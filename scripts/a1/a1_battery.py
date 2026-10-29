@@ -34,8 +34,7 @@ CELLS = [("gate", 3584, 18944, [128, 512, 1024]), ("down", 18944, 3584, [128, 51
          ("q/wo", 3584, 3584, [128, 1024]), ("kv", 3584, 512, [128, 1024])]
 SXM = "NVIDIA H100 80GB HBM3"
 # a1_cell_line's output for fixed inputs (tests.rs a1_cell_line_pinned asserts this file has it verbatim).
-FORMAT_LINE = ("A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; "
-               "9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)")
+FORMAT_LINE = "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"  # noqa: E501 (one literal: grepped)
 # Healthy gate nb 1024 TMAC/s per variant (shady's case: fp8_128x128 380, w4a16_256x64 240).
 HEALTHY = {"fp8_128x64": 300.0, "fp8_128x128": 380.0, "fp8n128_128x128": 420.0,
            "w4a16_128x64": 200.0, "w4a16_256x64": 240.0}
