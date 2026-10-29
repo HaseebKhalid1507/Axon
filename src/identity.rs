@@ -5,7 +5,9 @@
 //! or drafted (docs/determinism.md states the contract and its limits).
 //!
 //! In the tuple (`Identity::fields`, in this order):
-//! - `numerics`: `NUMERICS_VERSION`, Axon's own kernels and sampler.
+//! - `numerics`: the numerics mode and its version, `exact/N` or `fast/N.M`
+//!   (`NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`; `crate::numerics`):
+//!   Axon's own kernels and sampler.
 //! - `model`: `model_digest` of the GGUF file (its whole header, so every
 //!   metadata key, tensor name, shape and quant type, plus a sample of the
 //!   tensor data), and `types`, the quant types (readable; the header hash
@@ -49,20 +51,37 @@
 
 use crate::gguf::Model;
 use crate::lm::{Backend, Inner};
+use crate::numerics::Numerics;
 use std::io;
 use std::path::Path;
 
-/// Axon's numerics version. RULE: bump it in the same commit as any change
-/// that can change an output bit for some model on some backend: a kernel's
-/// arithmetic or reduction order (CPU or CUDA), the attention fold, RoPE,
-/// norms, the sampler's order or RNG, a quant format's dequant; or what turns
-/// a request into tokens or text: the tokenizer, chat templates and prompt
-/// rendering (serve.rs `Template`, tools.rs), stop tokens and strings, think
-/// handling. Changes that
-/// keep every bit (speed, scheduling, a kernel that matches the old one bit
-/// for bit, proven by the md5 gate) don't bump it. A bump changes every
-/// fingerprint, so a client caching on it knows its old outputs are stale.
-pub const NUMERICS_VERSION: u32 = 1;
+/// Exact mode's numerics version (`numerics=exact/N`; fast mode's tag
+/// carries it too, `fast/N.M`). RULE: bump it in the same commit as any
+/// change that can change an output bit in exact mode for some model on
+/// some backend: a kernel's arithmetic or reduction
+/// order (CPU or CUDA), the attention fold, RoPE, norms, the sampler's order
+/// or RNG, a quant format's dequant; or what turns a request into tokens or
+/// text: the tokenizer, chat templates and prompt rendering (serve.rs
+/// `Template`, tools.rs), stop tokens and strings, think handling. Changes
+/// that keep every bit (speed, scheduling, a kernel that matches the old one
+/// bit for bit, proven by the md5 gate) don't bump it. A bump changes every
+/// exact fingerprint, so a client caching on it knows its old outputs are
+/// stale; and every fast one too, with no second step: fast mode runs on
+/// top of the exact kernels and the request-to-text code, so its tag is
+/// `fast/<this>.<NUMERICS_VERSION_FAST>` (`Numerics::tag`), never a
+/// counter that has to be remembered. (Before 2026-10-29 the tuple's line
+/// was `numerics=1`: the same kernels as `exact/1`, another fingerprint.)
+pub const NUMERICS_VERSION_EXACT: u32 = 1;
+
+/// Fast mode's own numerics version: the M of `numerics=fast/N.M`, N being
+/// `NUMERICS_VERSION_EXACT` (docs/design/determinism-modes.md §4.3). RULE:
+/// bump it in the same commit as any change that can change an output bit
+/// in fast mode only: a fast-set kernel's arithmetic or its routing (which
+/// products run a fast kernel, at which shapes). Code both modes run (every
+/// kernel today: fast mode has no kernel of its own yet; the request-to-text
+/// parts) bumps `NUMERICS_VERSION_EXACT`, which moves fast's tag as well,
+/// so it doesn't bump this one. The first fast kernel is a bump.
+pub const NUMERICS_VERSION_FAST: u32 = 1;
 
 /// The tuple's format, the first line of `canonical`.
 const SCHEME: &str = "axon-identity/1";
@@ -87,7 +106,7 @@ impl Identity {
         kv: &str,
     ) -> Identity {
         let mut f = vec![
-            ("numerics", NUMERICS_VERSION.to_string()),
+            ("numerics", Numerics::Exact.tag()),
             ("model", model.to_string()),
             ("types", types.to_string()),
             ("backend", backend.to_string()),
@@ -103,6 +122,15 @@ impl Identity {
             fields: f,
             unknown: Vec::new(),
         }
+    }
+
+    /// The tuple in numerics mode `n` (`new`'s is exact): its `numerics`
+    /// field says the mode and that mode's version.
+    pub fn with_numerics(mut self, n: Numerics) -> Identity {
+        if let Some(f) = self.fields.iter_mut().find(|(k, _)| *k == "numerics") {
+            f.1 = n.tag();
+        }
+        self
     }
 
     /// The tuple with `field` marked unreadable (`unknown`).
@@ -154,11 +182,7 @@ impl Identity {
         m.insert("system_fingerprint".into(), self.fingerprint().into());
         m.insert("scheme".into(), SCHEME.into());
         for (k, v) in &self.fields {
-            let v = match *k {
-                "numerics" => serde_json::Value::from(NUMERICS_VERSION),
-                _ => v.clone().into(),
-            };
-            m.insert((*k).into(), v);
+            m.insert((*k).into(), v.clone().into());
         }
         if !self.unknown.is_empty() {
             m.insert("unknown".into(), self.unknown.clone().into());
@@ -219,7 +243,7 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
             Identity::new(&d, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
         }
     };
-    let mut id = id.with_rope(rope_field(m));
+    let mut id = id.with_rope(rope_field(m)).with_numerics(net.numerics());
     if digest.is_err() {
         id = id.unreadable("model");
     }
@@ -714,12 +738,16 @@ mod tests {
         assert_eq!(a.fingerprint().len(), 3 + 16);
         assert!(a.fingerprint().starts_with("fp_"));
         // Pinned: a change here means every deployed fingerprint changed,
-        // which needs a NUMERICS_VERSION or SCHEME reason.
+        // which needs a NUMERICS_VERSION_* or SCHEME reason (2026-10-29: the
+        // numerics mode, `numerics=1` -> `numerics=exact/1`, ADR M1).
         assert_eq!(
             a.canonical(),
-            "axon-identity/1\nnumerics=1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=exact/1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
+        // Golden (Python's hashlib over the line above; `numerics=1` was
+        // fp_e43c8e0d7c77ef03).
+        assert_eq!(a.fingerprint(), "fp_1e9019e52a04cc54");
         let g = Some("sm_120");
         let variants = [
             Identity::new("aa", "Q4_K:1", "cuda", g, None, "q8"),
@@ -728,6 +756,7 @@ mod tests {
             Identity::new("aa", "Q4_K:1", "cuda", Some("sm_89"), None, "f16"),
             Identity::new("aa", "Q4_K:1", "cuda", Some("sm_61"), None, "f16"),
             Identity::new("aa", "Q6_K:1", "cuda", g, None, "f16"),
+            base().with_numerics(Numerics::Fast),
         ];
         let mut seen = vec![a.fingerprint()];
         for v in &variants {
@@ -736,12 +765,60 @@ mod tests {
             seen.push(f);
         }
         let mut n = base();
-        n.fields[0].1 = "2".into();
+        n.fields[0].1 = "exact/2".into();
         assert_ne!(n.fingerprint(), a.fingerprint(), "numerics version");
         let j = a.json();
         assert_eq!(j["system_fingerprint"], a.fingerprint());
-        assert_eq!(j["numerics"], NUMERICS_VERSION);
+        assert_eq!(j["numerics"], "exact/1");
         assert_eq!(j["kv"], "f16");
+    }
+
+    /// The numerics mode (ADR M1): `numerics=exact/N` by default,
+    /// `fast/N.M` in fast mode (N exact's counter, M fast's own), the rest of the tuple the same; fast is its
+    /// own fingerprint, stable, and exact is `new`'s. Pinned, as the exact
+    /// one above.
+    #[test]
+    fn numerics_mode_in_the_fingerprint() {
+        let e = base();
+        assert_eq!(e.clone().with_numerics(Numerics::Exact), e);
+        let f = base().with_numerics(Numerics::Fast);
+        assert_eq!(
+            f.canonical(),
+            "axon-identity/1\nnumerics=fast/1.1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+             gpu=sm_120\nkv=f16\n"
+        );
+        assert_eq!(f.fingerprint(), "fp_bea740cf61d9d767", "golden (hashlib)");
+        assert_ne!(f.fingerprint(), e.fingerprint());
+        assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
+        assert_eq!(f.json()["numerics"], "fast/1.1");
+        assert!(f.line().contains("numerics fast/1.1"), "{}", f.line());
+        // Back to exact: the same tuple as never fast.
+        assert_eq!(f.with_numerics(Numerics::Exact), e);
+        // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's
+        // is in both modes' tags, fast's in fast's alone.
+        assert_eq!(
+            Numerics::Exact.tag(),
+            format!("exact/{NUMERICS_VERSION_EXACT}")
+        );
+        assert_eq!(
+            Numerics::Fast.tag(),
+            format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
+        );
+        // `of`: the mode a backend was made in (a CPU fixture: no model file,
+        // so its digest is unreadable, which doesn't touch the field).
+        crate::kv::set_f32(false);
+        for n in [Numerics::Exact, Numerics::Fast] {
+            // A model each: a CPU model releases the tensors it repacks.
+            let m = crate::model::tests::qwen3_fixture(crate::quant::F32);
+            let o = crate::lm::BackendOptions::default()
+                .device(crate::lm::Device::Cpu)
+                .max_ctx(64)
+                .numerics(n);
+            let net = Backend::new(&m, o).unwrap();
+            let id = of("/nonexistent/axon-fixture.gguf", &m, &net);
+            assert_eq!(id.fields[0], ("numerics", n.tag()), "{id:?}");
+            assert_eq!(id.fingerprint(), "fp_unknown");
+        }
     }
 
     /// Test file bytes: a fixed pseudo-random pattern (the golden values
@@ -929,7 +1006,7 @@ mod tests {
             Some(cuts.clone()),
         )
         .unwrap();
-        let net = Backend(Inner::Pipeline(Box::new(p)));
+        let net = Backend::of(Inner::Pipeline(Box::new(p)), Numerics::Exact);
         let id = of(path, &m, &net);
         assert_eq!(get(&id, "backend").unwrap(), pipeline_backend(&cuts));
         let g = get(&id, "gpu").unwrap();

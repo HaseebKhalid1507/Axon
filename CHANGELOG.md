@@ -4,6 +4,30 @@ All notable changes to Axon. Versions follow [SemVer](https://semver.org/); befo
 can change in any minor release. Each entry names its pull requests (#N on GitHub); the engineering log (`docs/log/`) has the
 measurements behind them.
 
+## Unreleased (after 0.1.0's draft)
+
+### Release note: every fingerprint changes once (numerics modes, #173)
+- **Every `system_fingerprint` changes, once; no output does.** The identity tuple's first line was `numerics=1`; it is
+  now `numerics=exact/1` (the numerics mode and its own version), so every fingerprint (`axon gen`'s `identity:`,
+  `axon serve`'s responses, `GET /identity`, `axon info`) has a new value. The kernels, the sampler and every output
+  bit are unchanged (the md5 gate against main: same greedy bytes). A client that caches or replays by
+  `(system_fingerprint, prompt, params, seed)` will miss once and repopulate. `GET /identity`'s `numerics` is now a
+  string (`"exact/1"`, was the number `1`). `chat --session` files from before still restore as bytes (exact mode's
+  session identity didn't change). Decision: Haseeb, 2026-10-29 (ship it now rather than with the next numerics bump);
+  [docs/design/determinism-modes.md](docs/design/determinism-modes.md) §7.
+- **`--numerics exact|fast`** on `gen`, `logits`, `chat` and `serve` (default `exact`, today's contract), and
+  `axon::Numerics` / `BackendOptions::numerics` in the library. `fast` may run kernels that change the float order,
+  graded against exact instead of matched bit for bit, under its own identity (`numerics=fast/1.1`: exact's counter
+  and fast's own, so a change to code both modes run moves both; its own NVRTC modules and session identity). Fast
+  mode promises tolerance on every path, bits on none (batching, cache reuse, chunking, drafting). **No fast kernel
+  exists yet**: `fast` runs the exact kernels and says so once; `Backend::fast_kernels()` tells an embedder which.
+  `axon info` prints each placement's fingerprint in both modes.
+- **`serve --datacenter`**: the datacenter bundle; today it only implies `--numerics fast` (an explicit `--numerics`
+  wins).
+- `scripts/numerics_dnll.py` and `axon logits` with `AXON_LOGITS_NLL=1` and `AXON_LOGITS_PREFIX=N` (the first N tokens
+  in batched passes): teacher-forced ΔNLL between two binaries or modes, per batched prefix (`--prefix`, default
+  0,24,160), with an SE clustered by window.
+
 ## [0.1.0] - unreleased (draft; not tagged)
 
 The first version: everything merged to `main` from the start of the project (2026-10-10) through PR #113
