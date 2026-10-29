@@ -1,0 +1,29 @@
+{
+ "label": "a1probe-989d1e2-rehearse",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1029-145526-7b39",
+   "name": "a1probe-989d1e2-rehearse",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "989d1e2",
+   "binary": "bash",
+   "started": 1793303428.4961975,
+   "ended": 1793303459.657658,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d12c68d6e56570e8fef05ddb147cd29e5d3846ee20cec74ed11dddb42ffcfd42",
+   "log_bytes": 35315
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-29 15:51:01 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
