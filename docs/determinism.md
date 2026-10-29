@@ -3,6 +3,33 @@
 Axon's output is a function of a small, named set of inputs. Fix them and you get the
 same tokens, bit for bit, every time. Every response says which set produced it.
 
+This contract is **exact mode** (`--numerics exact`), the default for `gen`, `logits`,
+`chat` and `serve`. A second mode, `--numerics fast` (the default under
+`serve --datacenter`), may use kernels that change the float order and is graded against
+exact mode instead of matched bit for bit; it has its own identity. Why two modes, what
+fast mode may do and how it is gated: [design/determinism-modes.md](design/determinism-modes.md)
+(the ADR, accepted 2026-10-29). Everything below is about exact mode unless it says
+otherwise.
+
+## Numerics modes
+
+| mode | what it promises | gate | identity |
+|---|---|---|---|
+| `exact` (default) | this page's whole contract | the md5 of `gen` outputs against main, the bit-identity tests | `numerics=exact/N` |
+| `fast` | the same model to within a tolerance of exact mode on the same device; fixed (identity, request) still gives a fixed reply on a fixed placement unless the fast kernel documents otherwise | `assert_graded` against exact with an exact-vs-exact floor, ΔNLL, a drafting χ² (ADR §4.2) | `numerics=fast/N` |
+
+**No fast kernel exists yet.** Until one does, `--numerics fast` runs the exact kernels and
+says so once on stderr (`no fast kernels on this backend yet; running exact kernels;
+identity says fast`), but it still identifies as fast: its fingerprint, its session files
+(a `chat --session` file saved in one mode is restored into the other as tokens, prefilled
+again, never as bytes) and its NVRTC kernel modules (compiled with `-DAXON_FAST`, their own
+cache entries) are fast mode's. A fast fingerprint promises less than an exact one, so a
+client that happens to get exact bits under it today was never promised more than
+tolerance, and the first fast kernel bumps `NUMERICS_VERSION_FAST`. The mode is the whole
+process's (a cache written by one mode's kernels can't be continued exactly by the
+other's); there is no per-request mode: run two servers. Draft models always run exact
+(they never change the output).
+
 ## The contract
 
 For one **identity** (below), the same prompt tokens, the same sampling parameters and the
@@ -76,8 +103,10 @@ and the token's position, never on the batch. The tests that hold this in place:
   So the identity keys on the exact `sm_XY` (plus the code, and the split count where it
   matters): on the tensor-core path the same architecture and code share an identity
   whatever the card, toolkit or driver.
-- **Across numerics versions.** When a change to Axon's kernels or sampler changes bits,
-  `NUMERICS_VERSION` goes up and every fingerprint changes with it.
+- **Across numerics modes and versions.** `exact` and `fast` are different identities.
+  When a change to Axon's kernels or sampler changes bits, that mode's numerics version
+  (`NUMERICS_VERSION_EXACT` or `NUMERICS_VERSION_FAST`) goes up and its fingerprints change
+  with it.
 - **Across models**, obviously, including another quantization of the same weights.
 
 Not guaranteed by design: a different seed, different sampling params, or a different
@@ -91,7 +120,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 
 | field      | what                                                                  |
 |------------|-----------------------------------------------------------------------|
-| `numerics` | `NUMERICS_VERSION`: Axon's kernels and sampler (bumped by rule, below) |
+| `numerics` | the mode and its version, `exact/1` or `fast/1` (`NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`): Axon's kernels and sampler (bumped by rule, below). Until 2026-10-29 the line was `numerics=1`, the same kernels as `exact/1`: every fingerprint changed once then (the release note in CHANGELOG.md), not a single output bit |
 | `model`    | SHA-256 over the GGUF file's length, its whole header (all metadata, tensor names, shapes, quant types) and samples of the tensor data |
 | `types`    | the quant types and their tensor counts (readable; the header hash covers them) |
 | `backend`  | `cpu`, `cuda`, `cuda+cpu` with the layer split (and `prefill streams >=N` when it streams), or a pipeline with its cuts |
@@ -127,7 +156,8 @@ The fingerprint is `fp_` plus 16 hex digits of the SHA-256 of the tuple's canoni
 - `axon serve` logs it at start; `axon gen` prints `identity: fp_...` on stderr
   (`--verbose`: the whole tuple); `axon info` prints the model digest and the fingerprints
   for the CPU and, if there's a GPU the weights fit, for CUDA with each cache type (a model
-  that would be split gets none: its identity depends on the placement).
+  that would be split gets none: its identity depends on the placement), each in both
+  numerics modes.
 
 A client that caches or replays by `(system_fingerprint, prompt, params, seed)` gets
 exact hits. A changed fingerprint means stored outputs may not reproduce.
@@ -147,12 +177,15 @@ changes the digest. An edit made on purpose to bytes between the samples would n
 digest names a file, it isn't a tamper seal. It reads the file itself, not the loaded copy
 (which may have been repacked or released), so it depends on nothing but the file's bytes.
 
-**The numerics rule.** `NUMERICS_VERSION` (src/identity.rs) is bumped in the same commit
-as any change that can change an output bit for some model on some backend: a kernel's
-arithmetic or reduction order (CPU or CUDA), the attention fold, RoPE, norms, dequant, the
-sampler's order or RNG; and what turns a request into tokens or text: the tokenizer,
-chat templates and prompt rendering, stop tokens and stop strings, think handling. A
-change that keeps every bit (proven by the md5 gate) doesn't bump it. A new flag that
+**The numerics rule.** `NUMERICS_VERSION_EXACT` (src/identity.rs) is bumped in the same
+commit as any change that can change an output bit in exact mode for some model on some
+backend: a kernel's arithmetic or reduction order (CPU or CUDA), the attention fold, RoPE,
+norms, dequant, the sampler's order or RNG; and what turns a request into tokens or text:
+the tokenizer, chat templates and prompt rendering, stop tokens and stop strings, think
+handling. A change that keeps every bit (proven by the md5 gate) doesn't bump it.
+`NUMERICS_VERSION_FAST` is bumped by a change to a fast-set kernel or to its routing; a
+change to code both modes run (today every kernel: fast mode has none of its own) bumps
+both. A new flag that
 changes bits adds a field to the tuple, set only when the flag is, so default fingerprints
 stay put (as `--rope-scaling` adds `rope`).
 

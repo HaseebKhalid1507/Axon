@@ -5,6 +5,7 @@ use super::{
     MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, Server, Template, api::Message, api::Role, start,
 };
 use crate::lm::{Device, Lm};
+use crate::numerics::Numerics;
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
 use crate::{GenOpts, generate};
@@ -60,6 +61,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        numerics: Numerics::Exact,
     }
 }
 
@@ -2902,7 +2904,8 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
     let id = call(a, "GET", "/identity", "").json();
     let fp = id["system_fingerprint"].as_str().unwrap().to_string();
     assert!(fp.starts_with("fp_"), "{id}");
-    assert_eq!(id["numerics"], crate::identity::NUMERICS_VERSION);
+    let modes = [Numerics::Exact.tag(), Numerics::Fast.tag()];
+    assert!(modes.iter().any(|t| id["numerics"] == *t), "{what}: {id}");
     let models = call(a, "GET", "/v1/models", "").json();
     for d in models["data"].as_array().unwrap() {
         assert_eq!(d["meta"]["identity"], id, "{what}");
@@ -3018,6 +3021,82 @@ fn serve_identity_cpu() {
     let (c, mut b) = identity_targets().swap_remove(2);
     b["seed"] = json!(4);
     assert_ne!(identity_reply(s.addr, c, &b, false).0, texts[2]);
+}
+
+/// The fast numerics mode over HTTP (ADR M1/M2) on `device`: a fast server
+/// passes `identity_checks` (same request, same fingerprint, same text:
+/// alone, cached, streamed, under load) under its own fingerprint, which
+/// differs from the exact server's in the `numerics` field alone and is
+/// stable across a restart. While no fast kernel exists
+/// (`numerics::fast_kernels`), a fast server runs the exact kernels, so its
+/// texts are the exact server's, bit for bit; once one does, that last
+/// check becomes a graded one (`cuda::qwen2::tests::numerics`).
+fn identity_fast_on(device: Device, f: impl Fn(&mut Opts) + Copy) {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let n = if device == Device::Cpu { 3 } else { usize::MAX };
+    let load: Vec<Value> = batch_bodies(true).into_iter().take(n).collect();
+    let run = |num: Numerics| {
+        let s = server_with(p, device, |o| {
+            f(o);
+            o.numerics = num;
+        });
+        let (id, texts) = identity_checks(s.addr, &load, &format!("{device:?} {num}"));
+        assert_eq!(id["numerics"], num.tag(), "{id}");
+        (id, texts)
+    };
+    let (exact, et) = run(Numerics::Exact);
+    let (fast, ft) = run(Numerics::Fast);
+    assert_ne!(fast["system_fingerprint"], exact["system_fingerprint"]);
+    let rest = |v: &Value| {
+        let mut v = v.clone();
+        let o = v.as_object_mut().unwrap();
+        o.remove("numerics");
+        o.remove("system_fingerprint");
+        v
+    };
+    assert_eq!(rest(&fast), rest(&exact), "only the numerics field differs");
+    // No fast kernel on this backend yet: the exact kernels, the same text.
+    assert_eq!(ft, et, "fast mode without fast kernels runs exact's bits");
+    let s = server_with(p, device, |o| {
+        f(o);
+        o.numerics = Numerics::Fast;
+    });
+    let again = call(s.addr, "GET", "/identity", "").json();
+    assert_eq!(again, fast, "a restarted fast server");
+}
+
+#[test]
+fn serve_identity_fast_cpu() {
+    identity_fast_on(Device::Cpu, |_| {});
+}
+
+/// `identity_fast_on` on the GPU, as `serve_identity` runs it (8 slots,
+/// drafting, a long prompt chunked between decode steps).
+#[test]
+fn serve_identity_fast() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    identity_fast_on(Device::Cuda, |o| {
+        o.parallel = 8;
+        o.max_draft = 3;
+        o.prefill_chunk = 64;
+    });
+}
+
+/// `--datacenter` implies `--numerics fast`; an explicit `--numerics`
+/// wins over it either way; without either, exact.
+#[test]
+fn datacenter_bundle() {
+    use super::datacenter_numerics as dc;
+    assert_eq!(dc(false, None), Numerics::Exact);
+    assert_eq!(dc(true, None), Numerics::Fast);
+    assert_eq!(dc(true, Some(Numerics::Exact)), Numerics::Exact);
+    assert_eq!(dc(true, Some(Numerics::Fast)), Numerics::Fast);
+    assert_eq!(dc(false, Some(Numerics::Fast)), Numerics::Fast);
 }
 
 /// `call` with extra header lines (`Name: value\r\n` each).

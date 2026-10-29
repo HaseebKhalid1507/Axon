@@ -24,6 +24,7 @@ mod ffi;
 pub mod qwen2;
 pub mod upload;
 
+use crate::numerics::Numerics;
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -1503,6 +1504,8 @@ pub struct Module<'g> {
     /// Compiled for sm_90a (hopper.cu's kernels are in it) and the driver
     /// has cuTensorMapEncodeTiled.
     hopper: bool,
+    /// Compiled with `FAST_DEFINE` (the fast numerics mode's module).
+    fast: bool,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1538,11 +1541,14 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 
 /// What decides the bits this device's kernels compute, as a string
 /// (kvsave's identity: a cache image is only loaded where it was made):
-/// the kernel sources and options, the device's architecture and
+/// the kernel sources and options (with `FAST_DEFINE` for a `fast`
+/// module: the fast numerics mode), the device's architecture and
 /// AXON_HOPPER (the sm_90a build). Not the driver or NVRTC version: the
-/// xarch audit measured the same bits across them (`driver_tag`).
-pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
-    let src = fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
+/// xarch audit measured the same bits across them (`driver_tag`). An exact
+/// module's tag is the one before the numerics modes (same options).
+pub fn numerics_tag(gpu: &Gpu, fast: bool) -> Result<String, String> {
+    let opts = mode_opts(&KERNEL_OPTS, fast_mode(fast));
+    let src = fnv128(&[KERNELS.as_bytes(), opts.join("\n").as_bytes()]);
     Ok(format!(
         "kernels {src:032x} {} hopper {}",
         gpu.info()?.arch(),
@@ -1867,6 +1873,7 @@ impl<'g> Module<'g> {
             Target::Cubin90a => 90,
         };
         m.hopper = target == Target::Cubin90a && ffi::tensor_map_encoder().is_some();
+        m.fast = opts.contains(&FAST_DEFINE);
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
         m.arch = arch;
@@ -1958,6 +1965,11 @@ impl<'g> Module<'g> {
         self.ext
     }
 
+    /// Whether it was built for the fast numerics mode (`FAST_DEFINE`).
+    pub fn fast(&self) -> bool {
+        self.fast
+    }
+
     /// Turn programmatic dependent launch off for this module (tests: PDL
     /// on vs off).
     #[cfg(test)]
@@ -1981,6 +1993,7 @@ impl<'g> Module<'g> {
             arch: 0,
             ext: false,
             hopper: false,
+            fast: false,
         })
     }
 
@@ -2045,6 +2058,44 @@ pub(crate) const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
 /// decode kernels' type switch.
 const KERNEL_OPTS_EXT: [&str; 3] = ["--std=c++17", "--ftz=false", "-DAXON_EXT_TYPES"];
 
+/// The define every module of the fast numerics mode compiles with
+/// (`crate::numerics`; the ADR's §4.3), last in its options: so in the
+/// kernel cache's key (`Module::load_cached` hashes the options) and in
+/// `numerics_tag`, and a fast-set kernel is `#ifdef AXON_FAST` code. No
+/// source tests it yet (no fast kernel exists): today a fast module is the
+/// exact one's code under its own key. Exact modules' options are main's,
+/// unchanged, so their cache entries and bits are too.
+pub(crate) const FAST_DEFINE: &str = "-DAXON_FAST";
+
+/// `opts` for numerics mode `n`: as given for exact, `FAST_DEFINE` added
+/// for fast.
+fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
+    let mut v = opts.to_vec();
+    if n == Numerics::Fast {
+        v.push(FAST_DEFINE);
+    }
+    v
+}
+
+/// `Numerics::Fast` if `fast`, else `Numerics::Exact`.
+fn fast_mode(fast: bool) -> Numerics {
+    if fast {
+        Numerics::Fast
+    } else {
+        Numerics::Exact
+    }
+}
+
+/// The MoE router module's options (`Kernels::moe_module`): debug builds
+/// add MOE_DEBUG (moe_router's trap), their own cache entry.
+fn moe_opts(base: &[&'static str]) -> Vec<&'static str> {
+    let mut opts = base.to_vec();
+    if cfg!(debug_assertions) {
+        opts.push("-DMOE_DEBUG");
+    }
+    opts
+}
+
 /// Whether `m` has a matrix type only `Kernels::module_ext` runs.
 pub fn needs_ext(m: &crate::gguf::Model) -> bool {
     use crate::quant::{IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q5_1, Q5_K};
@@ -2056,6 +2107,7 @@ pub fn needs_ext(m: &crate::gguf::Model) -> bool {
 impl<'m> Kernels<'m> {
     /// kernels.cu compiled for `gpu` (or from the cache): main's four
     /// quant types (Q4_K, Q6_K, Q5_0, Q8_0) in the decode kernels.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn module(gpu: &Gpu) -> Result<Module<'_>, String> {
         Ok(Module::load(gpu, KERNELS, &KERNEL_OPTS)?.0)
     }
@@ -2064,6 +2116,7 @@ impl<'m> Kernels<'m> {
     /// (AXON_EXT_TYPES). Same bits for the four (same code per type); a
     /// separate build so models without the extra types keep the smaller
     /// kernels.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn module_ext(gpu: &Gpu) -> Result<Module<'_>, String> {
         let mut m = Module::load(gpu, KERNELS, &KERNEL_OPTS_EXT)?.0;
         m.ext = true;
@@ -2074,12 +2127,9 @@ impl<'m> Kernels<'m> {
     /// models' module stays as it is. Debug builds compile it with
     /// MOE_DEBUG (moe_router's trap: a router with no eligible score),
     /// their own cache entry.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, include_str!("moe.cu"), &opts)?.0)
+        Ok(Module::load(gpu, include_str!("moe.cu"), &moe_opts(&KERNEL_OPTS))?.0)
     }
 
     /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
@@ -2087,49 +2137,61 @@ impl<'m> Kernels<'m> {
     /// moe.cu's router logits: the other modules stay as they are.
     /// Debug builds compile it with MOE_DEBUG (as `moe_module`), their
     /// own cache entry.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS_EXT.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
+        Ok(Module::load(gpu, MLA_KERNELS, &moe_opts(&KERNEL_OPTS_EXT))?.0)
     }
 
     /// `mla_module` with the reference kernels (`MLA_REF_KERNELS`; tests).
     #[cfg(test)]
     pub fn mla_ref_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS_EXT.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, MLA_REF_KERNELS, &opts)?.0)
+        Ok(Module::load(gpu, MLA_REF_KERNELS, &moe_opts(&KERNEL_OPTS_EXT))?.0)
     }
 
     /// The router module MoE model `m` needs (`crate::moe::MoeQwen3`):
     /// `mla_module` for deepseek2, else `moe_module`.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn moe_module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if m.arch == "deepseek2" {
-            Self::mla_module(gpu)
-        } else {
-            Self::moe_module(gpu)
-        }
+        Self::moe_module_for_mode(gpu, m, Numerics::Exact)
+    }
+
+    /// `moe_module_for` in numerics mode `n` (`mode_opts`).
+    pub fn moe_module_for_mode<'g>(
+        gpu: &'g Gpu,
+        m: &crate::gguf::Model,
+        n: Numerics,
+    ) -> Result<Module<'g>, String> {
+        let (src, base) = match m.arch == "deepseek2" {
+            true => (MLA_KERNELS, &KERNEL_OPTS_EXT[..]),
+            false => (include_str!("moe.cu"), &KERNEL_OPTS[..]),
+        };
+        Ok(Module::load(gpu, src, &mode_opts(&moe_opts(base), n))?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type;
     /// gpt-oss's: KERNELS + oss.cu (`KERNELS_OSS`), with the extra types
     /// too if it has one (e.g. a Q4_0 attention requant).
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if m.arch == "gpt-oss" {
-            let ext = needs_ext(m);
-            let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
-            let mut md = Module::load(gpu, KERNELS_OSS, opts)?.0;
-            md.ext = ext;
-            Ok(md)
-        } else if needs_ext(m) {
-            Self::module_ext(gpu)
+        Self::module_for_mode(gpu, m, Numerics::Exact)
+    }
+
+    /// `module_for` in numerics mode `n`: exact's options are `module_for`'s
+    /// as they always were; fast's add `FAST_DEFINE` (its own cache entry).
+    pub fn module_for_mode<'g>(
+        gpu: &'g Gpu,
+        m: &crate::gguf::Model,
+        n: Numerics,
+    ) -> Result<Module<'g>, String> {
+        let ext = needs_ext(m);
+        let src = if m.arch == "gpt-oss" {
+            KERNELS_OSS
         } else {
-            Self::module(gpu)
-        }
+            KERNELS
+        };
+        let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
+        let mut md = Module::load(gpu, src, &mode_opts(opts, n))?.0;
+        md.ext = ext;
+        Ok(md)
     }
 
     /// The kernels of `m`, which must be `Kernels::module`'s.

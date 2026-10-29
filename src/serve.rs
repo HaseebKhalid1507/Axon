@@ -43,6 +43,7 @@ use crate::chat::{self, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
+use crate::numerics::Numerics;
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
 use crate::spec::PromptLookup;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -157,6 +158,23 @@ pub struct Opts {
     /// is cancelled (its slot freed), as if it had disconnected. The CLI
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
+    /// `--numerics` (`crate::numerics`), or `--datacenter`'s fast: the
+    /// whole server's (every slot's cache is one mode's), in its identity.
+    pub numerics: Numerics,
+}
+
+/// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
+/// only the fast numerics mode. An explicit `--numerics` wins over it,
+/// before or after it on the command line, so a datacenter can serve
+/// exact. Later the bundle grows (tensor parallel, FP8 weights, NCCL) as
+/// those exist; `--datacenter` names the deployment, not a mode, so the
+/// numerics flag doesn't have to.
+pub fn datacenter_numerics(datacenter: bool, explicit: Option<Numerics>) -> Numerics {
+    match (explicit, datacenter) {
+        (Some(n), _) => n,
+        (None, true) => Numerics::Fast,
+        (None, false) => Numerics::Exact,
+    }
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -1059,6 +1077,7 @@ fn engine(
         defer_q6k8: true,
         paged: paged_serve(device, o.parallel, paged_env),
         gpu_experts: None,
+        numerics: o.numerics,
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -1992,6 +2011,7 @@ struct EngineOpts {
     generated: Arc<AtomicU64>,
     rope: crate::rope::RopeArgs,
     metrics: Arc<ops::Metrics>,
+    numerics: Numerics,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2100,6 +2120,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         draft_model: o.draft_model.clone(),
         log: o.log,
         rope: o.rope.clone(),
+        numerics: o.numerics,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -3104,8 +3125,8 @@ fn stream(
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--no-think] \
-     [--think-inline] [--quiet] [sampling flags]";
+     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] \
+     [--numerics exact|fast] [--datacenter] [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
 /// blank, or not UTF-8, is an error, not a server without auth.
@@ -3171,17 +3192,20 @@ pub fn run(args: &[String]) -> io::Result<()> {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        numerics: Numerics::Exact,
     };
     let mut k = None;
     let key_from;
+    let (mut datacenter, mut numerics) = (false, None);
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
         match f {
-            "--no-think" | "--think-inline" | "--quiet" => {
+            "--no-think" | "--think-inline" | "--quiet" | "--datacenter" => {
                 match f {
                     "--no-think" => o.no_think = true,
                     "--think-inline" => o.think_inline = true,
+                    "--datacenter" => datacenter = true,
                     _ => o.log = false,
                 }
                 i += 1;
@@ -3237,7 +3261,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
             | "--prefill-lanes"
             | "--api-key"
             | "--max-prompt-tokens"
-            | "--slot-idle-ms" => {}
+            | "--slot-idle-ms"
+            | "--numerics" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -3256,6 +3281,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--draft-model" => o.draft_model = Some(v.clone()),
             "--device" => o.device = Device::parse(v).unwrap_or_else(|e| crate::fail(&e)),
             "--kv" => o.kv = crate::kv_flag(Some(v)),
+            "--numerics" => numerics = Some(crate::numerics_flag(Some(v))),
             "--port" => {
                 o.port = v.parse::<u16>().unwrap_or_else(|_| {
                     crate::fail(&format!("--port needs a port number, got '{v}'"))
@@ -3301,6 +3327,18 @@ pub fn run(args: &[String]) -> io::Result<()> {
             _ => k = Some(whole(false)),
         }
         i += 2;
+    }
+    o.numerics = datacenter_numerics(datacenter, numerics);
+    if datacenter && o.log {
+        eprintln!(
+            "axon serve: --datacenter: --numerics {}{}",
+            o.numerics,
+            if numerics.is_some() {
+                " (given explicitly)"
+            } else {
+                ""
+            }
+        );
     }
     // Shortest-first without an age bound (`--admit-age-ms 0`): a long prompt
     // can wait behind shorter ones for as long as they keep coming.

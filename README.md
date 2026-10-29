@@ -269,18 +269,18 @@ axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
                                           (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
-          [--ctx N] [--gpu-layers N] [--gpus L] [--gpu-experts N|auto] [--kv T]
+          [--ctx N] [--gpu-layers N] [--gpus L] [--gpu-experts N|auto] [--kv T] [--numerics M]
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
           [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L]
-          [--gpu-experts N|auto] [--kv T] [--session F]
+          [--gpu-experts N|auto] [--kv T] [--numerics M] [--session F]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
 axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
           [--device D] [--gpu-layers N] [--kv T] [--parallel N] [--step-ms MS]
-          [--admit-order sjf|fifo] [...]
+          [--admit-order sjf|fifo] [--numerics M] [--datacenter] [...]
                                           OpenAI-compatible HTTP server (below)
 axon --help | --version
 ```
@@ -326,6 +326,12 @@ Defaults, as `axon --help` gives them:
   `axon serve` runs a pipeline one request at a time.
 - `--kv T`: `f16`, or `q8` (cuda only; on a split, the GPU layers' cache, so more
   layers fit).
+- `--numerics M` (gen, logits, chat, serve): `exact`, or `fast`. `exact` is the
+  bit-identity contract ([docs/determinism.md](docs/determinism.md)); `fast` may run
+  kernels that change the float order (graded against exact, not equal) under its own
+  identity. No fast kernel exists yet: `fast` runs the exact kernels and says so once.
+  `serve --datacenter` implies `--numerics fast` (and, today, nothing else); an explicit
+  `--numerics` wins. Why: [docs/design/determinism-modes.md](docs/design/determinism-modes.md).
 - `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
   whole model doesn't fit with it, a shorter context if at least half of it (or 4096)
   fits, else a split. For `serve`, see below: its default is the whole trained context.

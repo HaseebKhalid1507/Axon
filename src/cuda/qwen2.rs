@@ -543,6 +543,9 @@ pub(crate) struct CudaQwen2<'g> {
     /// The attention runs on the tensor cores (decode.cu "Tensor-core
     /// attention"), decode and batched alike, either cache: sm_80+.
     tc_attn: bool,
+    /// Its module is the fast numerics mode's (`Module::fast`): kvsave's
+    /// identity says so (`cuda::numerics_tag`).
+    fast: bool,
     /// The batched attention of one sequence's few queries by attn_blk_mq
     /// (each tile read once per 16 queries), not attn_blk_b per query: the
     /// same partials (AXON_ATT_MQ=0 turns it off).
@@ -1707,6 +1710,7 @@ impl<'g> CudaQwen2<'g> {
             att_gy: 0,
             // gpt-oss: the split attention (oss.cu), as gemma3's.
             tc_attn: module.mma() && head_dim != 256 && !oss,
+            fast: module.fast(),
             att_mq: std::env::var("AXON_ATT_MQ").map_or(true, |v| v != "0"),
             att_mq_max: std::env::var("AXON_ATT_MQ_MAX")
                 .ok()

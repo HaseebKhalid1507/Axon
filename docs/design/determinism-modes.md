@@ -1,7 +1,10 @@
 # ADR: what bit-identity costs, and making it a mode
 
-**Status: proposed.** Decision requested from Haseeb; nothing here is built. Written against `origin/main` `05fb70c`
-(2026-10-19). Answers the outside review's questions "Is bit-identity a product or a dev tool? If it's a dev tool, why
+**Status: accepted** (2026-10-29, Haseeb: "lets try fast"). §7 records the answers to its four questions. Built: M1,
+M2, M3, M5 and M8 (the mode scaffolding, no kernels; PR #PRNUM, [log](../log/2026-10-29-numerics-modes.md), "As built"
+under §4.7). Deferred: M4 (CPU fast prefill) and M6 (exact split-K; its 4090 attempt, #148, was killed on its kill rule:
+[experiments-rejected.md](../experiments-rejected.md)). M7 waits on a measured gap (§4.6). Written against `origin/main`
+`05fb70c` (2026-10-19). Answers the outside review's questions "Is bit-identity a product or a dev tool? If it's a dev tool, why
 is it a global constraint instead of a mode?" and "what is the plan for tensor parallel with fixed-order reductions,
 and have you costed it against NCCL?" (`fable-bigpicture-20261019`, §5 risk 1, §7 and §8 recommendation 3), and its
 mission-drift question, whose answer is the new "Mission and positioning" section of [roadmap.md](../roadmap.md).
@@ -392,6 +395,36 @@ M1–M3 and M5 are the whole mode and cost under a week with no kernel work. M4 
 exists on a branch. M6 is exact-mode work that removes the strongest single argument for a GPU fast set. M7 is gated on
 measurement by rule.
 
+**As built (2026-10-29, PR #PRNUM; [log](../log/2026-10-29-numerics-modes.md)).** Where the build differs from the plan
+above, and why:
+
+- **M1: `fast` is accepted, not refused.** With no fast kernel on a backend, `--numerics fast` runs the exact kernels,
+  prints one notice (`no fast kernels on this backend yet; running exact kernels; identity says fast`) and identifies
+  as fast everywhere: `numerics=fast/1` in the tuple and the fingerprint, `-DAXON_FAST` in its NVRTC modules' options
+  (their own kernel-cache entries), `numerics_mode` in its kvsave identity. Why not refuse: (1) M2's
+  `serve --datacenter` implies fast; refusing fast would make the bundle refuse to start until a kernel lands, so no
+  deployment could adopt the flag now and keep it; (2) M3 and M5 need a fast mode that runs, or their tests are
+  skipped everywhere and the first fast kernel lands on untested scaffolding; (3) it is honest: a fast fingerprint
+  promises tolerance, never exact bits, so a client that gets exact bits under it was promised less than it got, and
+  the first fast kernel bumps `NUMERICS_VERSION_FAST`, which tells fingerprint-caching clients. The notice keeps anyone
+  from reading `fast` as faster today.
+- **M1: the mode is a `Backend`'s** (`BackendOptions::numerics`, public; `axon::Numerics`, non-exhaustive), and the
+  CLI's per process. Exact modules' NVRTC options are main's, byte for byte, so their cache keys, cubins and bits are
+  too (the md5 gate checks the bits). The `numerics` field's JSON (`GET /identity`) is now the string `"exact/1"` (was
+  the number 1). Nothing in Axon reads the field back (fingerprints are compared as hashes), so §4.3's "'1' alone is
+  read as 'exact/1' for one release" has no reader to apply to.
+- **M2: `--datacenter` implies only `--numerics fast` today**; an explicit `--numerics` wins over it, so a datacenter
+  can serve exact.
+- **M3: the floor** is the cross-arch one (exact on a second GPU of another architecture in the same process) when the
+  host has one, else this GPU's f16 vs q8 KV cache, both exact; on the CPU, the r8 vs per-row kernels. No Axon host has
+  two architectures in one box today, so the cross-arch branch is written but not yet exercised. The fast-mode χ² on
+  the real model (§4.4) is not in this step: with no fast kernel, fast's verify rows are exact's, so the existing
+  identity-F tests already cover it bit for bit; it belongs to the first fast kernel's PR, next to the kernel that
+  breaks B. The ΔNLL hook is `scripts/numerics_dnll.py` (through `axon logits` with `AXON_LOGITS_NLL=1`) plus the same
+  measurement in-process in the graded tests.
+- **M5: exact sessions are unchanged.** A fast-mode backend adds `numerics_mode` to its kvsave identity; exact adds
+  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact.
+
 ---
 
 ## 5. Positioning (the mission-drift question)
@@ -446,9 +479,14 @@ contract where it is free, and nothing in the contract should block FP8 where it
   *Keep it global and never do FP8*: forfeits the datacenter tier by construction. (d) *Three tiers*: a looser third tier
   is an approximation mode, not a numerics mode; a stricter one (cross-arch exact) is a possible future `exact-xarch`.
 
-## 7. Open questions for Haseeb
+## 7. Open questions for Haseeb, answered
+
+Answered 2026-10-29 (Haseeb: "lets try fast"; the lead's answers to the four questions):
 
 1. M1 changes every fingerprint once. Ship it with the next NUMERICS bump that would happen anyway, or now?
-2. `serve --datacenter` as the name of the bundle, or `--profile datacenter`?
+   **Now.** It ships with a release note (CHANGELOG.md): every fingerprint changes once, no output bit does.
+2. `serve --datacenter` as the name of the bundle, or `--profile datacenter`? **`serve --datacenter`.**
 3. Is CPU fast prefill (M4, the one measured 1.3–1.6×) worth 8–12 h now, given nobody runs CPU prefill at scale?
+   **No: deferred, out of scope.**
 4. M6 (fixed-chunk split-K in exact mode) is a one-time exact-bits change. Approve the principle before the H100 hour?
+   **Deferred, out of scope** (its 4090 attempt, #148, already failed its kill rule).

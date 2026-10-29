@@ -134,7 +134,12 @@ Before a PR, on the exact tree that will merge:
 Extra gates by kind of change:
 
 - **Numerics-changing work:** teacher-forced accuracy A/B (ΔNLL with clustered SE, top-1, KL) against the
-  parent and against the CPU-vs-CPU noise floor (#2, #11, #19, #35).
+  parent and against the CPU-vs-CPU noise floor (#2, #11, #19, #35). `scripts/numerics_dnll.py` runs the ΔNLL
+  part through `axon logits` (two binaries, or one in two modes).
+- **Fast-mode kernels** (`--numerics fast`, [design/determinism-modes.md](design/determinism-modes.md) §4.2): no md5
+  across the kernel change; instead `assert_graded` against exact mode on the same device with an exact-vs-exact
+  floor (the harness in `src/cuda/qwen2/tests/numerics.rs`), ΔNLL against exact, and the kernel's kill rule. Exact
+  mode's gates are unchanged, and a PR that changes no fast kernel keeps the md5 gate in fast mode too.
 - **Cross-arch:** suites on sm_120 (bella), sm_89 (avante, 4090 pods), sm_61 (jade), sm_80 (A100), sm_90
   (H100) where the change could differ by arch (#31, #33, #39).
 - **Post-rebase:** after any rebase, compile and rerun before calling it clean. The foreman once reported

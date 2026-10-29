@@ -176,8 +176,10 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   `--parallel N` silently serving fewer slots) is fixed by #141: it's refused at start.
 - **Library API for embedders:** the rest of #118 (stderr from library code, env-only config, leaks, `serve`'s
   exits). The v0.1.0 tag is Haseeb's call.
-- **Determinism modes** (`--numerics exact | fast`): an ADR merged as PROPOSED
-  ([design/determinism-modes.md](design/determinism-modes.md)); nothing is built until it is decided.
+- **Determinism modes** (`--numerics exact | fast`): the ADR is accepted (2026-10-29,
+  [design/determinism-modes.md](design/determinism-modes.md)); its scaffolding is built (#PRNUM: the flag, the
+  identity line, `serve --datacenter`, the graded test harness, the cache keys). No fast kernel exists yet: `fast`
+  runs the exact kernels under its own identity.
 - **Batched speculative decoding in `serve`:** the first attempt (#90) is closed; a second (latency-guarded gate v2,
   then multi-row verify) is designed ([research/spec-gate-v2-20261024.md](research/spec-gate-v2-20261024.md)), below
   the line in the proposed order.
@@ -189,7 +191,7 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   results, the serving boards (RTX 4090 and H100 SXM vs vLLM / SGLang), with caveats.
 - [design/multi-gpu.md](design/multi-gpu.md): pipeline parallel, then tensor parallel; bit-identity analysis.
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
-- [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (PROPOSED).
+- [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (accepted 2026-10-29).
 - [determinism.md](determinism.md): what is bit-identical, and the identity tuple behind `system_fingerprint`.
 - [serve-apis.md](serve-apis.md): `axon serve`'s routes (chat completions, completions, Responses, ollama).
 - [testing.md](testing.md): the test tiers and what to run when.

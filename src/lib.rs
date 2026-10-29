@@ -7,7 +7,8 @@
 //!
 //! - [`load`]: map (or copy) a GGUF and check that Axon can run it;
 //! - [`Backend::new`]: place it on the CPU or a CUDA GPU, as an [`Lm`], as
-//!   [`BackendOptions`] say (device, context, GPU layers, KV type);
+//!   [`BackendOptions`] say (device, context, GPU layers, KV type,
+//!   [`Numerics`] mode);
 //! - [`Tokenizer`]: the model's own tokenizer, from the same file;
 //! - [`Lm`]: caches, prefill and decode steps;
 //! - [`generate`]: the greedy decode loop behind `axon gen` (sampling stays
@@ -34,7 +35,7 @@
 //! ```
 //!
 //! The choices the API takes as arguments (device, KV type, GPU layers,
-//! context) are never read from the environment: the CLI reads
+//! context, numerics mode) are never read from the environment: the CLI reads
 //! `AXON_DEVICE`, `AXON_KV` and `AXON_GPU_LAYERS` and passes them, and an
 //! embedder passes its own (`Device::from_env` and `KvType::parse` parse
 //! them as the CLI does; examples/embed.rs). Engine tuning variables are
@@ -48,8 +49,9 @@
 //! `load` and `Backend::new`. README; #118.
 //!
 //! [`Backend`] and [`BackendCache`] are opaque, [`Lm`] is sealed, and
-//! [`Device`], [`KvType`] and [`GenStats`] are non-exhaustive: a new
-//! backend, device, KV type or statistic is not a breaking change.
+//! [`Device`], [`KvType`], [`Numerics`] and [`GenStats`] are
+//! non-exhaustive: a new backend, device, KV type, numerics mode or
+//! statistic is not a breaking change.
 
 #[macro_use]
 mod mv;
@@ -69,6 +71,7 @@ mod lineedit;
 mod lm;
 mod model;
 mod moe;
+mod numerics;
 mod pool;
 mod quant;
 mod rope;
@@ -85,13 +88,14 @@ pub use generate::{GenOpts, GenStats, generate};
 pub use gguf::Model;
 pub use kv::KvType;
 pub use lm::{Backend, BackendCache, BackendOptions, Device, Lm};
+pub use numerics::Numerics;
 pub use tokenizer::{Tokenizer, Utf8Stream};
 
 // Crate-root paths the modules use (`crate::PREFILL_BATCH`, `crate::fail`,
 // ...), from before the library split, when they lived in main.rs.
 pub(crate) use cli::{
     DEFAULT_CHAT_CTX, backend_and_drafter, check_stream_decode, copy_for, device_env, draft_env,
-    draft_env_set, fail, kv_env, kv_flag, open_model_with, placement, round_draft,
+    draft_env_set, fail, kv_env, kv_flag, numerics_flag, open_model_with, placement, round_draft,
 };
 pub(crate) use generate::{PREFILL_BATCH, argmax};
 

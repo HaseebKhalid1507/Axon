@@ -216,6 +216,11 @@ impl<'g> CudaQwen2<'g> {
         self.gpu
     }
 
+    /// Whether it runs the fast numerics mode's module (`Module::fast`).
+    pub(crate) fn fast(&self) -> bool {
+        self.fast
+    }
+
     pub(crate) fn kv_dims(&self) -> (usize, usize, usize) {
         (self.layers.len(), self.kv_dim(), self.head_dim)
     }

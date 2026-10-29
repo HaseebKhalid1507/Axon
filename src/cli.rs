@@ -4,6 +4,7 @@
 //! use the crate root's API instead.
 
 use crate::generate::{GenOpts, generate};
+use crate::numerics::{self, Numerics};
 use crate::{
     chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, rope, sample,
     serve, spec, tokenizer,
@@ -36,20 +37,21 @@ usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf> [rope flags]       print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
-            [--ctx N] [--gpu-layers N] [--gpus L] [--kv T] [--verbose] [sampling flags]
+            [--ctx N] [--gpu-layers N] [--gpus L] [--kv T] [--numerics M] [--verbose]
+            [sampling flags]
                                             generation (greedy unless --temp > 0;
                                             --verbose: the full identity tuple)
-  axon logits <model.gguf> \"<prompt>\" [-k K]
+  axon logits <model.gguf> \"<prompt>\" [-k K] [--numerics M]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
             [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
-            [--session F] [sampling flags]
+            [--numerics M] [--session F] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
-            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
+            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -90,6 +92,14 @@ flags:
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
+  --numerics M  gen, logits, chat, serve: exact (default) or fast. exact: decode == batched prefill ==
+              verify, bit for bit, the same reply alone or batched (docs/determinism.md). fast: kernels
+              that change the float order are allowed (results graded against exact, not equal) and
+              the identity (fingerprint, session files) says fast; no backend has a fast kernel yet,
+              so today fast runs the exact kernels and says so once
+              (docs/design/determinism-modes.md)
+  --datacenter  serve: the datacenter bundle; today only --numerics fast (an explicit --numerics
+              wins). Later it grows to what a datacenter deployment wants (tensor parallel, FP8)
   --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3/llama)
   --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
@@ -425,13 +435,26 @@ fn run() -> std::io::Result<()> {
             if let Some((_, Ok(i))) = ids.first() {
                 let model = &i.fields[1].1;
                 println!(
-                    "model digest: {model} (sampled SHA-256, identity numerics {})",
-                    identity::NUMERICS_VERSION
+                    "model digest: {model} (sampled SHA-256, identity numerics {} | {})",
+                    Numerics::Exact.tag(),
+                    Numerics::Fast.tag()
                 );
             }
+            // Each placement in both numerics modes: exact's full tuple,
+            // then fast's fingerprint (the same tuple but its numerics
+            // field; no fast kernel exists yet, so it runs exact's).
             for (what, i) in ids {
                 match i {
-                    Ok(i) => println!("fingerprint {what}: {}", i.line()),
+                    Ok(i) => {
+                        println!("fingerprint {what}: {}", i.line());
+                        let f = i.with_numerics(Numerics::Fast);
+                        println!(
+                            "fingerprint {what} --numerics fast: {} (numerics {}; {})",
+                            f.fingerprint(),
+                            Numerics::Fast.tag(),
+                            numerics::FAST_NOTE
+                        );
+                    }
                     Err(why) => println!("fingerprint {what}: none ({why})"),
                 }
             }
@@ -543,6 +566,12 @@ pub(crate) fn kv_flag(v: Option<&str>) -> kv::KvType {
     }
 }
 
+/// --numerics' value (None: the flag was last, without one): exact or fast.
+pub(crate) fn numerics_flag(v: Option<&str>) -> Numerics {
+    let v = v.unwrap_or_else(|| fail("--numerics needs a value (exact or fast)"));
+    Numerics::parse(v).unwrap_or_else(|e| fail(&e))
+}
+
 /// --gpus LIST: the CUDA devices (`lm::set_gpus`); CUDA is the device.
 fn gpus_flag(v: Option<&str>) -> Device {
     let v = v.unwrap_or_else(|| fail("--gpus needs GPU ordinals (0 or 0,1)"));
@@ -592,10 +621,15 @@ fn backend<'a>(
     place: lm::Placing,
 ) -> Backend<'a> {
     let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place);
-    net.unwrap_or_else(|e| match device {
+    let net = net.unwrap_or_else(|e| match device {
         Device::Cuda => fail(&format!("--device cuda: {e}")),
         Device::Cpu => fail(&e),
-    })
+    });
+    // --numerics fast where no fast kernel exists yet: said once, here.
+    if let Some(note) = numerics::fast_note(&net) {
+        eprintln!("{note}");
+    }
+    net
 }
 
 /// The copy-vs-map choice for loading a model for `device`: the GPU reads
@@ -657,6 +691,13 @@ fn print_top(tok: &tokenizer::Tokenizer, logits: &[f32], k: usize, vocab: usize)
     }
 }
 
+/// `-ln p(next)` under `logits` (log-softmax in f64).
+fn next_nll(logits: &[f32], next: u32) -> f64 {
+    let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let s: f64 = logits.iter().map(|&l| (l as f64 - mx).exp()).sum();
+    mx + s.ln() - logits[next as usize] as f64
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -682,6 +723,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut sargs = sample::SampleArgs::default();
     let mut rargs = rope::RopeArgs::default();
     let mut verbose = false;
+    let mut num = Numerics::Exact;
     let mut i = 4;
     while i < args.len() {
         if args[i] == "--verbose" {
@@ -702,6 +744,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 device = Device::parse(v).unwrap_or_else(|e| fail(&e));
             }
             ("--kv", _) => kv = kv_flag(args.get(i + 1).map(String::as_str)),
+            ("--numerics", _) => num = numerics_flag(args.get(i + 1).map(String::as_str)),
             ("--draft-model", _) => {
                 let v = args.get(i + 1).filter(|v| !v.is_empty());
                 draft_path = Some(
@@ -855,6 +898,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         false,
         lm::Placing {
             gpu_experts,
+            numerics: num,
             ..lm::Placing::of(cache_ctx)
         },
         cache_ctx,
@@ -885,6 +929,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|_| cmd == "logits")
         .map_or(0, |n| n.min(ids.len()));
+    let nll_out = env::var_os("AXON_LOGITS_NLL").is_some_and(|v| v == "1");
     let t0 = Instant::now();
     let logits = if all > 0 {
         if seqs.is_empty() {
@@ -904,6 +949,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 last = net.forward(t, p, &mut cache);
                 println!("position {p}:");
                 print_top(&tok, &last, top_k, net.vocab());
+                // AXON_LOGITS_NLL=1: the teacher-forced next token's
+                // -ln p (scripts/numerics_dnll.py's ΔNLL), in f64.
+                if let Some(&next) = ids.get(p + 1).filter(|_| nll_out) {
+                    println!("nll {p} {next} {:.9}", next_nll(&last, next));
+                }
             }
         }
         last
@@ -1146,7 +1196,7 @@ fn forget_to_flag(v: &str) -> Result<f64, String> {
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] \
          [--forget-to F] [-n N] [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] \
-         [--gpus L] [--kv T] [--session FILE]";
+         [--gpus L] [--kv T] [--numerics M] [--session FILE]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -1164,6 +1214,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut sargs = sample::SampleArgs::default();
     let mut session = None;
     let mut rargs = rope::RopeArgs::default();
+    let mut num = Numerics::Exact;
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -1200,6 +1251,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 | "--kv"
                 | "--gpus"
                 | "--session"
+                | "--numerics"
         ) {
             fail(&format!("unknown argument '{f}' for chat"));
         }
@@ -1224,6 +1276,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
             kv = kv_flag(Some(v));
+        } else if f == "--numerics" {
+            num = numerics_flag(Some(v));
         } else if f == "--gpu-experts" {
             gpu_experts = Some(gpu_experts_flag(Some(v)));
         } else if f == "--gpus" {
@@ -1304,6 +1358,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         fit,
         lm::Placing {
             gpu_experts,
+            numerics: num,
             ..lm::Placing::of(ctx)
         },
         ctx,
