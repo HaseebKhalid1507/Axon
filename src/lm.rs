@@ -709,6 +709,50 @@ impl<'a> Backend<'a> {
         self.1
     }
 
+    /// Whether it runs any fast-set kernel. False in `Numerics::Exact`;
+    /// in `Numerics::Fast`, false means it runs exact mode's kernels under
+    /// fast mode's identity, which is every backend today: no fast kernel
+    /// exists yet (docs/design/determinism-modes.md). An embedder can tell
+    /// from it whether fast mode is still exact's bits on this backend.
+    pub fn fast_kernels(&self) -> bool {
+        crate::numerics::fast_kernels(self)
+    }
+
+    /// `Backend(inner, num)`, checked in debug builds: each of its GPU
+    /// models runs the kernel module of mode `num` (`Module::fast`), so a
+    /// fast module never sits under an exact identity, nor an exact one
+    /// under a fast identity's kvsave key.
+    pub(crate) fn of(inner: Inner<'a>, num: Numerics) -> Backend<'a> {
+        let b = Backend(inner, num);
+        debug_assert!(
+            b.gpu_nets()
+                .iter()
+                .all(|n| n.fast() == (num == Numerics::Fast)),
+            "a {num} backend over another mode's kernel module"
+        );
+        b
+    }
+
+    /// Its GPU models: the whole model, a split's or a MoE's GPU half, a
+    /// pipeline's stages; none on the CPU.
+    pub(crate) fn gpu_nets(&self) -> Vec<&CudaQwen2<'static>> {
+        match &self.0 {
+            Inner::Cpu(_) => Vec::new(),
+            Inner::Cuda(n) => vec![&**n],
+            Inner::Hybrid(n) => n.gpu_net().into_iter().collect(),
+            Inner::Pipeline(n) => n.stages(),
+            Inner::Moe(n) => vec![n.gpu_net()],
+        }
+    }
+
+    /// Fast-set kernel launches on its GPU models so far
+    /// (`CudaQwen2::fast_launched`): the fast-vs-exact gate's proof that a
+    /// fast kernel ran in the arm it grades. 0 on the CPU (no fast kernel).
+    #[cfg_attr(not(test), allow(dead_code))] // the gate reads it
+    pub(crate) fn fast_launches(&self) -> u64 {
+        self.gpu_nets().iter().map(|n| n.fast_launches()).sum()
+    }
+
     /// `new`, as `p` says (`axon serve`'s default: `Placing`). With
     /// p.split_ctx < max_ctx and `fit`, the whole model on the GPU (placed
     /// automatically, every layer by --gpu-layers, or a multi-GPU
@@ -760,7 +804,7 @@ impl<'a> Backend<'a> {
             if let Some(warn) = crate::model::check_ram_dense(m, ctx)? {
                 eprintln!("axon: {warn}");
             }
-            return Ok(Backend(Inner::Cpu(Qwen2::new(m)), num));
+            return Ok(Backend::of(Inner::Cpu(Qwen2::new(m)), num));
         }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
@@ -810,7 +854,7 @@ impl<'a> Backend<'a> {
             Box::leak(Box::new(Kernels::module_for_mode(gpu, m, num)?));
         let whole_gpu = |ctx: usize, fit: bool| {
             CudaQwen2::with_kv_q6k8(gpu, module, m, ctx, ckv, fit, !p.defer_q6k8)
-                .map(|n| Backend(Inner::Cuda(Box::new(n)), num))
+                .map(|n| Backend::of(Inner::Cuda(Box::new(n)), num))
         };
         let auto = gpu_layers.is_none();
         let stream = crate::hybrid::stream_setting();
@@ -877,7 +921,7 @@ impl<'a> Backend<'a> {
         let h =
             HybridQwen2::new_with_stream(Some((gpu, module)), m, split_ctx, g, ckv, stream, auto)?;
         eprintln!("split:       {}", h.describe(split_ctx));
-        Ok(Backend(Inner::Hybrid(Box::new(h)), num))
+        Ok(Backend::of(Inner::Hybrid(Box::new(h)), num))
     }
 
     /// A qwen3moe model on GPU `ordinal`: attention, routers and head there
@@ -916,7 +960,7 @@ impl<'a> Backend<'a> {
         };
         let n = MoeQwen3::new_with(gpu, module, router, m, max_ctx, kv, fit, q6k8, want)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
-        Ok(Backend(Inner::Moe(Box::new(n)), num))
+        Ok(Backend::of(Inner::Moe(Box::new(n)), num))
     }
 
     /// The model's layers over the GPUs `ordinals` (in order), a
@@ -947,7 +991,7 @@ impl<'a> Backend<'a> {
         };
         let p = PipelineQwen2::new(&devs, m, ctx, kv, None)?;
         eprintln!("pipeline:    {}", p.describe(ctx));
-        Ok(Backend(Inner::Pipeline(Box::new(p)), num))
+        Ok(Backend::of(Inner::Pipeline(Box::new(p)), num))
     }
 
     /// The context the cache was planned for: the GPU's, the split's or

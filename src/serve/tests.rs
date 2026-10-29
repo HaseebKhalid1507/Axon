@@ -2895,12 +2895,22 @@ fn identity_reply(a: SocketAddr, chat: bool, body: &Value, stream: bool) -> (Str
 }
 
 /// The determinism contract over HTTP (docs/determinism.md) on server `a`:
-/// each target alone, again (its prompt now cached: prefix reuse), streamed,
-/// and in the middle of `load` other requests (concurrent: batched on the
-/// GPU, queued on the CPU) gives the same text, and every response carries
-/// the fingerprint GET /identity and /v1/models report. Returns the
-/// identity and the targets' texts.
-fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<String>) {
+/// every response carries the fingerprint GET /identity and /v1/models
+/// report, and with `bits` each target alone, again (its prompt now cached:
+/// prefix reuse), streamed, and in the middle of `load` other requests
+/// (concurrent: batched on the GPU, queued on the CPU) gives the same text.
+/// Returns the identity and the targets' texts alone.
+///
+/// `bits` is exact mode's contract, and fast mode's while its backend runs
+/// no fast kernel (`Backend::fast_kernels`: none does yet, so every caller
+/// passes true today). A fast kernel may depend on the batch (its shape,
+/// what else is in it), so in fast mode with one, *every* path equality
+/// here is off, not just fast == exact: cached == fresh, streamed (served
+/// after the cached run) == alone, under load == alone. Those paths are
+/// graded instead, at the logits, by `cuda::qwen2::tests::numerics`' arms
+/// (decode, batched prefill, cached prefix, pool steps under load); here
+/// the fingerprint and a reply on every path are all that's left to check.
+fn identity_checks(a: SocketAddr, load: &[Value], what: &str, bits: bool) -> (Value, Vec<String>) {
     let id = call(a, "GET", "/identity", "").json();
     let fp = id["system_fingerprint"].as_str().unwrap().to_string();
     assert!(fp.starts_with("fp_"), "{id}");
@@ -2917,11 +2927,15 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
         assert_eq!(s.1, fp, "{what}: target {i}");
         // Right away, so its prompt is still the cache's (one request at a time).
         let again = identity_reply(a, *c, b, false);
-        assert_eq!(again.0, s.0, "{what}: target {i} with its prompt cached");
+        assert!(
+            !bits || again.0 == s.0,
+            "{what}: target {i} with its prompt cached"
+        );
         assert!(again.2 > 0, "{what}: target {i} reused nothing");
         assert_eq!(again.1, fp);
         let st = identity_reply(a, *c, b, true);
-        assert_eq!((&st.0, &st.1), (&s.0, &fp), "{what}: target {i} streamed");
+        assert_eq!(st.1, fp, "{what}: target {i} streamed");
+        assert!(!bits || st.0 == s.0, "{what}: target {i} streamed");
         solo.push(s);
     }
     // Under load: the targets go in after the others, interleaved with them.
@@ -2943,7 +2957,8 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     for (i, (l, s)) in loaded.iter().zip(&solo).enumerate() {
-        assert_eq!((&l.0, &l.1), (&s.0, &fp), "{what}: target {i} under load");
+        assert_eq!(l.1, fp, "{what}: target {i} under load");
+        assert!(!bits || l.0 == s.0, "{what}: target {i} under load");
     }
     (id, solo.into_iter().map(|s| s.0).collect())
 }
@@ -2972,7 +2987,7 @@ fn serve_identity() {
             // The long target is admitted in chunks while others decode.
             o.prefill_chunk = 64;
         });
-        let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"));
+        let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"), true);
         assert_eq!(id["backend"], "cuda");
         assert_eq!(
             id["kv"],
@@ -3006,7 +3021,7 @@ fn serve_identity_cpu() {
     let p = p.to_str().unwrap();
     let load: Vec<Value> = batch_bodies(true).into_iter().take(3).collect();
     let s = server_with(p, Device::Cpu, |_| {});
-    let (id, texts) = identity_checks(s.addr, &load, "cpu");
+    let (id, texts) = identity_checks(s.addr, &load, "cpu", true);
     assert_eq!(id["backend"], "cpu");
     assert!(id.get("gpu").is_none(), "{id}");
     drop(s);
@@ -3024,18 +3039,20 @@ fn serve_identity_cpu() {
 }
 
 /// The fast numerics mode over HTTP (ADR M1/M2) on `device`: a fast server
-/// passes `identity_checks` (same request, same fingerprint, same text:
-/// alone, cached, streamed, under load) under its own fingerprint, which
-/// differs from the exact server's in the `numerics` field alone and is
-/// stable across a restart. While no fast kernel exists
-/// (`numerics::fast_kernels`), a fast server runs the exact kernels, so its
-/// texts are the exact server's, bit for bit; once one does, that last
-/// check becomes a graded one (`cuda::qwen2::tests::numerics`).
+/// passes `identity_checks` under its own fingerprint, which differs from
+/// the exact server's in the `numerics` field alone and is stable across a
+/// restart. While its backend runs no fast kernel (`fast_kernels_on`; none
+/// exists yet), a fast server runs the exact kernels, so it is held to
+/// exact's bits: every path the same text (alone, cached, streamed, under
+/// load) and the exact server's texts. Once one does, none of those is a
+/// bit equality any more (`identity_checks`' `bits`): fast mode promises
+/// tolerance on every path, and `cuda::qwen2::tests::numerics` grades each.
 fn identity_fast_on(device: Device, f: impl Fn(&mut Opts) + Copy) {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
     let p = p.to_str().unwrap();
+    let bits = !fast_kernels_on(p, device);
     let n = if device == Device::Cpu { 3 } else { usize::MAX };
     let load: Vec<Value> = batch_bodies(true).into_iter().take(n).collect();
     let run = |num: Numerics| {
@@ -3043,7 +3060,8 @@ fn identity_fast_on(device: Device, f: impl Fn(&mut Opts) + Copy) {
             f(o);
             o.numerics = num;
         });
-        let (id, texts) = identity_checks(s.addr, &load, &format!("{device:?} {num}"));
+        let bits = num == Numerics::Exact || bits;
+        let (id, texts) = identity_checks(s.addr, &load, &format!("{device:?} {num}"), bits);
         assert_eq!(id["numerics"], num.tag(), "{id}");
         (id, texts)
     };
@@ -3059,13 +3077,28 @@ fn identity_fast_on(device: Device, f: impl Fn(&mut Opts) + Copy) {
     };
     assert_eq!(rest(&fast), rest(&exact), "only the numerics field differs");
     // No fast kernel on this backend yet: the exact kernels, the same text.
-    assert_eq!(ft, et, "fast mode without fast kernels runs exact's bits");
+    assert!(
+        !bits || ft == et,
+        "fast mode without fast kernels runs exact's bits"
+    );
     let s = server_with(p, device, |o| {
         f(o);
         o.numerics = Numerics::Fast;
     });
     let again = call(s.addr, "GET", "/identity", "").json();
     assert_eq!(again, fast, "a restarted fast server");
+}
+
+/// Whether a fast backend of the model at `p` on `device` runs any fast-set
+/// kernel (`Backend::fast_kernels`): then a fast server's paths are graded,
+/// not equal (`identity_checks`).
+fn fast_kernels_on(p: &str, device: Device) -> bool {
+    let m = crate::gguf::load_with(p, Some(false)).unwrap();
+    let o = crate::lm::BackendOptions::default()
+        .device(device)
+        .max_ctx(256)
+        .numerics(Numerics::Fast);
+    crate::lm::Backend::new(&m, o).unwrap().fast_kernels()
 }
 
 #[test]

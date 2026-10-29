@@ -19,7 +19,7 @@
 //! **No fast kernel exists yet** (the ADR's §4.6: none is built before a
 //! measured gap names it, with a kill rule). Until one does, `fast` runs
 //! the exact kernels, says so once (`FAST_NOTE`), and still *identifies* as
-//! fast: its own fingerprint (`numerics=fast/N` in the identity tuple), its
+//! fast: its own fingerprint (`numerics=fast/N.M` in the identity tuple), its
 //! own NVRTC modules (`cuda::FAST_DEFINE` in their options, so in the
 //! kernel cache's key), its own kvsave identity (a session saved in one
 //! mode is restored into the other as tokens, prefilled again, never as
@@ -62,15 +62,19 @@ impl Numerics {
         }
     }
 
-    /// The mode's own numerics version (identity.rs states when each bumps).
-    pub fn version(self) -> u32 {
+    /// The mode's numerics version (identity.rs states when each counter
+    /// bumps): exact's counter, `1`; fast's is exact's and its own,
+    /// `1.1`. Fast mode runs on top of the exact kernels and the
+    /// request-to-text code, so a change to those (an exact bump) moves
+    /// fast's version too, with nobody having to remember a second bump.
+    pub fn version(self) -> String {
         match self {
-            Numerics::Exact => NUMERICS_VERSION_EXACT,
-            Numerics::Fast => NUMERICS_VERSION_FAST,
+            Numerics::Exact => format!("{NUMERICS_VERSION_EXACT}"),
+            Numerics::Fast => format!("{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}"),
         }
     }
 
-    /// The identity tuple's `numerics` value: `exact/1`, `fast/1`.
+    /// The identity tuple's `numerics` value: `exact/1`, `fast/1.1`.
     pub fn tag(self) -> String {
         format!("{}/{}", self.name(), self.version())
     }
@@ -82,11 +86,15 @@ impl std::fmt::Display for Numerics {
     }
 }
 
-/// Whether `net` runs any fast-set kernel: none does yet, on any backend
-/// (module doc). The first fast kernel makes this true where it routes, and
-/// the tests that hold fast mode to exact mode's bits while it's false
-/// (`serve_identity_fast`, `graded_vs_exact`'s bit check, the md5 gate's
-/// fast column) become graded-only there.
+/// Whether `net` runs any fast-set kernel (`Backend::fast_kernels`): none
+/// does yet, on any backend (module doc). The first fast kernel makes this
+/// true where it routes, and calls `CudaQwen2::fast_launched` at each
+/// launch. The tests that hold fast mode to exact mode's bits while it's
+/// false (`identity_checks`' path equalities under `serve_identity_fast`,
+/// `graded_vs_exact`'s bit check, the md5 gate's fast column) become
+/// graded-only there, and the graded gate then requires the launch count
+/// to move in the arms it grades: a fast kernel that never ran can't pass
+/// it.
 pub(crate) fn fast_kernels(net: &Backend) -> bool {
     let _ = net;
     false
@@ -123,8 +131,9 @@ mod tests {
         );
         assert_eq!(
             Numerics::Fast.tag(),
-            format!("fast/{NUMERICS_VERSION_FAST}")
+            format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
+        assert_eq!(Numerics::Fast.version(), "1.1");
         assert_eq!(Numerics::Fast.to_string(), "fast");
     }
 

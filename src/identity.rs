@@ -5,7 +5,7 @@
 //! or drafted (docs/determinism.md states the contract and its limits).
 //!
 //! In the tuple (`Identity::fields`, in this order):
-//! - `numerics`: the numerics mode and its version, `exact/N` or `fast/N`
+//! - `numerics`: the numerics mode and its version, `exact/N` or `fast/N.M`
 //!   (`NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`; `crate::numerics`):
 //!   Axon's own kernels and sampler.
 //! - `model`: `model_digest` of the GGUF file (its whole header, so every
@@ -55,9 +55,10 @@ use crate::numerics::Numerics;
 use std::io;
 use std::path::Path;
 
-/// Exact mode's numerics version (`numerics=exact/N`). RULE: bump it in
-/// the same commit as any change that can change an output bit in exact
-/// mode for some model on some backend: a kernel's arithmetic or reduction
+/// Exact mode's numerics version (`numerics=exact/N`; fast mode's tag
+/// carries it too, `fast/N.M`). RULE: bump it in the same commit as any
+/// change that can change an output bit in exact mode for some model on
+/// some backend: a kernel's arithmetic or reduction
 /// order (CPU or CUDA), the attention fold, RoPE, norms, the sampler's order
 /// or RNG, a quant format's dequant; or what turns a request into tokens or
 /// text: the tokenizer, chat templates and prompt rendering (serve.rs
@@ -65,18 +66,21 @@ use std::path::Path;
 /// that keep every bit (speed, scheduling, a kernel that matches the old one
 /// bit for bit, proven by the md5 gate) don't bump it. A bump changes every
 /// exact fingerprint, so a client caching on it knows its old outputs are
-/// stale. (Before 2026-10-29 the tuple's line was `numerics=1`: the same
-/// kernels as `exact/1`, another fingerprint.)
+/// stale; and every fast one too, with no second step: fast mode runs on
+/// top of the exact kernels and the request-to-text code, so its tag is
+/// `fast/<this>.<NUMERICS_VERSION_FAST>` (`Numerics::tag`), never a
+/// counter that has to be remembered. (Before 2026-10-29 the tuple's line
+/// was `numerics=1`: the same kernels as `exact/1`, another fingerprint.)
 pub const NUMERICS_VERSION_EXACT: u32 = 1;
 
-/// Fast mode's numerics version (`numerics=fast/N`,
-/// docs/design/determinism-modes.md §4.3). RULE: bump it in the same commit
-/// as any change that can change an output bit in fast mode: a fast-set
-/// kernel's arithmetic or its routing (which products run a fast kernel,
-/// at which shapes). Code both modes run bumps both counters: every kernel
-/// today (fast mode has no kernel of its own yet and runs the exact ones),
-/// and the request-to-text parts `NUMERICS_VERSION_EXACT` lists. The first
-/// fast kernel is a bump.
+/// Fast mode's own numerics version: the M of `numerics=fast/N.M`, N being
+/// `NUMERICS_VERSION_EXACT` (docs/design/determinism-modes.md §4.3). RULE:
+/// bump it in the same commit as any change that can change an output bit
+/// in fast mode only: a fast-set kernel's arithmetic or its routing (which
+/// products run a fast kernel, at which shapes). Code both modes run (every
+/// kernel today: fast mode has no kernel of its own yet; the request-to-text
+/// parts) bumps `NUMERICS_VERSION_EXACT`, which moves fast's tag as well,
+/// so it doesn't bump this one. The first fast kernel is a bump.
 pub const NUMERICS_VERSION_FAST: u32 = 1;
 
 /// The tuple's format, the first line of `canonical`.
@@ -770,7 +774,7 @@ mod tests {
     }
 
     /// The numerics mode (ADR M1): `numerics=exact/N` by default,
-    /// `fast/N` in fast mode, the rest of the tuple the same; fast is its
+    /// `fast/N.M` in fast mode (N exact's counter, M fast's own), the rest of the tuple the same; fast is its
     /// own fingerprint, stable, and exact is `new`'s. Pinned, as the exact
     /// one above.
     #[test]
@@ -780,24 +784,25 @@ mod tests {
         let f = base().with_numerics(Numerics::Fast);
         assert_eq!(
             f.canonical(),
-            "axon-identity/1\nnumerics=fast/1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=fast/1.1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
-        assert_eq!(f.fingerprint(), "fp_380702fdbbb38616", "golden (hashlib)");
+        assert_eq!(f.fingerprint(), "fp_bea740cf61d9d767", "golden (hashlib)");
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
-        assert_eq!(f.json()["numerics"], "fast/1");
-        assert!(f.line().contains("numerics fast/1"), "{}", f.line());
+        assert_eq!(f.json()["numerics"], "fast/1.1");
+        assert!(f.line().contains("numerics fast/1.1"), "{}", f.line());
         // Back to exact: the same tuple as never fast.
         assert_eq!(f.with_numerics(Numerics::Exact), e);
-        // Each counter is in its own mode's line only.
+        // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's
+        // is in both modes' tags, fast's in fast's alone.
         assert_eq!(
             Numerics::Exact.tag(),
             format!("exact/{NUMERICS_VERSION_EXACT}")
         );
         assert_eq!(
             Numerics::Fast.tag(),
-            format!("fast/{NUMERICS_VERSION_FAST}")
+            format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
         // `of`: the mode a backend was made in (a CPU fixture: no model file,
         // so its digest is unreadable, which doesn't touch the field).
@@ -1001,7 +1006,7 @@ mod tests {
             Some(cuts.clone()),
         )
         .unwrap();
-        let net = Backend(Inner::Pipeline(Box::new(p)), Numerics::Exact);
+        let net = Backend::of(Inner::Pipeline(Box::new(p)), Numerics::Exact);
         let id = of(path, &m, &net);
         assert_eq!(get(&id, "backend").unwrap(), pipeline_backend(&cuts));
         let g = get(&id, "gpu").unwrap();

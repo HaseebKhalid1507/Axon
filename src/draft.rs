@@ -425,7 +425,7 @@ impl DraftModel {
                 .map_err(|e| format!("the draft model: {e}"))?;
                 // Exact, whatever the main model's mode: a drafter only
                 // guesses (the output is the main model's either way).
-                Backend(Inner::Cuda(Box::new(n)), crate::numerics::Numerics::Exact)
+                Backend::of(Inner::Cuda(Box::new(n)), crate::numerics::Numerics::Exact)
             }
         };
         Ok(ModelDrafter::new(net, ctx, &self.stop))

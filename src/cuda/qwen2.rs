@@ -546,6 +546,9 @@ pub(crate) struct CudaQwen2<'g> {
     /// Its module is the fast numerics mode's (`Module::fast`): kvsave's
     /// identity says so (`cuda::numerics_tag`).
     fast: bool,
+    /// Launches of fast-set kernels (`fast_launched`): the fast-vs-exact
+    /// gate reads it to know a fast kernel ran in the arm it grades.
+    fast_launches: std::sync::atomic::AtomicU64,
     /// The batched attention of one sequence's few queries by attn_blk_mq
     /// (each tile read once per 16 queries), not attn_blk_b per query: the
     /// same partials (AXON_ATT_MQ=0 turns it off).
@@ -1711,6 +1714,7 @@ impl<'g> CudaQwen2<'g> {
             // gpt-oss: the split attention (oss.cu), as gemma3's.
             tc_attn: module.mma() && head_dim != 256 && !oss,
             fast: module.fast(),
+            fast_launches: std::sync::atomic::AtomicU64::new(0),
             att_mq: std::env::var("AXON_ATT_MQ").map_or(true, |v| v != "0"),
             att_mq_max: std::env::var("AXON_ATT_MQ_MAX")
                 .ok()

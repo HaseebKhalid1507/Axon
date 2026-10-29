@@ -221,6 +221,25 @@ impl<'g> CudaQwen2<'g> {
         self.fast
     }
 
+    /// Count one launch of a fast-set kernel (`#ifdef AXON_FAST` code, or a
+    /// product routed to one in fast mode). Every such launch site calls it,
+    /// so the fast-vs-exact gate (`cuda::qwen2::tests::numerics`) can tell
+    /// a graded arm that ran a fast kernel from one that ran only exact
+    /// ones. No kernel calls it yet: none exists (`numerics::fast_kernels`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fast_launched(&self) {
+        debug_assert!(self.fast, "a fast-set kernel launched from an exact module");
+        self.fast_launches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Fast-set kernel launches so far (`fast_launched`).
+    #[cfg_attr(not(test), allow(dead_code))] // the fast-vs-exact gate reads it
+    pub(crate) fn fast_launches(&self) -> u64 {
+        self.fast_launches
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn kv_dims(&self) -> (usize, usize, usize) {
         (self.layers.len(), self.kv_dim(), self.head_dim)
     }
