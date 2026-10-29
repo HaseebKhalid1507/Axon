@@ -133,15 +133,17 @@ mod tests {
     #[test]
     fn fast_note_on_a_fixture() {
         crate::kv::set_f32(false);
-        let m = crate::model::tests::qwen3_fixture(crate::quant::F32);
-        let mk = |n| {
+        // A model each: a CPU model releases the tensors it repacks.
+        let fixture = || crate::model::tests::qwen3_fixture(crate::quant::F32);
+        let (me, mf) = (fixture(), fixture());
+        let mk = |m, n| {
             let o = crate::lm::BackendOptions::default()
                 .device(crate::lm::Device::Cpu)
                 .max_ctx(64)
                 .numerics(n);
-            Backend::new(&m, o).unwrap()
+            Backend::new(m, o).unwrap()
         };
-        let (e, f) = (mk(Numerics::Exact), mk(Numerics::Fast));
+        let (e, f) = (mk(&me, Numerics::Exact), mk(&mf, Numerics::Fast));
         assert_eq!(
             (e.numerics(), f.numerics()),
             (Numerics::Exact, Numerics::Fast)

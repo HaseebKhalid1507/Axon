@@ -802,8 +802,9 @@ mod tests {
         // `of`: the mode a backend was made in (a CPU fixture: no model file,
         // so its digest is unreadable, which doesn't touch the field).
         crate::kv::set_f32(false);
-        let m = crate::model::tests::qwen3_fixture(crate::quant::F32);
         for n in [Numerics::Exact, Numerics::Fast] {
+            // A model each: a CPU model releases the tensors it repacks.
+            let m = crate::model::tests::qwen3_fixture(crate::quant::F32);
             let o = crate::lm::BackendOptions::default()
                 .device(crate::lm::Device::Cpu)
                 .max_ctx(64)
