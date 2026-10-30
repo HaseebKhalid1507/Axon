@@ -1586,6 +1586,16 @@ fn check_fp8_tensors(fp8: bool, ts: &[Tensor]) -> Result<(), String> {
                     t.name
                 ));
             }
+            // F32 after the conversions (`target`: BF16 / F16 / F32 become
+            // F32); any other dtype (F64, an integer, an F8) is refused by
+            // name: `check_fp8_values` and every kernel read f32 scales.
+            if t.qtype.id != crate::quant::F32 {
+                let dt = t.hf.as_ref().map_or(t.qtype.name, |h| h.dtype);
+                return Err(format!(
+                    "tensor {}: weight_scale of dtype {dt}: BF16, F16 or F32 wanted",
+                    t.name
+                ));
+            }
             continue;
         }
         let linear = t.layer >= 0 && FP8_LINEARS.iter().any(|k| t.kind == format!("{k}.weight"));
@@ -1601,8 +1611,12 @@ fn check_fp8_tensors(fp8: bool, ts: &[Tensor]) -> Result<(), String> {
         if !f8 {
             continue;
         }
-        let (k, rows) = (t.dims[0], t.dims.get(1).copied().unwrap_or(0));
-        if t.dims.len() != 2 || !k.is_multiple_of(128) || k == 0 || rows == 0 {
+        // The rank first: a 0- or 1-dim F8 tensor is refused, never indexed.
+        let (k, rows) = match t.dims[..] {
+            [k, rows] => (k, rows),
+            _ => (0, 0),
+        };
+        if !k.is_multiple_of(128) || k == 0 || rows == 0 {
             return Err(format!(
                 "tensor {}: F8_E4M3 shape {:?}: rows of whole 128-value blocks wanted",
                 t.name, t.dims

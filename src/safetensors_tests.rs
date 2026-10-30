@@ -1603,7 +1603,7 @@ fn fp8_checkpoints_refused_cleanly() {
         }
     }
     type Edit = fn(&mut Vec<(String, &'static str, Vec<u64>, Vec<u8>)>);
-    let tensor_cases: [(&str, Edit, &str); 8] = [
+    let tensor_cases: [(&str, Edit, &str); 11] = [
         (
             "noscale",
             |w| w.retain(|t| t.0 != "model.layers.1.mlp.up_proj.weight_scale"),
@@ -1647,6 +1647,47 @@ fn fp8_checkpoints_refused_cleanly() {
                 t.3.truncate(2);
             },
             "q_proj.weight_scale: 2 bytes for shape",
+        ),
+        (
+            "f64scale",
+            |w| {
+                // Well-formed F64 scales (1.0), one per row: the dtype is
+                // what's wrong (kernels read f32).
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
+                    .unwrap();
+                let n: u64 = t.2.iter().product();
+                t.1 = "F64";
+                t.3 = 1.0f64.to_le_bytes().repeat(n as usize);
+            },
+            "blk.0.attn_q.scale: weight_scale of dtype F64",
+        ),
+        (
+            "i8scale",
+            |w| {
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.1.mlp.up_proj.weight_scale")
+                    .unwrap();
+                let n: u64 = t.2.iter().product();
+                t.1 = "I8";
+                t.3 = vec![1u8; n as usize];
+            },
+            "blk.1.ffn_up.scale: weight_scale of dtype I8",
+        ),
+        (
+            "rank0",
+            |w| {
+                // A 0-dim F8 linear: refused, not indexed (it panicked).
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight")
+                    .unwrap();
+                t.2 = vec![];
+                t.3 = vec![0x38];
+            },
+            "blk.0.attn_q.weight: F8_E4M3 shape []",
         ),
         (
             "nan",
