@@ -453,3 +453,30 @@ fn gpu_fp8_graded_vs_fp8_ref() {
     assert_graded_vs_exact_with(what, &g, false, Top1::Binomial);
     let _ = fp8::F8S;
 }
+
+/// The load arm's max |dlogit|, diagnosed (`numerics::load_diag`): run by
+/// hand (`--ignored`), on bella.
+#[test]
+#[ignore]
+fn gpu_fp8_load_diag() {
+    if f8_gpu().is_none() {
+        return;
+    }
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let (mr, mf, mo) = (load(), load(), load());
+    let net = |m, d, n| {
+        let o = BackendOptions::default()
+            .device(d)
+            .max_ctx(super::numerics::CTX)
+            .kv(KvType::F16)
+            .numerics(n);
+        Backend::new(m, o).unwrap()
+    };
+    let r = net(&mr, Device::Cpu, Numerics::Exact);
+    let f = crate::model::with_fp8_cpu_qt(F8S_TOK, || crate::model::Qwen2::new_with(&mf, true));
+    let o = net(&mo, Device::Cuda, Numerics::Fast);
+    super::numerics::load_diag(&r, &f, &o, &mr, &Sizes::FP8);
+}

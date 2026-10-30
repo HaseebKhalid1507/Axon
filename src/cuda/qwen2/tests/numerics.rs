@@ -531,6 +531,145 @@ pub(crate) fn grade_sized<F: Lm>(
     }
 }
 
+/// The load arm's rows, diagnosed (the FP8 gate's max |dlogit|, an
+/// `#[ignore]`d test): the same ids as `grade_sized`'s load arm, stepped
+/// in a pool of all `sz.load` (as the gate), the same pool in reversed
+/// slot and row order, a pool of the first half only, and each sequence
+/// alone through `o`'s decode path; against `r` (the reference) and `f`
+/// (the floor). Prints the worst rows: the logit with the max |pool - r|,
+/// its rank in r and both probabilities, its value in every run; and per
+/// row the max |a - b| between the runs.
+pub(crate) fn load_diag<F: Lm>(r: &Backend, f: &F, o: &Backend, m: &Model, sz: &Sizes) {
+    let pre = prefixes(Device::Cuda);
+    let (c0, c1) = CACHED;
+    let longest = *pre.iter().max().unwrap();
+    let (span, cspan) = match sz.cached_windows {
+        None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
+        Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+    };
+    let cwins = sz.cached_windows.unwrap_or(0);
+    let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
+    let total = sz.decode_windows * WINDOW + sz.batch_windows * span + cwins * cspan;
+    let ids = natural_ids(m, total + sz.load * load_len);
+    let seqs: Vec<&[u32]> = ids[total..].chunks(load_len).collect();
+    let n = seqs.len();
+    let spec = CandSpec {
+        k: o.vocab(),
+        penalty: 1.0,
+        last_n: 0,
+    };
+    // A pool run: `order` the sequences (slot i holds seqs[order[i]]),
+    // rows in that order; logits [seq][step].
+    let pooled = |order: &[usize]| -> Vec<Vec<Vec<f32>>> {
+        let mut pool = o.new_pool(order.len(), CTX).unwrap();
+        for (slot, &s) in order.iter().enumerate() {
+            o.feed_slot(&mut pool, slot, &seqs[s][..load_prefix(s)], 0)
+                .unwrap();
+        }
+        let mut out = vec![Vec::new(); n];
+        for k in 0..sz.load_steps {
+            let step: Vec<SeqRow> = (order.iter().enumerate())
+                .map(|(slot, &s)| {
+                    let pos = load_prefix(s) + k;
+                    SeqRow {
+                        token: seqs[s][pos],
+                        pos,
+                        slot,
+                        head: RowHead::Sample {
+                            spec,
+                            recent: &seqs[s][..=pos],
+                        },
+                    }
+                })
+                .collect();
+            for (i, row) in o.step(&mut pool, &step).unwrap().into_iter().enumerate() {
+                let RowOut::Cands(cs) = row else {
+                    panic!("candidates")
+                };
+                let mut lo = vec![f32::NAN; o.vocab()];
+                for c in cs {
+                    lo[c.id as usize] = c.logit;
+                }
+                out[order[i]].push(lo);
+            }
+        }
+        out
+    };
+    let all: Vec<usize> = (0..n).collect();
+    let rev: Vec<usize> = (0..n).rev().collect();
+    let half: Vec<usize> = (0..n / 2).collect();
+    let (pa, pb, ph) = (pooled(&all), pooled(&rev), pooled(&half));
+    let mut rows = Vec::new();
+    let mx = |a: &[f32], b: &[f32]| {
+        (a.iter().zip(b))
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    let (mut s_ab, mut s_ah, mut s_as, mut s_sr, mut s_fr, mut s_ar) =
+        (0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
+    let (mut t20_a, mut t20_s, mut t20_f) = (0f32, 0f32, 0f32);
+    for (s, seq) in seqs.iter().enumerate() {
+        let p = load_prefix(s);
+        let (mut rc, mut fc, mut oc) = (r.new_cache(CTX), f.new_cache(CTX), o.new_cache(CTX));
+        r.feed_batch(&seq[..p], 0, &mut rc);
+        f.feed_batch(&seq[..p], 0, &mut fc);
+        o.feed_batch(&seq[..p], 0, &mut oc);
+        for k in 0..sz.load_steps {
+            let pos = p + k;
+            let lr = r.forward(seq[pos], pos, &mut rc);
+            let lf = f.forward(seq[pos], pos, &mut fc);
+            let ls = o.forward(seq[pos], pos, &mut oc);
+            let la = &pa[s][k];
+            let (lpr, lpa) = (log_softmax(&lr), log_softmax(la));
+            let mut top: Vec<usize> = (0..lr.len()).collect();
+            top.sort_by(|&x, &y| lr[y].total_cmp(&lr[x]));
+            let t20 = |l: &[f32]| {
+                top[..20]
+                    .iter()
+                    .map(|&i| (l[i] - lr[i]).abs())
+                    .fold(0f32, f32::max)
+            };
+            t20_a = t20_a.max(t20(la));
+            t20_s = t20_s.max(t20(&ls));
+            t20_f = t20_f.max(t20(&lf));
+            let (i, d) = (la.iter().zip(&lr).map(|(x, y)| (x - y).abs()).enumerate())
+                .fold((0, 0f32), |b, (i, d)| if d > b.1 { (i, d) } else { b });
+            let rank = top.iter().position(|&j| j == i).unwrap();
+            let h = (s < n / 2).then(|| ph[s][k][i]);
+            let ab = mx(la, &pb[s][k]);
+            let ah = if s < n / 2 { mx(la, &ph[s][k]) } else { 0.0 };
+            let (as_, sr, fr) = (mx(la, &ls), mx(&ls, &lr), mx(&lf, &lr));
+            s_ab = s_ab.max(ab);
+            s_ah = s_ah.max(ah);
+            s_as = s_as.max(as_);
+            s_sr = s_sr.max(sr);
+            s_fr = s_fr.max(fr);
+            s_ar = s_ar.max(d);
+            rows.push((d, format!(
+                "seq {s:2} step {k:2} pos {pos:3}: max|pool-ref| {d:.3} at token {i} rank {rank} \
+                 (p_ref {:.2e}, p_pool {:.2e}; ref top-1 {:.2}): ref {:.3} floor {:.3} pool {:.3} \
+                 rev {:.3} half {} solo {:.3} | row max |pool-rev| {ab:.3} |pool-half| {ah:.3} \
+                 |pool-solo| {as_:.3} |solo-ref| {sr:.3} |floor-ref| {fr:.3}",
+                lpr[i].exp(), lpa[i].exp(), lr[top[0]], lr[i], lf[i], la[i], pb[s][k][i],
+                h.map_or("-".into(), |v| format!("{v:.3}")), ls[i]
+            )));
+        }
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (_, l) in rows.iter().take(15) {
+        eprintln!("{l}");
+    }
+    let over = |t: f32| rows.iter().filter(|r| r.0 >= t).count();
+    eprintln!(
+        "load diag over {} rows: max |pool-ref| {s_ar:.3} (rows >= 6: {}, >= 4: {}), |solo-ref| {s_sr:.3}, \
+         |floor-ref| {s_fr:.3}; |pool-rev| {s_ab:.3}, |pool-half| {s_ah:.3}, |pool-solo| {s_as:.3}; \
+         over r's top-20 only: pool {t20_a:.3} solo {t20_s:.3} floor {t20_f:.3}",
+        rows.len(),
+        over(6.0),
+        over(4.0)
+    );
+}
+
 /// A panic's message.
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<String>()

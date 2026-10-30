@@ -1606,23 +1606,25 @@ fn fp8_checkpoints_refused_cleanly() {
                     .iter_mut()
                     .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
                     .unwrap();
-                // 128 scales (of 1.0) for q_proj's 64 rows, well-formed bytes.
-                t.2 = vec![1, 128];
-                t.3 = [0x80u8, 0x3f].repeat(128);
+                // 64 scales (of 1.0) for q_proj's 128 rows (hidden 128),
+                // well-formed bytes: the count is what's wrong.
+                t.2 = vec![1, 64];
+                t.3 = [0x80u8, 0x3f].repeat(64);
             },
-            "blk.0.attn_q.scale: shape [128, 1], want one scale per row (64)",
+            "blk.0.attn_q.scale: shape [64, 1], want one scale per row (128)",
         ),
         (
             "grid",
             |w| {
-                // 64 scales, but as a grid: not one per row.
+                // 128 scales (the bytes unchanged), but as a grid: not one
+                // per row.
                 let t = w
                     .iter_mut()
                     .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
                     .unwrap();
-                t.2 = vec![8, 8];
+                t.2 = vec![16, 8];
             },
-            "blk.0.attn_q.scale: shape [8, 8], want one scale per row (64)",
+            "blk.0.attn_q.scale: shape [8, 16], want one scale per row (128)",
         ),
         (
             "bytes",
