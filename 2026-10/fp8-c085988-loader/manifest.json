@@ -1,0 +1,29 @@
+{
+ "label": "fp8-c085988-loader",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1030-092525-e89c",
+   "name": "fp8-c085988-loader",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "c085988",
+   "binary": "loadertests.sh",
+   "started": 1793366725.4156153,
+   "ended": 1793366730.4521153,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "4e920b38e72d39a03924e87f0931d85a33f7536793aeb537eb44a0ae653a5874",
+   "log_bytes": 4599
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-30 09:25:30 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

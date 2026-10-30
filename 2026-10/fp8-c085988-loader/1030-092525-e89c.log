@@ -1,0 +1,70 @@
+[axon-run 09:25:25] submitted 1030-092525-e89c by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/loadertests.sh bin/axon-test-c085988 bin/axon-test-dbg-c085988
+[axon-run 09:25:25] scope axon-job-1030-092525-e89c-1793366725.scope in app-axonjobs.slice: MemoryMax 17402 MB, MemoryHigh 15661 MB, no swap, oomd pressure kill 80% (claim 10919 MB): an OOM here kills only this job
+[axon-run 09:25:25] job 1030-092525-e89c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1030-092525-e89c-1793366725 --slice=app-axonjobs.slice -p MemoryMax=17402M -p MemoryHigh=15661M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/loadertests.sh bin/axon-test-c085988 bin/axon-test-dbg-c085988
+axon-q 09:25:25 start slot 16-23: /home/haseeb/.cache/axon-fp8/loadertests.sh bin/axon-test-c085988 bin/axon-test-dbg-c085988
+== bin/axon-test-c085988
+
+running 26 tests
+test quant::fp8::tests::converters ... ok
+test quant::fp8::tests::e4m3_codes_round_trip ... ok
+test quant::fp8::tests::act_quantizers ... ok
+test quant::fp8::tests::e4m3_rounding_ties_and_saturation ... ok
+test quant::fp8::tests::anchor_has_teeth ... ok
+test safetensors::tests::bf16_table_matches_numpy ... ok
+test quant::fp8::tests::gemv_ref_within_anchor ... ok
+test safetensors::tests::header_never_panics ... ok
+test safetensors::tests::header_parses_and_checks_every_range ... ok
+test safetensors::tests::bad_checkpoints_are_clean_errors ... ok
+test safetensors::tests::check_supported_refuses_as_for_the_gguf ... ok
+test safetensors::tests::llama3_rope_on_a_checkpoint_is_readable_before_conversion ... ok
+test safetensors::tests::fp8_checkpoints_refused_cleanly ... ok
+test safetensors::tests::names_map_to_gguf ... ok
+test safetensors::tests::oversized_json_is_refused ... ok
+test safetensors::tests::model_id_covers_the_whole_checkpoint ... ok
+test safetensors::tests::qwen25_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::llama32_metadata_tokenizer_and_rope_freqs_match_gguf ... ok
+test safetensors::tests::shared_ranges_cant_inflate_the_arena ... ok
+test safetensors::tests::tiny_checkpoint_is_its_gguf_f16 ... ok
+test safetensors::tests::tiny_fp8_checkpoint_is_its_exact_dequant ... ok
+test safetensors::tests::tiny_metadata_and_tokenizer ... ok
+test safetensors::tests::unconverted_types_are_refused_by_check_supported ... ok
+test safetensors::tests::qwen3_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::qwen25_tensors_match_gguf_f16 ... ok
+test safetensors::tests::llama32_tensors_match_gguf_f16 ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 779 filtered out; finished in 2.22s
+
+== bin/axon-test-dbg-c085988
+
+running 26 tests
+test quant::fp8::tests::act_quantizers ... ok
+test quant::fp8::tests::e4m3_codes_round_trip ... ok
+test quant::fp8::tests::converters ... ok
+test quant::fp8::tests::e4m3_rounding_ties_and_saturation ... ok
+test quant::fp8::tests::anchor_has_teeth ... ok
+test safetensors::tests::bf16_table_matches_numpy ... ok
+test quant::fp8::tests::gemv_ref_within_anchor ... ok
+test safetensors::tests::header_never_panics ... ok
+test safetensors::tests::header_parses_and_checks_every_range ... ok
+test safetensors::tests::bad_checkpoints_are_clean_errors ... ok
+test safetensors::tests::check_supported_refuses_as_for_the_gguf ... ok
+test safetensors::tests::llama3_rope_on_a_checkpoint_is_readable_before_conversion ... ok
+test safetensors::tests::fp8_checkpoints_refused_cleanly ... ok
+test safetensors::tests::names_map_to_gguf ... ok
+test safetensors::tests::oversized_json_is_refused ... ok
+test safetensors::tests::model_id_covers_the_whole_checkpoint ... ok
+test safetensors::tests::qwen25_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::qwen25_tensors_match_gguf_f16 ... ok
+test safetensors::tests::shared_ranges_cant_inflate_the_arena ... ok
+test safetensors::tests::tiny_checkpoint_is_its_gguf_f16 ... ok
+test safetensors::tests::tiny_fp8_checkpoint_is_its_exact_dequant ... ok
+test safetensors::tests::tiny_metadata_and_tokenizer ... ok
+test safetensors::tests::unconverted_types_are_refused_by_check_supported ... ok
+test safetensors::tests::llama32_metadata_tokenizer_and_rope_freqs_match_gguf ... ok
+test safetensors::tests::qwen3_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::llama32_tensors_match_gguf_f16 ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 779 filtered out; finished in 1.10s
+
+LOADERTESTS rc=0
+[axon-run 09:25:28] exit 0 after 3.4s (host bella)
