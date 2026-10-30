@@ -131,6 +131,10 @@ vLLM-FP8 tg128 measured beside it. ESTIMATED on bella: tg ≈ 0.6× Q4_K_M; pp 0
 **As run at b354543 (10-30):** every gate green: FP8 tests rel + dbg 1030-031016-38fe; release suite 1030-031020-4ccd,
 -b637; debug suite 1030-031020-9adf, -dc18. Gatewatch `fp8-b354543` printed two "FAIL" rows, 1030-031020-32b9 and
 -1a98: those are the `--shard 2` group ids, not jobs (a gatewatch bug); all 5 real jobs passed.
+**Review fixes at c085988 (shady, 10-30):** scale dtype checked (F32 after conversion; F64 / integer / F8 refused by
+name) and a 0-dim F8 linear refused, not indexed. Loader-only, so no md5 or graded rerun (no kernel or GGUF path
+touched). Gate: `safetensors::` + `quant::fp8::` on release and debug, bella, 1030-092525-e89c (pending; gatewatch
+`fp8-c085988-loader`); the new tests passed locally on the release binary; clippy `-D warnings` and rustfmt clean.
 
 ## 7. Pods (I stage and rehearse on bella; you book)
 4090 (sm_89), one session of about 45 min ≈ **$0.67**: (1)+(4) on the 0.5B, then the 7B HF BF16 reference (15 GB
@@ -187,6 +191,8 @@ most one position with KL > 0.5" doesn't scale with n). Every other gate keeps `
 (1029-205633-ac74, the arm's 1000 rows): the pool equals itself reversed and halved bit for bit, so no row or slot
 mixing; each sequence alone reaches 8.212; the rows ≥ 6 are one sequence's tail logits (rank 151829 / 151924 of
 151936, p_ref 5.7e-12 / 1.4e-13). Now: < 6 over the reference's top-20 (pool 4.087, floor 2.100), all logits < 12.
+This bound (and the outlier count above) is the FP8 gate's only: no future fast kernel inherits it; its gate starts at
+the strict bounds (< 6 over every logit, one KL > 0.5) and relaxes only on its own disclosed diagnosis.
 
 ## 12. CP2 results (7B, bella) and the ruling on them (lead, 2026-10-30)
 **Accuracy** (RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic vs fp8-ref, 32 windows, 5823 positions; jobs 1029-201935-949b,
@@ -208,8 +214,8 @@ median of the 3 rows, tok/s). **Both runs TAINTED** (desktop Xorg / zen-bin on t
 The fast tg128 rows sit at 31.5–32.4 in all 6 rounds (clean round 31.46): a 3× gap to Q4_K_M is far outside the taint.
 The §6 decode bar computed for bella, 0.9 × Q4 tg × 4.68/7.68, is 46.7 (run 1) / 55.4 (run 2): **fast fails it**.
 **Ruling (lead, 10-30):** fast FP8 on bella fails both pre-registered bars (decode 32 vs 47–55; 7B top-1 95.9 vs
-97 %). #177 ships as the loader plus exact mode: exact is the default, so an FP8 checkpoint runs as Q8_0 (both accuracy
-bars passed). Fast FP8 stays behind `--numerics fast`, documented as failing its bars on sm_120 and unmeasured on H100.
+97 %). #177 ships as the loader plus exact mode: exact is the default, so an FP8 checkpoint runs as Q8_0:
+The 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar. Fast FP8 stays behind `--numerics fast`, documented as failing its bars on sm_120 and unmeasured on H100.
 **Known cause of the decode miss:** an FP8-native net runs a single token as a one-row batched pass (`gemv_f8` plus
 the batched path's per-layer launches) with no decode-step kernels and no CUDA graphs (§10). Follow-up, not in this
 PR: give F8 nets the decode-graph GEMV path, then re-gate on bella and the H100 (roadmap).

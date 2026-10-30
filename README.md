@@ -142,8 +142,7 @@ Works today, honestly scoped:
   `--outtype f16` would round them). CPU only for now
   (the GPU has no F16 matrix kernels). **FP8 checkpoints** (compressed-tensors per-channel e4m3 with
   dynamic per-token activations, RedHatAI's `*-FP8-dynamic`) run everywhere: in exact mode (the
-  default) as Q8_0 converted at load (today's kernels and bit contract; 7B vs the exact dequant: KL
-  1.2e-3, top-1 98.1 %), on the CPU as the exact dequant (slow; the accuracy reference), and on the
+  default) as Q8_0 converted at load (today's kernels and bit contract; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar), on the CPU as the exact dequant (slow; the accuracy reference), and on the
   GPU natively with `--numerics fast` (sm_89+: e4m3 tensor cores, [fp8-weights.md](docs/design/fp8-weights.md)).
   Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
   without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other

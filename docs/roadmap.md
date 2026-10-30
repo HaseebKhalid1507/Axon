@@ -301,7 +301,7 @@ Also open:
   Stage A, the loader (Hugging Face checkpoint directories of qwen2 / qwen3 / llama, BF16 run as the
   GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). B, FP8
   per-channel dense (RedHatAI `*-FP8-dynamic`): #177 ([log](log/2026-10-30-fp8-weights.md)) loads them, runs them
-  as Q8_0 in exact mode (the default; passes the accuracy bars) and natively under `--numerics fast`, which
+  as Q8_0 in exact mode (the default; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar) and natively under `--numerics fast`, which
   **fails its bars on bella** (7B tg128 32 vs Q4_K_M 85–101 tok/s, top-1 95.9 % vs 97 %; unmeasured on H100).
   - **FP8 fast decode: give F8 nets the decode-graph gemv path; re-gate on bella + H100.**
 

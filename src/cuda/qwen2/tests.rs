@@ -335,8 +335,11 @@ pub(crate) enum Top1 {
     /// `2 sqrt(n p (1 - p))` with p the floor's rate, and at least 90 %:
     /// the FP8 gate's (docs/design/fp8-weights.md §6 B), whose floor
     /// changes precision (e4m3 activations), not only order, on arms of at
-    /// least 1000 positions. Set after the 0.5B's first run (decode arm
-    /// 274/294 vs the floor's 276/294: inside 2 SE, 2.04 points behind).
+    /// least 1000 positions. Its relaxed outlier and max |dlogit| bounds
+    /// are the FP8 gate's only (each set on FP8's own measurements): a
+    /// future fast kernel's gate doesn't take this variant to inherit them.
+    /// Set after the 0.5B's first run (decode arm 274/294 vs the floor's
+    /// 276/294: inside 2 SE, 2.04 points behind).
     /// The FP8 gate's outlier bound too (below): positions with KL above
     /// 0.5 at most max(1, 2x the floor's count over the same positions),
     /// the KL mean's 2x principle (lead ruling after the first 1014-position
@@ -429,6 +432,10 @@ pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     }
     // Max |dlogit|. The FP8 gate (`Top1::Binomial`): over the reference's
     // top-20 logits, plus a whole-vocabulary backstop at twice the bound.
+    // FP8-gate-only: it was justified by the FP8 load arm's diagnosis
+    // below, not in general. No future fast kernel inherits it by taking
+    // `Top1::Binomial`: its gate starts at the strict bound (< 6 over every
+    // logit) and relaxes only on a diagnosis of its own, disclosed.
     // Why (gpu_fp8_load_diag, job 1029-205633-ac74, the load arm's 1000
     // rows): its 8.515 (and 7.018, the only other >= 6) are one sequence's
     // tail logits, rank 151829 / 151924 of 151936, p_ref 5.7e-12 / 1.4e-13,
