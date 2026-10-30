@@ -1,0 +1,29 @@
+{
+ "label": "fp8-load-diag",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1029-205633-ac74",
+   "name": "fp8-load-diag",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "axon-test-diag",
+   "started": 1793343577.5435565,
+   "ended": 1793343826.2374249,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "14fb727d7c69fee75ec43a4d43ee4b1deec6413d405ebb5595bda32ac13e0c00",
+   "log_bytes": 5803
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-30 03:03:47 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
