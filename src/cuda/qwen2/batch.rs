@@ -358,6 +358,41 @@ pub(super) struct WaveGeom {
 /// 512-row k / v, whose grids are partly a wave either way, 88 %.
 pub(super) const TILE_T_TIME: usize = 82;
 
+/// Rows per block of gemm2r_* (`tile_r32`).
+pub(super) const G2R_BM: usize = 32;
+
+/// The most tokens `bgemm_g2x` fuses q, k and v for (the decode pool's
+/// steps; prefill passes past it keep their launches and `gemm_cost`).
+pub(super) const G2X_MAX_NB: usize = 128;
+
+/// gemm2x_q4_k's (t false) or gemm2xt_q4_k's (t true: gemm2t's tile for
+/// the first matrix, gemm2s's for the rest) dynamic shared memory.
+pub(super) fn gemm2x_smem(t: bool) -> usize {
+    let s = gemm2_smem(Q4_K, 64, 3);
+    if t { s.max(gemm2t_smem(Q4_K)) } else { s }
+}
+
+/// gemm2r's time per MAC in percent of gemm2s's, for `tile_r32`. 100 (no
+/// penalty) is a placeholder, not a measurement: WP-A4 checkpoint 1 fits it
+/// (`cuda_gemm_tile_bench`, bella, the 7B's down at nb 32 and 64), and
+/// the router stays off by default (`BatchFns::down_r32`) until then.
+pub(super) const TILE_R32_TIME: usize = 100;
+
+/// Whether a Q4_K product of `rows` outputs over nb tokens (SMALL < nb <=
+/// TILE_T_MIN_NB: one token tile) takes gemm2r's 32-row tiles: when their
+/// waves, at TILE_R32_TIME per MAC, cost less than gemm2s's 64-row ones
+/// (both one block an SM). Twice the blocks: it pays where gemm2s's grid
+/// ends in a mostly idle wave (the 7B's 3584-row down on 46 SMs: 56 blocks,
+/// 1 + 10/46 waves).
+pub(super) fn tile_r32(rows: usize, nb: usize, sms: usize) -> bool {
+    if nb <= SMALL || nb > TILE_T_MIN_NB {
+        return false;
+    }
+    let s = 100 * wave_cost(rows.div_ceil(G2_BM), G2_BM, sms);
+    let r = TILE_R32_TIME as u64 * wave_cost(rows.div_ceil(G2R_BM), G2R_BM, sms);
+    r < s
+}
+
 /// The most tokens a product keeps gemm2s for whatever `tile_t`'s waves say
 /// (one 64-token tile; review of #100, MUST 1).
 pub(super) const TILE_T_MIN_NB: usize = 64;
@@ -739,6 +774,20 @@ pub(super) struct BatchFns<'m> {
     /// activation copies per MAC, the same bits. None without int8 tensor
     /// cores or with AXON_GEMM_TILE=64 (gemm2s everywhere, as before).
     pub(super) gemm_t: Option<([Func<'m>; 2], Func<'m>)>,
+    /// gemm2x_q4_k and gemm2xt_q4_k: a layer's Q4_K q, k (and v) in one
+    /// launch, every tile gemm2s's, or q's gemm2t's (`CudaQwen2::bgemm_g2x`;
+    /// the same bits). None without int8 tensor cores.
+    pub(super) gemm_x: Option<[Func<'m>; 2]>,
+    /// AXON_QKV_FUSE=0: never `bgemm_g2x` (q, k, v as before).
+    pub(super) qkv_fuse: bool,
+    /// gemm2r_q4_k and gemm2r2_q4_k: 32 rows x 64 tokens, three and two
+    /// stages (`CudaQwen2::bgemm_r32`; the same bits). None without int8
+    /// tensor cores.
+    pub(super) gemm_r: Option<[Func<'m>; 2]>,
+    /// AXON_DOWN_R32: the Q4_K `down` of 17..64 tokens in 32-row tiles where
+    /// `tile_r32` picks them, by gemm2r_q4_k (3) or gemm2r2_q4_k (2); 0 or
+    /// unset, never (WP-A4 checkpoint 1: off until its micro-bench and A/B).
+    pub(super) down_r32: u8,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
     /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
@@ -946,6 +995,34 @@ impl<'m> BatchFns<'m> {
                 Some(([a, b], c))
             } else {
                 None
+            },
+            gemm_x: if module.mma() {
+                let (a, b) = (
+                    module.function("gemm2x_q4_k")?,
+                    module.function("gemm2xt_q4_k")?,
+                );
+                a.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
+                b.set_max_shared(gemm2x_smem(true))?;
+                Some([a, b])
+            } else {
+                None
+            },
+            qkv_fuse: std::env::var("AXON_QKV_FUSE").map_or(true, |v| v != "0"),
+            gemm_r: if module.mma() {
+                let (a, b) = (
+                    module.function("gemm2r_q4_k")?,
+                    module.function("gemm2r2_q4_k")?,
+                );
+                a.set_max_shared(gemm2_smem_bm(Q4_K, G2R_BM, 64, 3))?;
+                b.set_max_shared(gemm2_smem_bm(Q4_K, G2R_BM, 64, 2))?;
+                Some([a, b])
+            } else {
+                None
+            },
+            down_r32: match std::env::var("AXON_DOWN_R32").as_deref() {
+                Ok("3") => 3,
+                Ok("2") => 2,
+                _ => 0,
             },
             gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0") {
                 let (a, b) = (
@@ -1855,8 +1932,12 @@ impl<'g> CudaQwen2<'g> {
             // and k, else one by one.
             let one =
                 |m: (&Mat, Arg, Arg)| self.bgemm(wts, m.0, b.act.arg(), ast, nb, m.1, 0, m.2, qkvw);
-            if !self.bgemm_x(wts, &[q, k, v], b.act.arg(), ast, nb, qkvw)? {
-                if !self.bgemm_x(wts, &[q, k], b.act.arg(), ast, nb, qkvw)? {
+            let x = |ms: &[(&Mat, Arg, Arg)]| -> Result<bool, String> {
+                Ok(self.bgemm_x(wts, ms, b.act.arg(), ast, nb, qkvw)?
+                    || self.bgemm_g2x(wts, ms, b.act.arg(), ast, nb, qkvw)?)
+            };
+            if !x(&[q, k, v])? {
+                if !x(&[q, k])? {
                     one(q)?;
                     on("q")?;
                     one(k)?;
@@ -2552,14 +2633,18 @@ impl<'g> CudaQwen2<'g> {
             match l.post_ffn {
                 // gemma3: as the post-attention norm (b.up free again).
                 Some(pf) => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    if !self.bgemm_r32(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)? {
+                        self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    }
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                     post_add(pf)?;
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    if !self.bgemm_r32(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)? {
+                        self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    }
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                 }
@@ -2637,6 +2722,168 @@ impl<'g> CudaQwen2<'g> {
                 (128, 1, 1),
                 0,
                 &args,
+            )?;
+        }
+        Ok(true)
+    }
+
+    /// Two or three Q4_K products of the same activations (q, k, v) in one
+    /// gemm2x launch, mode 0, if they qualify: SMALL < nb <= G2X_MAX_NB, one
+    /// width, and the small matrices' blocks fit the SMs the first one's last
+    /// wave leaves idle (they add no wave). The first matrix takes the tile
+    /// `bgemm` gives it (gemm2t where `tile_t` picks it, else gemm2s), the
+    /// others gemm2s's (where `bgemm` may give them gemvm32: the same bits).
+    /// Ok(false): nothing launched (the caller runs them one by one).
+    ///
+    /// # Safety
+    /// As `bgemm`, for every matrix.
+    pub(super) unsafe fn bgemm_g2x(
+        &self,
+        wts: &DevBuf,
+        ms: &[(&Mat, Arg, Arg)],
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        ostride: usize,
+    ) -> Result<bool, String> {
+        let bf = &self.bf;
+        if bf.gemm_x.is_none() || !bf.qkv_fuse || bf.gemmh.is_some() {
+            return Ok(false);
+        }
+        if nb <= SMALL || nb > G2X_MAX_NB || !(2..=3).contains(&ms.len()) {
+            return Ok(false);
+        }
+        let m0 = ms[0].0;
+        if ms
+            .iter()
+            .any(|(m, _, _)| m.qt != Q4_K || m.cols != m0.cols || m.rb != m0.rb)
+        {
+            return Ok(false);
+        }
+        let t = bf.gemm_t.is_some() && tile_t(m0.rows, G2_BM, nb, bf.sms);
+        let tiles = nb.div_ceil(64);
+        let first = tiles * m0.rows.div_ceil(if t { G2T_BM } else { G2_BM });
+        let rest: usize = ms[1..]
+            .iter()
+            .map(|(m, _, _)| tiles * m.rows.div_ceil(G2_BM))
+            .sum();
+        if first + rest > first.div_ceil(bf.sms) * bf.sms {
+            return Ok(false);
+        }
+        // SAFETY: the caller's.
+        unsafe { self.launch_g2x(wts, ms, act, astride, nb, ostride, t)? };
+        Ok(true)
+    }
+
+    /// gemm2x_q4_k (t false) or gemm2xt_q4_k (t true) over `ms` (2 or 3
+    /// Q4_K matrices of one width), whatever `bgemm_g2x`'s routing.
+    ///
+    /// # Safety
+    /// As `bgemm`, for every matrix.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn launch_g2x(
+        &self,
+        wts: &DevBuf,
+        ms: &[(&Mat, Arg, Arg)],
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        ostride: usize,
+        t: bool,
+    ) -> Result<(), String> {
+        let fs = self.bf.gemm_x.as_ref().ok_or("no gemm2x")?;
+        let m0 = ms[0].0;
+        let at = |i: usize| ms.get(i);
+        let null = Arg::Ptr(0);
+        let rows = |i: usize| at(i).map_or(0, |(m, _, _)| m.rows);
+        let ty = rows(0).div_ceil(if t { G2T_BM } else { G2_BM })
+            + rows(1).div_ceil(G2_BM)
+            + rows(2).div_ceil(G2_BM);
+        let mut args = Vec::with_capacity(18);
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |(m, _, _)| wts.arg_at(m.off)));
+        }
+        for i in 0..3 {
+            args.push(Arg::I32(rows(i) as i32));
+        }
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |&(_, b, _)| b));
+        }
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |&(_, _, o)| o));
+        }
+        args.extend_from_slice(&[
+            Arg::U64(m0.rb as u64),
+            Arg::I32(m0.cols as i32),
+            act,
+            Arg::U64(astride as u64),
+            Arg::I32(nb as i32),
+            Arg::U64(ostride as u64),
+        ]);
+        // SAFETY: the caller's contract; gemm2x's signature (prefill.cu).
+        unsafe {
+            self.gpu.launch(
+                &fs[t as usize],
+                (nb.div_ceil(64) as u32, ty as u32, 1),
+                (256, 1, 1),
+                gemm2x_smem(t) as u32,
+                &args,
+            )
+        }
+    }
+
+    /// A Q4_K product (a layer's down) in gemm2r's 32-row tiles, if
+    /// AXON_DOWN_R32 asks for them and `tile_r32` picks them where `bgemm`
+    /// would take gemm2s. Ok(false): nothing launched (the caller `bgemm`s).
+    ///
+    /// # Safety
+    /// As `bgemm`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn bgemm_r32(
+        &self,
+        wts: &DevBuf,
+        mt: &Mat,
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        bias: Arg,
+        mode: i32,
+        out: Arg,
+        ostride: usize,
+    ) -> Result<bool, String> {
+        let bf = &self.bf;
+        let (Some(fs), 2 | 3) = (&bf.gemm_r, bf.down_r32) else {
+            return Ok(false);
+        };
+        if mt.qt != Q4_K
+            || bf.gemmh.is_some()
+            || bf.gemm.is_none()
+            || (bf.gemvm.is_some() && self.takes_gemvm(mt.rows, nb))
+            || !tile_r32(mt.rows, nb, bf.sms)
+        {
+            return Ok(false);
+        }
+        let st = bf.down_r32 as usize;
+        // SAFETY: the caller's contract; gemm2's signature (prefill.cu).
+        unsafe {
+            self.gpu.launch(
+                &fs[(st == 2) as usize],
+                (nb.div_ceil(64) as u32, mt.rows.div_ceil(G2R_BM) as u32, 1),
+                (256, 1, 1),
+                gemm2_smem_bm(Q4_K, G2R_BM, 64, st) as u32,
+                &[
+                    wts.arg_at(mt.off),
+                    Arg::U64(mt.rb as u64),
+                    Arg::I32(mt.rows as i32),
+                    Arg::I32(mt.cols as i32),
+                    act,
+                    Arg::U64(astride as u64),
+                    Arg::I32(nb as i32),
+                    bias,
+                    Arg::I32(mode),
+                    out,
+                    Arg::U64(ostride as u64),
+                ],
             )?;
         }
         Ok(true)

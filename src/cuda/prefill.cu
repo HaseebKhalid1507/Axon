@@ -2175,11 +2175,12 @@ template <int QT, int NT, int ST, int GU = 0, int WR = 2, bool TW = false>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride, const u8* w2 = nullptr,
-                                        int zt = -1) {
+                                        int zt = -1, int yt = -1) {
 #if __CUDA_ARCH__ >= 800
     // WR warps along rows x 8 / WR along tokens, each 32 rows x 8 NT tokens.
     // zt >= 0: the block's token tile is zt, not blockIdx.x (moe_res.cu's
-    // grouped expert GEMMs, whose blockIdx.x indexes a tile list).
+    // grouped expert GEMMs, whose blockIdx.x indexes a tile list); yt >= 0:
+    // its row tile is yt, not blockIdx.y (gemm2x's matrices in one grid).
     const int WC = 8 / WR, BM = 32 * WR, BN = 8 * NT * WC;
     typedef G2L<QT, BN, ST, BM> L;
     static_assert(WR == 2 || L::RAW, "the register-staged types stage 64 rows (g2_item)");
@@ -2196,7 +2197,8 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     u8* wbuf = sm;
     u8* stg = sm + L::NWB * L::W;
     int nblk = n / (L::KQ ? 256 : 32), nst = (n + 255) / 256;
-    int r0 = blockIdx.y * (GU ? BM / 2 : BM), z0 = zt < 0 ? blockIdx.x * BN : zt * BN;
+    int r0 = (yt < 0 ? (int)blockIdx.y : yt) * (GU ? BM / 2 : BM);
+    int z0 = zt < 0 ? blockIdx.x * BN : zt * BN;
     int warp = threadIdx.x >> 5, wr = warp % WR, wc = warp / WR;
     float acc[2][NT][4];
 #pragma unroll
@@ -2383,6 +2385,65 @@ GEMM2(gemm2s_q2_k, QT_Q2_K, 2, 3)
 GEMM2(gemm2s_q3_k, QT_Q3_K, 2, 3)
 GEMM2(gemm2_iq4_nl, QT_IQ4_NL, 4, 2)
 GEMM2(gemm2s_iq4_nl, QT_IQ4_NL, 2, 3)
+
+// gemm2r_*: 32 rows x 64 tokens (8 warps along the tokens, each 32 rows x
+// 8), three stages; gemm2r2_*: two stages, in half the shared memory, two
+// blocks an SM where the registers allow. Twice gemm2s's blocks, for a
+// decode-sized batch's tall product whose 64-row grid ends in a partial wave
+// (qwen2/batch.rs `tile_r32`). Each output as gemm2s's, bit for bit: one
+// thread's sum over the K stages in order, the same epilogue.
+#define GEMM2R(NAME, QT, ST, MINB)                                                                \
+    extern "C" __global__ void __launch_bounds__(G2_THREADS, MINB) NAME(                          \
+        const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
+        u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
+        u64 ostride) {                                                                            \
+        gemm2_t<QT, 1, ST, 0, 1>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);     \
+    }
+GEMM2R(gemm2r_q4_k, QT_Q4_K, 3, 1)
+GEMM2R(gemm2r2_q4_k, QT_Q4_K, 2, 2)
+
+// gemm2x_*: two or three products of the same activations (a layer's q, k,
+// v) in one launch, mode 0, each matrix with its bias and output (ostride
+// floats a token apart): blockIdx.y runs over matrix 0's row tiles, then
+// 1's, then 2's (rows2 0: two matrices), so the small matrices' blocks fill
+// the SMs matrix 0's last wave leaves idle. Every tile is gemm2s's 64 x 64;
+// gemm2xt_*: matrix 0's are gemm2t's 128 x 64 (where `tile_t` gives it that
+// tile alone). Each output is its own launch's (the same instantiation of
+// gemm2_t, its stage order and epilogue): only which block computes it
+// changes (qwen2/batch.rs `bgemm_g2x`).
+template <int QT, bool T>
+__device__ __forceinline__ void gemm2x_t(const u8* w0, const u8* w1, const u8* w2, int rows0,
+                                         int rows1, int rows2, const float* b0, const float* b1,
+                                         const float* b2, float* o0, float* o1, float* o2, u64 rb,
+                                         int n, const u8* act, u64 astride, int nb, u64 ostride) {
+    int y = blockIdx.y, t0 = T ? (rows0 + 127) / 128 : (rows0 + 63) / 64;
+    if (y < t0) {
+        if constexpr (T)
+            gemm2_t<QT, 4, 2, 0, 4>(w0, rb, rows0, n, act, astride, nb, b0, 0, o0, ostride,
+                                    nullptr, -1, y);
+        else
+            gemm2_t<QT, 2, 3>(w0, rb, rows0, n, act, astride, nb, b0, 0, o0, ostride, nullptr, -1,
+                              y);
+        return;
+    }
+    y -= t0;
+    int t1 = (rows1 + 63) / 64;
+    bool one = y < t1;
+    gemm2_t<QT, 2, 3>(one ? w1 : w2, rb, one ? rows1 : rows2, n, act, astride, nb, one ? b1 : b2,
+                      0, one ? o1 : o2, ostride, nullptr, -1, one ? y : y - t1);
+}
+#define GEMM2X(NAME, QT, T)                                                                       \
+    extern "C" __global__ void __launch_bounds__(G2_THREADS, 1) NAME(                             \
+        const u8* __restrict__ w0, const u8* __restrict__ w1, const u8* __restrict__ w2,         \
+        int rows0, int rows1, int rows2, const float* __restrict__ b0,                            \
+        const float* __restrict__ b1, const float* __restrict__ b2, float* __restrict__ o0,       \
+        float* __restrict__ o1, float* __restrict__ o2, u64 rb, int n,                            \
+        const u8* __restrict__ act, u64 astride, int nb, u64 ostride) {                           \
+        gemm2x_t<QT, T>(w0, w1, w2, rows0, rows1, rows2, b0, b1, b2, o0, o1, o2, rb, n, act,      \
+                        astride, nb, ostride);                                                    \
+    }
+GEMM2X(gemm2x_q4_k, QT_Q4_K, false)
+GEMM2X(gemm2xt_q4_k, QT_Q4_K, true)
 
 // gemm2s_q4_k_gu: the gate and up products of a layer in one launch and
 // out = silu(gate) * up (gate_up's ops; swiglu_quant_b's floats): a block

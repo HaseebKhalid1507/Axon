@@ -2922,6 +2922,23 @@ unsafe fn launch_product(
         } else if kernel.starts_with("gemvm") {
             g.launch(f, (rows.div_ceil(16) as u32, 1, 1), (128, 1, 1), 0, common)
                 .unwrap();
+        } else if kernel.starts_with("gemm2r") {
+            // gemm2r_* three stages, gemm2r2_* two; 32 rows a block.
+            let st = if kernel.starts_with("gemm2r2") { 2 } else { 3 };
+            let sm = gemm2_smem_bm(qt, batch::G2R_BM, 64, st);
+            f.set_max_shared(sm).unwrap();
+            g.launch(
+                f,
+                (
+                    nb.div_ceil(64) as u32,
+                    rows.div_ceil(batch::G2R_BM) as u32,
+                    1,
+                ),
+                (256, 1, 1),
+                sm as u32,
+                common,
+            )
+            .unwrap();
         } else if kernel.starts_with("gemm2t") {
             let sm = gemm2t_smem(qt);
             f.set_max_shared(sm).unwrap();
@@ -3108,7 +3125,10 @@ fn gpu_batched_products_match_gemv_bits() {
             (qt, cols, rows, &m.tensor_data(t)[..rows * rb])
         };
         let w = g.upload(wd).unwrap();
-        for nb in [1usize, 6, 7, 8, 13, 31, 33, 64, 66, 77, 129] {
+        // (17..128: the decode pool's steps past gemvm16, WP-A4.)
+        for nb in [
+            1usize, 6, 7, 8, 13, 17, 24, 31, 32, 33, 48, 64, 65, 66, 77, 96, 128, 129,
+        ] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
@@ -3172,6 +3192,192 @@ fn gpu_batched_products_match_gemv_bits() {
         Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
     ] {
         assert!(seen.contains(&qt), "type {qt} not covered");
+    }
+}
+
+/// A matrix with its bias and output (`bgemm_g2x`'s segments).
+type MatArgs<'a> = (&'a Mat, Arg, Arg);
+
+/// WP-A4 (i): a layer's Q4_K q, k (and v) in one gemm2x / gemm2xt launch
+/// == the launches `bgemm` makes for each at that batch size (main's
+/// routing on this GPU: k / v on gemvm32 where `takes_gemvm` picks it, q on
+/// gemm2t where `tile_t` does, else gemm2s), byte for byte over the whole
+/// q|k|v buffer, with and without biases, for every decode batch size past
+/// gemvmx. Both fused variants at every size, whatever the router picks,
+/// and the router's own choice. (Those launches == the per-token GEMV:
+/// `gpu_batched_products_match_gemv_bits`, the same kernels and sizes.)
+#[test]
+fn gpu_qkv_one_launch_matches_three() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let mut net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    net.bf.qkv_fuse = true;
+    let mut rng = Rng(0x0a4f_05ed_2026_1030);
+    // (cols, rows of q, k, v; 0 = no v): the 7B's, odd sizes, two matrices.
+    for (cols, rs) in [
+        (3584usize, [3584usize, 512, 512]),
+        (1536, [1000, 136, 72]),
+        (768, [333, 77, 0]),
+    ] {
+        let n = if rs[2] == 0 { 2 } else { 3 };
+        let rb = quant::row_bytes(Q4_K, cols);
+        let mut wd = Vec::new();
+        let mut mats = Vec::new();
+        for &rows in &rs[..n] {
+            mats.push(Mat {
+                qt: Q4_K,
+                off: wd.len(),
+                rb,
+                rows,
+                cols,
+                c8: None,
+                ws: None,
+            });
+            wd.extend(synth_matrix(&mut rng, Q4_K, rows, cols));
+        }
+        let w = g.upload(&wd).unwrap();
+        let ostride: usize = rs.iter().sum();
+        let biases: Vec<DevBuf> = rs[..n]
+            .iter()
+            .map(|&r| g.upload(&rng.vec(r, 3.0)).unwrap())
+            .collect();
+        for nb in [17usize, 24, 32, 33, 48, 64, 65, 96, 128] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let ast = act_stride_t(cols);
+            for with_bias in [false, true] {
+                let run = |fill: f32, how: &dyn Fn(&[MatArgs])| -> Vec<u32> {
+                    let out = g.upload(&vec![fill; nb * ostride]).unwrap();
+                    let mut at = 0;
+                    let ms: Vec<(&Mat, Arg, Arg)> = mats
+                        .iter()
+                        .enumerate()
+                        .map(|(i, mt)| {
+                            let o = out.arg_at(at * 4);
+                            at += mt.rows;
+                            let b = if with_bias {
+                                biases[i].arg()
+                            } else {
+                                Arg::Ptr(0)
+                            };
+                            (mt, b, o)
+                        })
+                        .collect();
+                    how(&ms);
+                    g.sync().unwrap();
+                    bits(&out.read().unwrap())
+                };
+                let what = format!("cols {cols} rows {rs:?} nb {nb} bias {with_bias}");
+                // SAFETY (every launch): w holds the matrices, act nb tokens
+                // of cols inputs, out nb rows of ostride floats.
+                let want = run(0.0, &|ms| {
+                    for &(mt, b, o) in ms {
+                        unsafe { net.bgemm(&w, mt, act.arg(), ast, nb, b, 0, o, ostride) }.unwrap();
+                    }
+                });
+                for t in [false, true] {
+                    let got = run(1.0, &|ms| {
+                        unsafe { net.launch_g2x(&w, ms, act.arg(), ast, nb, ostride, t) }.unwrap()
+                    });
+                    assert!(got == want, "{what}: gemm2x (t {t}) != bgemm's launches");
+                }
+                let got = run(1.0, &|ms| {
+                    if !unsafe { net.bgemm_g2x(&w, ms, act.arg(), ast, nb, ostride) }.unwrap() {
+                        for &(mt, b, o) in ms {
+                            unsafe { net.bgemm(&w, mt, act.arg(), ast, nb, b, 0, o, ostride) }
+                                .unwrap();
+                        }
+                    }
+                });
+                assert!(got == want, "{what}: bgemm_g2x's routing");
+            }
+        }
+        eprintln!("q|k|v cols {cols} rows {rs:?}: one launch == bgemm's, bit for bit");
+    }
+}
+
+/// WP-A4 (ii): the Q4_K product in gemm2r's / gemm2r2's 32-row tiles ==
+/// gemm2s's 64-row and gemm2t's 128-row tiles, byte for byte: the 7B's down
+/// (3584 x 18944) and odd shapes (rows not a multiple of 32; K stage counts
+/// whose last pass through the 3- or 2-slot ring is partial: a K-quant
+/// stage is one whole 256-wide block, so that is the only partial stage),
+/// every decode batch size past gemvmx, epilogue mode 0
+/// (plain, bias) and mode 1 (residual add, as down into x).
+#[test]
+fn gpu_down_rows32_matches_rows64() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let mut rng = Rng(0x0a4f_d032_2026_1030);
+    // K stages (256-wide blocks) 74, 1, 3, 4, 5, 14: the last ring slot
+    // partial (nst mod 3 = 2, 1, 0, 1, 2, 2; mod 2 = 0, 1, 1, 0, 1, 0) for
+    // both stage counts.
+    for (cols, rows) in [
+        (18944usize, 3584usize),
+        (256, 333),
+        (768, 1000),
+        (1024, 96),
+        (1280, 200),
+        (3584, 77),
+    ] {
+        let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+        for nb in [17usize, 24, 32, 33, 48, 64, 65, 96, 128] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            for (e, epi) in [
+                Epi::default(),
+                Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+                Epi {
+                    bias: None,
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+            ]
+            .iter()
+            .enumerate()
+            {
+                let want = bits(&gpu_batched(
+                    &g,
+                    &km,
+                    "gemm2s_q4_k",
+                    Q4_K,
+                    &w,
+                    rows,
+                    cols,
+                    &act,
+                    nb,
+                    epi,
+                ));
+                for k in ["gemm2r_q4_k", "gemm2r2_q4_k", "gemm2t_q4_k"] {
+                    let got = bits(&gpu_batched(
+                        &g, &km, k, Q4_K, &w, rows, cols, &act, nb, epi,
+                    ));
+                    assert!(
+                        got == want,
+                        "{k} {rows} x {cols} nb {nb} epilogue {e} != gemm2s"
+                    );
+                }
+            }
+        }
+        eprintln!("down tiles {rows} x {cols}: 32 rows == 64 == 128, bit for bit");
     }
 }
 
@@ -3396,6 +3602,10 @@ fn gemm2_names(qt: u32) -> Vec<String> {
     if matches!(qt, Q4_K | Q5_K) {
         v.push(format!("gemm2t_{tn}"));
     }
+    // The 32-row tiles (WP-A4 (ii)): Q4_K only.
+    if qt == Q4_K {
+        v.extend(["gemm2r_q4_k".into(), "gemm2r2_q4_k".into()]);
+    }
     v
 }
 
@@ -3430,6 +3640,8 @@ fn cuda_gemm_tile_bench() {
         "gemm2t_q4_k",
         "gemm2t_q5_k",
         "gemm2t_q4_k_gu",
+        "gemm2r_q4_k",
+        "gemm2r2_q4_k",
     ] {
         let rl = km.function(k).unwrap().regs_local().unwrap();
         eprintln!("REGS {k}: {} regs, {} local bytes", rl.0, rl.1);
@@ -3519,16 +3731,25 @@ fn cuda_gemm_tile_bench() {
             )
         })
         .collect();
-    // Cases: (nb index, shape index or 4 = gu, kernel).
+    // Cases: (nb index, shape index or 4 = gu, kernel). AXON_BENCH_SHAPE:
+    // the shape names to run (comma-separated, default all); the 32-row
+    // tiles (gemm2r, gemm2r2; WP-A4) ride along.
+    let want: Option<Vec<String>> = std::env::var("AXON_BENCH_SHAPE")
+        .ok()
+        .map(|v| v.split(',').map(|x| x.to_string()).collect());
     let mut cases: Vec<(usize, usize, &str)> = Vec::new();
     for ni in 0..nbs.len() {
         for si in 0..5 {
-            let ks: [&str; 2] = if si == 4 {
-                ["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
+            let sname = shapes.get(si).map_or("gu", |x| x.0);
+            if want.as_ref().is_some_and(|w| !w.iter().any(|x| x == sname)) {
+                continue;
+            }
+            let ks: &[&str] = if si == 4 {
+                &["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
             } else {
-                ["gemm2s_q4_k", "gemm2t_q4_k"]
+                &["gemm2s_q4_k", "gemm2t_q4_k", "gemm2r_q4_k", "gemm2r2_q4_k"]
             };
-            for k in ks {
+            for &k in ks {
                 cases.push((ni, si, k));
             }
         }
@@ -3649,7 +3870,8 @@ fn cuda_gemm_tile_bench() {
         let mut p = per.clone();
         p.sort_by(|a, b| a.partial_cmp(b).unwrap());
         eprintln!(
-            "TILE {name:<4} nb {nb:<5} {k:<15} median {tmac:6.2} TMAC/s (min {:.2} max {:.2}) clk {clk:.0} MHz -> {:.0} MAC/clk/SM",
+            "TILE {name:<4} nb {nb:<5} {k:<15} median {tmac:6.2} TMAC/s {:.1} us (min {:.2} max {:.2}) clk {clk:.0} MHz -> {:.0} MAC/clk/SM",
+            med(&ms[ci]) * 1e3,
             p[0],
             p[p.len() - 1],
             tmac * 1e12 / (info.sms as f64 * clk * 1e6)

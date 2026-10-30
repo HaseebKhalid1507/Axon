@@ -70,6 +70,14 @@ pub struct CudaPool<'g> {
 /// Captured steps kept at most.
 const MAX_GRAPHS: usize = 64;
 
+/// Test builds: host time spent in `step_checked` outside the GPU's work
+/// (ns, steps), for `pool_step_cost`'s HOST lines (WP-A4).
+#[cfg(test)]
+pub(super) static STEP_HOST: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
 /// VRAM a captured step graph takes, about (MEASURED, bella sm_120,
 /// 1019-045116-c9d3 `pool_graph_bytes`: 8 step graphs of 1-16 rows took
 /// 4 MiB of the driver's 2 MiB-granular memory, a view's decode graph and a
@@ -502,6 +510,8 @@ impl<'g> CudaQwen2<'g> {
 
     /// `step_rows` after its checks.
     fn step_checked(&self, p: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+        #[cfg(test)]
+        let t_in = std::time::Instant::now();
         let nb = rows.len();
         // Greedy rows first, then the ones sampled on the device, then
         // those selected on the host (the order changes no row's bits).
@@ -597,6 +607,8 @@ impl<'g> CudaQwen2<'g> {
         } else {
             pass()?;
         }
+        #[cfg(test)]
+        let host_pre = t_in.elapsed();
         let mut out: Vec<Option<RowOut>> = vec![None; nb];
         let b = p.c.b.as_mut().expect("batch scratch");
         if ng > 0 {
@@ -604,6 +616,8 @@ impl<'g> CudaQwen2<'g> {
                 out[order[z]] = Some(RowOut::Pick(pick));
             }
         }
+        #[cfg(test)]
+        let t_back = std::time::Instant::now();
         if ns > ng {
             let cs = self.samp_read(&mut p.c, kmax, self.vocab, ns - ng)?;
             for (j, mut c) in cs.into_iter().enumerate() {
@@ -625,7 +639,14 @@ impl<'g> CudaQwen2<'g> {
                 .collect();
             out[i] = Some(RowOut::Cands(sample::cands(&mut l, &spec, recent)));
         }
-        Ok(out.into_iter().map(|o| o.expect("every row")).collect())
+        let out = out.into_iter().map(|o| o.expect("every row")).collect();
+        #[cfg(test)]
+        {
+            let ns = (host_pre + t_back.elapsed()).as_nanos() as u64;
+            STEP_HOST[0].fetch_add(ns, Relaxed);
+            STEP_HOST[1].fetch_add(1, Relaxed);
+        }
+        Ok(out)
     }
 
     /// S for a step's sampled rows (in their order): the largest k,
@@ -2304,7 +2325,10 @@ mod tests {
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
     /// request's results and tokens == running it alone, under each
-    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape). WP-A4: up to 128
+    /// rows, by shape with q|k(|v) in one gemm2x launch (`bgemm_g2x`, the
+    /// Llama's Q4_K q, k, v) on and off, and the Q4_K down in 32-row tiles
+    /// (`bgemm_r32`, the 0.5B's and the Llama's) off, three and two stages.
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2318,7 +2342,7 @@ mod tests {
             .into_iter()
             .flatten()
             .collect();
-        let (slots, ctx, steps) = (64usize, 256usize, 2usize);
+        let (slots, ctx, steps) = (128usize, 256usize, 2usize);
         for m in ms {
             let mut net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
             let v = net.vocab;
@@ -2336,14 +2360,27 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            for vm in [16usize, 32, 0] {
+            // (vm_max, qkv_fuse, down_r32): the gemvm limits with the
+            // default switches, then by shape (0) with each WP-A4 switch.
+            for (vm, fuse, r32) in [
+                (16usize, true, 0u8),
+                (32, true, 0),
+                (0, false, 0),
+                (0, true, 0),
+                (0, true, 3),
+                (0, false, 2),
+            ] {
                 net.bf.vm_max = vm;
+                net.bf.qkv_fuse = fuse;
+                net.bf.down_r32 = r32;
                 // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
                 // doesn't apply there, so once).
-                let nbs: &[usize] = match vm {
-                    0 => &[9, 12, 16, 17, 33, 48, 64],
-                    _ => &[17, 33, 48, 64],
+                let nbs: &[usize] = match (vm, fuse, r32) {
+                    (16 | 32, _, _) => &[17, 33, 48, 64],
+                    (_, true, 0) => &[9, 12, 16, 17, 33, 48, 64, 65, 96, 128],
+                    _ => &[17, 24, 33, 48, 64, 65, 128],
                 };
+                let vm = format!("vm {vm} fuse {fuse} r32 {r32}");
                 for &nb in nbs {
                     let mut p = net.pool(slots, ctx).unwrap();
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
@@ -2543,14 +2580,21 @@ mod tests {
                         net.bf.gemvmx_on = x == 1;
                         // (The graphs hold the kernels picked when made.)
                         p.graphs.clear();
+                        let h0 = [STEP_HOST[0].load(Relaxed), STEP_HOST[1].load(Relaxed)];
                         let t = time(&mut || {
                             std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
                         });
+                        let hn = STEP_HOST[1].load(Relaxed) - h0[1];
+                        let hms = (STEP_HOST[0].load(Relaxed) - h0[0]) as f64 / 1e6 / hn as f64;
                         eprintln!(
                             "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
                             t / d,
                             nb as f64 * 1e3 / t
                         );
+                        // WP-A4: the host's serial part of a step (step_checked's
+                        // entry to the graph launch's return, and its tail past
+                        // the picks' read), mean over the timed steps.
+                        eprintln!("HOST depth {depth} nb {nb}: {hms:.3} ms/step of {t:.3}");
                     }
                 }
                 net.bf.vm_max = *vms.last().unwrap();
