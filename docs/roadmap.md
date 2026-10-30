@@ -299,9 +299,13 @@ Also open:
   gpt-oss, #98, and deepseek2, #89); what's left lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Native safetensors, then FP8 / NVFP4 weights** (the FP8 plan, `specs/fp8-safetensors.md`).
   Stage A, the loader (Hugging Face checkpoint directories of qwen2 / qwen3 / llama, BF16 run as the
-  GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). Next: B, FP8
-  per-channel dense on the GPU (sm_89 / sm_120); C, FP8 128×128 block scales (DeepSeek-style, MoE
-  experts from per-expert tensors); D, NVFP4.
+  GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). B, FP8
+  per-channel dense (RedHatAI `*-FP8-dynamic`): #177 ([log](log/2026-10-30-fp8-weights.md)) loads them, runs them
+  as Q8_0 in exact mode (the default; passes the accuracy bars) and natively under `--numerics fast`, which
+  **fails its bars on bella** (7B tg128 32 vs Q4_K_M 85–101 tok/s, top-1 95.9 % vs 97 %; unmeasured on H100).
+  - **FP8 fast decode: give F8 nets the decode-graph gemv path; re-gate on bella + H100.**
+
+  Then C, FP8 128×128 block scales (DeepSeek-style, MoE experts from per-expert tensors); D, NVFP4.
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
   ([benchmarks-gpu.md](benchmarks-gpu.md)).
 - **Gemma 3 27B (head_dim 128) on CUDA.** Needs the head-128 windowed attention kernels and the

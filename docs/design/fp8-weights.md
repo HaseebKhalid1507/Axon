@@ -128,6 +128,9 @@ B can't run on the 7B (three nets), so it stays on the 0.5B. **H100 decode bar (
 FP8 tg128 ≥ 0.9 × Q4_K_M tg128 × (Q4_K_M bytes/token ÷ FP8 bytes/token), bytes measured (weights read incl. the q8
 head, plus KV at 128): ≈ 0.9 × 314 × 4.68/7.68 ≈ **172 tok/s**. It is not a beat-vLLM bar; any such claim needs a
 vLLM-FP8 tg128 measured beside it. ESTIMATED on bella: tg ≈ 0.6× Q4_K_M; pp 0.9–1.3× (R2).
+**As run at b354543 (10-30):** every gate green: FP8 tests rel + dbg 1030-031016-38fe; release suite 1030-031020-4ccd,
+-b637; debug suite 1030-031020-9adf, -dc18. Gatewatch `fp8-b354543` printed two "FAIL" rows, 1030-031020-32b9 and
+-1a98: those are the `--shard 2` group ids, not jobs (a gatewatch bug); all 5 real jobs passed.
 
 ## 7. Pods (I stage and rehearse on bella; you book)
 4090 (sm_89), one session of about 45 min ≈ **$0.67**: (1)+(4) on the 0.5B, then the 7B HF BF16 reference (15 GB
@@ -180,3 +183,33 @@ bound passed in every arm (KL mean 1.28e-2 vs floor 1.65e-2 decode; launches in 
 ≥ 1000 positions (`Sizes::FP8`: 1014 / 1029 / 1029 / 1000) and top-1 ≥ floor − 2 binomial SE (√(n p (1−p)), p the
 floor's rate) and ≥ 90 % (`Top1::Binomial`). KL mean ≤ 2× floor and the per-position bounds are unchanged (note: "at
 most one position with KL > 0.5" doesn't scale with n). Every other gate keeps `Top1::Points(94)` and `Sizes::BASE`.
+**B, max |Δlogit| (FP8 gate only, b354543; disclosed).** Under load 8.515 (floor 3.465). `gpu_fp8_load_diag`
+(1029-205633-ac74, the arm's 1000 rows): the pool equals itself reversed and halved bit for bit, so no row or slot
+mixing; each sequence alone reaches 8.212; the rows ≥ 6 are one sequence's tail logits (rank 151829 / 151924 of
+151936, p_ref 5.7e-12 / 1.4e-13). Now: < 6 over the reference's top-20 (pool 4.087, floor 2.100), all logits < 12.
+
+## 12. CP2 results (7B, bella) and the ruling on them (lead, 2026-10-30)
+**Accuracy** (RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic vs fp8-ref, 32 windows, 5823 positions; jobs 1029-201935-949b,
+-bd1a, bbd9821): fp8-native fast decode KL 4.56e-3, top-1 95.86 % ±0.37; batched 4.49e-3 / 95.99 %. Its e4m3-tok CPU
+emulation (16 windows): 4.40e-3 / 96.09 %, the GPU on the same windows 4.84e-3 / 95.34 %. fp8-q8 (exact) 1.21e-3 /
+98.06 %. Q4_K_M 2.39e-2 / 92.00 %. **KL PASS, top-1 FAIL** (the format's, as on the 0.5B). HF BF16 7B: a pod item.
+**Speed** (`bench7b.sh`, `--timing bella`, bbd9821's binary (the FP8 kernels unchanged since), 3 interleaved rounds;
+median of the 3 rows, tok/s). **Both runs TAINTED** (desktop Xorg / zen-bin on the GPU):
+
+| run | taint (mean / max) | arm | fp8 fast | fp8-q8 exact | Q4_K_M | fast / Q4 |
+|---|---|---|---|---|---|---|
+| 1029-201935-2a32 | 10.9 % / 71 % | tg128 | 32.03 | 53.26 | 85.21 | 0.38× |
+| | | pp512 | 4090 | 3169 | 4225 | 0.97× |
+| | | pp2048 | 4296 | 3675 | 4751 | 0.90× |
+| 1030-081143-1f70 | 11.9 % / 44 % | tg128 | 31.85 | 50.20 | 101.05 | 0.32× |
+| | | pp512 | 4240 | 3095 | 4812 | 0.88× |
+| | | pp2048 | 4197 | 3560 | 5107 | 0.82× |
+
+The fast tg128 rows sit at 31.5–32.4 in all 6 rounds (clean round 31.46): a 3× gap to Q4_K_M is far outside the taint.
+The §6 decode bar computed for bella, 0.9 × Q4 tg × 4.68/7.68, is 46.7 (run 1) / 55.4 (run 2): **fast fails it**.
+**Ruling (lead, 10-30):** fast FP8 on bella fails both pre-registered bars (decode 32 vs 47–55; 7B top-1 95.9 vs
+97 %). #177 ships as the loader plus exact mode: exact is the default, so an FP8 checkpoint runs as Q8_0 (both accuracy
+bars passed). Fast FP8 stays behind `--numerics fast`, documented as failing its bars on sm_120 and unmeasured on H100.
+**Known cause of the decode miss:** an FP8-native net runs a single token as a one-row batched pass (`gemv_f8` plus
+the batched path's per-layer launches) with no decode-step kernels and no CUDA graphs (§10). Follow-up, not in this
+PR: give F8 nets the decode-graph GEMV path, then re-gate on bella and the H100 (roadmap).
