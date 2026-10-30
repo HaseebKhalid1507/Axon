@@ -1,6 +1,7 @@
 # WP-A4 / WP-C1: decode-step structure, exact mode, consumer GPUs first
 
-**Status: Checkpoint 0 (design, no code).** Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
+**Status: Checkpoint 1 (built: (i), and (ii) for Q4_K behind its switch; gates and A/B submitted, pending).** CP0
+review: shady 7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`); its MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
 spec's WP-A4 (i) and (ii) (`specs/beat-vllm-scope.md` §6 Track A, the same package as Track C's WP-C1), in **exact**
 mode, built and judged on bella (RTX 5070 Ti Laptop, sm_120, 46 SMs, 12 GB). (iii), the lm_head on the fast GEMM, is
 out of scope. Hopper (the spec's H100 kill rule) comes after this, on a pod the lead books.
@@ -19,23 +20,33 @@ shown), **OPINION**.
   `--numerics fast`.
 - On bella the gain is smaller than the spec's H100 figure, and part of the spec's (ii) does not apply there: main
   already routes `q`, `o`, Q4_K `down` and `gate_up` to the 128-row gemm2t tile at nb 128 on 46 SMs (§2.2). ESTIMATED
-  gain is up to −6.7 % at nb 32 and −2 % at nb 128 (§3). The A/B bar in §4 is set at about 60 % of those estimates,
-  the same ratio as the spec's (−10 % bar for a −17 % estimate).
+  gain for CP1's scope is up to −4.1 % at nb 32 and −1.8 % at nb 128 (§3), against the `fde94b6` baseline. The
+  A/B bars in §4 are 60 % of the estimates, the spec's own ratio (−10 % bar for a −17 % estimate).
 
 ## 1. Where the step's time goes on bella
 
-MEASURED, bella, 7B Q4_K_M, `pool_step_cost` profile at d600 (log `1018-090100-a107`, main `1a55a4b` of 10-18; older
-than `fde94b6`, so the A/B re-measures main). The step is 24.4 ms with the graph (A/A over 6 runs: 24.32–24.48 ms,
-±0.3 %). The ungraphed profile below totals 25.04 ms, in ms per step over 28 layers:
+MEASURED, bella, 7B Q4_K_M, `pool_step_cost` on main `fde94b6` (job `1030-124131-7858`, two runs in one job). Run 1
+had no foreign GPU load (`FOREIGN_GPU sample max=0%`); run 2 had Xorg/kitty at 8 % mean, 14 % max. Graphed ms/step:
 
-| nb | q | k | v (v6 + v4) | wo | gate_up | down6 (14 Q6_K layers) | down4 (14 Q4_K layers) | attn | head |
-|---|---|---|---|---|---|---|---|---|---|
-| 32 | 1.29 | 0.40 | 0.47 | 1.08 | 8.96 | 5.20 | 2.46 | 2.43 | 1.72 |
-| 64 | 1.20 | 1.42 | 0.69 | 1.16 | 8.44 | 4.50 | 2.86 | 6.62 | 2.18 |
+| cell | run 1 (clean) | run 2 (8 % foreign) | A/A spread | solo `forward_argmax` |
+|---|---|---|---|---|
+| nb 32 d600 (pool 64 × 704) | 22.995 | 23.171 | 0.77 % | 12.29 / 10.46 |
+| nb 32 d256 (pool 128 × 320) | 21.724 | 22.100 | 1.7 % | 10.66 / 10.82 |
+| nb 128 d256 | 38.751 | 38.947 | 0.51 % | (as above) |
+
+A pool of 128 × 704 does not fit (CUDA OOM, MEASURED), so nb 128 runs at d256. The ungraphed per-kernel profile, run
+1, ms per step summed over 28 layers:
+
+| cell | total | q | k | v6 + v4 | wo | gate_up | down6 (14 Q6_K layers) | down4 (14 Q4_K layers) | attn | head |
+|---|---|---|---|---|---|---|---|---|---|---|
+| nb 32 d600 | 23.43 | 1.23 | 0.46 | 0.28 + 0.23 | 1.17 | 8.45 | 3.55 | 2.65 | 2.15 | 2.25 |
+| nb 128 d256 | 39.59 | 2.11 | 0.70 | 0.45 + 0.34 | 2.12 | 13.52 | 5.71 | 4.77 | 4.63 | 3.30 |
+
+(CP0's table came from main `1a55a4b` of 10-18, log `1018-090100-a107`. These replace it.)
 
 MEASURED (GGUF headers): the 7B's `attn_v` and `ffn_down` are Q6_K on 14 of 28 layers and Q4_K on the rest. `q`, `k`,
-`o`, `gate` and `up` are all Q4_K. `down` is 31 % of the nb 32 step (7.66 ms). The Q6_K `down` costs 2.1× the Q4_K one
-for 1.46× the bytes.
+`o`, `gate` and `up` are all Q4_K. `down` is 26 % of the nb 32 d600 profile (6.20 of 23.43 ms). The Q6_K `down` costs
+1.34× the Q4_K one for 1.46× the bytes.
 
 Routing on bella at the A/B's batch sizes, from the code (CODE `batch.rs`: `bgemm` 1121, `tile_t` 383, `takes_gemvm`
 2654, `bgemm_x` 2580; `layer`'s qkv block 1855–1868; `ffn_half`'s `down` 2555/2562):
@@ -119,100 +130,139 @@ Launches per layer for 17 ≤ nb ≤ 128: 3 → 1 on Q4_K-v layers, 3 → 2 on Q
   G2_THREADS == 4·G2_BM`, `prefill.cu:1443`; `WR == 2 || RAW`, 2185). (ii-b) gives them a BM parameter: at BM 32 each
   thread loads half an item's rows, and the meta layout offsets use BM. The dequant values written to shared memory
   and the compute are byte-identical; only which thread copies which row changes. The 14 Q6_K `down` layers are
-  68 % of `down`'s nb 32 time (5.20 of 7.66 ms), so (ii) without (ii-b) leaves most of the gain behind.
+  57 % of `down`'s nb 32 time (3.55 of 6.20 ms, `fde94b6`), so (ii) without (ii-b) leaves most of the gain behind.
 - **Router:** a `tile_r32(rows, nb, sms)` predicate built like `tile_t`, on the same `wave_cost` and `PARTIAL_WAVE`
   model. It takes 32 rows when the model says the waves cost less. A per-MAC factor for the 32-row tile
-  (`TILE_R32_TIME`, like `TILE_T_TIME`) starts at 100 (no penalty) and is fitted from the A/B's profile, not
-  guessed.
+  (`TILE_R32_TIME`, like `TILE_T_TIME`) is a 100 placeholder in CP1's code, with the router off; it is set from
+  the micro-bench (§4 step 1) before the router is ever on by default.
   - On bella the model picks 32-row tiles at nb ≤ 64 (56 CTAs: 1.45 waves → 112 half-CTAs: 1.30, ESTIMATED −10 % of
     `down`).
   - At nb 128 it keeps gemm2t: 224 quarter-size CTAs cost 2.45 vs gemm2t's 2.38 (ESTIMATED, in gemm2s-CTA waves).
   - So the spec's "(ii) at nb ≤ 128" becomes "nb ≤ 64" on bella. The H100 (2 CTAs/SM, 132 SMs) is where the nb 128
     half applies; that is the follow-up pod run.
 - Applies to `down` only (scope). `o` has the same 3584-row shape and could reuse the predicate later.
-- Kill switch `AXON_DOWN_R32=0`.
+- Switch `AXON_DOWN_R32`: unset or 0 is off (CP1's default), 3 takes gemm2r (3 stages), 2 gemm2r2 (2 stages, 2
+  CTAs/SM).
 
 ## 3. ESTIMATED gains on bella
 
-Wave arithmetic uses the repo's own fitted model (CODE `wave_cost`; `PARTIAL_WAVE` 30, fitted on 4090 prefill).
-Times are scaled from §1's MEASURED profile (main `1a55a4b`).
+Wave arithmetic uses the repo's own fitted model (CODE `wave_cost`; `PARTIAL_WAVE` 30, fitted on 4090 prefill). Times
+are from §1's MEASURED `fde94b6` profile, run 1. CP1 builds (i) and (ii) for Q4_K only (no ii-b), so the Q6_K `down`
+and the Q6_K `v` gain nothing here.
 
-| cell | (i) | (ii) | total | of step |
+| cell | (i) | (ii), Q4_K only | total | of step |
 |---|---|---|---|---|
-| nb 32 d600 (24.4 ms) | k+v ride q's tail: −0.87 ms (all of k+v, upper bound) | down4 −10 % (−0.25) + down6 −10 % (−0.52, needs ii-b) | **≈ −1.6 ms** | **−6.7 %** |
-| nb 128 d256 | q|k|v: k+v in q's gemm2t tail ≈ −1.1 gemm2s-waves per Q4_K-v layer, −0.54 per Q6_K-v layer, at ≈ 29 µs per wave (nb 64 q) ≈ −0.67 ms | none (router keeps gemm2t) | **≈ −0.7 ms** | **≈ −2 %** (step ≈ 35 ms, ESTIMATED: unmeasured at nb 128 on bella) |
+| nb 32 d600 (22.995 ms) | k (0.46) + v4 (0.23) ride q's tail: −0.69 ms, upper bound (v6 runs alone) | down4 −10 % (−0.26) | **≈ −0.95 ms** | **−4.1 %** |
+| nb 128 d256 (38.751 ms) | k + v4 in q's gemm2t tail, ≈ −0.7 ms (CP0's wave estimate; k + v4 measure 1.03 ms, upper bound) | none (`tile_r32` stops at nb 64) | **≈ −0.7 ms** | **≈ −1.8 %** |
 
-OPINION: (i)'s nb 32 figure is an upper bound because it assumes the k/v CTAs are fully hidden in q's tail. Gemvm32's
-k at 14 µs/layer is already cheap.
+OPINION: both (i) figures are upper bounds. They come from the ungraphed profile, so they include launch gaps the graph
+already removes (review point), and they assume the k/v CTAs are fully hidden in q's tail. The −10 % for (ii) is the
+wave model at `TILE_R32_TIME` = 100. Shady's point stands: a 32-row CTA stages the same activation tile for half the
+rows, so its true per-MAC cost is unknown. M2's micro-bench measures it before the router is used (§4).
 
 ## 4. Pre-registered A/B rule
 
 The spec's kill rule (H100): nb 128 d600 step not ≤ 13.0 ms (−10 % of 14.55) → revert the tile change; keep the
-fusion if it alone wins ≥ 0.8 ms. Adapted to bella:
+fusion if it alone wins ≥ 0.8 ms. Adapted to bella, with CP0 review's M2 and M3. All of it runs in **one**
+`axon-run --detach --timing bella --low` job (`.a4bin/ab.sh`, committed before submission and not edited after):
 
-- **Harness:** `cuda::qwen2::slots::tests::pool_step_cost` (`slots.rs:2418`, `#[ignore]`).
-  - Settings: `AXON_STEP_MODEL` = the 7B Q4_K_M, f16 KV, graphs on (the harness default); `AXON_STEP_PROF` for the
-    per-kernel split.
-  - Main `fde94b6` and the candidate run as two binaries in **one** `axon-run --detach` timing job, alternating
-    A B A B A B (3 each), cool-gated (the harness logs temperature and clock per row).
-  - The statistic is the median ms/step per cell. A/A noise is the spread of main's 3 runs in the same job (10-18
-    reference: ±0.3 %).
-- **Deciding cells:**
-  - nb 32, d600.
-  - nb 128, d256. 128 slots × 704 positions of f16 KV (5.2 GB) do not fit beside the 7B (4.7 GB) in 12 GB, so nb 128
-    runs at d256 (pool 128 × 320).
-- **Regression cells:** nb 16 d600 (the gemvmx path; must not move), nb 64 d600, and solo `forward_argmax`.
-- **Pass:** candidate ≤ 0.96 × main at nb 32 (−4 %, ≈ 60 % of the ESTIMATED −6.7 %), and ≤ 0.99 × main at nb 128
-  (−1 %, ≈ 50 % of −2 %, above the ±0.3 % noise). Each gain must exceed 2× the job's A/A spread. No regression cell
-  may be more than 0.5 % worse.
-- **Partial:** if the combined candidate misses the nb 32 bar, rerun with `AXON_DOWN_R32=0`.
-  - If (i) alone gives ≥ 2 % at nb 32 (≈ 60 % of its −3.6 %), keep (i) and revert (ii).
-  - If (ii) alone (`AXON_QKV_FUSE=0`) gives ≥ 2 %, keep (ii) and revert (i).
-  - A change that fails its own bar is reverted, not tuned until it passes.
-- **Kill:** if neither part reaches 2 % at nb 32 and neither reaches 1 % at nb 128, stop WP-C1 on consumer GPUs and
-  record it in `experiments-rejected.md`. No 4090/H100 pod is asked for it.
-- **Secondary, not deciding:** `scripts/serve_load.py load` at C = 8/16/32 (7B, `--parallel 32`, a small `--ctx`
-  that fits), agg tok/s and ITL p50/p99 vs main, reported in the PR.
+**Step 1: the (ii) micro-bench (M2).** `cuda_gemm_tile_bench` (candidate binary) with `AXON_BENCH_SHAPE=down`,
+`AXON_BENCH_NB=32,64`, 7 rounds: the 7B's Q4_K down (3584 × 18944) on gemm2s (today's tile), gemm2r (32 rows, 3
+stages, 1 CTA/SM) and gemm2r2 (32 rows, 2 stages, 47.5 KB, 2 CTAs/SM), the median µs per launch in isolation. Rule:
+
+- A 32-row variant **qualifies** if its median is ≤ 0.95 × gemm2s's at **both** nb 32 and nb 64. The best qualifying
+  variant is (ii)'s; its ratio at nb 32 becomes `TILE_R32_TIME`.
+- If neither qualifies, (ii) is **dropped with no A/B**: its kernels and router are removed before the PR, and (ii-b)
+  never starts. The A/B rows below that carry (ii) are then reported but decide nothing.
+
+**Step 2: the pool A/B.** `cuda::qwen2::slots::tests::pool_step_cost`, the 7B Q4_K_M, f16 KV, graphs on,
+`AXON_STEP_DEPTHS=600,256`, `AXON_STEP_NB=16,32,64,128` (nb 128 only fits at d256). Four configurations:
+
+- **M**: main `fde94b6`'s test binary.
+- **A**: the candidate, defaults ((i) on, (ii) off).
+- **B**: the candidate, `AXON_DOWN_R32=3` ((i) + (ii) with gemm2r).
+- **C**: the candidate, `AXON_DOWN_R32=2` ((i) + (ii) with gemm2r2).
+
+Three rounds, the order rotated each round (M A B C, B C M A, C M A B). The statistic is the median ms/step per cell
+over the three rounds. The A/A spread of a cell is (max − min) / median of M's three runs in this job.
+
+- **M3, nb 128 is provisional.** If M's nb 128 d256 spread is over 0.5 %, nb 128 decides nothing, and that is
+  reported. The baseline job already measured 0.51 % between a clean run and a run with 8 % foreign load (§1), so this
+  is a real risk.
+- **Pass for (i)** (A vs M): ≤ 0.982 × M at nb 32 d600 (−1.8 %, 60 % of the ESTIMATED −3.0 %), and more than 2 × the
+  A/A spread of that cell. At nb 128 d256, if M3 allows: ≤ 0.99 × M (−1 %, ≈ 55 % of −1.8 %).
+- **Pass for (ii)** (the qualifying variant's config vs A, the share (ii) adds on top of (i)): ≤ 0.995 × A at nb 32
+  **and** nb 64 d600. (ii)'s ESTIMATED −1.1 % of the step is close to the noise, so its step bar is "measurably better,
+  never worse" and its real bar is the micro-bench. (ii-b) for Q6_K starts only if (ii)-Q4_K passes **both**.
+- **Regression cells:** nb 16 at both depths (the gemvmx path, which CP1 does not touch), and solo `forward_argmax`.
+  No regression cell may be more than 0.5 % worse than M, and nb 16 must not move beyond its A/A spread.
+- **Kill:** if (i) misses its nb 32 bar and nb 128 decides nothing or misses too, stop WP-C1 on consumer GPUs and
+  record it in `experiments-rejected.md`. No pod is asked for it. A change that fails its own bar is reverted, not
+  tuned until it passes.
+- **Changed from CP0 and why:** CP0's bars (−4 % at nb 32 combined, ≥ 2 % for either part alone) were 60 % of
+  estimates made from the `1a55a4b` profile, assuming (ii-b) and that all of v fuses. The `fde94b6` baseline and the
+  CP1 scope (Q4_K only; v6 stays alone) lower the estimates, so the bars are recomputed by the same 60 % rule. They are
+  set before any candidate run.
+
+**Step 3: host time per step (for A4 vs A6 ordering).** The candidate's `pool_step_cost` prints, per cell, a `HOST`
+line. It is the mean time `step_checked` spends on the CPU outside the GPU's work: from its entry to the graph launch's
+return, plus its tail after the picks' read (test builds only: `#[cfg(test)]` counters, zero cost in the product).
+Compare it with the step's ms: that is the host gap A6 (iii) could overlap.
+
+**Secondary, not deciding:** `scripts/serve_load.py load` at C = 8/16/32 vs main, in the PR.
 
 ## 5. Bit-identity tests (all through `axon-run --detach` on bella)
 
-Existing tests, which must stay green and are extended where noted:
+What each test compares against (M1): every reference below is the code main runs, or the per-token GEMV, never a
+forced variant of the new kernel.
 
-1. `cuda::qwen2::tests::gpu_batched_products_match_gemv_bits` (`tests.rs:3031`): batched products == per-token gemv
-   bits. Extended to nb ∈ {17, 24, 32, 33, 48, 64, 65, 96, 128}, run with the fused qkv launch and 32-row `down`
-   tiles forced on.
-2. `cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo` (`slots.rs:2309`): pool rows == solo under vm_max
-   16/32/0. Extended with nb 65 and 128 and with both kill switches on and off.
-3. `pool_steps_match_solo_in_any_order` (`slots.rs:1202`), `pool_wide_long_steps_match_solo` (`slots.rs:2174`),
-   `pool_rows_of_one_slot_match_verify` (`slots.rs:1060`): row order, long contexts, f16 and q8 KV, verify rows.
+1. `cuda::qwen2::tests::gpu_batched_products_match_gemv_bits`: every batched product kernel == the per-token decode
+   GEMV, bit for bit, on the 0.5B's real tensors and synthetic shapes. Extended: nb ∈ {1, 6, 7, 8, 13, 17, 24, 31, 32,
+   33, 48, 64, 65, 66, 77, 96, 128, 129}, and `gemm2_names(Q4_K)` now includes `gemm2r_q4_k` and `gemm2r2_q4_k`. So
+   the 32-row tiles are checked against the GEMV directly. `gpu_products_match_reference_bits` (against
+   `gemv_ref`, the order written out) uses the same list.
+2. `cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo`: pool rows == each request run alone (decode GEMV),
+   0.5B and Llama 1B. Extended to 128 slots, nb up to 128, and the switches as configurations: vm_max 16 and 32 (fuse
+   on), then by shape with fuse off, fuse on, fuse on + r32 three stages, and fuse off + r32 two stages. The Llama's
+   q, k (and v on 8 layers) are Q4_K, so it takes the fused launch. The 0.5B's 12 Q4_K `down` layers and the Llama's 8
+   take the 32-row tiles at nb 17..64 where gemvm doesn't.
+3. `pool_steps_match_solo_in_any_order`, `pool_wide_long_steps_match_solo`, `pool_rows_of_one_slot_match_verify`:
+   unchanged, must stay green.
 
 New tests:
 
-4. `gpu_qkv_one_launch_matches_three` (`tests.rs`): per test model (0.5B Q4_K_M with Q4_K and Q6_K v layers,
-   Llama 1B with no biases, qwen3 0.6B Q8_0 as a register-staged type at BM 64), the qkv buffer from one `bgemm_g2x`
-   launch == three `bgemm` launches, **byte for byte**. Covered: every nb in test 1's set; both segment layouts (q|k|v,
-   q|k + v); the WR 4 + WR 2 mixed grid (nb 65..128, forced on with `tile_t`).
-5. `gpu_down_rows32_matches_rows64` (`tests.rs`): `down` through 32-row tiles == the 64-row gemm2s and the gemm2t
-   result, byte for byte, for Q4_K and Q6_K (ii-b), epilogue mode 0 (into `up`) and mode 1 (residual into `x`), nb in
-   test 1's set.
+4. `gpu_qkv_one_launch_matches_three` (`tests.rs`): the q|k|v buffer from one `gemm2x`/`gemm2xt` launch == the
+   launches **main's `bgemm`** makes for each matrix at that nb on this GPU, byte for byte over the whole buffer
+   (gemvm32 for k/v where `takes_gemvm` picks it at 17..32, gemm2s above, gemm2t for q where `tile_t` picks it). Both
+   fused variants at every nb, plus the router's own choice (`bgemm_g2x`, falling back to `bgemm`). Shapes: the 7B's
+   (3584 + 512 + 512 × 3584), an odd one (1000 + 136 + 72 × 1536), and two matrices (333 + 77 × 768); with and
+   without biases; nb ∈ {17, 24, 32, 33, 48, 64, 65, 96, 128}. Transitively against the GEMV: `bgemm`'s kernels at
+   these sizes are test 1's.
+5. `gpu_down_rows32_matches_rows64` (`tests.rs`): gemm2r and gemm2r2 == gemm2s (and gemm2t), byte for byte, Q4_K,
+   epilogue mode 0 (plain, bias) and mode 1 (residual), the same nb set. Shapes: the 7B's down (3584 × 18944) and odd
+   ones whose K stage counts (74, 1, 3, 4, 5, 14) leave the last pass through the 3- or 2-slot ring partial. A K-quant
+   stage is one whole 256-wide block, so that is the only partial stage there is. (ii-b)'s Q6_K shapes join this test
+   only if (ii-b) is ever built.
 
 Gates:
 
-6. **md5 gate vs main** (AGENTS.md "The md5 gate"): greedy `axon gen` on the 0.5B, 1.5B and 7B. Prompt prefill
-   passes of 17..128 tokens take (i), so this exercises the fused launch end to end.
-7. **Serve identity:** `serve_load.py texts` at `--c 1` and `--c 8`, against main's `--c 1` digest. Caveat: its 16
-   requests keep nb ≤ 16, so the steps take gemvmx and not the new code. Tests 2–3 are what cover pool steps of
-   17..128 rows.
+6. **md5 gate vs main** (AGENTS.md "The md5 gate"): greedy `axon gen` on the 0.5B, 1.5B and 7B. What it does **not**
+   cover, plainly: `gen` decodes at nb 1, so no decode step reaches either change. (ii) is off by default, so the gate
+   never runs it. (i) runs only in a prefill pass of 17..128 tokens, and the gate's prompts are not chosen to make one.
+   So the md5 gate shows that default-path output is unchanged; tests 1, 2, 4 and 5 are the proof for (i) and (ii).
+7. **Serve identity:** `serve_load.py texts` at `--c 1` and `--c 8`, against main's `--c 1` digest. Its 16 requests
+   keep nb ≤ 16 (gemvmx), so it doesn't reach the new code either.
 
 `NUMERICS_VERSION_EXACT` is not bumped. If any of tests 1–7 shows one differing bit, the change is a bug, not a
 numerics change, and does not ship.
 
-## 6. Plan after review
+## 6. Plan
 
-- Checkpoint 1: (i) at nb ≤ 64 (one gemm2s instantiation plus the segment table), with tests 1, 2 and 4, then the
-  A/B. This is the cheapest part and the most informative.
-- Checkpoint 2: the WR 4 + WR 2 mixed grid (nb 65..128).
-- Checkpoint 3: (ii) for Q4_K, then (ii-b) for Q6_K, with test 5.
-- Then the full A/B (§4), fmt/clippy/CPU suites, the md5 and serve gates, and the PR (template: methodology,
-  benchmarks, models, hardware, gates).
-- Pods (4090 re-board, H100 nb 128 kill rule) only if the lead books them.
+- **CP1 (this commit series):** (i) at nb 17..128, both tile layouts (gemm2x: every tile gemm2s's; gemm2xt: q's
+  gemm2t's), in one launch; Q4_K only. (ii) for Q4_K: gemm2r / gemm2r2 and `tile_r32`, off unless `AXON_DOWN_R32` is
+  set. Switches `AXON_QKV_FUSE=0` and `AXON_DOWN_R32` (unset/0 = off). Tests 1, 2, 4, 5; the §4 job.
+- After the A/B: drop or keep each part by §4's rule. If (ii) qualifies and passes, set `TILE_R32_TIME` from the
+  micro-bench and turn its router on by default; otherwise remove it.
+- Then A6 before (ii-b) (review: A6's host overlap is the better consumer-GPU bet), decided with §4's `HOST` data.
+- fmt/clippy/CPU suites, the md5 and serve gates, then the PR (template: methodology, benchmarks, models, hardware,
+  gates). Pods (4090, H100 kill rule) only if the lead books them.
