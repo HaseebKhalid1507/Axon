@@ -140,8 +140,13 @@ Works today, honestly scoped:
   (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
   [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
   `--outtype f16` would round them). CPU only for now
-  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
-  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  (the GPU has no F16 matrix kernels). **FP8 checkpoints** (compressed-tensors per-channel e4m3 with
+  dynamic per-token activations, RedHatAI's `*-FP8-dynamic`) run everywhere: in exact mode (the
+  default) as Q8_0 converted at load (today's kernels and bit contract; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar), on the CPU as the exact dequant (slow; the accuracy reference), and on the
+  GPU natively with `--numerics fast` (sm_89+: e4m3 tensor cores, [fp8-weights.md](docs/design/fp8-weights.md)).
+  Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
+  without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other
+  architectures are refused with a message (roadmap). The pre-tokenizer must be one
   Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
   `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
@@ -205,7 +210,7 @@ Works today, honestly scoped:
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
+Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the
 GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and `qwen3moe`'s can be:
 `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched speculative decoding in
 `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and

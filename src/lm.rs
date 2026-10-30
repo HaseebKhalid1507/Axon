@@ -447,7 +447,7 @@ pub struct Backend<'a>(pub(crate) Inner<'a>, pub(crate) Numerics);
 
 /// What a `Backend` holds.
 pub(crate) enum Inner<'a> {
-    Cpu(Qwen2<'a>),
+    Cpu(Box<Qwen2<'a>>),
     /// Its `Gpu` and kernel module are leaked: they live as long as the
     /// process, which is as long as the CLI needs them (the weights and
     /// caches are still freed on drop).
@@ -804,7 +804,7 @@ impl<'a> Backend<'a> {
             if let Some(warn) = crate::model::check_ram_dense(m, ctx)? {
                 eprintln!("axon: {warn}");
             }
-            return Ok(Backend::of(Inner::Cpu(Qwen2::new(m)), num));
+            return Ok(Backend::of(Inner::Cpu(Box::new(Qwen2::new(m))), num));
         }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
@@ -1011,7 +1011,10 @@ impl<'a> Backend<'a> {
 macro_rules! dispatch {
     ($self:expr, $cache:expr, |$n:ident, $c:ident| $body:expr) => {
         match (&$self.0, &mut $cache.0) {
-            (Inner::Cpu($n), CacheInner::Cpu($c)) => $body,
+            (Inner::Cpu($n), CacheInner::Cpu($c)) => {
+                let $n = &**$n;
+                $body
+            }
             (Inner::Cuda($n), CacheInner::Cuda($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
@@ -1049,7 +1052,7 @@ impl Lm for Backend<'_> {
 
     fn new_cache(&self, max_ctx: usize) -> BackendCache {
         BackendCache(match &self.0 {
-            Inner::Cpu(n) => CacheInner::Cpu(Lm::new_cache(n, max_ctx)),
+            Inner::Cpu(n) => CacheInner::Cpu(Lm::new_cache(&**n, max_ctx)),
             Inner::Cuda(n) => CacheInner::Cuda(Box::new(n.new_cache(max_ctx))),
             Inner::Hybrid(n) => CacheInner::Hybrid(Box::new(n.new_cache(max_ctx))),
             Inner::Pipeline(n) => CacheInner::Pipeline(Box::new(n.new_cache(max_ctx))),

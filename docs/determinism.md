@@ -122,7 +122,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 
 | field      | what                                                                  |
 |------------|-----------------------------------------------------------------------|
-| `numerics` | the mode and its version, `exact/1` or `fast/1.1` (fast's is exact's counter and its own: `NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`): Axon's kernels and sampler (bumped by rule, below). Until 2026-10-29 the line was `numerics=1`, the same kernels as `exact/1`: every fingerprint changed once then (the release note in CHANGELOG.md), not a single output bit |
+| `numerics` | the mode and its version, `exact/1` or `fast/1.2` (fast's is exact's counter and its own: `NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`): Axon's kernels and sampler (bumped by rule, below). Until 2026-10-29 the line was `numerics=1`, the same kernels as `exact/1`: every fingerprint changed once then (the release note in CHANGELOG.md), not a single output bit |
 | `model`    | SHA-256 over the GGUF file's length, its whole header (all metadata, tensor names, shapes, quant types) and samples of the tensor data |
 | `types`    | the quant types and their tensor counts (readable; the header hash covers them) |
 | `backend`  | `cpu`, `cuda`, `cuda+cpu` with the layer split (and `prefill streams >=N` when it streams), or a pipeline with its cuts |
@@ -130,6 +130,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 | `cpu`      | when any layer runs on the CPU: arch, FMA or not, r8 repack or per-row (`AXON_REPACK=0` changes the low bits); not the SIMD path, which matches scalar bit for bit |
 | `kv`       | `f16`, `q8`, `q8/32`; `f32` on the CPU with `AXON_KV=f32`             |
 | `rope`     | when not plain RoPE: the effective scaling as run (YaRN's factor, original context, betas, ext factor and (sin, cos) multiplier, from the GGUF or `--rope-scaling`; gemma3's linear scale) and `freq_base`. Read from the model's metadata after the flags rewrite it: the model digest hashes the file, which the flags don't change. `--rope-scaling none` on a plain model adds nothing |
+| `weights`, `act`, `head` | FP8 checkpoints only ([fp8-weights.md](design/fp8-weights.md) §4): `fp8-native` (fp8.cu's e4m3 products: `--numerics fast` on sm_89+), `fp8-q8` (converted to Q8_0 at load: exact mode, or a GPU below sm_89) or `fp8-ref` (the CPU: exact dequant); the activations the matrices read (`e4m3-tok`, `q8`, `f32`); the head's type (`q8`, `f16`). Other models carry none of the three |
 | `serve`    | `axon serve` only, when not the defaults: `no-think`, `think-inline`, the server's sampling flags |
 
 Left out because they never change bits: drafting, `--parallel`/slots, chunk sizes,

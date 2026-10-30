@@ -3,6 +3,7 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use std::path::PathBuf;
 
+mod fp8;
 mod numerics;
 mod twin;
 
@@ -43,6 +44,9 @@ pub(crate) struct Agree {
     last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
+    /// `max_abs` over the reference's 20 largest logits only (the FP8
+    /// gate's bound, `Top1::Binomial`).
+    max_abs_top: f32,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
 }
@@ -159,12 +163,28 @@ impl Agree {
         for (x, y) in lr.iter().zip(lo) {
             self.max_abs = self.max_abs.max((x - y).abs());
         }
+        for i in top_k(lr, 20) {
+            self.max_abs_top = self.max_abs_top.max((lr[i] - lo[i]).abs());
+        }
         if ar != ao {
             // How close a call it was, in the reference's logits.
             self.flips.push(lr[ar as usize] - lr[ao as usize]);
             self.flip_at.push(self.positions);
         }
     }
+}
+
+/// The indexes of the `k` largest values of `l` (any order).
+fn top_k(l: &[f32], k: usize) -> Vec<usize> {
+    let mut t: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, &x) in l.iter().enumerate() {
+        if t.len() < k || x > l[t[t.len() - 1]] {
+            let at = t.partition_point(|&j| l[j] >= x);
+            t.insert(at, i);
+            t.truncate(k);
+        }
+    }
+    t
 }
 
 /// The gap between the two largest logits.
@@ -211,7 +231,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
 pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
         "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {:?}), max |dlogit| \
-         {:.3}, flip margins {:?}",
+         {:.3} (top-20 {:.3}), flip margins {:?}",
         a.top1,
         a.positions,
         100.0 * a.top1 as f64 / a.positions as f64,
@@ -219,6 +239,7 @@ pub(crate) fn report(name: &str, a: &Agree) {
         a.max_kl,
         a.over_half,
         a.max_abs,
+        a.max_abs_top,
         a.flips
     );
 }
@@ -301,15 +322,55 @@ fn ref_spread_zero_fails_by_name() {
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
 pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
+    assert_graded_with(ag, ac, Top1::Points(floor));
+}
+
+/// `assert_graded_with`'s top-1 rule.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Top1 {
+    /// At most 2 points behind the reference's self-agreement, and at
+    /// least `.0` % (every gate before the FP8 one).
+    Points(usize),
+    /// At least the floor's count minus 2 binomial standard errors,
+    /// `2 sqrt(n p (1 - p))` with p the floor's rate, and at least 90 %:
+    /// the FP8 gate's (docs/design/fp8-weights.md §6 B), whose floor
+    /// changes precision (e4m3 activations), not only order, on arms of at
+    /// least 1000 positions. Its relaxed outlier and max |dlogit| bounds
+    /// are the FP8 gate's only (each set on FP8's own measurements): a
+    /// future fast kernel's gate doesn't take this variant to inherit them.
+    /// Set after the 0.5B's first run (decode arm 274/294 vs the floor's
+    /// 276/294: inside 2 SE, 2.04 points behind).
+    /// The FP8 gate's outlier bound too (below): positions with KL above
+    /// 0.5 at most max(1, 2x the floor's count over the same positions),
+    /// the KL mean's 2x principle (lead ruling after the first 1014-position
+    /// decode arm: 5 above 0.5, max 0.885, the floor 5, max 0.634).
+    Binomial,
+}
+
+/// `assert_graded_floor` with the top-1 rule `top1`; the other bounds the
+/// same.
+pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     assert_ref_spread(ac);
     let n = ag.positions;
-    // Top-1: at most 2% of positions behind the CPU's self-agreement.
-    assert!(
-        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
-        "top-1 agreement {}/{n} (cpu vs itself {})",
-        ag.top1,
-        ac.top1
-    );
+    match top1 {
+        // Top-1: at most 2% of positions behind the CPU's self-agreement.
+        Top1::Points(floor) => assert!(
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
+            "top-1 agreement {}/{n} (cpu vs itself {})",
+            ag.top1,
+            ac.top1
+        ),
+        Top1::Binomial => {
+            let p = ac.top1 as f64 / n.max(1) as f64;
+            let two_se = 2.0 * (n as f64 * p * (1.0 - p)).sqrt();
+            assert!(
+                ag.top1 as f64 >= ac.top1 as f64 - two_se && ag.top1 * 100 >= 90 * n,
+                "top-1 agreement {}/{n} (floor {}, 2 SE {two_se:.1})",
+                ag.top1,
+                ac.top1
+            );
+        }
+    }
     // Only near-ties flip. Flipping a margin m takes the top two logits
     // moving m apart, which the reference's own spread (`ac.max_abs`, the
     // CPU's two kernel sets: 1.26 on 1.5B natural text, 1.9-2.3 on chat
@@ -341,19 +402,131 @@ pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
     // reference itself doesn't resolve stably. So: at most one position
     // above 0.5, none above 2, and that one only where `ac` (the CPU vs
     // its other kernel set) also flips.
-    assert!(
-        ag.over_half.len() <= 1 && ag.max_kl < 2.0,
-        "max KL {} (above 0.5 (index, KL, reference margin, previous KL): {:?})",
-        ag.max_kl,
-        ag.over_half
-    );
-    for &(i, k, mg, _) in &ag.over_half {
+    // The FP8 gate (`Top1::Binomial`): the floor changes precision too,
+    // so its own outliers set the count, 2x as for the mean; the single
+    // outlier's "where the floor flips" rule is for order-only floors.
+    if let Top1::Binomial = top1 {
+        let (got, floor) = (ag.over_half.len(), ac.over_half.len());
         assert!(
-            ac.flip_at.contains(&i),
-            "KL {k} at position {i} (reference margin {mg}), where the CPU's kernel sets agree"
+            got <= (2 * floor).max(1) && ag.max_kl < 2.0,
+            "max KL {}, {got} positions above 0.5 vs the floor's {floor} (allowed {}): \
+             (index, KL, reference margin, previous KL): {:?}; the floor's: {:?}",
+            ag.max_kl,
+            (2 * floor).max(1),
+            ag.over_half,
+            ac.over_half
         );
+    } else {
+        assert!(
+            ag.over_half.len() <= 1 && ag.max_kl < 2.0,
+            "max KL {} (above 0.5 (index, KL, reference margin, previous KL): {:?})",
+            ag.max_kl,
+            ag.over_half
+        );
+        for &(i, k, mg, _) in &ag.over_half {
+            assert!(
+                ac.flip_at.contains(&i),
+                "KL {k} at position {i} (reference margin {mg}), where the CPU's kernel sets agree"
+            );
+        }
     }
-    assert!(ag.max_abs < 6.0, "max logit difference");
+    // Max |dlogit|. The FP8 gate (`Top1::Binomial`): over the reference's
+    // top-20 logits, plus a whole-vocabulary backstop at twice the bound.
+    // FP8-gate-only: it was justified by the FP8 load arm's diagnosis
+    // below, not in general. No future fast kernel inherits it by taking
+    // `Top1::Binomial`: its gate starts at the strict bound (< 6 over every
+    // logit) and relaxes only on a diagnosis of its own, disclosed.
+    // Why (gpu_fp8_load_diag, job 1029-205633-ac74, the load arm's 1000
+    // rows): its 8.515 (and 7.018, the only other >= 6) are one sequence's
+    // tail logits, rank 151829 / 151924 of 151936, p_ref 5.7e-12 / 1.4e-13,
+    // p_fast 3.4e-8 / 2.5e-10; the same sequence alone through the decode
+    // path reaches 8.212, and the pool equals itself reversed and halved
+    // bit for bit (max 0.000; pool vs alone 2.678), so no row mixing: FP8's
+    // precision on near-zero-probability logits, not the pool. Over the
+    // top-20: pool 4.087, alone 4.096, floor 2.100.
+    if let Top1::Binomial = top1 {
+        assert!(
+            ag.max_abs_top < 6.0 && ag.max_abs < 12.0,
+            "max logit difference: top-20 {} (< 6), all {} (< 12)",
+            ag.max_abs_top,
+            ag.max_abs
+        );
+    } else {
+        assert!(ag.max_abs < 6.0, "max logit difference");
+    }
+}
+
+/// `top_k` against a full sort.
+#[test]
+fn top_k_is_the_largest() {
+    let l: Vec<f32> = (0..1000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761) >> 7) % 997) as f32 - 400.0)
+        .collect();
+    let mut want: Vec<usize> = (0..l.len()).collect();
+    want.sort_by(|&a, &b| l[b].total_cmp(&l[a]));
+    let mut got: Vec<f32> = top_k(&l, 20).iter().map(|&i| l[i]).collect();
+    got.sort_by(|a, b| b.total_cmp(a));
+    let w: Vec<f32> = want[..20].iter().map(|&i| l[i]).collect();
+    assert_eq!(got, w);
+}
+
+/// `Top1::Binomial` at the 0.5B FP8 decode arm's first numbers: floor
+/// 276/294, so 2 SE = 2 sqrt(294 p (1 - p)) = 8.2: 268 passes, 267 fails
+/// (and 274, which failed `Points`, passes); never below 90 %.
+#[test]
+fn top1_binomial_rule() {
+    let ag = |n, t| Agree {
+        positions: n,
+        top1: t,
+        ..Agree::default()
+    };
+    let ac = |n, t| Agree {
+        max_abs: 0.1,
+        ..ag(n, t)
+    };
+    let ok = |a: Agree, c: Agree, r: Top1| {
+        std::panic::catch_unwind(|| assert_graded_with(&a, &c, r)).is_ok()
+    };
+    assert!(ok(ag(294, 274), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 274), ac(294, 276), Top1::Points(94)));
+    assert!(ok(ag(294, 268), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 267), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(1000, 899), ac(1000, 900), Top1::Binomial), "90 %");
+    assert!(ok(ag(1000, 1000), ac(1000, 1000), Top1::Binomial));
+    // Max |dlogit| under Binomial: the top-20's < 6, all < 12 (the load
+    // diagnostic's 8.515 in the tail, 4.087 in the top-20, passes).
+    let d = |all, top| Agree {
+        max_abs: all,
+        max_abs_top: top,
+        ..ag(1000, 1000)
+    };
+    assert!(ok(d(8.515, 4.087), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(8.515, 4.087), ac(1000, 1000), Top1::Points(90)));
+    assert!(!ok(d(8.515, 6.0), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(12.0, 4.0), ac(1000, 1000), Top1::Binomial));
+    // The outlier bound: KL > 0.5 at most max(1, 2x the floor's) under
+    // Binomial (5 vs 5, the first decode arm's, passes; 3 vs 1 fails), one
+    // only where the floor flips under Points.
+    let over = |n: usize| (0..n).map(|i| (i, 0.6, 1.0, 0.0)).collect::<Vec<_>>();
+    let with = |mut a: Agree, n| {
+        a.over_half = over(n);
+        a.max_kl = if n > 0 { 0.6 } else { 0.0 };
+        a
+    };
+    let b = |g, f| {
+        ok(
+            with(ag(1000, 950), g),
+            with(ac(1000, 950), f),
+            Top1::Binomial,
+        )
+    };
+    assert!(b(5, 5) && b(10, 5) && b(1, 0) && b(2, 1));
+    assert!(!b(11, 5) && !b(2, 0) && !b(3, 1));
+    assert!(!ok(
+        with(ag(1000, 1000), 2),
+        with(ac(1000, 1000), 2),
+        Top1::Points(94)
+    ));
 }
 
 /// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256

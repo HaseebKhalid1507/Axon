@@ -6,6 +6,24 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### FP8 checkpoints (#177)
+- **FP8 checkpoints load, as Q8_0 by default.** compressed-tensors per-channel e4m3 checkpoints with dynamic per-token
+  activations (RedHatAI's `*-FP8-dynamic`) load from their directory. In exact mode (the default) the FP8 matrices
+  become Q8_0 at load and run on the existing kernels under the exact contract (identity `weights=fp8-q8`). Accuracy:
+  the 7B passes both bars (KL ≤ 0.01, top-1 ≥ 97 %) against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %); the 0.5B
+  scores 96.7 % top-1 against HF F32, below the 97 % bar. On the CPU the checkpoint runs as its exact dequant
+  (`weights=fp8-ref`, the accuracy reference). Block-scaled FP8 and other FP8 forms are refused by name.
+- **Native FP8 is opt-in and fails its bars on sm_120.** `--numerics fast` on sm_89+ runs the weights natively (e4m3
+  tensor cores, `weights=fp8-native`). On bella (RTX 5070 Ti Laptop) the 7B misses both pre-registered bars: tg128
+  32 tok/s vs a bar of 47–55 (Q4_K_M: 85–101), top-1 95.9 % vs 97 %. It isn't measured on an H100. Follow-up: decode
+  graphs for FP8 nets ([docs/log/2026-10-30-fp8-weights.md](docs/log/2026-10-30-fp8-weights.md)).
+- **Every GGUF fast-mode fingerprint changes once; no output does.** `NUMERICS_VERSION_FAST` 1 → 2 (the first fast
+  kernels), so `numerics=fast/1.1` becomes `fast/1.2` in every fast-mode identity, GGUF models included; their
+  output bits are unchanged (the md5 gate against main, exact and fast). Exact-mode fingerprints don't change.
+- **Fast-mode sessions saved before restore once as tokens.** A `chat --session` file saved in fast mode carries
+  `fast/1.1` in its identity. That no longer matches, so the session restores once as tokens (prefilled again)
+  instead of as KV bytes, which is slower but never wrong (`src/kvsave.rs`). Exact-mode sessions are unaffected.
+
 ### Release note: every fingerprint changes once (numerics modes, #173)
 - **Every `system_fingerprint` changes, once; no output does.** The identity tuple's first line was `numerics=1`; it is
   now `numerics=exact/1` (the numerics mode and its own version), so every fingerprint (`axon gen`'s `identity:`,
@@ -17,7 +35,7 @@ measurements behind them.
   [docs/design/determinism-modes.md](docs/design/determinism-modes.md) §7.
 - **`--numerics exact|fast`** on `gen`, `logits`, `chat` and `serve` (default `exact`, today's contract), and
   `axon::Numerics` / `BackendOptions::numerics` in the library. `fast` may run kernels that change the float order,
-  graded against exact instead of matched bit for bit, under its own identity (`numerics=fast/1.1`: exact's counter
+  graded against exact instead of matched bit for bit, under its own identity (`numerics=fast/1.1` as #173 shipped it, `fast/1.2` since #177: exact's counter
   and fast's own, so a change to code both modes run moves both; its own NVRTC modules and session identity). Fast
   mode promises tolerance on every path, bits on none (batching, cache reuse, chunking, drafting). **No fast kernel
   exists yet**: `fast` runs the exact kernels and says so once; `Backend::fast_kernels()` tells an embedder which.

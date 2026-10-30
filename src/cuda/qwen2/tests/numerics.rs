@@ -69,7 +69,8 @@
 //! activations, W4A16), and their reference bound is still to be decided.
 
 use super::{
-    Agree, PROMPTS, assert_graded, compare_trace, log_softmax, natural_ids, report, trace,
+    Agree, PROMPTS, Top1, assert_graded_with, compare_trace, log_softmax, natural_ids, report,
+    trace,
 };
 use crate::cuda::Gpu;
 use crate::gguf::Model;
@@ -97,12 +98,56 @@ const LOAD_STEPS: usize = 4;
 /// The load arm's longest prefix (`load_prefix`).
 const LOAD_PREFIX_MAX: usize = 63;
 /// The nets' context.
-const CTX: usize = 640;
+pub(crate) const CTX: usize = 640;
+
+/// How many positions each arm grades (`grade_sized`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sizes {
+    /// The decode arm's windows of `WINDOW` tokens.
+    pub(crate) decode_windows: usize,
+    /// The batched arm's windows; `verify_argmax` on the first
+    /// `verify_windows` of them.
+    pub(crate) batch_windows: usize,
+    pub(crate) verify_windows: usize,
+    /// The cached arm's windows: None, the batched arm's (the same text);
+    /// Some(k), k of its own.
+    pub(crate) cached_windows: Option<usize>,
+    /// Positions decoded after each batched pass.
+    pub(crate) after: usize,
+    /// The load arm's sequences, and steps.
+    pub(crate) load: usize,
+    pub(crate) load_steps: usize,
+}
+
+impl Sizes {
+    /// The constants above: every gate's before the FP8 one.
+    pub(crate) const BASE: Sizes = Sizes {
+        decode_windows: DECODE_WINDOWS,
+        batch_windows: BATCH_WINDOWS,
+        verify_windows: BATCH_WINDOWS,
+        cached_windows: None,
+        after: AFTER,
+        load: LOAD,
+        load_steps: LOAD_STEPS,
+    };
+    /// At least 1000 positions in every arm on the GPU (the FP8 gate,
+    /// docs/design/fp8-weights.md §6 B): decode 6 x 17 + 19 x 48 = 1014,
+    /// batched 7 x 3 x 49 = 1029, cached 21 x 49 = 1029, load 40 x 25.
+    pub(crate) const FP8: Sizes = Sizes {
+        decode_windows: 19,
+        batch_windows: 7,
+        verify_windows: BATCH_WINDOWS,
+        cached_windows: Some(21),
+        after: 48,
+        load: LOAD,
+        load_steps: 25,
+    };
+}
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU
 /// prefills in 128-token batches (`PREFILL_BATCH`): 520 is no new shape
 /// there, only time.
-fn prefixes(device: Device) -> &'static [usize] {
+pub(crate) fn prefixes(device: Device) -> &'static [usize] {
     match device {
         Device::Cpu => &[24, 160],
         _ => &[24, 160, 520],
@@ -227,6 +272,9 @@ pub(crate) enum Floor {
     KvQ8,
     /// Exact on the CPU's per-row kernels (AXON_REPACK=0's).
     CpuRows,
+    /// FP8 (tests/fp8.rs): the CPU's fp8-ref with the fast path's e4m3
+    /// activations, against fp8-ref (docs/design/fp8-weights.md §6 B).
+    Fp8Emu,
 }
 
 impl Floor {
@@ -235,6 +283,7 @@ impl Floor {
             Floor::CrossArch => "exact on another GPU architecture",
             Floor::KvQ8 => "exact with the q8 KV cache",
             Floor::CpuRows => "exact on the CPU's per-row kernels",
+            Floor::Fp8Emu => "the CPU's fp8-ref with e4m3 per-token activations",
         }
     }
 }
@@ -261,8 +310,9 @@ fn nll(l: &[f32], next: u32) -> f64 {
     -log_softmax(l)[next as usize]
 }
 
-/// `AFTER` positions from `p` on, teacher-forced, a token per step, on
+/// `after` positions from `p` on, teacher-forced, a token per step, on
 /// caches that hold positions 0..p: graded into `a` (window `w`).
+#[allow(clippy::too_many_arguments)]
 fn decode_after<R: Lm, F: Lm, O: Lm>(
     a: &mut ArmGrade,
     (r, rc): (&R, &mut R::Cache),
@@ -271,8 +321,9 @@ fn decode_after<R: Lm, F: Lm, O: Lm>(
     seq: &[u32],
     p: usize,
     w: usize,
+    after: usize,
 ) {
-    for pos in p..p + AFTER {
+    for pos in p..p + after {
         let t = seq[pos];
         let lr = r.forward(t, pos, rc);
         let lf = f.forward(t, pos, fc);
@@ -292,16 +343,36 @@ pub(crate) fn grade<F: Lm>(
     floor: Floor,
     device: Device,
 ) -> Graded {
+    grade_sized(r, f, o, m, floor, device, &Sizes::BASE)
+}
+
+/// `grade` with the arms' sizes `s`.
+pub(crate) fn grade_sized<F: Lm>(
+    r: &Backend,
+    f: &F,
+    o: &Backend,
+    m: &Model,
+    floor: Floor,
+    device: Device,
+    sz: &Sizes,
+) -> Graded {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let pre = prefixes(device);
-    let span = (*pre.iter().max().unwrap()).max(CACHED.0 + CACHED.1) + AFTER + 1;
-    let load_len = LOAD_PREFIX_MAX + LOAD_STEPS + 1;
+    let (c0, c1) = CACHED;
+    let longest = *pre.iter().max().unwrap();
+    let (span, cspan) = match sz.cached_windows {
+        None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
+        Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+    };
+    let cwins = sz.cached_windows.unwrap_or(0);
+    let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
     let ids = natural_ids(
         m,
-        DECODE_WINDOWS * WINDOW + BATCH_WINDOWS * span + LOAD * load_len,
+        sz.decode_windows * WINDOW + sz.batch_windows * span + cwins * cspan + sz.load * load_len,
     );
-    let (dec, rest) = ids.split_at(DECODE_WINDOWS * WINDOW);
-    let (bat, load) = rest.split_at(BATCH_WINDOWS * span);
+    let (dec, rest) = ids.split_at(sz.decode_windows * WINDOW);
+    let (bat, rest) = rest.split_at(sz.batch_windows * span);
+    let (cac, load) = rest.split_at(cwins * cspan);
     let caches = || (r.new_cache(CTX), f.new_cache(CTX), o.new_cache(CTX));
     let mut arms = Vec::new();
 
@@ -331,8 +402,8 @@ pub(crate) fn grade<F: Lm>(
     let mut a = ArmGrade::new(Arm::Batched);
     let mut rows = (0, 0, 0);
     let l0 = o.fast_launches();
-    for (w, seq) in bat.chunks(span).enumerate() {
-        let w = DECODE_WINDOWS + w;
+    for (i, seq) in bat.chunks(span).enumerate() {
+        let w = sz.decode_windows + i;
         for &p in pre {
             let (mut rc, mut fc, mut oc) = caches();
             a.start();
@@ -340,7 +411,11 @@ pub(crate) fn grade<F: Lm>(
             let lf = f.prefill_logits(&seq[..p], 0, &mut fc);
             let lo = o.prefill_logits(&seq[..p], 0, &mut oc);
             a.tally(&lr, &lf, &lo, Some((w, seq[p])));
-            decode_after(&mut a, (r, &mut rc), (f, &mut fc), (o, &mut oc), seq, p, w);
+            let (rr, ff, oo) = ((r, &mut rc), (f, &mut fc), (o, &mut oc));
+            decode_after(&mut a, rr, ff, oo, seq, p, w, sz.after);
+            if i >= sz.verify_windows {
+                continue;
+            }
             let (mut rc, mut fc, mut oc) = caches();
             let pr = r.verify_argmax(&seq[..p], 0, &mut rc);
             let pf = f.verify_argmax(&seq[..p], 0, &mut fc);
@@ -354,10 +429,13 @@ pub(crate) fn grade<F: Lm>(
 
     // Cached: a prefix in the cache, the rest in a second batched pass.
     let mut a = ArmGrade::new(Arm::Cached);
-    let (c0, c1) = CACHED;
     let l0 = o.fast_launches();
-    for (w, seq) in bat.chunks(span).enumerate() {
-        let w = DECODE_WINDOWS + w;
+    let (cwin, w0) = match sz.cached_windows {
+        None => (bat.chunks(span), sz.decode_windows),
+        Some(_) => (cac.chunks(cspan), sz.decode_windows + sz.batch_windows),
+    };
+    for (w, seq) in cwin.enumerate() {
+        let w = w0 + w;
         let (mut rc, mut fc, mut oc) = caches();
         a.start();
         r.feed_batch(&seq[..c0], 0, &mut rc);
@@ -375,6 +453,7 @@ pub(crate) fn grade<F: Lm>(
             seq,
             c0 + c1,
             w,
+            sz.after,
         );
     }
     a.launches = o.fast_launches() - l0;
@@ -386,14 +465,15 @@ pub(crate) fn grade<F: Lm>(
         let mut a = ArmGrade::new(Arm::Load);
         let l0 = o.fast_launches();
         let seqs: Vec<&[u32]> = load.chunks(load_len).collect();
-        let mut pool = o.new_pool(LOAD, CTX).unwrap();
-        let mut alone = Vec::with_capacity(LOAD);
+        let lw = sz.decode_windows + sz.batch_windows + cwins;
+        let mut pool = o.new_pool(sz.load, CTX).unwrap();
+        let mut alone = Vec::with_capacity(sz.load);
         for (s, seq) in seqs.iter().enumerate() {
             let p = load_prefix(s);
             let (mut rc, mut fc) = (r.new_cache(CTX), f.new_cache(CTX));
             r.feed_batch(&seq[..p], 0, &mut rc);
             f.feed_batch(&seq[..p], 0, &mut fc);
-            let at: Vec<_> = (p..p + LOAD_STEPS)
+            let at: Vec<_> = (p..p + sz.load_steps)
                 .map(|pos| {
                     let lr = r.forward(seq[pos], pos, &mut rc);
                     (lr, f.forward(seq[pos], pos, &mut fc))
@@ -409,7 +489,7 @@ pub(crate) fn grade<F: Lm>(
             penalty: 1.0,
             last_n: 0,
         };
-        for k in 0..LOAD_STEPS {
+        for k in 0..sz.load_steps {
             let step: Vec<SeqRow> = (seqs.iter().enumerate())
                 .map(|(s, seq)| {
                     let pos = load_prefix(s) + k;
@@ -437,12 +517,7 @@ pub(crate) fn grade<F: Lm>(
                 let (lr, lf) = alone[s].next().unwrap();
                 let next = seqs[s][step[s].pos + 1];
                 a.start();
-                a.tally(
-                    &lr,
-                    &lf,
-                    &lo,
-                    Some((DECODE_WINDOWS + BATCH_WINDOWS + s, next)),
-                );
+                a.tally(&lr, &lf, &lo, Some((lw + s, next)));
             }
         }
         a.launches = o.fast_launches() - l0;
@@ -456,6 +531,145 @@ pub(crate) fn grade<F: Lm>(
     }
 }
 
+/// The load arm's rows, diagnosed (the FP8 gate's max |dlogit|, an
+/// `#[ignore]`d test): the same ids as `grade_sized`'s load arm, stepped
+/// in a pool of all `sz.load` (as the gate), the same pool in reversed
+/// slot and row order, a pool of the first half only, and each sequence
+/// alone through `o`'s decode path; against `r` (the reference) and `f`
+/// (the floor). Prints the worst rows: the logit with the max |pool - r|,
+/// its rank in r and both probabilities, its value in every run; and per
+/// row the max |a - b| between the runs.
+pub(crate) fn load_diag<F: Lm>(r: &Backend, f: &F, o: &Backend, m: &Model, sz: &Sizes) {
+    let pre = prefixes(Device::Cuda);
+    let (c0, c1) = CACHED;
+    let longest = *pre.iter().max().unwrap();
+    let (span, cspan) = match sz.cached_windows {
+        None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
+        Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+    };
+    let cwins = sz.cached_windows.unwrap_or(0);
+    let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
+    let total = sz.decode_windows * WINDOW + sz.batch_windows * span + cwins * cspan;
+    let ids = natural_ids(m, total + sz.load * load_len);
+    let seqs: Vec<&[u32]> = ids[total..].chunks(load_len).collect();
+    let n = seqs.len();
+    let spec = CandSpec {
+        k: o.vocab(),
+        penalty: 1.0,
+        last_n: 0,
+    };
+    // A pool run: `order` the sequences (slot i holds seqs[order[i]]),
+    // rows in that order; logits [seq][step].
+    let pooled = |order: &[usize]| -> Vec<Vec<Vec<f32>>> {
+        let mut pool = o.new_pool(order.len(), CTX).unwrap();
+        for (slot, &s) in order.iter().enumerate() {
+            o.feed_slot(&mut pool, slot, &seqs[s][..load_prefix(s)], 0)
+                .unwrap();
+        }
+        let mut out = vec![Vec::new(); n];
+        for k in 0..sz.load_steps {
+            let step: Vec<SeqRow> = (order.iter().enumerate())
+                .map(|(slot, &s)| {
+                    let pos = load_prefix(s) + k;
+                    SeqRow {
+                        token: seqs[s][pos],
+                        pos,
+                        slot,
+                        head: RowHead::Sample {
+                            spec,
+                            recent: &seqs[s][..=pos],
+                        },
+                    }
+                })
+                .collect();
+            for (i, row) in o.step(&mut pool, &step).unwrap().into_iter().enumerate() {
+                let RowOut::Cands(cs) = row else {
+                    panic!("candidates")
+                };
+                let mut lo = vec![f32::NAN; o.vocab()];
+                for c in cs {
+                    lo[c.id as usize] = c.logit;
+                }
+                out[order[i]].push(lo);
+            }
+        }
+        out
+    };
+    let all: Vec<usize> = (0..n).collect();
+    let rev: Vec<usize> = (0..n).rev().collect();
+    let half: Vec<usize> = (0..n / 2).collect();
+    let (pa, pb, ph) = (pooled(&all), pooled(&rev), pooled(&half));
+    let mut rows = Vec::new();
+    let mx = |a: &[f32], b: &[f32]| {
+        (a.iter().zip(b))
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    let (mut s_ab, mut s_ah, mut s_as, mut s_sr, mut s_fr, mut s_ar) =
+        (0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
+    let (mut t20_a, mut t20_s, mut t20_f) = (0f32, 0f32, 0f32);
+    for (s, seq) in seqs.iter().enumerate() {
+        let p = load_prefix(s);
+        let (mut rc, mut fc, mut oc) = (r.new_cache(CTX), f.new_cache(CTX), o.new_cache(CTX));
+        r.feed_batch(&seq[..p], 0, &mut rc);
+        f.feed_batch(&seq[..p], 0, &mut fc);
+        o.feed_batch(&seq[..p], 0, &mut oc);
+        for k in 0..sz.load_steps {
+            let pos = p + k;
+            let lr = r.forward(seq[pos], pos, &mut rc);
+            let lf = f.forward(seq[pos], pos, &mut fc);
+            let ls = o.forward(seq[pos], pos, &mut oc);
+            let la = &pa[s][k];
+            let (lpr, lpa) = (log_softmax(&lr), log_softmax(la));
+            let mut top: Vec<usize> = (0..lr.len()).collect();
+            top.sort_by(|&x, &y| lr[y].total_cmp(&lr[x]));
+            let t20 = |l: &[f32]| {
+                top[..20]
+                    .iter()
+                    .map(|&i| (l[i] - lr[i]).abs())
+                    .fold(0f32, f32::max)
+            };
+            t20_a = t20_a.max(t20(la));
+            t20_s = t20_s.max(t20(&ls));
+            t20_f = t20_f.max(t20(&lf));
+            let (i, d) = (la.iter().zip(&lr).map(|(x, y)| (x - y).abs()).enumerate())
+                .fold((0, 0f32), |b, (i, d)| if d > b.1 { (i, d) } else { b });
+            let rank = top.iter().position(|&j| j == i).unwrap();
+            let h = (s < n / 2).then(|| ph[s][k][i]);
+            let ab = mx(la, &pb[s][k]);
+            let ah = if s < n / 2 { mx(la, &ph[s][k]) } else { 0.0 };
+            let (as_, sr, fr) = (mx(la, &ls), mx(&ls, &lr), mx(&lf, &lr));
+            s_ab = s_ab.max(ab);
+            s_ah = s_ah.max(ah);
+            s_as = s_as.max(as_);
+            s_sr = s_sr.max(sr);
+            s_fr = s_fr.max(fr);
+            s_ar = s_ar.max(d);
+            rows.push((d, format!(
+                "seq {s:2} step {k:2} pos {pos:3}: max|pool-ref| {d:.3} at token {i} rank {rank} \
+                 (p_ref {:.2e}, p_pool {:.2e}; ref top-1 {:.2}): ref {:.3} floor {:.3} pool {:.3} \
+                 rev {:.3} half {} solo {:.3} | row max |pool-rev| {ab:.3} |pool-half| {ah:.3} \
+                 |pool-solo| {as_:.3} |solo-ref| {sr:.3} |floor-ref| {fr:.3}",
+                lpr[i].exp(), lpa[i].exp(), lr[top[0]], lr[i], lf[i], la[i], pb[s][k][i],
+                h.map_or("-".into(), |v| format!("{v:.3}")), ls[i]
+            )));
+        }
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (_, l) in rows.iter().take(15) {
+        eprintln!("{l}");
+    }
+    let over = |t: f32| rows.iter().filter(|r| r.0 >= t).count();
+    eprintln!(
+        "load diag over {} rows: max |pool-ref| {s_ar:.3} (rows >= 6: {}, >= 4: {}), |solo-ref| {s_sr:.3}, \
+         |floor-ref| {s_fr:.3}; |pool-rev| {s_ab:.3}, |pool-half| {s_ah:.3}, |pool-solo| {s_as:.3}; \
+         over r's top-20 only: pool {t20_a:.3} solo {t20_s:.3} floor {t20_f:.3}",
+        rows.len(),
+        over(6.0),
+        over(4.0)
+    );
+}
+
 /// A panic's message.
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<String>()
@@ -465,9 +679,11 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// `assert_graded` on one arm, its failure naming the arm.
-fn assert_arm(what: &str, a: &ArmGrade) -> Result<(), String> {
-    catch_unwind(AssertUnwindSafe(|| assert_graded(&a.mode, &a.floor)))
-        .map_err(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
+fn assert_arm(what: &str, a: &ArmGrade, top1: Top1) -> Result<(), String> {
+    catch_unwind(AssertUnwindSafe(|| {
+        assert_graded_with(&a.mode, &a.floor, top1)
+    }))
+    .map_err(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
 }
 
 /// Print `g`, every arm.
@@ -506,6 +722,11 @@ pub(crate) fn report_graded(what: &str, g: &Graded) {
 /// nothing at all to grade: every logit equal in every arm, ΔNLL 0, every
 /// row's pick the reference's.
 pub(crate) fn assert_graded_vs_exact(what: &str, g: &Graded, bits: bool) {
+    assert_graded_vs_exact_with(what, g, bits, Top1::Points(94));
+}
+
+/// `assert_graded_vs_exact` with the top-1 rule `top1` (`assert_graded_with`).
+pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, top1: Top1) {
     report_graded(what, g);
     let launched = g.launches();
     if g.fast_kernels {
@@ -533,16 +754,20 @@ pub(crate) fn assert_graded_vs_exact(what: &str, g: &Graded, bits: bool) {
         }
         assert_eq!(same, n, "{what}: verify rows");
     }
+    // Every arm graded before failing, so one run names every bound that
+    // trips.
+    let mut errs = Vec::new();
     for a in &g.arms {
         assert!(
             a.mode.positions > 0,
             "{what} [{}]: nothing graded",
             a.arm.name()
         );
-        if let Err(e) = assert_arm(what, a) {
-            panic!("{e}");
+        if let Err(e) = assert_arm(what, a, top1) {
+            errs.push(e);
         }
     }
+    assert!(errs.is_empty(), "{}", errs.join("\n"));
     assert!(
         same * 100 + 2 * n >= fsame * 100 && same * 100 >= 90 * n,
         "{what}: verify rows {same}/{n} the reference's picks (floor {fsame}/{n})"
@@ -685,7 +910,8 @@ fn graded_catches_another_model() {
     report_graded("0.5B Q4_0 vs Q4_K_M exact", &g);
     assert_eq!(g.arms.len(), 4);
     for a in &g.arms {
-        let e = assert_arm("Q4_0", a).expect_err("another model passed an arm of the gate");
+        let e = assert_arm("Q4_0", a, Top1::Points(94))
+            .expect_err("another model passed an arm of the gate");
         eprintln!("as it must: {e}");
         assert!(!e.contains("reference spread"), "{e}");
     }

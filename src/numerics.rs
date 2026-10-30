@@ -64,9 +64,10 @@ impl Numerics {
 
     /// The mode's numerics version (identity.rs states when each counter
     /// bumps): exact's counter, `1`; fast's is exact's and its own,
-    /// `1.1`. Fast mode runs on top of the exact kernels and the
-    /// request-to-text code, so a change to those (an exact bump) moves
-    /// fast's version too, with nobody having to remember a second bump.
+    /// `1.2` (FP8's kernels: `NUMERICS_VERSION_FAST` 2). Fast mode runs on
+    /// top of the exact kernels and the request-to-text code, so a change to
+    /// those (an exact bump) moves fast's version too, with nobody having to
+    /// remember a second bump.
     pub fn version(self) -> String {
         match self {
             Numerics::Exact => format!("{NUMERICS_VERSION_EXACT}"),
@@ -74,7 +75,7 @@ impl Numerics {
         }
     }
 
-    /// The identity tuple's `numerics` value: `exact/1`, `fast/1.1`.
+    /// The identity tuple's `numerics` value: `exact/1`, `fast/1.2`.
     pub fn tag(self) -> String {
         format!("{}/{}", self.name(), self.version())
     }
@@ -86,18 +87,16 @@ impl std::fmt::Display for Numerics {
     }
 }
 
-/// Whether `net` runs any fast-set kernel (`Backend::fast_kernels`): none
-/// does yet, on any backend (module doc). The first fast kernel makes this
-/// true where it routes, and calls `CudaQwen2::fast_launched` at each
-/// launch. The tests that hold fast mode to exact mode's bits while it's
+/// Whether `net` runs any fast-set kernel (`Backend::fast_kernels`): an FP8
+/// checkpoint's native matrices on the GPU (fp8.cu, docs/design/fp8-weights.md),
+/// the only fast kernels; every launch calls `CudaQwen2::fast_launched`. The tests that hold fast mode to exact mode's bits while it's
 /// false (`identity_checks`' path equalities under `serve_identity_fast`,
 /// `graded_vs_exact`'s bit check, the md5 gate's fast column) become
 /// graded-only there, and the graded gate then requires the launch count
 /// to move in the arms it grades: a fast kernel that never ran can't pass
 /// it.
 pub(crate) fn fast_kernels(net: &Backend) -> bool {
-    let _ = net;
-    false
+    net.gpu_nets().iter().any(|n| n.f8_native())
 }
 
 /// What `--numerics fast` says once where no fast kernel exists yet.
@@ -133,7 +132,7 @@ mod tests {
             Numerics::Fast.tag(),
             format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
-        assert_eq!(Numerics::Fast.version(), "1.1");
+        assert_eq!(Numerics::Fast.version(), "1.2");
         assert_eq!(Numerics::Fast.to_string(), "fast");
     }
 

@@ -37,6 +37,7 @@
 use super::{Arg, DevBuf, Func, Gpu, Graph, HostBuf, Module};
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
+use crate::quant::fp8::F8_E4M3;
 use crate::quant::{self, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 use std::rc::Rc;
@@ -200,6 +201,9 @@ struct Mat {
     /// Q6_K: byte offset of its prefill copy (prefill.cu Q6K8, 288 bytes a
     /// block) in `CudaQwen2::w8`, if made (`make_q6k8`).
     c8: Option<usize>,
+    /// F8_E4M3 (fp8.cu): offset in floats of its row scales in the vector
+    /// buffer.
+    ws: Option<u32>,
 }
 
 impl Mat {
@@ -549,6 +553,13 @@ pub(crate) struct CudaQwen2<'g> {
     /// Launches of fast-set kernels (`fast_launched`): the fast-vs-exact
     /// gate reads it to know a fast kernel ran in the arm it grades.
     fast_launches: std::sync::atomic::AtomicU64,
+    /// An FP8 checkpoint's matrices run natively (fp8.cu; its module's
+    /// `Module::f8`): every single-token step goes through the batched
+    /// passes (`Lm` impl), whose products route F8_E4M3 to fp8.cu.
+    pub(super) f8: bool,
+    /// fp8.cu's activation codes and scales (device addresses): the running
+    /// pass's cache's (`BatchBufs::f8`), set by `layer` (`f8_scratch`).
+    pub(super) f8scr: [std::sync::atomic::AtomicU64; 2],
     /// The batched attention of one sequence's few queries by attn_blk_mq
     /// (each tile read once per 16 queries), not attn_blk_b per query: the
     /// same partials (AXON_ATT_MQ=0 turns it off).
@@ -751,6 +762,17 @@ fn act_bytes(n: usize) -> usize {
     2 * np + np / 64 + np / 8 + np / 8
 }
 
+/// An FP8 module's act rows (decode.cu f8_off): the f32 values `quant_warp`
+/// also stores, at this offset.
+pub(super) fn act_f8_off(n: usize) -> usize {
+    act_bytes(n).next_multiple_of(256)
+}
+
+/// `act_bytes` of an FP8 module's nets: the f32 values after the views.
+pub(super) fn act_bytes_f8(n: usize) -> usize {
+    act_f8_off(n) + 4 * n.next_multiple_of(256)
+}
+
 /// The weight types the CUDA kernels take (decode GEMV, batched products,
 /// mla.cu's per-head products).
 const GPU_TYPES: [u32; 11] = [
@@ -779,6 +801,8 @@ fn gpu_type_ok(mt: &Mat, name: &str) -> Result<(), String> {
 /// offset), the arena's size, norms and biases, RoPE frequencies.
 struct Plan<'m> {
     uploads: Vec<(&'m Tensor, usize)>,
+    /// Matrices converted at upload (`place_q8`), after `uploads`.
+    conv: Vec<Conv<'m>>,
     total: usize,
     vecs: Vec<f32>,
     freq_swa: Vec<f64>,
@@ -806,14 +830,13 @@ pub(crate) enum Input<'x> {
 
 /// `t` placed in the weight arena after the last of `uploads` (256-byte
 /// aligned), and recorded there.
-fn place<'t>(t: &'t Tensor, uploads: &mut Vec<(&'t Tensor, usize)>) -> Mat {
+fn place<'t>(t: &'t Tensor, a: &mut Arena<'t>) -> Mat {
     let cols = t.dims[0] as usize;
     let rows = t.n_elements as usize / cols;
     let rb = quant::row_bytes(t.qtype.id, cols);
-    let off = uploads
-        .last()
-        .map_or(0, |&(u, o)| o + (u.n_bytes as usize).next_multiple_of(256));
-    uploads.push((t, off));
+    let off = a.end.next_multiple_of(256);
+    a.end = off + t.n_bytes as usize;
+    a.raw.push((t, off));
     Mat {
         qt: t.qtype.id,
         off,
@@ -821,6 +844,72 @@ fn place<'t>(t: &'t Tensor, uploads: &mut Vec<(&'t Tensor, usize)>) -> Mat {
         rows,
         cols,
         c8: None,
+        ws: None,
+    }
+}
+
+/// `t` (F16, or F8_E4M3 with its row `scales`) as Q8_0 in the arena,
+/// converted on the host at upload (docs/design/fp8-weights.md D1, D3).
+fn place_q8<'t>(t: &'t Tensor, a: &mut Arena<'t>, scales: Option<Vec<f32>>) -> Mat {
+    let cols = t.dims[0] as usize;
+    let rows = t.n_elements as usize / cols;
+    let rb = quant::row_bytes(quant::Q8_0, cols);
+    let off = a.end.next_multiple_of(256);
+    a.end = off + rows * rb;
+    a.conv.push(Conv { t, off, scales });
+    Mat {
+        qt: quant::Q8_0,
+        off,
+        rb,
+        rows,
+        cols,
+        c8: None,
+        ws: None,
+    }
+}
+
+/// The weight arena being planned: tensors uploaded as they are in the
+/// file (`raw`, at their offsets) and converted ones (`conv`); `end` is
+/// past the last one.
+#[derive(Default)]
+pub(super) struct Arena<'m> {
+    raw: Vec<(&'m Tensor, usize)>,
+    conv: Vec<Conv<'m>>,
+    end: usize,
+}
+
+/// A matrix converted to Q8_0 at upload (`place_q8`).
+struct Conv<'m> {
+    t: &'m Tensor,
+    off: usize,
+    scales: Option<Vec<f32>>,
+}
+
+impl Conv<'_> {
+    /// Its Q8_0 bytes (`quant::fp8`'s converters, rows split over threads).
+    fn bytes(&self, m: &Model) -> Vec<u8> {
+        let k = self.t.dims[0] as usize;
+        let rows = self.t.n_elements as usize / k;
+        let (ib, ob) = (
+            quant::row_bytes(self.t.qtype.id, k),
+            quant::row_bytes(quant::Q8_0, k),
+        );
+        let src = m.tensor_data(self.t);
+        let mut out = vec![0u8; rows * ob];
+        let per = rows.div_ceil(16).max(1);
+        std::thread::scope(|sc| {
+            for (i, o) in out.chunks_mut(per * ob).enumerate() {
+                let r0 = i * per;
+                let n = o.len() / ob;
+                let raw = &src[r0 * ib..(r0 + n) * ib];
+                let sc_rows = self.scales.as_ref().map(|s| &s[r0..r0 + n]);
+                sc.spawn(move || match sc_rows {
+                    Some(s) => quant::fp8::f8_rows_to_q8_0(raw, s, k, o),
+                    None => quant::fp8::f16_rows_to_q8_0(raw, k, o),
+                });
+            }
+        });
+        out
     }
 }
 
@@ -1150,6 +1239,10 @@ impl<'g> CudaQwen2<'g> {
         } else {
             Self::upload_pageable(&net.weights, m, &plan.uploads, uploaded)?;
         }
+        for c in &plan.conv {
+            net.weights.write_at(c.off, &c.bytes(m))?;
+            uploaded(c.t);
+        }
         if std::env::var_os("AXON_UPLOAD_TRACE").is_some() {
             let s = t0.elapsed().as_secs_f64();
             eprintln!(
@@ -1467,9 +1560,24 @@ impl<'g> CudaQwen2<'g> {
         let has_head = last == n_layers;
 
         // Every matrix's (tensor, arena offset), uploaded once all fit.
-        let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
+        let mut uploads = Arena::default();
+        // An FP8 checkpoint: its F16 (from BF16) embedding and head as Q8_0
+        // (D3); its F8_E4M3 matrices native (fp8.cu) in an FP8 module, else
+        // as Q8_0 (D1).
+        let fp8 = crate::safetensors::is_fp8(m);
+        if module.f8() && (first > 0 || !has_head || mla_d.is_some() || moe_dims.is_some()) {
+            return Err(
+                "FP8 natively runs every layer of a dense model on one GPU; \
+                        --numerics exact runs its Q8_0 form"
+                    .into(),
+            );
+        }
+        let place_h = |t: &'m Tensor, a: &mut Arena<'m>| match fp8 && t.qtype.id == quant::F16 {
+            true => place_q8(t, a, None),
+            false => place(t, a),
+        };
         let embd_t = tensor(m, "token_embd.weight")?;
-        let embd = (first == 0).then(|| place(embd_t, &mut uploads));
+        let embd = (first == 0).then(|| place_h(embd_t, &mut uploads));
         let output = match (tensor_opt(m, "output.weight"), embd) {
             // No head here: its shape only (no bytes, never read).
             (t, _) if !has_head => {
@@ -1482,12 +1590,13 @@ impl<'g> CudaQwen2<'g> {
                     rows: t.n_elements as usize / cols,
                     cols,
                     c8: None,
+                    ws: None,
                 }
             }
-            (Some(t), _) => place(t, &mut uploads),
+            (Some(t), _) => place_h(t, &mut uploads),
             (None, Some(e)) => e,
             // Tied, and the embedding isn't here: upload it as the head.
-            (None, None) => place(embd_t, &mut uploads),
+            (None, None) => place_h(embd_t, &mut uploads),
         };
         let vocab = output.rows;
         if has_head {
@@ -1515,7 +1624,19 @@ impl<'g> CudaQwen2<'g> {
         for i in (first..last).filter(|_| mla.is_none()) {
             let name = |s: &str| format!("blk.{i}.{s}");
             let mut mat = |s: &str| -> Result<Mat, String> {
-                let mt = place(tensor(m, &name(s))?, &mut uploads);
+                let t = tensor(m, &name(s))?;
+                if t.qtype.id == F8_E4M3 {
+                    let sc = name(&s.replace(".weight", ".scale"));
+                    let scales = vec_f32(m, tensor(m, &sc)?);
+                    return Ok(match module.f8() {
+                        true => Mat {
+                            ws: Some(push_vec(scales) as u32),
+                            ..place(t, &mut uploads)
+                        },
+                        false => place_q8(t, &mut uploads, Some(scales)),
+                    });
+                }
+                let mt = place(t, &mut uploads);
                 gpu_type_ok(&mt, &name(s))?;
                 Ok(mt)
             };
@@ -1624,9 +1745,7 @@ impl<'g> CudaQwen2<'g> {
                 oss: oss_l,
             });
         }
-        let total = uploads
-            .last()
-            .map_or(0, |&(t, off)| off + t.n_bytes as usize);
+        let total = uploads.end;
         // A MoE model has no dense FFN here (no scratch for one).
         let ffn_rows = |l: &LayerW| match l.ffn {
             Ffn::Dense { gate, .. } => gate.rows,
@@ -1715,6 +1834,8 @@ impl<'g> CudaQwen2<'g> {
             tc_attn: module.mma() && head_dim != 256 && !oss,
             fast: module.fast(),
             fast_launches: std::sync::atomic::AtomicU64::new(0),
+            f8: module.f8(),
+            f8scr: Default::default(),
             att_mq: std::env::var("AXON_ATT_MQ").map_or(true, |v| v != "0"),
             att_mq_max: std::env::var("AXON_ATT_MQ_MAX")
                 .ok()
@@ -1748,7 +1869,8 @@ impl<'g> CudaQwen2<'g> {
             }
         }
         let plan = Plan {
-            uploads,
+            uploads: uploads.raw,
+            conv: uploads.conv,
             vecs,
             freq,
             freq_swa,
@@ -1884,6 +2006,20 @@ impl<'g> CudaQwen2<'g> {
 
     /// Longest vector quantized into an activation buffer: the model width,
     /// the attention output (q_dim) or the FFN's hidden width.
+    /// Bytes of a decode act buffer (`act_bytes`; an FP8 module's nets:
+    /// `act_bytes_f8`).
+    fn act_bytes(&self) -> usize {
+        match self.f8 {
+            true => act_bytes_f8(self.act_len()),
+            false => act_bytes(self.act_len()),
+        }
+    }
+
+    /// Whether its matrices run natively as FP8 (fp8.cu, the fast set).
+    pub(crate) fn f8_native(&self) -> bool {
+        self.f8
+    }
+
     fn act_len(&self) -> usize {
         self.dim.max(self.q_dim).max(self.ffn)
     }
@@ -1923,7 +2059,7 @@ impl<'g> CudaQwen2<'g> {
         };
         let kv = self.kv_cache_bytes(kv, max_ctx) + kvf;
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
-        let act = act_bytes(self.act_len());
+        let act = self.act_bytes();
         let parts = self.n_heads * self.att_parts(max_ctx) * (self.head_dim + 2) * f;
         let rope_swa = if self.freq_swa.len() > 0 {
             self.head_dim * f
@@ -2054,7 +2190,7 @@ impl<'g> CudaQwen2<'g> {
             // cause is unknown.)
             att: g.alloc(self.q_dim * f + cmb_cnt_bytes(self.q_dim))?,
             hid: g.alloc(self.ffn * f)?,
-            act: g.alloc(act_bytes(self.act_len()))?,
+            act: g.alloc(self.act_bytes())?,
             part_o: g.alloc(self.n_heads * self.att_parts(att_ctx) * self.head_dim * f)?,
             part_ml: g.alloc(self.n_heads * self.att_parts(att_ctx) * 2 * f)?,
             kraw: g.alloc(self.kv_dim() * f)?,
@@ -2736,6 +2872,10 @@ impl<'g> CudaQwen2<'g> {
         if self.moe.is_some() {
             return Err(MOE_DENSE_STEP.into());
         }
+        // FP8: no decode-step kernels (its steps are batched passes, `Lm`).
+        if self.f8 {
+            return Err("FP8: a decode step outside the batched passes".into());
+        }
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(head != Head::Last, "Head::Last: batched passes only");
         assert!(
@@ -3215,11 +3355,24 @@ impl<'g> Lm for CudaQwen2<'g> {
     }
 
     fn forward(&self, token: u32, pos: usize, cache: &mut CudaCache<'g>) -> Vec<f32> {
+        if self.f8 {
+            // FP8: one token is a batched pass of one row (fp8.cu's products).
+            self.check_batch(&[token], pos, cache);
+            return self
+                .prefill_tokens(cache, &[token], pos)
+                .unwrap_or_else(|e| Self::die(e));
+        }
         self.logits(cache, Input::Token(token), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
 
     fn forward_argmax(&self, token: u32, pos: usize, cache: &mut CudaCache<'g>) -> u32 {
+        if self.f8 {
+            self.check_batch(&[token], pos, cache);
+            return self
+                .verify_tokens(cache, batch::BatchIn::Tokens(&[token]), pos)
+                .unwrap_or_else(|e| Self::die(e))[0];
+        }
         self.pick(cache, Input::Token(token), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
@@ -3232,7 +3385,7 @@ impl<'g> Lm for CudaQwen2<'g> {
             cache.net, self.id,
             "a CudaCache used with another CudaQwen2"
         );
-        let r = if tokens.len() == 1 {
+        let r = if tokens.len() == 1 && !self.f8 {
             self.feed(cache, tokens[0], start) // the step's graph: fewer launches
         } else {
             self.feed_tokens(cache, batch::BatchIn::Tokens(tokens), start)
@@ -3249,7 +3402,7 @@ impl<'g> Lm for CudaQwen2<'g> {
             cache.net, self.id,
             "a CudaCache used with another CudaQwen2"
         );
-        if tokens.len() == 1 {
+        if tokens.len() == 1 && !self.f8 {
             return Lm::forward(self, tokens[0], start, cache);
         }
         self.prefill_tokens(cache, tokens, start)
@@ -3284,7 +3437,7 @@ impl<'g> Lm for CudaQwen2<'g> {
             Some(&token),
             "recent must end with the token"
         );
-        if spec.k > CAND_MAX {
+        if spec.k > CAND_MAX || self.f8 {
             let mut l = Lm::forward(self, token, pos, cache);
             return sample::cands(&mut l, spec, recent);
         }
