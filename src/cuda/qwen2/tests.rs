@@ -44,6 +44,9 @@ pub(crate) struct Agree {
     last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
+    /// `max_abs` over the reference's 20 largest logits only (the FP8
+    /// gate's bound, `Top1::Binomial`).
+    max_abs_top: f32,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
 }
@@ -160,12 +163,28 @@ impl Agree {
         for (x, y) in lr.iter().zip(lo) {
             self.max_abs = self.max_abs.max((x - y).abs());
         }
+        for i in top_k(lr, 20) {
+            self.max_abs_top = self.max_abs_top.max((lr[i] - lo[i]).abs());
+        }
         if ar != ao {
             // How close a call it was, in the reference's logits.
             self.flips.push(lr[ar as usize] - lr[ao as usize]);
             self.flip_at.push(self.positions);
         }
     }
+}
+
+/// The indexes of the `k` largest values of `l` (any order).
+fn top_k(l: &[f32], k: usize) -> Vec<usize> {
+    let mut t: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, &x) in l.iter().enumerate() {
+        if t.len() < k || x > l[t[t.len() - 1]] {
+            let at = t.partition_point(|&j| l[j] >= x);
+            t.insert(at, i);
+            t.truncate(k);
+        }
+    }
+    t
 }
 
 /// The gap between the two largest logits.
@@ -212,7 +231,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
 pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
         "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {:?}), max |dlogit| \
-         {:.3}, flip margins {:?}",
+         {:.3} (top-20 {:.3}), flip margins {:?}",
         a.top1,
         a.positions,
         100.0 * a.top1 as f64 / a.positions as f64,
@@ -220,6 +239,7 @@ pub(crate) fn report(name: &str, a: &Agree) {
         a.max_kl,
         a.over_half,
         a.max_abs,
+        a.max_abs_top,
         a.flips
     );
 }
@@ -407,7 +427,40 @@ pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
             );
         }
     }
-    assert!(ag.max_abs < 6.0, "max logit difference");
+    // Max |dlogit|. The FP8 gate (`Top1::Binomial`): over the reference's
+    // top-20 logits, plus a whole-vocabulary backstop at twice the bound.
+    // Why (gpu_fp8_load_diag, job 1029-205633-ac74, the load arm's 1000
+    // rows): its 8.515 (and 7.018, the only other >= 6) are one sequence's
+    // tail logits, rank 151829 / 151924 of 151936, p_ref 5.7e-12 / 1.4e-13,
+    // p_fast 3.4e-8 / 2.5e-10; the same sequence alone through the decode
+    // path reaches 8.212, and the pool equals itself reversed and halved
+    // bit for bit (max 0.000; pool vs alone 2.678), so no row mixing: FP8's
+    // precision on near-zero-probability logits, not the pool. Over the
+    // top-20: pool 4.087, alone 4.096, floor 2.100.
+    if let Top1::Binomial = top1 {
+        assert!(
+            ag.max_abs_top < 6.0 && ag.max_abs < 12.0,
+            "max logit difference: top-20 {} (< 6), all {} (< 12)",
+            ag.max_abs_top,
+            ag.max_abs
+        );
+    } else {
+        assert!(ag.max_abs < 6.0, "max logit difference");
+    }
+}
+
+/// `top_k` against a full sort.
+#[test]
+fn top_k_is_the_largest() {
+    let l: Vec<f32> = (0..1000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761) >> 7) % 997) as f32 - 400.0)
+        .collect();
+    let mut want: Vec<usize> = (0..l.len()).collect();
+    want.sort_by(|&a, &b| l[b].total_cmp(&l[a]));
+    let mut got: Vec<f32> = top_k(&l, 20).iter().map(|&i| l[i]).collect();
+    got.sort_by(|a, b| b.total_cmp(a));
+    let w: Vec<f32> = want[..20].iter().map(|&i| l[i]).collect();
+    assert_eq!(got, w);
 }
 
 /// `Top1::Binomial` at the 0.5B FP8 decode arm's first numbers: floor
@@ -433,6 +486,17 @@ fn top1_binomial_rule() {
     assert!(!ok(ag(294, 267), ac(294, 276), Top1::Binomial));
     assert!(!ok(ag(1000, 899), ac(1000, 900), Top1::Binomial), "90 %");
     assert!(ok(ag(1000, 1000), ac(1000, 1000), Top1::Binomial));
+    // Max |dlogit| under Binomial: the top-20's < 6, all < 12 (the load
+    // diagnostic's 8.515 in the tail, 4.087 in the top-20, passes).
+    let d = |all, top| Agree {
+        max_abs: all,
+        max_abs_top: top,
+        ..ag(1000, 1000)
+    };
+    assert!(ok(d(8.515, 4.087), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(8.515, 4.087), ac(1000, 1000), Top1::Points(90)));
+    assert!(!ok(d(8.515, 6.0), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(12.0, 4.0), ac(1000, 1000), Top1::Binomial));
     // The outlier bound: KL > 0.5 at most max(1, 2x the floor's) under
     // Binomial (5 vs 5, the first decode arm's, passes; 3 vs 1 fails), one
     // only where the floor flips under Points.

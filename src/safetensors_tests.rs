@@ -798,30 +798,40 @@ fn bad_checkpoints_are_clean_errors() {
     );
 }
 
-/// An FP8 tensor in a checkpoint without a quantization_config: loads
-/// (named in `axon info`), refused by check_supported.
+/// A type the loader doesn't convert (F8_E5M2): loads (named in `axon
+/// info`), refused by check_supported. F8_E4M3 is converted now (an FP8
+/// checkpoint, docs/design/fp8-weights.md): without a quantization_config
+/// saying how it's scaled, it's refused at load, naming the tensor.
 #[test]
 fn unconverted_types_are_refused_by_check_supported() {
-    let d = Dir::new("f8");
-    write_tiny(&d, 1);
     let up = "model.layers.0.mlp.up_proj.weight";
-    let w = tiny_weights();
-    let ts: Vec<(&str, &str, Vec<u64>, Vec<u8>)> = (w.iter())
-        .map(|(n, sh, v)| match n.as_str() {
-            n if n == up => (n, "F8_E4M3", vec![128, 64], vec![0x38; 128 * 64]),
-            n => (
-                n,
-                "BF16",
-                sh.clone(),
-                v.iter().flat_map(|h| h.to_le_bytes()).collect(),
-            ),
-        })
-        .collect();
-    d.put("model.safetensors", &st_bytes(&ts, None));
-    let m = load_dir(&d.0).unwrap();
+    let with = |tag: &str, dt: &'static str| {
+        let d = Dir::new(tag);
+        write_tiny(&d, 1);
+        let w = tiny_weights();
+        let ts: Vec<(&str, &str, Vec<u64>, Vec<u8>)> = (w.iter())
+            .map(|(n, sh, v)| match n.as_str() {
+                n if n == up => (n, dt, vec![128, 64], vec![0x38; 128 * 64]),
+                n => (
+                    n,
+                    "BF16",
+                    sh.clone(),
+                    v.iter().flat_map(|h| h.to_le_bytes()).collect(),
+                ),
+            })
+            .collect();
+        d.put("model.safetensors", &st_bytes(&ts, None));
+        load_dir(&d.0)
+    };
+    let m = with("f8e5", "F8_E5M2").unwrap();
     let e = crate::model::check_supported(&m).unwrap_err().to_string();
     assert!(
-        e.contains("F8_E4M3") && e.contains("blk.0.ffn_up.weight"),
+        e.contains("F8_E5M2") && e.contains("blk.0.ffn_up.weight"),
+        "{e}"
+    );
+    let e = with("f8e4", "F8_E4M3").err().expect("loaded").to_string();
+    assert!(
+        e.contains("without a quantization_config") && e.contains("blk.0.ffn_up.weight"),
         "{e}"
     );
 }

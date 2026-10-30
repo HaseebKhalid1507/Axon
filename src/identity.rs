@@ -822,7 +822,11 @@ mod tests {
             "axon-identity/1\nnumerics=fast/1.2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
-        assert_eq!(f.fingerprint(), "fp_bea740cf61d9d767", "golden (hashlib)");
+        assert_eq!(
+            f.fingerprint(),
+            "fp_c9b871192100d614",
+            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767)"
+        );
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
         assert_eq!(f.json()["numerics"], "fast/1.2");

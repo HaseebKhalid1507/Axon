@@ -64,9 +64,10 @@ impl Numerics {
 
     /// The mode's numerics version (identity.rs states when each counter
     /// bumps): exact's counter, `1`; fast's is exact's and its own,
-    /// `1.1`. Fast mode runs on top of the exact kernels and the
-    /// request-to-text code, so a change to those (an exact bump) moves
-    /// fast's version too, with nobody having to remember a second bump.
+    /// `1.2` (FP8's kernels: `NUMERICS_VERSION_FAST` 2). Fast mode runs on
+    /// top of the exact kernels and the request-to-text code, so a change to
+    /// those (an exact bump) moves fast's version too, with nobody having to
+    /// remember a second bump.
     pub fn version(self) -> String {
         match self {
             Numerics::Exact => format!("{NUMERICS_VERSION_EXACT}"),
@@ -131,7 +132,7 @@ mod tests {
             Numerics::Fast.tag(),
             format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
-        assert_eq!(Numerics::Fast.version(), "1.1");
+        assert_eq!(Numerics::Fast.version(), "1.2");
         assert_eq!(Numerics::Fast.to_string(), "fast");
     }
 
