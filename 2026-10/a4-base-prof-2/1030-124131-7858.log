@@ -1,0 +1,51 @@
+[axon-run 12:41:31] submitted 1030-124131-7858 by /home/haseeb/.cache/axon-wt-a4: /home/haseeb/.cache/axon-wt-a4/.a4bin/base_prof.sh
+[axon-run 12:54:56] scope axon-job-1030-124131-7858-1793379296.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 12:54:56] job 1030-124131-7858 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1030-124131-7858-1793379296 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-wt-a4/.a4bin/base_prof.sh
+=== A/A run 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+  pool of 128 x 704: cuMemAlloc_v2: CUDA_ERROR_OUT_OF_MEMORY: out of memory
+depth 600: decode step (forward_argmax) 12.287 ms; pool 64 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 22.995 | 1.87 | 1392 |
+prof depth 600 nb 32: 23.429 ms (no graph, 424 events): embed 0.007, rmsnorm 0.436, q 1.229, k 0.459, v6 0.277, qkv 0.012, rope_kv 0.212, attn 2.153, combine 0.111, wo 1.173, gate 0.023, gate_up 8.451, swiglu 0.188, down6 3.553, down 0.014, v4 0.229, down4 2.647, head 2.251
+kernels: plain
+depth 256: decode step (forward_argmax) 10.659 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 32 | 0 x1 | 21.724 | 2.04 | 1473 |
+[axon-run 12:55:31] FOREIGN_GPU sample max=0% mean=0.0% n=6
+| 256 | 128 | 0 x1 | 38.751 | 3.64 | 3303 |
+prof depth 256 nb 32: 23.840 ms (no graph, 424 events): embed 0.007, rmsnorm 0.488, q 1.236, k 0.467, v6 0.281, qkv 0.012, rope_kv 0.222, attn 1.179, combine 0.117, wo 1.659, gate 0.035, gate_up 8.855, swiglu 0.212, down6 4.151, down 0.019, v4 0.232, down4 2.607, head 2.057
+prof depth 256 nb 128: 39.593 ms (no graph, 424 events): embed 0.010, rmsnorm 0.604, q 2.114, k 0.698, v6 0.450, qkv 0.036, rope_kv 0.369, attn 4.633, combine 0.162, wo 2.116, gate 0.022, gate_up 13.522, swiglu 0.694, down6 5.714, down 0.039, v4 0.336, down4 4.769, head 3.299
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 39.69s
+
+=== A/A run 2
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+  pool of 128 x 704: cuMemAlloc_v2: CUDA_ERROR_OUT_OF_MEMORY: out of memory
+depth 600: decode step (forward_argmax) 10.464 ms; pool 64 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 23.171 | 2.21 | 1381 |
+prof depth 600 nb 32: 23.908 ms (no graph, 424 events): embed 0.008, rmsnorm 0.495, q 1.425, k 0.476, v6 0.284, qkv 0.013, rope_kv 0.247, attn 2.651, combine 0.126, wo 1.351, gate 0.030, gate_up 7.748, swiglu 0.201, down6 3.841, down 0.015, v4 0.235, down4 2.589, head 2.168
+kernels: plain
+depth 256: decode step (forward_argmax) 10.824 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+[axon-run 12:56:05] FOREIGN_GPU sample max=14% mean=8.0% n=6 (Xorg 2952 9%)
+| 256 | 32 | 0 x1 | 22.100 | 2.04 | 1448 |
+| 256 | 128 | 0 x1 | 38.947 | 3.60 | 3287 |
+prof depth 256 nb 32: 24.317 ms (no graph, 424 events): embed 0.007, rope 0.007, rmsnorm 0.511, q 1.246, k 0.474, v6 0.286, qkv 0.026, rope_kv 0.239, attn 1.388, combine 0.134, wo 1.175, gate 0.037, gate_up 8.655, swiglu 0.225, down6 4.307, down 0.031, v4 0.246, down4 3.399, head 1.924
+prof depth 256 nb 128: 38.273 ms (no graph, 424 events): embed 0.012, rmsnorm 0.581, q 1.874, k 0.666, v6 0.420, qkv 0.011, rope_kv 0.366, attn 5.391, combine 0.165, wo 1.908, gate 0.026, gate_up 12.397, swiglu 0.515, down6 5.377, down 0.014, v4 0.331, down4 4.367, head 3.846
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 38.62s
+
+[axon-run 12:56:15] exit 0 after 78.5s (host bella)
+[axon-run 12:56:16] FOREIGN_GPU max=14% mean=3.7% samples=13 top: kitty 3834185 14%

@@ -1,0 +1,29 @@
+{
+ "label": "a4-base-prof",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1030-124131-7858",
+   "name": "a4-base-prof",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "base_prof.sh",
+   "started": 1793379296.5372458,
+   "ended": 1793379376.084448,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d899e4d331b3dd85ac4f82bd022ff27cef5fe0dd39c6f3ec33c227359958be8d",
+   "log_bytes": 4413
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-30 12:56:16 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
