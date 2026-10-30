@@ -1,0 +1,52 @@
+[axon-run 20:19:35] submitted 1029-201935-2a32 by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/bench7b.sh bin/axon-bbd9821 3
+[axon-run 08:08:18] scope axon-job-1029-201935-2a32-1793362098.scope in app-axonjobs.slice: MemoryMax 17390 MB, MemoryHigh 15651 MB, no swap, oomd pressure kill 80% (claim 10911 MB): an OOM here kills only this job
+[axon-run 08:08:18] job 1029-201935-2a32 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-201935-2a32-1793362098 --slice=app-axonjobs.slice -p MemoryMax=17390M -p MemoryHigh=15651M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-fp8/bench7b.sh bin/axon-bbd9821 3
+BENCH7B out /home/haseeb/.cache/axon-fp8/bench7b-axon-bbd9821-1030-080818 bin /home/haseeb/.cache/axon-fp8/bin/axon-bbd9821 sha256 4c6b17f8cdfd07c0
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, [N/A], 3090 MHz, 68
+r1	f8exact	tg128	53.26	ntok=128	rc=0	32 4.6 TAINTED
+r1	f8exact	pp512	2404.22	ntok=513	rc=0	22 11.2 TAINTED
+r1	f8exact	pp2048	3675.25	ntok=2054	rc=0	22 5.5 TAINTED
+r1	q4km	tg128	85.21	ntok=128	rc=0	14 3.5 clean
+r1	q4km	pp512	4858.01	ntok=513	rc=0	10 5.0 clean
+r1	q4km	pp2048	4683.15	ntok=2054	rc=0	80 40.0 TAINTED
+[axon-run 08:08:53] FOREIGN_GPU sample max=22% mean=9.8% n=6 (Xorg 2952 3%)
+r1	f8fast	tg128	32.38	ntok=128	rc=0	31 6.0 TAINTED
+r1	f8fast	pp512	4323.55	ntok=513	rc=0	28 15.5 TAINTED
+r1	f8fast	pp2048	4435.82	ntok=2054	rc=0	26 11.7 TAINTED
+r2	q4km	tg128	102.10	ntok=128	rc=0	13 5.3 TAINTED
+r2	q4km	pp512	4203.14	ntok=514	rc=0	7 5.0 clean
+r2	q4km	pp2048	4750.99	ntok=2054	rc=0	30 17.5 TAINTED
+[axon-run 08:09:28] FOREIGN_GPU sample max=71% mean=20.2% n=6 (Xorg 2952 4%)
+r2	f8fast	tg128	32.03	ntok=128	rc=0	39 7.4 TAINTED
+r2	f8fast	pp512	3711.85	ntok=514	rc=0	32 11.3 TAINTED
+r2	f8fast	pp2048	4295.72	ntok=2053	rc=0	70 35.0 TAINTED
+r2	f8exact	tg128	52.39	ntok=128	rc=0	10 1.4 clean
+r2	f8exact	pp512	3224.88	ntok=513	rc=0	17 7.7 TAINTED
+r2	f8exact	pp2048	3736.25	ntok=2054	rc=0	20 8.8 TAINTED
+[axon-run 08:10:02] FOREIGN_GPU sample max=12% mean=5.8% n=6 (Xorg 2952 5%)
+r3	f8fast	tg128	31.46	ntok=128	rc=0	8 3.4 clean
+r3	f8fast	pp512	4089.91	ntok=514	rc=0	28 10.3 TAINTED
+r3	f8fast	pp2048	4282.86	ntok=2054	rc=0	32 16.0 TAINTED
+r3	f8exact	tg128	54.04	ntok=128	rc=0	20 8.2 TAINTED
+r3	f8exact	pp512	3169.46	ntok=514	rc=0	16 6.0 TAINTED
+[axon-run 08:10:37] FOREIGN_GPU sample max=43% mean=11.0% n=6
+r3	f8exact	pp2048	3214.82	ntok=2054	rc=0	0 0.0 clean
+r3	q4km	tg128	84.94	ntok=128	rc=0	0 0.0 clean
+r3	q4km	pp512	4224.71	ntok=514	rc=0	8 4.0 clean
+r3	q4km	pp2048	5350.65	ntok=2054	rc=0	0 0.0 clean
+identity:    fp_0322e669276aa65b
+identity:    fp_dc45d137feb2a71f
+identity:    fp_ec46752faa5d757a
+== medians (clean rows)
+f8fast   tg128   median 31.46 (n 1)
+f8fast   pp512   median NA (n 0)
+f8fast   pp2048  median NA (n 0)
+f8exact  tg128   median 52.39 (n 1)
+f8exact  pp512   median NA (n 0)
+f8exact  pp2048  median 3214.82 (n 1)
+q4km     tg128   median 84.94 (n 2)
+q4km     pp512   median 4224.71 (n 3)
+q4km     pp2048  median 5350.65 (n 1)
+BENCH7B DONE
+[axon-run 08:10:55] exit 0 after 157.5s (host bella)
+[axon-run 08:10:57] FOREIGN_GPU max=71% mean=10.9% samples=27 top: zen-bin 3791878 42%, Xorg 2952 29%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

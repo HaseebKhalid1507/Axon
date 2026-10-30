@@ -1,0 +1,16 @@
+[axon-run 20:19:35] submitted 1029-201935-949b by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/acc7b_gpu.sh bin/axon-bbd9821 acc7b
+[axon-run 00:52:19] scope axon-job-1029-201935-949b-1793335939.scope in app-axonjobs.slice: MemoryMax 14530 MB, MemoryHigh 13077 MB, no swap, oomd pressure kill 80% (claim 9004 MB): an OOM here kills only this job
+[axon-run 00:52:19] job 1029-201935-949b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-201935-949b-1793335939 --slice=app-axonjobs.slice -p MemoryMax=14530M -p MemoryHigh=13077M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/acc7b_gpu.sh bin/axon-bbd9821 acc7b
+axon-q 00:52:19 start slot 16-23: /home/haseeb/.cache/axon-fp8/acc7b_gpu.sh bin/axon-bbd9821 acc7b
+acc7b/f8-fast-decode.json: 5855 positions
+f8-fast-decode done 233s
+acc7b/f8-fast-batched.json: 5343 positions
+f8-fast-batched done 456s
+acc7b/f8-exact-decode.json: 5855 positions
+f8-exact-decode done 596s
+acc7b/q4km-decode.json: 5855 positions
+q4km-decode done 688s
+acc7b/q4km-batched.json: 5343 positions
+q4km-batched done 901s
+ACC7B_GPU DONE
+[axon-run 01:07:20] exit 0 after 900.7s (host bella)

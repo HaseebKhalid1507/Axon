@@ -1,0 +1,10 @@
+[axon-run 20:19:35] submitted 1029-201935-bd1a by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/acc7b_cpu.sh bin/axon-bbd9821 acc7b
+[axon-run 01:07:21] scope axon-job-1029-201935-bd1a-1793336841.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 01:07:21] job 1029-201935-bd1a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-201935-bd1a-1793336841 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/acc7b_cpu.sh bin/axon-bbd9821 acc7b
+axon-q 01:07:21 start slot 16-23: /home/haseeb/.cache/axon-fp8/acc7b_cpu.sh bin/axon-bbd9821 acc7b
+acc7b/ref.json: 5855 positions
+ref done 4540s
+acc7b/emu16.json: 3213 positions
+emu done 6734s
+ACC7B_CPU DONE
+[axon-run 02:59:35] exit 0 after 6734.3s (host bella)
