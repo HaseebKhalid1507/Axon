@@ -1,0 +1,5 @@
+[axon-run 12:13:27] submitted 1030-121327-e600 by /home/haseeb/.cache/axon-wt-a4: /home/haseeb/.cache/axon-wt-a4/.a4bin/base_prof.sh
+[axon-run 12:13:28] timing job waiting: foreign GPU load 12 % (kitty 3834185 9%, Xorg 2952 3%), quiet 0 s of the 120 s needed (on bella; > 10 %)
+[axon-run 12:34:33] /home/haseeb/.cache/axon-wt-a4/.a4bin/base_prof.sh changed after submit (rebuilt?): refusing to run a different binary than submitted. Resubmit.
+[axon-run 12:34:33] exit 125 after 0.0s (host bella)
+[axon-run 12:34:38] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
