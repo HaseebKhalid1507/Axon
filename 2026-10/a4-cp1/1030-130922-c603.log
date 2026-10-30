@@ -1,0 +1,433 @@
+[axon-run 13:09:22] submitted 1030-130922-c603 by /home/haseeb/.cache/axon-wt-a4: /home/haseeb/.cache/axon-wt-a4/.a4bin/ab.sh
+[axon-run 14:09:10] scope axon-job-1030-130922-c603-1793383750.scope in app-axonjobs.slice: MemoryMax 15718 MB, MemoryHigh 14146 MB, no swap, oomd pressure kill 80% (claim 9796 MB): an OOM here kills only this job
+[axon-run 14:09:10] job 1030-130922-c603 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1030-130922-c603-1793383750 --slice=app-axonjobs.slice -p MemoryMax=15718M -p MemoryHigh=14146M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-wt-a4/.a4bin/ab.sh
+=== step 1: micro-bench (down Q4_K, nb 32/64)
+
+running 1 test
+test cuda::qwen2::tests::cuda_gemm_tile_bench ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs
+REGS gemm2s_q4_k: 185 regs, 0 local bytes
+REGS gemm2s_q4_k_gu: 189 regs, 0 local bytes
+REGS gemm2t_q4_k: 255 regs, 0 local bytes
+REGS gemm2t_q5_k: 255 regs, 0 local bytes
+REGS gemm2t_q4_k_gu: 255 regs, 0 local bytes
+REGS gemm2r_q4_k: 132 regs, 0 local bytes
+REGS gemm2r2_q4_k: 128 regs, 0 local bytes
+TILE down nb 32    gemm2s_q4_k     median  11.82 TMAC/s 183.8 us (min 11.37 max 11.95) clk 2452 MHz -> 105 MAC/clk/SM
+TILE down nb 32    gemm2t_q4_k     median  14.98 TMAC/s 145.0 us (min 14.63 max 15.41) clk 2482 MHz -> 131 MAC/clk/SM
+TILE down nb 32    gemm2r_q4_k     median  10.66 TMAC/s 203.8 us (min 10.39 max 11.43) clk 2334 MHz -> 99 MAC/clk/SM
+TILE down nb 32    gemm2r2_q4_k    median  11.09 TMAC/s 195.9 us (min 9.54 max 11.35) clk 2476 MHz -> 97 MAC/clk/SM
+TILE down nb 64    gemm2s_q4_k     median  22.08 TMAC/s 196.8 us (min 21.52 max 22.49) clk 2400 MHz -> 200 MAC/clk/SM
+TILE down nb 64    gemm2t_q4_k     median  26.79 TMAC/s 162.2 us (min 25.14 max 27.81) clk 2385 MHz -> 244 MAC/clk/SM
+TILE down nb 64    gemm2r_q4_k     median  19.40 TMAC/s 223.9 us (min 18.88 max 19.80) clk 2422 MHz -> 174 MAC/clk/SM
+TILE down nb 64    gemm2r2_q4_k    median  19.13 TMAC/s 227.2 us (min 18.17 max 20.49) clk 2367 MHz -> 176 MAC/clk/SM
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 18.96s
+
+=== step 2: config M round 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:09:44] FOREIGN_GPU sample max=14% mean=6.2% n=6 (picom 105604 11%)
+depth 600: decode step (forward_argmax) 10.319 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 18.876 | 1.83 | 848 |
+| 600 | 32 | 0 x1 | 22.537 | 2.18 | 1420 |
+| 600 | 64 | 0 x1 | 26.596 | 2.58 | 2406 |
+| 600 | 128 | 0 x1 | 44.059 | 4.27 | 2905 |
+prof depth 600 nb 32: 27.297 ms (no graph, 424 events): embed 0.008, rmsnorm 0.448, q 1.813, k 0.453, v6 0.293, qkv 0.024, rope_kv 0.335, attn 3.894, combine 0.115, wo 1.162, gate 0.022, gate_up 8.894, swiglu 0.227, down6 4.515, down 0.011, v4 0.215, down4 2.559, head 2.305
+prof depth 600 nb 64: 28.270 ms (no graph, 424 events): embed 0.009, rope 0.006, rmsnorm 0.498, q 1.252, k 0.654, v6 0.411, qkv 0.020, rope_kv 0.268, attn 6.286, combine 0.129, wo 1.212, gate 0.021, gate_up 7.392, swiglu 0.288, down6 4.159, down 0.020, v4 0.328, down4 3.261, head 2.055
+prof depth 600 nb 128: 44.709 ms (no graph, 424 events): embed 0.011, rope 0.006, rmsnorm 0.603, q 1.880, k 0.677, v6 0.413, qkv 0.024, rope_kv 0.369, attn 11.706, combine 0.171, wo 2.099, gate 0.025, gate_up 11.703, swiglu 0.506, down6 5.681, down 0.022, v4 0.340, down4 5.066, head 3.407
+kernels: plain
+[axon-run 14:10:19] FOREIGN_GPU sample max=22% mean=3.7% n=6
+depth 256: decode step (forward_argmax) 10.564 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 18.495 | 1.75 | 865 |
+| 256 | 32 | 0 x1 | 21.465 | 2.03 | 1491 |
+| 256 | 64 | 0 x1 | 24.280 | 2.30 | 2636 |
+| 256 | 128 | 0 x1 | 38.004 | 3.60 | 3368 |
+prof depth 256 nb 32: 22.274 ms (no graph, 424 events): embed 0.006, rope 0.006, rmsnorm 0.482, q 1.415, k 0.482, v6 0.285, qkv 0.022, rope_kv 0.236, attn 1.378, combine 0.131, wo 1.184, gate 0.035, gate_up 7.276, swiglu 0.223, down6 4.013, down 0.010, v4 0.243, down4 2.897, head 1.951
+prof depth 256 nb 64: 25.640 ms (no graph, 424 events): embed 0.008, rope 0.006, rmsnorm 0.504, q 1.269, k 0.972, v6 0.419, qkv 0.013, rope_kv 0.274, attn 2.533, combine 0.129, wo 1.232, gate 0.025, gate_up 8.014, swiglu 0.295, down6 4.202, down 0.014, v4 0.336, down4 2.686, head 2.706
+prof depth 256 nb 128: 38.869 ms (no graph, 424 events): embed 0.011, rope 0.006, rmsnorm 0.611, q 2.537, k 0.688, v6 0.437, qkv 0.022, rope_kv 0.375, attn 4.875, combine 0.163, wo 2.163, gate 0.026, gate_up 12.632, swiglu 0.510, down6 5.435, down 0.020, v4 0.335, down4 4.811, head 3.212
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 73.59s
+
+=== step 2: config A round 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:10:53] FOREIGN_GPU sample max=23% mean=7.8% n=6
+depth 600: decode step (forward_argmax) 10.491 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 24.073 | 2.29 | 665 |
+HOST depth 600 nb 16: 0.534 ms/step of 24.073
+| 600 | 32 | 0 x1 | 25.708 | 2.45 | 1245 |
+HOST depth 600 nb 32: 0.271 ms/step of 25.708
+| 600 | 64 | 0 x1 | 30.254 | 2.88 | 2115 |
+HOST depth 600 nb 64: 0.269 ms/step of 30.254
+[axon-run 14:11:28] FOREIGN_GPU sample max=32% mean=17.3% n=6 (picom 105604 14%, kitty 109043 14%)
+| 600 | 128 | 0 x1 | 53.443 | 5.09 | 2395 |
+HOST depth 600 nb 128: 0.376 ms/step of 53.443
+prof depth 600 nb 32: 27.867 ms (no graph, 368 events): embed 0.010, rmsnorm 0.465, k 0.688, v6 0.301, qkv 1.140, rope_kv 0.195, attn 3.191, combine 0.136, wo 2.833, gate 0.018, gate_up 8.957, swiglu 0.239, down6 4.158, down 0.026, down4 3.271, head 2.235
+prof depth 600 nb 64: 33.376 ms (no graph, 368 events): embed 0.008, rope 0.006, rmsnorm 0.517, k 0.719, v6 0.807, qkv 0.731, rope_kv 0.235, attn 6.201, combine 0.163, wo 1.365, gate 0.020, gate_up 9.677, swiglu 0.303, down6 4.948, down 0.019, down4 5.024, head 2.632
+prof depth 600 nb 128: 53.192 ms (no graph, 368 events): embed 0.012, rope 0.006, rmsnorm 0.981, k 1.070, v6 0.462, qkv 1.545, rope_kv 0.338, attn 10.451, combine 0.196, wo 3.254, gate 0.031, gate_up 17.848, swiglu 0.515, down6 6.339, down 0.040, down4 6.073, head 4.030
+kernels: plain
+depth 256: decode step (forward_argmax) 11.468 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 21.368 | 1.86 | 749 |
+HOST depth 256 nb 16: 0.290 ms/step of 21.368
+| 256 | 32 | 0 x1 | 26.344 | 2.30 | 1215 |
+HOST depth 256 nb 32: 0.393 ms/step of 26.344
+| 256 | 64 | 0 x1 | 31.663 | 2.76 | 2021 |
+HOST depth 256 nb 64: 0.541 ms/step of 31.663
+[axon-run 14:12:02] FOREIGN_GPU sample max=36% mean=15.5% n=6 (Xorg 105425 9%)
+| 256 | 128 | 0 x1 | 47.549 | 4.15 | 2692 |
+HOST depth 256 nb 128: 0.305 ms/step of 47.549
+prof depth 256 nb 32: 24.954 ms (no graph, 368 events): embed 0.010, rmsnorm 0.492, k 1.031, v6 0.324, qkv 0.740, rope_kv 0.204, attn 1.411, combine 0.151, wo 1.721, gate 0.029, gate_up 8.753, swiglu 0.228, down6 4.305, down 0.018, down4 3.001, head 2.532
+prof depth 256 nb 64: 30.249 ms (no graph, 368 events): embed 0.009, rope 0.006, rmsnorm 0.560, k 0.774, v6 0.504, qkv 0.784, rope_kv 0.258, attn 3.098, combine 0.168, wo 2.103, gate 0.020, gate_up 9.839, swiglu 0.341, down6 5.280, down 0.031, down4 3.760, head 2.713
+prof depth 256 nb 128: 46.185 ms (no graph, 368 events): embed 0.012, rope 0.006, rmsnorm 0.666, k 1.189, v6 0.508, qkv 1.196, rope_kv 0.367, attn 4.920, combine 0.190, wo 2.709, gate 0.021, gate_up 16.568, swiglu 0.573, down6 6.567, down 0.028, down4 6.921, head 3.742
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 85.87s
+
+=== step 2: config B round 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 12.709 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+[axon-run 14:12:37] FOREIGN_GPU sample max=19% mean=5.5% n=6
+| 600 | 16 | 0 x1 | 21.495 | 1.69 | 744 |
+HOST depth 600 nb 16: 0.106 ms/step of 21.495
+| 600 | 32 | 0 x1 | 26.740 | 2.10 | 1197 |
+HOST depth 600 nb 32: 0.083 ms/step of 26.740
+| 600 | 64 | 0 x1 | 30.651 | 2.41 | 2088 |
+HOST depth 600 nb 64: 0.094 ms/step of 30.651
+| 600 | 128 | 0 x1 | 49.009 | 3.86 | 2612 |
+HOST depth 600 nb 128: 0.088 ms/step of 49.009
+prof depth 600 nb 32: 26.776 ms (no graph, 368 events): embed 0.009, rope 0.006, rmsnorm 0.483, k 0.750, v6 0.566, qkv 0.757, rope_kv 0.194, attn 2.528, combine 0.137, wo 1.385, gate 0.019, gate_up 9.825, swiglu 0.226, down6 4.440, down 0.018, down4 3.283, head 2.148
+prof depth 600 nb 64: 31.573 ms (no graph, 368 events): embed 0.009, rope 0.006, rmsnorm 0.789, k 0.821, v6 0.515, qkv 0.833, rope_kv 0.263, attn 4.944, combine 0.185, wo 1.517, gate 0.032, gate_up 10.998, swiglu 0.347, down6 4.568, down 0.019, down4 3.447, head 2.278
+prof depth 600 nb 128: 48.951 ms (no graph, 368 events): embed 0.014, rope 0.006, rmsnorm 0.678, k 1.175, v6 0.492, qkv 1.568, rope_kv 0.356, attn 9.769, combine 0.243, wo 2.267, gate 0.031, gate_up 15.063, swiglu 0.820, down6 7.273, down 0.028, down4 5.498, head 3.670
+kernels: plain
+[axon-run 14:13:11] FOREIGN_GPU sample max=12% mean=3.5% n=6
+depth 256: decode step (forward_argmax) 11.719 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 19.872 | 1.70 | 805 |
+HOST depth 256 nb 16: 0.087 ms/step of 19.872
+| 256 | 32 | 0 x1 | 25.229 | 2.15 | 1268 |
+HOST depth 256 nb 32: 0.083 ms/step of 25.229
+| 256 | 64 | 0 x1 | 28.811 | 2.46 | 2221 |
+HOST depth 256 nb 64: 0.084 ms/step of 28.811
+| 256 | 128 | 0 x1 | 44.220 | 3.77 | 2895 |
+HOST depth 256 nb 128: 0.086 ms/step of 44.220
+prof depth 256 nb 32: 25.650 ms (no graph, 368 events): embed 0.022, rope 0.019, rmsnorm 0.552, k 0.779, v6 0.338, qkv 0.798, rope_kv 0.219, attn 1.802, combine 0.173, wo 1.416, gate 0.034, gate_up 8.757, swiglu 0.237, down6 4.649, down 0.022, down4 3.281, head 2.552
+prof depth 256 nb 64: 31.000 ms (no graph, 368 events): embed 0.010, rope 0.006, rmsnorm 0.582, k 0.803, v6 0.508, qkv 0.827, rope_kv 0.254, attn 2.800, combine 0.169, wo 1.883, gate 0.017, gate_up 11.567, swiglu 0.358, down6 4.980, down 0.031, down4 3.828, head 2.377
+prof depth 256 nb 128: 44.978 ms (no graph, 368 events): embed 0.013, rope 0.006, rmsnorm 0.661, k 1.164, v6 0.494, qkv 1.175, rope_kv 0.597, attn 5.220, combine 0.210, wo 2.292, gate 0.029, gate_up 16.033, swiglu 0.583, down6 7.602, down 0.018, down4 5.126, head 3.755
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 87.76s
+
+=== step 2: config C round 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:13:46] FOREIGN_GPU sample max=14% mean=2.3% n=6
+depth 600: decode step (forward_argmax) 10.505 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 20.569 | 1.96 | 778 |
+HOST depth 600 nb 16: 0.072 ms/step of 20.569
+| 600 | 32 | 0 x1 | 25.759 | 2.45 | 1242 |
+HOST depth 600 nb 32: 0.084 ms/step of 25.759
+| 600 | 64 | 0 x1 | 30.879 | 2.94 | 2073 |
+HOST depth 600 nb 64: 0.080 ms/step of 30.879
+[axon-run 14:14:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+| 600 | 128 | 0 x1 | 48.177 | 4.59 | 2657 |
+HOST depth 600 nb 128: 0.086 ms/step of 48.177
+prof depth 600 nb 32: 27.293 ms (no graph, 368 events): embed 0.009, rope 0.006, rmsnorm 0.503, k 0.722, v6 0.318, qkv 0.745, rope_kv 0.202, attn 3.652, combine 0.138, wo 1.348, gate 0.018, gate_up 9.276, swiglu 0.246, down6 4.698, down 0.027, down4 3.219, head 2.164
+prof depth 600 nb 64: 31.734 ms (no graph, 368 events): embed 0.009, rope 0.007, rmsnorm 0.559, k 0.772, v6 0.505, qkv 0.774, rope_kv 0.264, attn 6.024, combine 0.185, wo 2.015, gate 0.019, gate_up 8.798, swiglu 0.333, down6 5.295, down 0.029, down4 3.839, head 2.307
+prof depth 600 nb 128: 49.095 ms (no graph, 368 events): embed 0.011, rope 0.006, rmsnorm 0.655, k 1.106, v6 0.474, qkv 1.132, rope_kv 0.365, attn 11.813, combine 0.243, wo 2.197, gate 0.029, gate_up 14.708, swiglu 0.553, down6 6.650, down 0.020, down4 5.294, head 3.840
+kernels: plain
+depth 256: decode step (forward_argmax) 11.119 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 20.500 | 1.84 | 780 |
+HOST depth 256 nb 16: 0.082 ms/step of 20.500
+| 256 | 32 | 0 x1 | 24.590 | 2.21 | 1301 |
+HOST depth 256 nb 32: 0.091 ms/step of 24.590
+| 256 | 64 | 0 x1 | 27.935 | 2.51 | 2291 |
+HOST depth 256 nb 64: 0.084 ms/step of 27.935
+[axon-run 14:14:55] FOREIGN_GPU sample max=26% mean=8.7% n=6 (picom 105604 12%)
+| 256 | 128 | 0 x1 | 43.081 | 3.87 | 2971 |
+HOST depth 256 nb 128: 0.078 ms/step of 43.081
+prof depth 256 nb 32: 24.660 ms (no graph, 368 events): embed 0.007, rmsnorm 0.506, k 0.751, v6 0.321, qkv 0.760, rope_kv 0.187, attn 1.563, combine 0.159, wo 1.399, gate 0.029, gate_up 9.294, swiglu 0.243, down6 4.267, down 0.018, down4 3.006, head 2.147
+prof depth 256 nb 64: 29.483 ms (no graph, 368 events): embed 0.008, rope 0.006, rmsnorm 0.573, k 0.807, v6 0.502, qkv 0.823, rope_kv 0.249, attn 2.293, combine 0.172, wo 1.897, gate 0.023, gate_up 9.792, swiglu 0.338, down6 4.982, down 0.020, down4 4.344, head 2.655
+prof depth 256 nb 128: 45.378 ms (no graph, 368 events): embed 0.011, rope 0.006, rmsnorm 0.670, k 1.616, v6 0.495, qkv 1.199, rope_kv 0.348, attn 4.209, combine 0.196, wo 2.433, gate 0.023, gate_up 16.457, swiglu 0.542, down6 6.851, down 0.030, down4 6.253, head 4.038
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 84.60s
+
+=== step 2: config B round 2
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 11.835 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 20.785 | 1.76 | 770 |
+HOST depth 600 nb 16: 0.071 ms/step of 20.785
+[axon-run 14:15:30] FOREIGN_GPU sample max=11% mean=1.8% n=6
+| 600 | 32 | 0 x1 | 26.185 | 2.21 | 1222 |
+HOST depth 600 nb 32: 0.065 ms/step of 26.185
+| 600 | 64 | 0 x1 | 31.336 | 2.65 | 2042 |
+HOST depth 600 nb 64: 0.086 ms/step of 31.336
+| 600 | 128 | 0 x1 | 48.793 | 4.12 | 2623 |
+HOST depth 600 nb 128: 0.076 ms/step of 48.793
+kernels: plain
+depth 256: decode step (forward_argmax) 11.702 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+[axon-run 14:16:04] FOREIGN_GPU sample max=22% mean=3.7% n=6 (Xorg 105425 22%)
+| 256 | 16 | 0 x1 | 20.084 | 1.72 | 797 |
+HOST depth 256 nb 16: 0.067 ms/step of 20.084
+| 256 | 32 | 0 x1 | 25.441 | 2.17 | 1258 |
+HOST depth 256 nb 32: 0.079 ms/step of 25.441
+| 256 | 64 | 0 x1 | 29.083 | 2.49 | 2201 |
+HOST depth 256 nb 64: 0.076 ms/step of 29.083
+| 256 | 128 | 0 x1 | 44.622 | 3.81 | 2869 |
+HOST depth 256 nb 128: 0.085 ms/step of 44.622
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 85.79s
+
+=== step 2: config C round 2
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:16:39] FOREIGN_GPU sample max=19% mean=7.7% n=6 (picom 105604 16%)
+depth 600: decode step (forward_argmax) 11.534 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 20.576 | 1.78 | 778 |
+HOST depth 600 nb 16: 0.043 ms/step of 20.576
+| 600 | 32 | 0 x1 | 25.345 | 2.20 | 1263 |
+HOST depth 600 nb 32: 0.067 ms/step of 25.345
+| 600 | 64 | 0 x1 | 35.072 | 3.04 | 1825 |
+HOST depth 600 nb 64: 0.321 ms/step of 35.072
+[axon-run 14:17:13] FOREIGN_GPU sample max=39% mean=13.0% n=6
+| 600 | 128 | 0 x1 | 54.348 | 4.71 | 2355 |
+HOST depth 600 nb 128: 0.207 ms/step of 54.348
+kernels: plain
+depth 256: decode step (forward_argmax) 12.490 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 23.172 | 1.86 | 690 |
+HOST depth 256 nb 16: 0.152 ms/step of 23.172
+| 256 | 32 | 0 x1 | 27.000 | 2.16 | 1185 |
+HOST depth 256 nb 32: 0.183 ms/step of 27.000
+[axon-run 14:17:47] FOREIGN_GPU sample max=12% mean=5.3% n=6 (picom 105604 9%)
+| 256 | 64 | 0 x1 | 31.129 | 2.49 | 2056 |
+HOST depth 256 nb 64: 0.182 ms/step of 31.129
+| 256 | 128 | 0 x1 | 47.812 | 3.83 | 2677 |
+HOST depth 256 nb 128: 0.152 ms/step of 47.812
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 90.84s
+
+=== step 2: config M round 2
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:18:22] FOREIGN_GPU sample max=39% mean=12.0% n=6
+depth 600: decode step (forward_argmax) 13.112 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 22.832 | 1.74 | 701 |
+| 600 | 32 | 0 x1 | 29.530 | 2.25 | 1084 |
+| 600 | 64 | 0 x1 | 33.741 | 2.57 | 1897 |
+| 600 | 128 | 0 x1 | 53.144 | 4.05 | 2409 |
+kernels: plain
+[axon-run 14:18:56] FOREIGN_GPU sample max=24% mean=9.2% n=6 (zen-bin 106891 9%)
+depth 256: decode step (forward_argmax) 13.058 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 22.787 | 1.75 | 702 |
+| 256 | 32 | 0 x1 | 29.362 | 2.25 | 1090 |
+| 256 | 64 | 0 x1 | 31.576 | 2.42 | 2027 |
+[axon-run 14:19:31] FOREIGN_GPU sample max=19% mean=8.2% n=6 (picom 105604 14%)
+| 256 | 128 | 0 x1 | 49.202 | 3.77 | 2602 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 94.19s
+
+=== step 2: config A round 2
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 13.105 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 22.396 | 1.71 | 714 |
+HOST depth 600 nb 16: 0.156 ms/step of 22.396
+[axon-run 14:20:05] FOREIGN_GPU sample max=14% mean=4.7% n=6
+| 600 | 32 | 0 x1 | 29.059 | 2.22 | 1101 |
+HOST depth 600 nb 32: 0.212 ms/step of 29.059
+| 600 | 64 | 0 x1 | 31.378 | 2.39 | 2040 |
+HOST depth 600 nb 64: 0.155 ms/step of 31.378
+| 600 | 128 | 0 x1 | 55.491 | 4.23 | 2307 |
+HOST depth 600 nb 128: 0.173 ms/step of 55.491
+kernels: plain
+depth 256: decode step (forward_argmax) 12.529 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+[axon-run 14:20:40] FOREIGN_GPU sample max=16% mean=2.7% n=6 (Xorg 105425 16%)
+| 256 | 16 | 0 x1 | 22.728 | 1.81 | 704 |
+HOST depth 256 nb 16: 0.160 ms/step of 22.728
+| 256 | 32 | 0 x1 | 26.848 | 2.14 | 1192 |
+HOST depth 256 nb 32: 0.169 ms/step of 26.848
+| 256 | 64 | 0 x1 | 30.750 | 2.45 | 2081 |
+HOST depth 256 nb 64: 0.195 ms/step of 30.750
+| 256 | 128 | 0 x1 | 48.142 | 3.84 | 2659 |
+HOST depth 256 nb 128: 0.172 ms/step of 48.142
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 93.64s
+
+=== step 2: config C round 3
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:21:14] FOREIGN_GPU sample max=11% mean=1.8% n=6 (Xorg 105425 11%)
+depth 600: decode step (forward_argmax) 12.772 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 21.960 | 1.72 | 729 |
+HOST depth 600 nb 16: 0.159 ms/step of 21.960
+| 600 | 32 | 0 x1 | 28.082 | 2.20 | 1140 |
+HOST depth 600 nb 32: 0.179 ms/step of 28.082
+[axon-run 14:21:49] FOREIGN_GPU sample max=16% mean=9.0% n=6 (picom 105604 12%)
+| 600 | 64 | 0 x1 | 35.571 | 2.78 | 1799 |
+HOST depth 600 nb 64: 0.289 ms/step of 35.571
+| 600 | 128 | 0 x1 | 53.818 | 4.21 | 2378 |
+HOST depth 600 nb 128: 0.144 ms/step of 53.818
+kernels: plain
+depth 256: decode step (forward_argmax) 11.211 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 24.809 | 2.21 | 645 |
+HOST depth 256 nb 16: 0.359 ms/step of 24.809
+[axon-run 14:22:24] FOREIGN_GPU sample max=19% mean=7.7% n=6
+| 256 | 32 | 0 x1 | 30.247 | 2.70 | 1058 |
+HOST depth 256 nb 32: 0.356 ms/step of 30.247
+| 256 | 64 | 0 x1 | 32.625 | 2.91 | 1962 |
+HOST depth 256 nb 64: 0.208 ms/step of 32.625
+| 256 | 128 | 0 x1 | 50.740 | 4.53 | 2523 |
+HOST depth 256 nb 128: 0.166 ms/step of 50.740
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 95.74s
+
+=== step 2: config M round 3
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:22:58] FOREIGN_GPU sample max=19% mean=9.8% n=6
+depth 600: decode step (forward_argmax) 12.744 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 24.215 | 1.90 | 661 |
+| 600 | 32 | 0 x1 | 30.996 | 2.43 | 1032 |
+| 600 | 64 | 0 x1 | 35.156 | 2.76 | 1820 |
+[axon-run 14:23:33] FOREIGN_GPU sample max=11% mean=1.8% n=6
+| 600 | 128 | 0 x1 | 55.892 | 4.39 | 2290 |
+kernels: plain
+depth 256: decode step (forward_argmax) 12.793 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 23.610 | 1.85 | 678 |
+| 256 | 32 | 0 x1 | 27.845 | 2.18 | 1149 |
+[axon-run 14:24:07] FOREIGN_GPU sample max=36% mean=7.8% n=6
+| 256 | 64 | 0 x1 | 31.799 | 2.49 | 2013 |
+| 256 | 128 | 0 x1 | 49.488 | 3.87 | 2586 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 97.48s
+
+=== step 2: config A round 3
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+[axon-run 14:24:42] FOREIGN_GPU sample max=33% mean=11.3% n=6 (picom 105604 33%)
+depth 600: decode step (forward_argmax) 12.931 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 16 | 0 x1 | 24.173 | 1.87 | 662 |
+HOST depth 600 nb 16: 0.166 ms/step of 24.173
+| 600 | 32 | 0 x1 | 28.986 | 2.24 | 1104 |
+HOST depth 600 nb 32: 0.169 ms/step of 28.986
+| 600 | 64 | 0 x1 | 34.156 | 2.64 | 1874 |
+HOST depth 600 nb 64: 0.183 ms/step of 34.156
+| 600 | 128 | 0 x1 | 57.815 | 4.47 | 2214 |
+HOST depth 600 nb 128: 0.210 ms/step of 57.815
+kernels: plain
+[axon-run 14:25:16] FOREIGN_GPU sample max=14% mean=6.2% n=6 (picom 105604 9%)
+depth 256: decode step (forward_argmax) 13.010 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 23.592 | 1.81 | 678 |
+HOST depth 256 nb 16: 0.170 ms/step of 23.592
+| 256 | 32 | 0 x1 | 27.906 | 2.14 | 1147 |
+HOST depth 256 nb 32: 0.184 ms/step of 27.906
+| 256 | 64 | 0 x1 | 31.614 | 2.43 | 2024 |
+HOST depth 256 nb 64: 0.191 ms/step of 31.614
+[axon-run 14:25:51] FOREIGN_GPU sample max=19% mean=13.2% n=6
+| 256 | 128 | 0 x1 | 52.309 | 4.02 | 2447 |
+HOST depth 256 nb 128: 0.213 ms/step of 52.309
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 96.96s
+
+=== step 2: config B round 3
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_step_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 12.485 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+[axon-run 14:26:25] FOREIGN_GPU sample max=19% mean=8.8% n=6 (zen-bin 106891 19%)
+| 600 | 16 | 0 x1 | 27.184 | 2.18 | 589 |
+HOST depth 600 nb 16: 0.576 ms/step of 27.184
+| 600 | 32 | 0 x1 | 33.827 | 2.71 | 946 |
+HOST depth 600 nb 32: 0.311 ms/step of 33.827
+| 600 | 64 | 0 x1 | 30.988 | 2.48 | 2065 |
+HOST depth 600 nb 64: 0.039 ms/step of 30.988
+| 600 | 128 | 0 x1 | 49.954 | 4.00 | 2562 |
+HOST depth 600 nb 128: 0.066 ms/step of 49.954
+kernels: plain
+[axon-run 14:27:00] FOREIGN_GPU sample max=39% mean=6.5% n=6
+depth 256: decode step (forward_argmax) 10.892 ms; pool 128 x 320
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 256 | 16 | 0 x1 | 19.516 | 1.79 | 820 |
+HOST depth 256 nb 16: 0.019 ms/step of 19.516
+| 256 | 32 | 0 x1 | 25.250 | 2.32 | 1267 |
+HOST depth 256 nb 32: 0.134 ms/step of 25.250
+| 256 | 64 | 0 x1 | 29.241 | 2.68 | 2189 |
+HOST depth 256 nb 64: 0.111 ms/step of 29.241
+| 256 | 128 | 0 x1 | 43.827 | 4.02 | 2921 |
+HOST depth 256 nb 128: 0.050 ms/step of 43.827
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 92.03s
+
+AB_DONE
+[axon-run 14:27:28] exit 0 after 1098.4s (host bella)
+[axon-run 14:27:29] FOREIGN_GPU max=39% mean=7.1% samples=190 top: zen-bin 106891 39%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
