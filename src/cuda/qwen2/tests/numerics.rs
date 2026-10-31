@@ -142,6 +142,29 @@ impl Sizes {
         load: LOAD,
         load_steps: 25,
     };
+    /// `FP8` in a debug-assertions build: every arm, prefix length and
+    /// route of the release gate (the load arm's 32 rows reach the pool's
+    /// tensor-core attention, `ATT_NB_MIN`), on about a quarter of the CPU
+    /// reference's tokens: decode 6 x 17 + 48 = 150, batched 3 x 49 = 147,
+    /// cached 2 x 49 = 98, load 32 x 4 = 128 positions. The two CPU nets
+    /// are the test's cost: at `FP8`'s size it held the GPU test lock for
+    /// over 2700 s in a debug shard with 4 test threads (1031-080835-d64f).
+    /// This size keeps what only a debug build checks on those paths:
+    /// every launch's argument count (`cuda::Kernel`'s cuFuncGetParamInfo
+    /// check), the pool's page table, the fast counter's assertion and
+    /// overflow checks. The statistical verdict at >= 1000 positions per
+    /// arm is the release build's (`Sizes::FP8`): the debug build adds
+    /// checks, not other arithmetic, so its larger run would grade the
+    /// same numbers again.
+    pub(crate) const FP8_DEBUG: Sizes = Sizes {
+        decode_windows: 1,
+        batch_windows: 1,
+        verify_windows: 1,
+        cached_windows: Some(2),
+        after: 48,
+        load: 32,
+        load_steps: 4,
+    };
 }
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU

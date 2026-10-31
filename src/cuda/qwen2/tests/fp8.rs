@@ -405,7 +405,9 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 /// (e4m3 per token): the same precision change in the CPU's order. Every
 /// arm graded, and a fast kernel seen in each (decode on a fresh net: its
 /// steps are batched passes of one row; the batched arm's prefixes all
-/// past the GEMV's 16 rows).
+/// past the GEMV's 16 rows). At >= 1000 positions per arm in a release
+/// build (`Sizes::FP8`, the binding run); a debug-assertions build runs
+/// every arm and route on fewer (`Sizes::FP8_DEBUG`: the lock timeout).
 #[test]
 fn gpu_fp8_graded_vs_fp8_ref() {
     if f8_gpu().is_none() {
@@ -435,7 +437,12 @@ fn gpu_fp8_graded_vs_fp8_ref() {
             "prefix {n}"
         );
     }
-    let g = grade_sized(&r, &f, &o, &mr, Floor::Fp8Emu, Device::Cuda, &Sizes::FP8);
+    let (sz, min) = match cfg!(debug_assertions) {
+        false => (Sizes::FP8, 1000),
+        true => (Sizes::FP8_DEBUG, 98),
+    };
+    assert!(super::batch::ATT_NB_MIN <= sz.load);
+    let g = grade_sized(&r, &f, &o, &mr, Floor::Fp8Emu, Device::Cuda, &sz);
     let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
     assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
     for a in &g.arms {
@@ -443,7 +450,7 @@ fn gpu_fp8_graded_vs_fp8_ref() {
     }
     for a in &g.arms {
         assert!(
-            a.mode.positions >= 1000,
+            a.mode.positions >= min,
             "[{}]: {} positions",
             a.arm.name(),
             a.mode.positions
