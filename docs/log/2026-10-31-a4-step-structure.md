@@ -1,34 +1,49 @@
-# WP-A4 (i): a layer's Q4_K q, k (and v) in one launch for decode-sized batches (exact, same bits)
+# WP-A4: a layer's Q4_K / Q5_K down on gemm2t from nb 32 (exact, same bits); q|k|v fusion and 32-row tiles dropped
 
 - Date: 2026-10-31. Branch: feat/a4-step-structure. Base: main fde94b6. This is WP-A4 / WP-C1 of the beat-vLLM scope
   (`specs/beat-vllm-scope.md` §6), in exact mode, on consumer GPUs first. Design and results:
-  [a4-step-structure.md](../design/a4-step-structure.md).
+  [a4-step-structure.md](../design/a4-step-structure.md) (§7, §8).
 
-Labels: **MEASURED** (job cited), **CODE**.
+Labels: **MEASURED** (job cited), **CODE**, **OPINION**.
 
-## What changed
+## What ships
 
-- **`prefill.cu`:** `gemm2x_q4_k` and `gemm2xt_q4_k` put two or three Q4_K products of the same activations into one grid, mode 0. In
-  `gemm2x` every tile is gemm2s's; in `gemm2xt`, q's tiles are gemm2t's. Each output comes from the same `gemm2_t`
-  instantiation as its own launch, with the same stage order and epilogue. Only the blockIdx → (matrix, row tile) map changes. The
-  map uses a new `yt` argument of `gemm2_t`, the row-tile twin of the existing `zt`.
-- **`batch.rs`:** `bgemm_g2x` fuses q|k|v, or else q|k, at 17 ≤ nb ≤ 128 (`G2X_MAX_NB`). It fuses only when the small matrices' blocks fit
-  the SMs that q's last wave leaves idle, so they add no wave. q keeps the tile `bgemm` would give it. `AXON_QKV_FUSE=0` turns it off.
-- **Tests:** `gpu_qkv_one_launch_matches_three` (new) compares against main's `bgemm` routing, byte for byte. Two tests are extended:
-  `gpu_batched_products_match_gemv_bits` and `gpu_products_match_reference_bits` now cover the decode batch sizes, and
-  `pool_steps_past_gemvm16_match_solo` goes up to 128 rows with the fusion on and off.
-- **Harnesses (test builds only):** `pool_step_cost` prints `HOST`, the per-step host time inside `step_checked`, and
-  `cuda_gemm_tile_bench` takes `AXON_BENCH_SHAPE`.
-- **Dropped:** (ii), the 32-row `down` tiles. The M2 micro-bench measured them 7–15 % slower than gemm2s
-  (`1030-130922-c603`). They were built in `7b32b3a` and removed in `05b48b6`.
+- **`batch.rs`:** a layer's Q4_K / Q5_K `down` keeps gemm2s up to `DOWN_T_MIN_NB` = 31 tokens instead of
+  `TILE_T_MIN_NB` = 64. Past it, `tile_t_from`'s wave model picks gemm2t where it pays (`bgemm_at`; the layer's two
+  `down` calls). `AXON_DOWN_TILE_T_MIN_NB` overrides it, and 64 restores the old routing. Every other product keeps 64.
+- **Bits:** gemm2t and gemm2s give the same bits per output (`gpu_batched_products_match_gemv_bits`: both equal the
+  decode GEMV; extended to nb 17..129). `gpu_down_tile_t_matches_bgemm` (new) checks the moved route against the old one
+  byte for byte, in modes 0 and 1. `down_tile_t_floor_routes` (new, CPU) pins what moves.
+- **What moves (CODE, the wave model):** on bella (46 SMs), downs of 3072 rows and up at nb 32..64; the 7B's is measured.
+  On a 4090 (128 SMs), an H100 (132) and a 5090 (170), no down of a hidden size ≤ 8192 moves. Smaller cards move more
+  (from 1408 rows on 20 SMs), unmeasured.
+- **Kept from the experiments (tests only):** `pool_steps_past_gemvm16_match_solo` up to 128 rows, and the
+  `AXON_BENCH_SHAPE` filter of `cuda_gemm_tile_bench`.
 
-## Numbers (bella, RTX 5070 Ti Laptop sm_120, 7B Q4_K_M, graphed pool step; MEASURED, `1031-045802-1654`)
+## Numbers (bella, RTX 5070 Ti Laptop sm_120, 7B Q4_K_M, graphed pool step; MEASURED, `1031-065003-733e`)
 
-| depth | nb 16 | nb 32 | nb 64 | nb 128 |
+Pre-registered run (note §8): arms M (main), A (fusion on), T (A plus the floor at 31), F (fusion off, the A/A control).
+Each run started at 54–55 °C. The statistic is the median of paired deltas against the M runs on either side. TAINTED by one
+Xorg sample at 41 % (mean 1.2 %); the lead accepted the run, because its noise term is the in-job F control.
+
+| depth | nb | T vs A (the floor) | A vs M (the fusion) | S_F |
 |---|---|---|---|---|
-| 600 | −0.1 % | **−2.3 %** | −2.3 % | −2.2 % |
-| 256 | 0.0 % | −1.7 % | −1.6 % | −2.0 % |
+| 600 | 16 | −0.11 % | +0.01 % | 0.31 % |
+| 600 | **32** | **−2.47 %** | **−1.80 %** | 0.96 % |
+| 600 | 64 | −2.53 % | −0.84 % | 6.30 % |
+| 600 | 128 | −0.10 % | −2.44 % | 1.29 % |
+| 256 | 32 | −2.62 % | −1.90 % | 0.71 % |
+| 256 | 64 | −2.29 % | −3.24 % | 0.48 % |
 
-These are medians, candidate vs main. The A/A control (the candidate with `AXON_QKV_FUSE=0`) is within −0.7 to +0.9 % of main.
-The job was flagged TAINTED by a single Xorg sample at 54 %, with a mean of 0.9 %; the lead accepted it with disclosure. nb 128 is
-informational (M3). The drift-paired estimate at nb 32 d600 is −1.4 % (design note §7.2).
+The floor's gain is taken as T against A. It was measured with the fusion on, and the shipped head has no fusion; the two
+touch different products, so the gain is assumed to carry over (unmeasured on the final head).
+
+## NO-GO
+
+- **(i) q|k|v in one launch** (`gemm2x_q4_k` / `gemm2xt_q4_k`, built in `7b32b3a`, removed in `fe20964`). The first A/B
+  (`1031-045802-1654`) was INCONCLUSIVE: −2.3 % by median, but not more than 2 × main's spread, and −1.4 % drift-paired.
+  The pre-registered rerun gave −1.80 % at nb 32 d600, which is not beyond its noise term (2 S_F = 1.93 %). Lead ruling
+  10-31: removed.
+- **(ii) 32-row `down` tiles** (built in `7b32b3a`, removed in `05b48b6`). The M2 micro-bench (`1030-130922-c603`)
+  measured them 7–15 % slower than gemm2s and 35–41 % slower than gemm2t. That bench is also where the gemm2t lead came
+  from: 145 vs 184 µs for the 7B's down at nb 32.

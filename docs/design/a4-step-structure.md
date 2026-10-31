@@ -1,10 +1,10 @@
 # WP-A4 / WP-C1: decode-step structure, exact mode, consumer GPUs first
 
-**Status: Checkpoint 3, the PR (#178, draft).** (i) is **INCONCLUSIVE** under its pre-registered rule (§7.2, lead ruling
-10-31): the median gives −2.3 %, but not more than 2 × the A/A spread, and the drift-paired estimate is −1.4 %. A rerun with a
-cooldown and an F-based noise term is pre-registered in §8, and it adds arm T (gemm2t for `down` from nb 32). (ii) was dropped by M2 with no A/B, because the 32-row tiles were 7–15 % slower than today's gemm2s and 35–41 % slower than
-gemm2t. Its code was removed in `05b48b6`. CP0 review: shady 7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`). Its
-MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
+**Status: Checkpoint 4, the PR (#178).** What ships: a layer's Q4_K / Q5_K `down` takes gemm2t from nb 32 instead of
+nb 65 (`DOWN_T_MIN_NB` = 31), −2.5 % per 7B pool step at nb 32 on bella, same bits (§8). (i), q|k|v in one launch, is
+**dropped**: the pre-registered rerun put it at −1.80 %, not beyond its noise term (2 S_F = 1.93 %, §8.1), and the lead ruled it out (§8.2). Its
+code was removed in `fe20964`. (ii) was dropped by M2 with no A/B (§7.1); its code was removed in `05b48b6`. CP0 review: shady
+7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`). Its MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
 spec's WP-A4 (i) and (ii) (`specs/beat-vllm-scope.md` §6 Track A, the same package as Track C's WP-C1), in **exact**
 mode, built and judged on bella (RTX 5070 Ti Laptop, sm_120, 46 SMs, 12 GB). (iii), the lm_head on the fast GEMM, is
 out of scope. Hopper (the spec's H100 kill rule) comes after this, on a pod the lead books.
@@ -335,7 +335,8 @@ drift-paired statistic, nb 32 d600 is −1.4 % (one of three blocks is +0.1 %) a
 
 ### 7.3 Host time per step (A4 vs A6)
 
-The candidate's `HOST` lines, the same job: the host time `step_checked` spends outside the GPU's work, from entry to the graph
+The candidate's `HOST` lines, the same job (test-only instrumentation in `step_checked`, removed in `fe20964` with (i); it is
+in `05b48b6` for A6 to reuse): the host time `step_checked` spends outside the GPU's work, from entry to the graph
 launch's return plus its tail after the picks' read. Median over runs, ms/step:
 
 | depth | nb 16 | nb 32 | nb 64 | nb 128 | step (A) |
@@ -405,3 +406,78 @@ attached to #178. The candidate binary is the `19c3e75` test build.
 **Gates for the new code** (`axon-run --detach`, release and debug, the candidate head): `gpu_down_tile_t_matches_bgemm`,
 `gpu_batched_products_match_gemv_bits`, `tile_t_picks`, and §5's tests 1–4. Plus the md5 gate against main at the candidate head, which
 runs with the default routing.
+
+### 8.1 Results (job `1031-065003-733e`, MEASURED)
+
+Run as pre-registered: scripts unchanged (sha256 as above), `--timing bella --low`, candidate `19c3e75`. Every run started
+at 54–55 °C after a 60–156 s wait; none hit the cap. **Taint, disclosed:** flagged TAINTED by one Xorg sample at 41 % (mean
+foreign load 1.2 % over 656 samples). The lead accepted the run under the pre-registered rule, whose noise term is the
+in-job F control, so the taint is already in S_F.
+
+Median ms/step over runs (M 7, A T F 6 each), and `ab3_stat.py`'s paired medians:
+
+| depth | nb | M | A | T | F | d_A | d_T | d_TA (T vs A) | d_F | S_F |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 600 | 16 | 18.106 | 18.129 | 18.107 | 18.111 | +0.01 % | −0.07 % | −0.11 % | −0.04 % | 0.31 % |
+| 600 | **32** | 21.615 | 21.237 | 20.709 | 21.768 | **−1.80 %** | −4.17 % | **−2.47 %** | +0.64 % | **0.96 %** |
+| 600 | 64 | 25.961 | 25.366 | 24.713 | 25.989 | −0.84 % | −3.23 % | −2.53 % | +1.53 % | 6.30 % |
+| 600 | 128 | 40.787 | 39.662 | 39.617 | 40.759 | −2.44 % | −2.74 % | −0.10 % | +0.16 % | 1.29 % |
+| 256 | 16 | 17.425 | 17.412 | 17.391 | 17.408 | −0.05 % | −0.19 % | −0.16 % | −0.06 % | 2.03 % |
+| 256 | 32 | 20.422 | 20.029 | 19.511 | 20.399 | −1.90 % | −4.51 % | −2.62 % | −0.08 % | 0.71 % |
+| 256 | 64 | 23.105 | 22.337 | 21.834 | 23.108 | −3.24 % | −5.37 % | −2.29 % | +0.03 % | 0.48 % |
+| 256 | 128 | 35.659 | 35.115 | 35.085 | 35.565 | −1.54 % | −1.57 % | −0.09 % | −0.22 % | 0.57 % |
+
+- **A at nb 32 d600: FAIL.** −1.80 % meets the −1.8 % bar but not the noise clause (|d_A| > 2 S_F = 1.93 %).
+- **T against A at nb 32 d600: PASS.** −2.47 %, beyond both −2.0 % and 2 S_F.
+- **Regression cells (nb 16):** none; every median is within 2 S_F of 0.
+- The floor moves only nb 32..64, and the data agree. T against A is −2.3 to −2.6 % at nb 32 and 64, and −0.1 % at nb 16 and
+  128, where T and A run the same kernels.
+
+### 8.2 Ruling (lead, 10-31) and what ships
+
+The pre-registered outcomes said a failed A closes #178 and a passing T goes to a follow-up PR. The lead ruled under CP0's
+keep-one-part rule instead:
+
+1. (i) is removed in a new commit (`fe20964`): `gemm2x_q4_k`, `gemm2xt_q4_k`, gemm2_t's `yt`, `bgemm_g2x`,
+   `AXON_QKV_FUSE`, and `gpu_qkv_one_launch_matches_three`. There is no default-off code. The tests that protect existing
+   routes stay: the extended nb lists of `gpu_batched_products_match_gemv_bits` and `gpu_products_match_reference_bits`, and
+   `pool_steps_past_gemvm16_match_solo` up to 128 rows.
+2. The floor ships as the default in the same PR: `DOWN_T_MIN_NB` = 31, with `AXON_DOWN_TILE_T_MIN_NB` as the override
+   (64 restores the old routing).
+3. **Assumption, stated:** T was measured on top of A. The shipped head has the floor without the fusion. The two touch
+   different products (q, k, v against `down`) and different launches, so the floor's gain is taken as T against A,
+   −2.5 % at nb 32 d600 (−2.6 % at d256, −2.3 to −2.5 % at nb 64), not T against M (−4.2 %). This is unmeasured on the
+   final head; the md5 gate there checks bits, not speed.
+
+### 8.3 Route safety on other GPUs (CODE `tile_t_from`, `wave_cost`)
+
+At nb ≤ 64 there is one token tile, so the route depends only on (rows, SMs), not on nb. The question is which `down`
+row counts (= hidden size) the waves send to gemm2t once the floor is 31. Swept over hidden sizes 128..8192 (every
+multiple of 128, which covers every Qwen2.5, Qwen3, Llama 3, Mistral and Gemma 3 dense model):
+
+| GPU (SMs) | downs moved to gemm2t at nb 32..64 |
+|---|---|
+| RTX 4090, sm_89 (128) | **none** (the first is 8320 rows) |
+| H100, sm_90 (132) | **none** (the first is 8576). Q4_K at nb ≤ 64 isn't on gemmh2 there (`gemmh_plain` needs ≥ 132 blocks; the 7B's down has 28), so it takes the same `tile_t_from` path. |
+| RTX 5090, sm_120 (170) | **none** (the first is 11008) |
+| bella, 5070 Ti Laptop (46) | 3072 and up (Llama 3B, the 7B and 8B, Qwen 14B/32B, Gemma 12B/27B). The 7B is measured; the others are not. |
+| 20 / 58 / 76 / 84 SMs | 1408 / 3840 / 4992 / 5504 and up (every multiple of 128 from there to 8192). Unmeasured. |
+
+`down_tile_t_floor_routes` (CPU test) pins the 4090, H100 and 5090 rows of the table, and bella's 7B move. Routes don't
+change on a 4090 or an H100, so the lead's rule needs no `--timing 4090` job, and nothing changes there to measure.
+
+**Unmeasured cards, OPINION:** the smaller cards' moves come from the same wave model, which predicted this one well.
+For the 7B's down on 46 SMs it gives gemm2t/gemm2s = 0.82, and the micro-bench measured 0.79 at nb 32 and 0.82 at nb 64.
+`TILE_T_TIME` itself was fitted on a 20-SM RTX 4050. The floor is not restricted by SM count. If a smaller card regresses,
+`AXON_DOWN_TILE_T_MIN_NB=64` is the switch back.
+
+**Known modelling gap:** `gemm_cost` (the prefill wave planner, passes > 32 tokens) still prices every Q4_K product with the
+64 floor. That includes `down` in a pass of 33..64 tokens, which now runs gemm2t on bella. It only steers how a long prompt is
+split into passes, and those passes are a quarter of the batch max or more (≥ 288 tokens at the default). Bits are unaffected.
+
+### 8.4 Final-head gates (`fe20964`)
+
+Bit tests (release and debug), the md5 gate against main (11 configs × 4 prompts: P4, about 53 tokens, prefills in one pass of
+33..64 tokens, so the moved route runs on the 7B and the 8B), and the full release and debug suites, all through
+`axon-run --detach` on bella. The jobs and results are in #178's §6.
+
