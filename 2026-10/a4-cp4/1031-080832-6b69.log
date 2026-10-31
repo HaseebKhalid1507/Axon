@@ -1,0 +1,352 @@
+[axon-run 08:08:32] submitted 1031-080832-6b69 by /home/haseeb/.cache/axon-wt-a4: /home/haseeb/.cache/axon-wt-a4/.a4bin/gates4.sh
+[axon-run 08:13:15] scope axon-job-1031-080832-6b69-1793448795.scope in app-axonjobs.slice: MemoryMax 17734 MB, MemoryHigh 15960 MB, no swap, oomd pressure kill 80% (claim 9796 MB): an OOM here kills only this job
+[axon-run 08:13:15] job 1031-080832-6b69 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-080832-6b69-1793448795 --slice=app-axonjobs.slice -p MemoryMax=17734M -p MemoryHigh=15960M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-wt-a4/.a4bin/gates4.sh
+axon-q 08:13:15 start slot 16-23: /home/haseeb/.cache/axon-wt-a4/.a4bin/gates4.sh
+=== rel cuda::qwen2::tests::gpu_down_tile_t_matches_bgemm
+
+running 1 test
+test cuda::qwen2::tests::gpu_down_tile_t_matches_bgemm ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+down: gemm2t from 17 / 32 tokens == the 64 floor's routing, bit for bit (10 sizes moved)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.74s
+
+=== rel cuda::qwen2::tests::tile_t_picks
+
+running 1 test
+test cuda::qwen2::tests::tile_t_picks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.00s
+
+=== rel cuda::qwen2::tests::down_tile_t_floor_routes
+
+running 1 test
+test cuda::qwen2::tests::down_tile_t_floor_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.00s
+
+=== rel cuda::qwen2::tests::gpu_batched_products_match_gemv_bits
+
+running 1 test
+test cuda::qwen2::tests::gpu_batched_products_match_gemv_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+blk.0.attn_q.weight Q5_0: bit-identical
+blk.0.attn_v.weight Q8_0: bit-identical
+blk.1.attn_v.weight Q8_0: bit-identical
+blk.0.ffn_down.weight Q6_K: bit-identical
+blk.1.ffn_down.weight Q6_K: bit-identical
+blk.2.ffn_down.weight Q4_K: bit-identical
+blk.0.ffn_gate.weight Q5_0: bit-identical
+output.weight Q8_0: bit-identical
+synth Q4_K 768 Q4_K: bit-identical
+synth Q4_K 1536 Q4_K: bit-identical
+synth Q6_K 1536 Q6_K: bit-identical
+synth Q6_K 2304 Q6_K: bit-identical
+synth Q8_0 3584 Q8_0: bit-identical
+synth Q5_0 1536 Q5_0: bit-identical
+synth Q4_K 3584 Q4_K: bit-identical
+synth Q4_K 18944 Q4_K: bit-identical
+synth Q6_K 3584 Q6_K: bit-identical
+synth Q6_K 18944 Q6_K: bit-identical
+synth Q4_0 896 Q4_0: bit-identical
+synth Q4_0 4864 Q4_0: bit-identical
+synth Q4_0 18944 Q4_0: bit-identical
+synth Q5_K 768 Q5_K: bit-identical
+synth Q5_K 1536 Q5_K: bit-identical
+synth Q5_K 3584 Q5_K: bit-identical
+synth Q5_K 18944 Q5_K: bit-identical
+synth Q4_1 896 Q4_1: bit-identical
+synth Q4_1 4864 Q4_1: bit-identical
+synth Q5_1 896 Q5_1: bit-identical
+synth Q5_1 4864 Q5_1: bit-identical
+synth Q2_K 1536 Q2_K: bit-identical
+synth Q2_K 3584 Q2_K: bit-identical
+synth Q2_K 18944 Q2_K: bit-identical
+synth Q3_K 768 Q3_K: bit-identical
+synth Q3_K 1536 Q3_K: bit-identical
+synth Q3_K 18944 Q3_K: bit-identical
+synth IQ4_NL 896 IQ4_NL: bit-identical
+synth IQ4_NL 4864 IQ4_NL: bit-identical
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 6.19s
+
+=== rel cuda::qwen2::tests::gpu_products_match_reference_bits
+
+running 1 test
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+q4_k 256 x 333: every kernel == gemv_ref
+q4_k 18944 x 77: every kernel == gemv_ref
+q4_k 3328 x 129: every kernel == gemv_ref
+q4_k 17664 x 1001: every kernel == gemv_ref
+q6_k 256 x 333: every kernel == gemv_ref
+q6_k 18944 x 77: every kernel == gemv_ref
+q6_k 15360 x 129: every kernel == gemv_ref
+q6_k 5120 x 1001: every kernel == gemv_ref
+q8_0 256 x 333: every kernel == gemv_ref
+q8_0 18944 x 77: every kernel == gemv_ref
+q8_0 896 x 129: every kernel == gemv_ref
+q8_0 4448 x 1001: every kernel == gemv_ref
+q8_0 14368 x 65: every kernel == gemv_ref
+q5_0 256 x 333: every kernel == gemv_ref
+q5_0 18944 x 77: every kernel == gemv_ref
+q5_0 896 x 129: every kernel == gemv_ref
+q5_0 13760 x 1001: every kernel == gemv_ref
+q5_0 7872 x 65: every kernel == gemv_ref
+q5_k 256 x 333: every kernel == gemv_ref
+q5_k 18944 x 77: every kernel == gemv_ref
+q5_k 8448 x 129: every kernel == gemv_ref
+q5_k 10240 x 1001: every kernel == gemv_ref
+q4_0 256 x 333: every kernel == gemv_ref
+q4_0 18944 x 77: every kernel == gemv_ref
+q4_0 896 x 129: every kernel == gemv_ref
+q4_0 16928 x 1001: every kernel == gemv_ref
+q4_0 7200 x 65: every kernel == gemv_ref
+q4_1 256 x 333: every kernel == gemv_ref
+q4_1 18944 x 77: every kernel == gemv_ref
+q4_1 896 x 129: every kernel == gemv_ref
+q4_1 18752 x 1001: every kernel == gemv_ref
+q4_1 13728 x 65: every kernel == gemv_ref
+q5_1 256 x 333: every kernel == gemv_ref
+q5_1 18944 x 77: every kernel == gemv_ref
+q5_1 896 x 129: every kernel == gemv_ref
+q5_1 18016 x 1001: every kernel == gemv_ref
+q5_1 10752 x 65: every kernel == gemv_ref
+q2_k 256 x 333: every kernel == gemv_ref
+q2_k 18944 x 77: every kernel == gemv_ref
+q2_k 1792 x 129: every kernel == gemv_ref
+q2_k 12800 x 1001: every kernel == gemv_ref
+q3_k 256 x 333: every kernel == gemv_ref
+q3_k 18944 x 77: every kernel == gemv_ref
+q3_k 18688 x 129: every kernel == gemv_ref
+q3_k 1792 x 1001: every kernel == gemv_ref
+iq4_nl 256 x 333: every kernel == gemv_ref
+iq4_nl 18944 x 77: every kernel == gemv_ref
+iq4_nl 896 x 129: every kernel == gemv_ref
+iq4_nl 6720 x 1001: every kernel == gemv_ref
+iq4_nl 17184 x 65: every kernel == gemv_ref
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 4.87s
+
+=== rel cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference
+
+running 1 test
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+Q4_K 256 x 333: mode 2 and the fused gate+up == gemv_ref
+Q4_K 1536 x 129: mode 2 and the fused gate+up == gemv_ref
+Q4_K 3584 x 1000: mode 2 and the fused gate+up == gemv_ref
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.46s
+
+=== rel cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 12.83s
+
+=== rel cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 7.29s
+
+=== rel cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+pool_wide_long_steps_match_solo case qwen3 F16: ran, 40 x 1152
+pool_wide_long_steps_match_solo case qwen3 Q8 { group: 32 }: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama F16: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama Q8 { group: 32 }: ran, 40 x 1152
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 77.46s
+
+=== rel cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 1.96s
+
+=== dbg cuda::qwen2::tests::gpu_down_tile_t_matches_bgemm
+
+running 1 test
+test cuda::qwen2::tests::gpu_down_tile_t_matches_bgemm ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+down: gemm2t from 17 / 32 tokens == the 64 floor's routing, bit for bit (10 sizes moved)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.60s
+
+=== dbg cuda::qwen2::tests::tile_t_picks
+
+running 1 test
+test cuda::qwen2::tests::tile_t_picks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.00s
+
+=== dbg cuda::qwen2::tests::down_tile_t_floor_routes
+
+running 1 test
+test cuda::qwen2::tests::down_tile_t_floor_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.00s
+
+=== dbg cuda::qwen2::tests::gpu_batched_products_match_gemv_bits
+
+running 1 test
+test cuda::qwen2::tests::gpu_batched_products_match_gemv_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+blk.0.attn_q.weight Q5_0: bit-identical
+blk.0.attn_v.weight Q8_0: bit-identical
+blk.1.attn_v.weight Q8_0: bit-identical
+blk.0.ffn_down.weight Q6_K: bit-identical
+blk.1.ffn_down.weight Q6_K: bit-identical
+blk.2.ffn_down.weight Q4_K: bit-identical
+blk.0.ffn_gate.weight Q5_0: bit-identical
+output.weight Q8_0: bit-identical
+synth Q4_K 768 Q4_K: bit-identical
+synth Q4_K 1536 Q4_K: bit-identical
+synth Q6_K 1536 Q6_K: bit-identical
+synth Q6_K 2304 Q6_K: bit-identical
+synth Q8_0 3584 Q8_0: bit-identical
+synth Q5_0 1536 Q5_0: bit-identical
+synth Q4_K 3584 Q4_K: bit-identical
+synth Q4_K 18944 Q4_K: bit-identical
+synth Q6_K 3584 Q6_K: bit-identical
+synth Q6_K 18944 Q6_K: bit-identical
+synth Q4_0 896 Q4_0: bit-identical
+synth Q4_0 4864 Q4_0: bit-identical
+synth Q4_0 18944 Q4_0: bit-identical
+synth Q5_K 768 Q5_K: bit-identical
+synth Q5_K 1536 Q5_K: bit-identical
+synth Q5_K 3584 Q5_K: bit-identical
+synth Q5_K 18944 Q5_K: bit-identical
+synth Q4_1 896 Q4_1: bit-identical
+synth Q4_1 4864 Q4_1: bit-identical
+synth Q5_1 896 Q5_1: bit-identical
+synth Q5_1 4864 Q5_1: bit-identical
+synth Q2_K 1536 Q2_K: bit-identical
+synth Q2_K 3584 Q2_K: bit-identical
+synth Q2_K 18944 Q2_K: bit-identical
+synth Q3_K 768 Q3_K: bit-identical
+synth Q3_K 1536 Q3_K: bit-identical
+synth Q3_K 18944 Q3_K: bit-identical
+synth IQ4_NL 896 IQ4_NL: bit-identical
+synth IQ4_NL 4864 IQ4_NL: bit-identical
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 6.34s
+
+=== dbg cuda::qwen2::tests::gpu_products_match_reference_bits
+
+running 1 test
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+q4_k 256 x 333: every kernel == gemv_ref
+q4_k 18944 x 77: every kernel == gemv_ref
+q4_k 3328 x 129: every kernel == gemv_ref
+q4_k 17664 x 1001: every kernel == gemv_ref
+q6_k 256 x 333: every kernel == gemv_ref
+q6_k 18944 x 77: every kernel == gemv_ref
+q6_k 15360 x 129: every kernel == gemv_ref
+q6_k 5120 x 1001: every kernel == gemv_ref
+q8_0 256 x 333: every kernel == gemv_ref
+q8_0 18944 x 77: every kernel == gemv_ref
+q8_0 896 x 129: every kernel == gemv_ref
+q8_0 4448 x 1001: every kernel == gemv_ref
+q8_0 14368 x 65: every kernel == gemv_ref
+q5_0 256 x 333: every kernel == gemv_ref
+q5_0 18944 x 77: every kernel == gemv_ref
+q5_0 896 x 129: every kernel == gemv_ref
+q5_0 13760 x 1001: every kernel == gemv_ref
+q5_0 7872 x 65: every kernel == gemv_ref
+q5_k 256 x 333: every kernel == gemv_ref
+q5_k 18944 x 77: every kernel == gemv_ref
+q5_k 8448 x 129: every kernel == gemv_ref
+q5_k 10240 x 1001: every kernel == gemv_ref
+q4_0 256 x 333: every kernel == gemv_ref
+q4_0 18944 x 77: every kernel == gemv_ref
+q4_0 896 x 129: every kernel == gemv_ref
+q4_0 16928 x 1001: every kernel == gemv_ref
+q4_0 7200 x 65: every kernel == gemv_ref
+q4_1 256 x 333: every kernel == gemv_ref
+q4_1 18944 x 77: every kernel == gemv_ref
+q4_1 896 x 129: every kernel == gemv_ref
+q4_1 18752 x 1001: every kernel == gemv_ref
+q4_1 13728 x 65: every kernel == gemv_ref
+q5_1 256 x 333: every kernel == gemv_ref
+q5_1 18944 x 77: every kernel == gemv_ref
+q5_1 896 x 129: every kernel == gemv_ref
+q5_1 18016 x 1001: every kernel == gemv_ref
+q5_1 10752 x 65: every kernel == gemv_ref
+q2_k 256 x 333: every kernel == gemv_ref
+q2_k 18944 x 77: every kernel == gemv_ref
+q2_k 1792 x 129: every kernel == gemv_ref
+q2_k 12800 x 1001: every kernel == gemv_ref
+q3_k 256 x 333: every kernel == gemv_ref
+q3_k 18944 x 77: every kernel == gemv_ref
+q3_k 18688 x 129: every kernel == gemv_ref
+q3_k 1792 x 1001: every kernel == gemv_ref
+iq4_nl 256 x 333: every kernel == gemv_ref
+iq4_nl 18944 x 77: every kernel == gemv_ref
+iq4_nl 896 x 129: every kernel == gemv_ref
+iq4_nl 6720 x 1001: every kernel == gemv_ref
+iq4_nl 17184 x 65: every kernel == gemv_ref
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 5.04s
+
+=== dbg cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference
+
+running 1 test
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+Q4_K 256 x 333: mode 2 and the fused gate+up == gemv_ref
+Q4_K 1536 x 129: mode 2 and the fused gate+up == gemv_ref
+Q4_K 3584 x 1000: mode 2 and the fused gate+up == gemv_ref
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.46s
+
+=== dbg cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 12.73s
+
+=== dbg cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 8.11s
+
+=== dbg cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+pool_wide_long_steps_match_solo case qwen3 F16: ran, 40 x 1152
+pool_wide_long_steps_match_solo case qwen3 Q8 { group: 32 }: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama F16: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama Q8 { group: 32 }: ran, 40 x 1152
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 84.69s
+
+=== dbg cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 2.01s
+
+GATES_OK
+[axon-run 08:17:08] exit 0 after 232.8s (host bella)
