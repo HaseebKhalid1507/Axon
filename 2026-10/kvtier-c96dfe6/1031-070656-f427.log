@@ -1,0 +1,93 @@
+[axon-run 07:06:56] submitted 1031-070656-f427 by /home/haseeb/.cache/axon-kvtier: /home/haseeb/.cache/axon-kvtier/md5def.sh ./axon-base-fde94b6 ./axon-c96dfe6 md5out-c96dfe6 ./serve_md5.py
+[axon-run 08:01:30] scope axon-job-1031-070656-f427-1793448090.scope in app-axonjobs.slice: MemoryMax 10624 MB, MemoryHigh 9561 MB, no swap, oomd pressure kill 80% (claim 2082 MB): an OOM here kills only this job
+[axon-run 08:01:30] job 1031-070656-f427 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-070656-f427-1793448090 --slice=app-axonjobs.slice -p MemoryMax=10624M -p MemoryHigh=9561M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/md5def.sh ./axon-base-fde94b6 ./axon-c96dfe6 md5out-c96dfe6 ./serve_md5.py
+axon-q 08:01:30 start slot 16-23: /home/haseeb/.cache/axon-kvtier/md5def.sh ./axon-base-fde94b6 ./axon-c96dfe6 md5out-c96dfe6 ./serve_md5.py
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	c0dfbb1ca4f2	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	c0dfbb1ca4f2	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	35b4ed5d823a	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	35b4ed5d823a	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p2	0b1ad272f80c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p2	0b1ad272f80c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	0db9b9a9d122	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	0db9b9a9d122	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	c3e22f8d32bc	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	c3e22f8d32bc	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	14339231cc8d	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	14339231cc8d	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	1c3ca55ba717	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	1c3ca55ba717	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	f65ecf98f629	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	f65ecf98f629	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p2	3caf0991a150	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p2	3caf0991a150	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	42cf756d6808	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	42cf756d6808	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	a0a829819411	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	a0a829819411	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	ff493ed15da7	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	ff493ed15da7	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN MD5 differing: 0 of 30
+base: ready after 2.0 s
+SERVE base: cached 0, restored None, digest 68f192753d80
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest 68f192753d80
+SERVE MD5 cuda f16 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 21/21 same
+base: ready after 1.0 s
+SERVE base: cached 0, restored None, digest 0cf1027aaa2a
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest 0cf1027aaa2a
+SERVE MD5 cuda q8 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 21/21 same
+base: ready after 1.0 s
+SERVE base: cached 17, restored None, digest 36474ce1926a
+cand: ready after 1.0 s
+SERVE cand: cached 17, restored None, digest 36474ce1926a
+SERVE MD5 cuda f16 google_gemma-3-1b-it-Q4_K_M.gguf: 21/21 same
+base: ready after 1.0 s
+SERVE base: cached 0, restored None, digest be3e8d0eaafe
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest be3e8d0eaafe
+SERVE MD5 cuda q8 Qwen3-0.6B-Q8_0.gguf: 21/21 same
+base: ready after 1.0 s
+SERVE base: cached 6, restored None, digest 376ef9c9f1c6
+cand: ready after 1.0 s
+SERVE cand: cached 2, restored None, digest 376ef9c9f1c6
+SERVE MD5 cpu f16 qwen2.5-0.5b-q4_k_m.gguf: 21/21 same
+RC 0
+[axon-run 08:04:17] exit 0 after 167.9s (host bella)

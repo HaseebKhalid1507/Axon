@@ -1,0 +1,37 @@
+[axon-run 07:06:55] submitted 1031-070655-20fd by /home/haseeb/.cache/axon-kvtier: /home/haseeb/.cache/axon-kvtier/axon-test-c96dfe6 serve:: kvstore:: cuda::qwen2::slots::
+[axon-run 08:00:24] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 08:00:24] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 08:00:24] scope axon-job-1031-070655-20fd-1793448024.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14496 MB): an OOM here kills only this job
+[axon-run 08:00:24] job 1031-070655-20fd -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-070655-20fd-1793448024 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/axon-test-c96dfe6 serve:: kvstore:: cuda::qwen2::slots:: --test-threads 6
+axon-q 08:00:24 start slot 16-23: /home/haseeb/.cache/axon-kvtier/axon-test-c96dfe6 serve:: kvstore:: cuda::qwen2::slots:: --test-threads 6
+
+running 173 tests
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::paged_release_refeed_four_families ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+[axon-run 08:01:08] SCOPE OOM-KILLED: systemd: axon-job-1031-070655-20fd-1793448024.scope Result=oom-kill; kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/app-ax (MemoryMax 22000 MB)
+[axon-run 08:01:08] exit 137 after 43.4s (host bella)
+[axon-run 08:01:08] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 08:01:08] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 08:01:08] scope axon-job-1031-070655-20fd-1793448068.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 21744 MB): an OOM here kills only this job
+[axon-run 08:01:08] job 1031-070655-20fd -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-070655-20fd-1793448068 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/axon-test-c96dfe6 serve:: kvstore:: cuda::qwen2::slots:: --test-threads 6
+axon-q 08:01:08 start slot 16-23: /home/haseeb/.cache/axon-kvtier/axon-test-c96dfe6 serve:: kvstore:: cuda::qwen2::slots:: --test-threads 6
+
+running 173 tests
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+[axon-run 08:01:29] signal 15: stopping the job
+[axon-run 08:01:29] exit 143 after 21.5s (host bella)
