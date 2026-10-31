@@ -574,6 +574,54 @@ impl Gpu {
         })
     }
 
+    /// `host_alloc` without the zeroing: the bytes are whatever the driver
+    /// handed out (the RAM tier's arena, whose page slots are only ever
+    /// read by a copy after a copy has written them).
+    ///
+    /// # Safety
+    /// The caller never reads the bytes (`bytes_mut`, a copy to the
+    /// device) before something has written them.
+    pub unsafe fn host_alloc_uninit(&self, len: usize) -> Result<HostBuf<'_>, String> {
+        let mut p: *mut c_void = std::ptr::null_mut();
+        if len > 0 {
+            self.bind()?;
+            // SAFETY: context current; writes the host address.
+            let r = unsafe { (self.d.cuMemHostAlloc)(&mut p, len, 0) };
+            check(self.d, r, "cuMemHostAlloc")?;
+        }
+        Ok(HostBuf {
+            gpu: self,
+            p: p.cast(),
+            len,
+            pending: std::cell::Cell::new(false),
+        })
+    }
+
+    /// A handle that allocates page-locked host memory for this context
+    /// from another thread (`HostAllocator`).
+    pub fn host_allocator(&self) -> HostAllocator {
+        HostAllocator {
+            d: self.d,
+            ctx: self.ctx,
+        }
+    }
+
+    /// The `len` bytes at `addr`, from `HostAllocator::alloc` (not
+    /// zeroed), as a `HostBuf` of this context (freed on drop).
+    ///
+    /// # Safety
+    /// `addr` is a live `HostAllocator::alloc` of `len` bytes of this
+    /// context that nothing else owns; as `host_alloc_uninit`, its bytes
+    /// are not read before they are written.
+    pub unsafe fn adopt_host(&self, addr: usize, len: usize) -> HostBuf<'_> {
+        HostBuf {
+            gpu: self,
+            p: addr as *mut u8,
+            len,
+            pending: std::cell::Cell::new(false),
+        }
+    }
+
     /// Record everything `f` launches on the stream into a graph instead of
     /// running it. `f` must only launch kernels and make stream-ordered
     /// async copies (no sync, no alloc/free): those would end the capture
@@ -1016,6 +1064,49 @@ impl Drop for Graph<'_> {
             let _ = self.gpu.sync();
             // SAFETY: our executable graph, destroyed once, not running.
             unsafe { (self.gpu.d.cuGraphExecDestroy)(self.exec) };
+        }
+    }
+}
+
+/// Allocates page-locked host memory for one context from any thread
+/// (`Gpu::host_allocator`): the RAM tier pins its arena off the engine
+/// thread. The driver API is thread-safe; each call makes the context
+/// current on the calling thread first. Its allocations become `HostBuf`s
+/// on the context's own thread (`Gpu::adopt_host`), or are given back
+/// (`free`).
+pub struct HostAllocator {
+    d: &'static Driver,
+    ctx: CUcontext,
+}
+
+// SAFETY: a driver function table ('static, immutable) and a context
+// handle, which the CUDA driver API lets any thread make current.
+unsafe impl Send for HostAllocator {}
+
+impl HostAllocator {
+    /// `len` bytes of page-locked host memory (not zeroed): its address.
+    pub fn alloc(&self, len: usize) -> Result<usize, String> {
+        // SAFETY: ctx is the retained primary context of a live `Gpu` (the
+        // caller keeps it alive: serve leaks its `Gpu`).
+        let r = unsafe { (self.d.cuCtxSetCurrent)(self.ctx) };
+        check(self.d, r, "cuCtxSetCurrent")?;
+        let mut p: *mut c_void = std::ptr::null_mut();
+        // SAFETY: context current; writes the host address.
+        let r = unsafe { (self.d.cuMemHostAlloc)(&mut p, len, 0) };
+        check(self.d, r, "cuMemHostAlloc")?;
+        Ok(p as usize)
+    }
+
+    /// Give back an `alloc` that was never adopted.
+    ///
+    /// # Safety
+    /// `addr` is a live `alloc` of ours, adopted by nobody, with no copy
+    /// in flight.
+    pub unsafe fn free(&self, addr: usize) {
+        // SAFETY: as above; the caller's.
+        unsafe {
+            let _ = (self.d.cuCtxSetCurrent)(self.ctx);
+            (self.d.cuMemFreeHost)(addr as *mut c_void);
         }
     }
 }

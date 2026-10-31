@@ -888,6 +888,92 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     }
 }
 
+// A pool page (`pages::PAGE`, the attention block) and the RAM tier's /
+// kvsave's page are the same positions: `Batch::restore` counts the pool's
+// pages and the tier's as one unit, and `pool_page_io` moves one as the other.
+const _: () = assert!(PAGE == crate::kvsave::PAGE);
+
+impl<'g> CudaQwen2<'g> {
+    /// Image bytes of one page of `p`'s slots (`PAGE` positions, every
+    /// layer, kvsave's image layout: the RAM tier's page, `serve::tier`);
+    /// None: no image (a split's GPU half, deepseek2's MLA cache).
+    pub(crate) fn pool_page_bytes(&self, p: &CudaPool<'g>) -> Option<usize> {
+        crate::kvsave::KvIo::kv_ident(self, &p.c)?;
+        Some(PAGE * self.cache_row_bytes(&p.c))
+    }
+
+    /// Enqueue the copy of slot `slot`'s page `page` (positions
+    /// `page * PAGE..` + PAGE, which it holds) to `host` at `at`, or
+    /// (`to_dev`) from there into the slot: one strided copy per region, on
+    /// the stream, so ordered before any later work (a feed, a step, a
+    /// `release`'s table write and the reuse of its pages after it). Nothing
+    /// numeric runs: the bytes are the slot's (`Rows::page`).
+    pub(crate) fn pool_page_io(
+        &self,
+        p: &CudaPool<'g>,
+        slot: usize,
+        page: usize,
+        host: &mut HostBuf,
+        at: usize,
+        to_dev: bool,
+    ) -> Result<(), String> {
+        if slot >= p.slots || (page + 1) * PAGE > p.ctx {
+            return Err(format!(
+                "page {page} of slot {slot} (pool {} x {})",
+                p.slots, p.ctx
+            ));
+        }
+        let (base, tab) = match &p.pm {
+            None => (slot * p.ctx + page * PAGE, None),
+            Some(m) => match m.pages(slot).get(page) {
+                Some(&pg) => (0, Some(vec![pg])),
+                None => return Err(format!("slot {slot} holds no page {page}")),
+            },
+        };
+        let rows = super::kvio::Rows {
+            kv: &p.c.kv,
+            max_ctx: p.c.rows,
+            base,
+            len: PAGE,
+            tab,
+            regions: self.kv_regions(p.c.mode),
+            arrays: 2 * self.layers.len(),
+        };
+        rows.check(0, PAGE).map_err(|e| e.to_string())?;
+        rows.page(host, at, 0, PAGE, to_dev)
+    }
+
+    /// `pool_page_io` of the physical page `id` of a paged pool, whichever
+    /// slot holds it (a page evicted page by page: PR C's eviction hands
+    /// the RAM tier page ids, not slot positions). Plain pools have none.
+    pub(crate) fn pool_page_id_io(
+        &self,
+        p: &CudaPool<'g>,
+        id: u32,
+        host: &mut HostBuf,
+        at: usize,
+        to_dev: bool,
+    ) -> Result<(), String> {
+        let Some(m) = &p.pm else {
+            return Err("page ids: a plain pool has none".into());
+        };
+        if id as usize >= m.total() {
+            return Err(format!("page {id} of {}", m.total()));
+        }
+        let rows = super::kvio::Rows {
+            kv: &p.c.kv,
+            max_ctx: p.c.rows,
+            base: 0,
+            len: PAGE,
+            tab: Some(vec![id]),
+            regions: self.kv_regions(p.c.mode),
+            arrays: 2 * self.layers.len(),
+        };
+        rows.check(0, PAGE).map_err(|e| e.to_string())?;
+        rows.page(host, at, 0, PAGE, to_dev)
+    }
+}
+
 impl CudaPool<'_> {
     /// Slot `slot`'s first table entry (paged), or first row (plain): a
     /// `Place::Seq` / `RowAt` base.
@@ -2697,6 +2783,111 @@ mod tests {
                 c * 1e3,
                 ns
             );
+        }
+    }
+
+    /// The RAM tier's copies (`pool_page_io`, `serve --cache-ram`): a
+    /// slot's whole pages copied out, the slot's rows then written over by
+    /// another prompt (its pages released and taken again: the copies are
+    /// ordered before), the pages copied into another slot (other physical
+    /// pages) and the rest of the prompt fed there: that slot's KV bytes and
+    /// greedy tokens == the request run alone, uninterrupted. f16 and q8;
+    /// plain, paged and shuffled pools; qwen2.5, qwen3 and gemma3 (f16: it
+    /// has no q8 GPU cache; its sliding-window layers keep every position).
+    #[test]
+    fn pool_pages_restore_exactly() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let mut ms = models();
+        ms.extend(crate::testutil::gemma3_model());
+        let steps = 20;
+        for m in ms {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 320;
+                let net = match CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false) {
+                    Ok(n) => n,
+                    // gemma3 has no q8 cache on the GPU (refused at load).
+                    Err(e) if m.arch == "gemma3" && kv != CacheKv::F16 => {
+                        assert!(e.contains("no q8 KV cache"), "{e}");
+                        continue;
+                    }
+                    Err(e) => panic!("{} {kv:?}: {e}", m.arch),
+                };
+                let v = net.vocab;
+                // 3 whole pages and 11 positions below the last token.
+                let prompt = ids(3 * PAGE + 12, 77, v);
+                let n = prompt.len();
+                let k = (n - 1) / PAGE;
+                let (want, hist, want_kv) = solo(&net, ctx, &prompt, Kind::Greedy, steps);
+                for lay in LAYS {
+                    let what = format!("{} {kv:?} {lay:?}", m.arch);
+                    let mut p = pool_of(&net, 3, ctx, lay);
+                    net.feed_slot(&mut p, 2, &ids(70, 5, v), 0).unwrap();
+                    net.feed_slot(&mut p, 0, &prompt[..n - 1], 0).unwrap();
+                    let pb = net.pool_page_bytes(&p).expect("an image");
+                    assert_eq!(pb, PAGE * net.cache_row_bytes(&p.c));
+                    let mut host = g.host_alloc(k * pb).unwrap();
+                    for i in 0..k {
+                        match &p.pm {
+                            // Odd pages by their physical id (PR C's
+                            // page-level eviction), even ones by position.
+                            Some(m) if i % 2 == 1 => {
+                                let id = m.pages(0)[i];
+                                net.pool_page_id_io(&p, id, &mut host, i * pb, false)
+                            }
+                            _ => net.pool_page_io(&p, 0, i, &mut host, i * pb, false),
+                        }
+                        .unwrap();
+                    }
+                    match &p.pm {
+                        Some(m) => assert!(
+                            net.pool_page_id_io(&p, m.total() as u32, &mut host, 0, false)
+                                .is_err()
+                        ),
+                        None => assert!(net.pool_page_id_io(&p, 0, &mut host, 0, false).is_err()),
+                    }
+                    // Past what the slot holds: refused (paged), or past ctx.
+                    if p.pm.is_some() {
+                        assert!(net.pool_page_io(&p, 0, 4, &mut host, 0, false).is_err());
+                    }
+                    assert!(net.pool_page_io(&p, 0, 5, &mut host, 0, false).is_err());
+                    // Slot 0's rows go, and are written over.
+                    net.release(&mut p, 0, 0).unwrap();
+                    net.feed_slot(&mut p, 0, &ids(n, 9, v), 0).unwrap();
+                    // Restore into slot 1, feed the rest, decode.
+                    assert_eq!(net.reserve(&mut p, 1, k * PAGE).unwrap(), 0);
+                    for i in 0..k {
+                        net.pool_page_io(&p, 1, i, &mut host, i * pb, true).unwrap();
+                    }
+                    net.feed_slot(&mut p, 1, &prompt[k * PAGE..n - 1], k * PAGE)
+                        .unwrap();
+                    let mut h = prompt.clone();
+                    for (s, w) in want.iter().enumerate() {
+                        let row = SeqRow {
+                            token: h[h.len() - 1],
+                            pos: h.len() - 1,
+                            slot: 1,
+                            head: RowHead::Argmax,
+                        };
+                        let got = net.step_rows(&mut p, &[row]).unwrap();
+                        assert_eq!(&got[0], w, "{what}: step {s}");
+                        let RowOut::Pick(t) = got[0] else {
+                            unreachable!()
+                        };
+                        h.push(t);
+                    }
+                    assert_eq!(h, hist, "{what}: tokens");
+                    assert!(
+                        pool_bytes(&net, &p, 1, hist.len() - 1) == want_kv,
+                        "{what}: KV bytes"
+                    );
+                }
+            }
         }
     }
 }

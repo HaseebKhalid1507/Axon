@@ -61,6 +61,8 @@ fn test_opts(path: &str, device: Device) -> Opts {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        cache_ram: super::tier::CacheRam::Bytes(0),
+        cache_ram_alloc: super::tier::Alloc::Thread,
         numerics: Numerics::Exact,
     }
 }
@@ -6119,4 +6121,157 @@ fn serve_explicit_parallel_refused_when_short() {
     // As many as fit (fewer than asked; one at a time at worst).
     let n = sl["slots"].as_array().map_or(0, |a| a.len());
     assert!((1..256).contains(&n), "{sl}");
+}
+
+/// `--cache-ram` (serve/tier.rs) on `device`: conversation A, then B and C
+/// take its slot (or the one cache) so its rows leave the GPU, then A's
+/// next turn alone (the solo path: `lend_solo`, or the one cache), then
+/// again with another request decoding (the batch: `admit`). Each reply ==
+/// the server's without the tier (`--cache-ram 0`), and only with it are
+/// A's turns' prompts copied back (`cached_tokens`, /metrics).
+fn cache_ram_case(device: Device, what: &str, f: impl Fn(&mut Opts)) {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let words = |w: &str| -> String {
+        (0..30)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let (a, b, c) = (words("Lamp"), words("Stone"), words("Reed"));
+    let run = |ram: u64| {
+        let pool = std::cell::Cell::new(false);
+        let s = server_with(p.to_str().unwrap(), device, |o| {
+            f(o);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+            pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        // A pool's arena pinned by a thread (the default) is pinned from
+        // start on: wait until all of it is in, so the turns below are
+        // stored whatever the host's pinning speed (the tier stores nothing
+        // into slabs that aren't pinned yet).
+        if ram > 0 && pool.get() {
+            let m = |name: &str| -> Option<u64> {
+                let body = call(addr, "GET", "/metrics", "").body;
+                body.lines()
+                    .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            };
+            wait_for("the KV RAM tier pinned", || {
+                let cap = m("axon_kv_ram_capacity_bytes");
+                cap.is_some() && m("axon_kv_ram_pinned_bytes") == cap
+            });
+        }
+        let text = |r: &(Value, u64, u64, u64)| r.0.as_str().unwrap().to_string();
+        let a1 = completion_usage(addr, &a, 16);
+        let a2p = format!("{a}{} And then", text(&a1));
+        completion_usage(addr, &b, 16);
+        completion_usage(addr, &c, 16);
+        let a2 = completion_usage(addr, &a2p, 16);
+        completion_usage(addr, &b, 16);
+        completion_usage(addr, &c, 16);
+        let a3p = format!("{a2p}{} Next", text(&a2));
+        let a3 = match device {
+            Device::Cuda => std::thread::scope(|sc| {
+                let g0 = g.load(Ordering::Relaxed);
+                let d = sc.spawn(|| completion_usage(addr, "The history of the Roman Empire", 200));
+                wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
+                let a3 = completion_usage(addr, &a3p, 16);
+                d.join().unwrap();
+                a3
+            }),
+            _ => completion_usage(addr, &a3p, 16),
+        };
+        let m = call(addr, "GET", "/metrics", "").body;
+        (vec![a1, a2, a3], m)
+    };
+    let (off, m0) = run(0);
+    let (on, m1) = run(64 << 20);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "{what}: turn {i}: the reply with the tier on");
+        assert_eq!(x.2, y.2, "{what}: turn {i}: prompt tokens");
+        assert!(y.1 >= x.1, "{what}: turn {i}: cached {} < {} off", y.1, x.1);
+    }
+    assert!(!m0.contains("axon_kv_ram"), "{what}: off: {m0}");
+    // A's turns 2 and 3: A's earlier rows (whole pages) came back.
+    for i in [1, 2] {
+        let pt = super::PAGE_TOKENS;
+        let floor = (on[i - 1].2 as usize / pt).saturating_sub(1) * pt;
+        assert!(
+            on[i].1 as usize >= floor && off[i].1 < on[i].1,
+            "{what}: turn {i}: {} cached on, {} off, of {} (prefix pages >= {floor})",
+            on[i].1,
+            off[i].1,
+            on[i].2
+        );
+    }
+    let metric = |name: &str| -> u64 {
+        m1.lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            .unwrap_or_else(|| panic!("{what}: no {name} in {m1}"))
+    };
+    assert!(metric("axon_kv_ram_restored_tokens_total") >= on[1].1 - off[1].1);
+    assert!(metric("axon_kv_ram_hits_total") >= 2);
+    assert!(metric("axon_kv_ram_pages") > 0);
+    assert!(metric("axon_kv_ram_capacity_bytes") > 0);
+}
+
+#[test]
+fn serve_cpu_cache_ram() {
+    cache_ram_case(Device::Cpu, "cpu", |_| {});
+}
+
+#[test]
+fn serve_cuda_cache_ram() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    cache_ram_case(Device::Cuda, "cuda paged f16", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+    });
+    cache_ram_case(Device::Cuda, "cuda paged f16, pinned at start", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+        o.cache_ram_alloc = super::tier::Alloc::Start;
+    });
+    cache_ram_case(Device::Cuda, "cuda paged q8", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+        o.kv = crate::kv::KvType::Q8;
+    });
+    cache_ram_case(Device::Cuda, "cuda plain f16", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.paged = Some(false);
+    });
+    cache_ram_case(Device::Cuda, "cuda one at a time", |o| {
+        o.parallel = 1;
+    });
+}
+
+/// `--cache-ram` past the RAM available is refused at start; auto and a
+/// backend without a page image say what they did in the banner.
+#[test]
+fn serve_cache_ram_refused_past_ram() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut o = test_opts(p.to_str().unwrap(), Device::Cpu);
+    o.cache_ram = super::tier::CacheRam::Bytes(1 << 50);
+    let e = start(o).err().expect("a 1 PiB --cache-ram started");
+    assert!(super::is_refused(&e), "{e}");
+    assert!(
+        e.to_string().starts_with("--cache-ram 1048576.00 GiB"),
+        "{e}"
+    );
 }

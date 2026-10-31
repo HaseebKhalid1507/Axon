@@ -284,6 +284,72 @@ pub trait BatchLm: Lm {
 
     /// `lend_scratch` undone.
     fn return_scratch(&self, pool: &mut Self::Pool, cache: &mut Self::Cache) -> Result<(), String>;
+
+    /// Image bytes of one `PAGE`-position page of a slot (the RAM tier's
+    /// page, `axon serve --cache-ram`); None: the pool's cache has no image.
+    fn page_bytes(&self, _pool: &Self::Pool) -> Option<usize> {
+        None
+    }
+
+    /// Page-locked host memory for pages (`page_out` / `page_in`), not
+    /// zeroed: a page slot is only ever copied from after a copy into it.
+    fn host_alloc(&self, _bytes: usize) -> Result<crate::cuda::HostBuf<'static>, String> {
+        Err("no host pages on this backend".into())
+    }
+
+    /// `host_alloc` from another thread: an allocator to move there, and
+    /// its allocations adopted back here (`host_adopt`). None: no pages.
+    fn host_allocator(&self) -> Option<crate::cuda::HostAllocator> {
+        None
+    }
+
+    /// A `host_allocator` allocation of `bytes` at `addr`, as page memory.
+    ///
+    /// # Safety
+    /// As `Gpu::adopt_host`: a live, unowned allocation of this backend's
+    /// context, never read before it is written.
+    unsafe fn host_adopt(&self, _addr: usize, _bytes: usize) -> crate::cuda::HostBuf<'static> {
+        unreachable!("no host pages on this backend")
+    }
+
+    /// Enqueue the copy of page `page` of slot `slot` (which holds it) to
+    /// `host` at `at`. Ordered before any later work on the pool, so the
+    /// page may be released and reused right after.
+    fn page_out(
+        &self,
+        _pool: &Self::Pool,
+        _slot: usize,
+        _page: usize,
+        _host: &mut crate::cuda::HostBuf<'static>,
+        _at: usize,
+    ) -> Result<(), String> {
+        Err("no page images on this backend".into())
+    }
+
+    /// `page_out` of the physical page `page` of a paged pool, whichever
+    /// slot holds it (page-level eviction); a plain pool: an error.
+    fn page_out_id(
+        &self,
+        _pool: &Self::Pool,
+        _page: u32,
+        _host: &mut crate::cuda::HostBuf<'static>,
+        _at: usize,
+    ) -> Result<(), String> {
+        Err("no page images on this backend".into())
+    }
+
+    /// `page_out` the other way: the page's image at `at` in `host` into
+    /// slot `slot`'s page `page` (which it holds: `reserve`).
+    fn page_in(
+        &self,
+        _pool: &Self::Pool,
+        _slot: usize,
+        _page: usize,
+        _host: &mut crate::cuda::HostBuf<'static>,
+        _at: usize,
+    ) -> Result<(), String> {
+        Err("no page images on this backend".into())
+    }
 }
 
 /// A paged pool's pages (`BatchLm::pages`).
@@ -1252,6 +1318,78 @@ impl BatchLm for Backend<'_> {
         match (&self.0, &mut cache.0) {
             (Inner::Cuda(n), CacheInner::Cuda(c)) => n.return_scratch(pool, c),
             _ => Err("return_scratch: a cache of another backend".into()),
+        }
+    }
+
+    fn page_bytes(&self, pool: &Self::Pool) -> Option<usize> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pool_page_bytes(pool),
+            _ => None,
+        }
+    }
+
+    fn host_alloc(&self, bytes: usize) -> Result<crate::cuda::HostBuf<'static>, String> {
+        match &self.0 {
+            // SAFETY: page memory: the tier copies into a slot before it
+            // copies out of it (the trait's contract).
+            Inner::Cuda(n) => unsafe { n.gpu().host_alloc_uninit(bytes) },
+            _ => Err("no host pages on this backend".into()),
+        }
+    }
+
+    fn host_allocator(&self) -> Option<crate::cuda::HostAllocator> {
+        match &self.0 {
+            Inner::Cuda(n) => Some(n.gpu().host_allocator()),
+            _ => None,
+        }
+    }
+
+    unsafe fn host_adopt(&self, addr: usize, bytes: usize) -> crate::cuda::HostBuf<'static> {
+        match &self.0 {
+            // SAFETY: the caller's (the trait's contract).
+            Inner::Cuda(n) => unsafe { n.gpu().adopt_host(addr, bytes) },
+            _ => unreachable!("no host pages on this backend"),
+        }
+    }
+
+    fn page_out(
+        &self,
+        pool: &Self::Pool,
+        slot: usize,
+        page: usize,
+        host: &mut crate::cuda::HostBuf<'static>,
+        at: usize,
+    ) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pool_page_io(pool, slot, page, host, at, false),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn page_out_id(
+        &self,
+        pool: &Self::Pool,
+        page: u32,
+        host: &mut crate::cuda::HostBuf<'static>,
+        at: usize,
+    ) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pool_page_id_io(pool, page, host, at, false),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn page_in(
+        &self,
+        pool: &Self::Pool,
+        slot: usize,
+        page: usize,
+        host: &mut crate::cuda::HostBuf<'static>,
+        at: usize,
+    ) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pool_page_io(pool, slot, page, host, at, true),
+            _ => unreachable!("a pool is the GPU model's"),
         }
     }
 }
