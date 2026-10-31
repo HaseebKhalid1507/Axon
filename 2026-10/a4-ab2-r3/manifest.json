@@ -1,0 +1,29 @@
+{
+ "label": "a4-ab2-r3",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1031-035325-5217",
+   "name": "a4-ab2-7b32b3a",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "7b32b3a",
+   "binary": "ab2.sh",
+   "started": null,
+   "ended": 1793433233.5267832,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d8df04507c4c142587b6003bb74ce8b3654d0bf31ac47964c0abd6aabf57ed59",
+   "log_bytes": 257
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-31 03:53:58 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
