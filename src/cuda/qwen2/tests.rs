@@ -2922,23 +2922,6 @@ unsafe fn launch_product(
         } else if kernel.starts_with("gemvm") {
             g.launch(f, (rows.div_ceil(16) as u32, 1, 1), (128, 1, 1), 0, common)
                 .unwrap();
-        } else if kernel.starts_with("gemm2r") {
-            // gemm2r_* three stages, gemm2r2_* two; 32 rows a block.
-            let st = if kernel.starts_with("gemm2r2") { 2 } else { 3 };
-            let sm = gemm2_smem_bm(qt, batch::G2R_BM, 64, st);
-            f.set_max_shared(sm).unwrap();
-            g.launch(
-                f,
-                (
-                    nb.div_ceil(64) as u32,
-                    rows.div_ceil(batch::G2R_BM) as u32,
-                    1,
-                ),
-                (256, 1, 1),
-                sm as u32,
-                common,
-            )
-            .unwrap();
         } else if kernel.starts_with("gemm2t") {
             let sm = gemm2t_smem(qt);
             f.set_max_shared(sm).unwrap();
@@ -3306,81 +3289,6 @@ fn gpu_qkv_one_launch_matches_three() {
     }
 }
 
-/// WP-A4 (ii): the Q4_K product in gemm2r's / gemm2r2's 32-row tiles ==
-/// gemm2s's 64-row and gemm2t's 128-row tiles, byte for byte: the 7B's down
-/// (3584 x 18944) and odd shapes (rows not a multiple of 32; K stage counts
-/// whose last pass through the 3- or 2-slot ring is partial: a K-quant
-/// stage is one whole 256-wide block, so that is the only partial stage),
-/// every decode batch size past gemvmx, epilogue mode 0
-/// (plain, bias) and mode 1 (residual add, as down into x).
-#[test]
-fn gpu_down_rows32_matches_rows64() {
-    let Some(g) = crate::testutil::gpu() else {
-        return;
-    };
-    let km = Kernels::module(&g).unwrap();
-    if !km.mma() {
-        return;
-    }
-    let mut rng = Rng(0x0a4f_d032_2026_1030);
-    // K stages (256-wide blocks) 74, 1, 3, 4, 5, 14: the last ring slot
-    // partial (nst mod 3 = 2, 1, 0, 1, 2, 2; mod 2 = 0, 1, 1, 0, 1, 0) for
-    // both stage counts.
-    for (cols, rows) in [
-        (18944usize, 3584usize),
-        (256, 333),
-        (768, 1000),
-        (1024, 96),
-        (1280, 200),
-        (3584, 77),
-    ] {
-        let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
-        for nb in [17usize, 24, 32, 33, 48, 64, 65, 96, 128] {
-            let xs: Vec<Vec<f32>> = (0..nb)
-                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
-                .collect();
-            let act = quantize_batch(&g, &km, &xs, cols);
-            for (e, epi) in [
-                Epi::default(),
-                Epi {
-                    bias: Some(rng.vec(rows, 3.0)),
-                    init: None,
-                },
-                Epi {
-                    bias: None,
-                    init: Some(rng.vec(rows, 5.0)),
-                },
-            ]
-            .iter()
-            .enumerate()
-            {
-                let want = bits(&gpu_batched(
-                    &g,
-                    &km,
-                    "gemm2s_q4_k",
-                    Q4_K,
-                    &w,
-                    rows,
-                    cols,
-                    &act,
-                    nb,
-                    epi,
-                ));
-                for k in ["gemm2r_q4_k", "gemm2r2_q4_k", "gemm2t_q4_k"] {
-                    let got = bits(&gpu_batched(
-                        &g, &km, k, Q4_K, &w, rows, cols, &act, nb, epi,
-                    ));
-                    assert!(
-                        got == want,
-                        "{k} {rows} x {cols} nb {nb} epilogue {e} != gemm2s"
-                    );
-                }
-            }
-        }
-        eprintln!("down tiles {rows} x {cols}: 32 rows == 64 == 128, bit for bit");
-    }
-}
-
 /// Every product kernel against gemv_ref, the canonical order written out
 /// one thread per output: the decode GEMV (per token), gemvn, gemvm and
 /// the GEMMs, bit for bit, every weight type, random widths up to the 7B's
@@ -3602,10 +3510,6 @@ fn gemm2_names(qt: u32) -> Vec<String> {
     if matches!(qt, Q4_K | Q5_K) {
         v.push(format!("gemm2t_{tn}"));
     }
-    // The 32-row tiles (WP-A4 (ii)): Q4_K only.
-    if qt == Q4_K {
-        v.extend(["gemm2r_q4_k".into(), "gemm2r2_q4_k".into()]);
-    }
     v
 }
 
@@ -3640,8 +3544,6 @@ fn cuda_gemm_tile_bench() {
         "gemm2t_q4_k",
         "gemm2t_q5_k",
         "gemm2t_q4_k_gu",
-        "gemm2r_q4_k",
-        "gemm2r2_q4_k",
     ] {
         let rl = km.function(k).unwrap().regs_local().unwrap();
         eprintln!("REGS {k}: {} regs, {} local bytes", rl.0, rl.1);
@@ -3732,8 +3634,7 @@ fn cuda_gemm_tile_bench() {
         })
         .collect();
     // Cases: (nb index, shape index or 4 = gu, kernel). AXON_BENCH_SHAPE:
-    // the shape names to run (comma-separated, default all); the 32-row
-    // tiles (gemm2r, gemm2r2; WP-A4) ride along.
+    // the shape names to run (comma-separated, default all).
     let want: Option<Vec<String>> = std::env::var("AXON_BENCH_SHAPE")
         .ok()
         .map(|v| v.split(',').map(|x| x.to_string()).collect());
@@ -3747,7 +3648,7 @@ fn cuda_gemm_tile_bench() {
             let ks: &[&str] = if si == 4 {
                 &["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
             } else {
-                &["gemm2s_q4_k", "gemm2t_q4_k", "gemm2r_q4_k", "gemm2r2_q4_k"]
+                &["gemm2s_q4_k", "gemm2t_q4_k"]
             };
             for &k in ks {
                 cases.push((ni, si, k));

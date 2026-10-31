@@ -2386,22 +2386,6 @@ GEMM2(gemm2s_q3_k, QT_Q3_K, 2, 3)
 GEMM2(gemm2_iq4_nl, QT_IQ4_NL, 4, 2)
 GEMM2(gemm2s_iq4_nl, QT_IQ4_NL, 2, 3)
 
-// gemm2r_*: 32 rows x 64 tokens (8 warps along the tokens, each 32 rows x
-// 8), three stages; gemm2r2_*: two stages, in half the shared memory, two
-// blocks an SM where the registers allow. Twice gemm2s's blocks, for a
-// decode-sized batch's tall product whose 64-row grid ends in a partial wave
-// (qwen2/batch.rs `tile_r32`). Each output as gemm2s's, bit for bit: one
-// thread's sum over the K stages in order, the same epilogue.
-#define GEMM2R(NAME, QT, ST, MINB)                                                                \
-    extern "C" __global__ void __launch_bounds__(G2_THREADS, MINB) NAME(                          \
-        const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
-        u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
-        u64 ostride) {                                                                            \
-        gemm2_t<QT, 1, ST, 0, 1>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);     \
-    }
-GEMM2R(gemm2r_q4_k, QT_Q4_K, 3, 1)
-GEMM2R(gemm2r2_q4_k, QT_Q4_K, 2, 2)
-
 // gemm2x_*: two or three products of the same activations (a layer's q, k,
 // v) in one launch, mode 0, each matrix with its bias and output (ostride
 // floats a token apart): blockIdx.y runs over matrix 0's row tiles, then

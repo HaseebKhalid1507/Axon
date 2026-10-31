@@ -2327,8 +2327,7 @@ mod tests {
     /// request's results and tokens == running it alone, under each
     /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape). WP-A4: up to 128
     /// rows, by shape with q|k(|v) in one gemm2x launch (`bgemm_g2x`, the
-    /// Llama's Q4_K q, k, v) on and off, and the Q4_K down in 32-row tiles
-    /// (`bgemm_r32`, the 0.5B's and the Llama's) off, three and two stages.
+    /// Llama's Q4_K q, k, v) on and off.
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2360,27 +2359,19 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            // (vm_max, qkv_fuse, down_r32): the gemvm limits with the
-            // default switches, then by shape (0) with each WP-A4 switch.
-            for (vm, fuse, r32) in [
-                (16usize, true, 0u8),
-                (32, true, 0),
-                (0, false, 0),
-                (0, true, 0),
-                (0, true, 3),
-                (0, false, 2),
-            ] {
+            // (vm_max, qkv_fuse): the gemvm limits with the default
+            // switch, then by shape (0) with the fused q|k|v off and on.
+            for (vm, fuse) in [(16usize, true), (32, true), (0, false), (0, true)] {
                 net.bf.vm_max = vm;
                 net.bf.qkv_fuse = fuse;
-                net.bf.down_r32 = r32;
                 // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
                 // doesn't apply there, so once).
-                let nbs: &[usize] = match (vm, fuse, r32) {
-                    (16 | 32, _, _) => &[17, 33, 48, 64],
-                    (_, true, 0) => &[9, 12, 16, 17, 33, 48, 64, 65, 96, 128],
+                let nbs: &[usize] = match (vm, fuse) {
+                    (16 | 32, _) => &[17, 33, 48, 64],
+                    (_, true) => &[9, 12, 16, 17, 33, 48, 64, 65, 96, 128],
                     _ => &[17, 24, 33, 48, 64, 65, 128],
                 };
-                let vm = format!("vm {vm} fuse {fuse} r32 {r32}");
+                let vm = format!("vm {vm} fuse {fuse}");
                 for &nb in nbs {
                     let mut p = net.pool(slots, ctx).unwrap();
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
