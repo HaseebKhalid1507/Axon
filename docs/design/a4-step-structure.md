@@ -1,7 +1,8 @@
 # WP-A4 / WP-C1: decode-step structure, exact mode, consumer GPUs first
 
-**Status: Checkpoint 2, the PR.** (i) ships: −2.3 % at nb 32 d600, which passes its pre-registered bar of −1.8 %, by the lead's
-ruling (§7). (ii) was dropped by M2 with no A/B, because the 32-row tiles were 7–15 % slower than today's gemm2s and 35–41 % slower than
+**Status: Checkpoint 3, the PR (#178, draft).** (i) is **INCONCLUSIVE** under its pre-registered rule (§7.2, lead ruling
+10-31): the median gives −2.3 %, but not more than 2 × the A/A spread, and the drift-paired estimate is −1.4 %. A rerun with a
+cooldown and an F-based noise term is pre-registered in §8, and it adds arm T (gemm2t for `down` from nb 32). (ii) was dropped by M2 with no A/B, because the 32-row tiles were 7–15 % slower than today's gemm2s and 35–41 % slower than
 gemm2t. Its code was removed in `05b48b6`. CP0 review: shady 7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`). Its
 MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
 spec's WP-A4 (i) and (ii) (`specs/beat-vllm-scope.md` §6 Track A, the same package as Track C's WP-C1), in **exact**
@@ -317,14 +318,16 @@ is mostly a monotonic drift over the 18-minute job: at nb 32 d600, M1 21.67 ms r
 to cancel exactly that. F against its neighbouring Ms is +0.4 / 0.0 % at nb 32 d600, and within −0.8 to +2.9 % per block over
 all cells.
 
-**Ruling (lead, 10-31):**
+**Ruling (lead, 10-31, final): (i) is INCONCLUSIVE.** The lead first accepted the run as a pass on the median. That
+acceptance was withdrawn when the second clause below was pointed out.
 
-1. The run is accepted, with the disclosure above.
-2. (i) **passes** its pre-registered bar at nb 32 d600: the median gives −2.3 %, against a bar of −1.8 %.
-3. (ii) is dropped by M2 (§7.1).
-4. nb 128 is informational only. Under M3 it decides nothing, because M's spread is over 0.5 %.
+1. The median passes: −2.3 % against the −1.8 % bar. But the gain is not more than 2 × the A/A spread of the cell (M's 4.6 %), and
+   the drift-paired estimate is −1.4 %, under the bar. So the pre-registered rule neither passes nor kills (i).
+2. (ii) is dropped by M2 (§7.1).
+3. nb 128 is informational only. Under M3 it decides nothing, because M's spread is over 0.5 %.
+4. A rerun is pre-registered in §8.
 
-**Disclosed against the letter of §4.** §4's pass for (i) also asks for "more than 2 × the A/A spread of that cell".
+**The second clause, in detail.** §4's pass for (i) also asks for "more than 2 × the A/A spread of that cell".
 Read literally, as M's max − min over its 6 runs, that spread is 4.6 %, and the clause fails. M's spread is a drift that the
 design cancels. A drift-free A/A, F against its neighbouring Ms (≤ 0.4 % at that cell), meets the clause by a wide margin. On the
 drift-paired statistic, nb 32 d600 is −1.4 % (one of three blocks is +0.1 %) and nb 32 d256 is −1.9 %. Over the 6 cells where (i) fires, the drift-paired mean is
@@ -345,4 +348,60 @@ launch's return plus its tail after the picks' read. Median over runs, ms/step:
 So 0.016–0.023 ms of a 17.6–42.8 ms graphed step, ≤ 0.13 %. Inside the pool step, the host is not the cost. A6 (iii)'s
 host overlap can only win host time spent outside `step_checked`: the serve loop's scheduling and row building between
 steps. A6 (i)/(ii)'s feed passes are not seen here either, so A6 needs its own serve-level measurement. On this
-data, A4 (i)'s −2 % is already larger than anything A6 (iii) could hide inside the step.
+data, A4 (i)'s −1.4 to −2.3 % is already larger than anything A6 (iii) could hide inside the step.
+
+## 8. CP3: the rerun, pre-registered (10-31, before submission)
+
+**Why.** §7.2 is inconclusive. M's raw spread was a thermal climb, so this run sets the start temperature of every
+run and takes its noise term from the F control, not from M's spread. It also adds the gemm2t lead from §7.1.
+
+**New switch, candidate only: `AXON_DOWN_TILE_T_MIN_NB`** (`BatchFns::down_t_min_nb`, default `TILE_T_MIN_NB` = 64,
+which is main's routing).
+- It is the most tokens a layer's Q4_K or Q5_K `down` keeps on gemm2s, whatever `tile_t`'s waves say (`tile_t_from`, `bgemm_at`).
+- It routes only between gemm2s and gemm2t. Main already proves those bit-identical per output:
+  `gpu_batched_products_match_gemv_bits` checks both `gemm2s_q4_k` and `gemm2t_q4_k` (`gemm2_names`) == the decode
+  GEMV, bit for bit. This branch extends it to nb 17..129, including 32, 33, 48 and 64, at Q4_K widths up to the 7B's 18944, with all
+  four epilogues.
+- The new test `gpu_down_tile_t_matches_bgemm` checks the route itself. It compares `bgemm_at` with t_min 16 and 31 against
+  main's `bgemm`, byte for byte, on the 7B's down and on a shape that takes gemm2t at any SM count. It covers mode 0 with bias and mode 1
+  (the residual add), nb ∈ {17, 24, 31, 32, 33, 48, 63, 64}, and asserts the route actually moved.
+- On bella the 7B's 3584-row `down` takes gemm2t at nb 32..64 once the floor is 31 (CODE `wave_cost`: 28 gemm2t blocks at 82 % beat 56 gemm2s).
+  Q6_K `down` (14 of 28 layers) is untouched. ESTIMATED gain from §7.1: (183.8 − 145.0) µs × 14 layers = −0.54 ms
+  of ≈ 21.9 ms at nb 32 d600, about −2.5 %, an upper bound from isolated launches.
+
+**Arms, all in one `--timing bella --low` job** (`.a4bin/ab3.sh`, sha256 below):
+- **M** is main `fde94b6`.
+- **A** is the candidate with defaults (fused q|k|v).
+- **T** is A plus `AXON_DOWN_TILE_T_MIN_NB=31`.
+- **F** is the candidate with `AXON_QKV_FUSE=0`, the A/A control.
+
+`pool_step_cost`, 7B Q4_K_M, f16 KV, graphs on, `AXON_STEP_DEPTHS=600,256`, `AXON_STEP_NB=16,32,64,128`.
+
+**Order:** one discarded warm-up (M), then `M`, then 6 blocks `a b c M`. Each block is one permutation of A T F, mirrored in
+pairs: ATF FTA, TFA AFT, FAT TAF. Each arm runs 6 times and sits in each in-block position twice. **Cooldown before every run:**
+30 s, then wait until `nvidia-smi` reads ≤ 55 °C, with a cap of 300 s. A run that hits the cap is kept and logged `COOL CAPPED`, and
+the start temperature of every run is reported.
+
+**Statistic** (`.a4bin/ab3_stat.py`, sha256 below):
+- **Paired delta:** each candidate run against the mean of its block's two M runs, d_X = X / mean(M_before, M_after) − 1. Per cell, the
+  median over the arm's 6 runs.
+- **T against A:** per block, d_TA = T / A − 1, the same block. The median over the 6 blocks.
+- **Noise term:** S_F = max(d_F) − min(d_F), the range of F's 6 paired deltas at that cell. It replaces M's raw spread.
+- **Bars at nb 32 d600:**
+  - **A passes** if median d_A ≤ −1.8 % **and** |median d_A| > 2 S_F.
+  - **T passes** (against A) if median d_TA ≤ −2.0 % **and** |median d_TA| > 2 S_F.
+  - Otherwise it fails. Nothing is tuned and rerun to pass.
+- **Regression cells:** nb 16 at both depths, where neither change fires. A median d_A or d_T beyond 2 S_F is reported as a regression.
+- **nb 128:** informational. Other cells are reported but decide nothing.
+- **Outcomes:**
+  - If A passes, (i) ships on by default.
+  - If A fails, #178 closes as a NO-GO for (i), with a docs entry.
+  - T is a separate decision. If it passes, its default (31) goes into a follow-up PR with its own design paragraph. If it fails, the
+    switch stays an experiment knob or is removed.
+
+**Scripts, frozen at submission:** `ab3.sh` sha256 `a22043383c01c48f…` and `ab3_stat.py` sha256 `10146c962f37ca5a…`, both
+attached to #178. The candidate binary is the `19c3e75` test build.
+
+**Gates for the new code** (`axon-run --detach`, release and debug, the candidate head): `gpu_down_tile_t_matches_bgemm`,
+`gpu_batched_products_match_gemv_bits`, `tile_t_picks`, and §5's tests 1–4. Plus the md5 gate against main at the candidate head, which
+runs with the default routing.
