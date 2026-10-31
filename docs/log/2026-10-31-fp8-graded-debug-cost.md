@@ -1,4 +1,4 @@
-# The FP8 graded gate's cost in debug builds  (PR #TBD)
+# The FP8 graded gate's cost in debug builds  (PR #179)
 
 - Date: 2026-10-31. Branch: fix/fp8-graded-debug-cost. Base: main fde94b6. Status: open
 - Pick / design: lead, 10-31, after A4's debug shard 1/3 (1031-080835-d64f) failed on the GPU test lock
