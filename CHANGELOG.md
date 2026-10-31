@@ -6,6 +6,22 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### KV RAM tier, opt-in (#166)
+- **`axon serve --cache-ram BYTES|auto`: keep conversations' KV pages in host RAM, off by default.** When a slot goes to
+  another conversation, its KV pages stay in host memory, and its next turn copies the longest stored prefix back
+  instead of prefilling it again: the same bits (the md5 gate against main, with the tier off and on). Default 0:
+  without the flag the server is main's, byte for byte (`/metrics` included).
+- **The whole size is pinned from server start.** On the GPU, `--cache-ram` is page-locked (unswappable) host RAM
+  from start, used or not; `auto` is half the RAM available after the model, at most 8 GiB.
+- **The tier is inclusive, so it helps only when sized well above the GPU KV pool.** Pages are copied as they fill,
+  so the tier also holds what the GPU still has: useful capacity ≈ `--cache-ram` − the GPU pool's KV bytes. On
+  bella's 7B f16 (pool ≈ 5.4–6.0 GiB) 6G buys almost nothing; about 20G is where it works (the 4090 replay
+  1027-155046-1ed0: TTFT-resume p50 13.5 → 0.11 s at 20G).
+- **It failed its pre-registered bella cell.** 1031-063509-f763 (7B f16, `--cache-ram 6G`, a 25k session evicted by
+  real pressure): 6,592 of 26,496 tokens restored, TTFT-resume 7.05 s vs main 8.68 s, short of the 0.3 s bar. Hence
+  opt-in (rule B's else branch). Next: an exclusive tier (C3), then the bella cell again
+  ([docs/log/2026-10-27-kv-ram-tier.md](docs/log/2026-10-27-kv-ram-tier.md)).
+
 ### FP8 checkpoints (#177)
 - **FP8 checkpoints load, as Q8_0 by default.** compressed-tensors per-channel e4m3 checkpoints with dynamic per-token
   activations (RedHatAI's `*-FP8-dynamic`) load from their directory. In exact mode (the default) the FP8 matrices

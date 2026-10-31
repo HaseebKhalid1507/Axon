@@ -301,7 +301,9 @@ That is the restored count measured in all three rounds. TTFT-resume was 7.05 s 
 Xorg sample at job start, so the timings aren't of record; the count is). The earlier passes (4090 a975 / fbcb,
 bella 7f15 / ef2b: 1,715 pages written ≤ 1,755) sat inside the only window where an inclusive tier helps: **the
 work written during the gap must fit between the pool's size and the tier's**, ≈ 11–185 pages on bella at 6G
-(under half of one 25k session). Next: an exclusive tier (spill at GPU eviction, or drop the tier's copies of
+(under half of one 25k session). Sizing rule, until then: useful capacity ≈ `--cache-ram` − the GPU pool's KV bytes
+(bella's 7B f16 pool ≈ 5.4–6.0 GiB at 56 KiB a position: 6G buys almost nothing; about 20G is where it works, as in
+the 4090 replay 1027-155046-1ed0, 20G over a 5.25 GiB pool). Next: an exclusive tier (spill at GPU eviction, or drop the tier's copies of
 GPU-resident pages first, PR C3), so GPU + RAM ≈ pool + tier as §3 assumes; then re-run the bella cell.
 
 Order: A → B → C → D → E → F; B and C are independent in code (B wires kvstore, C changes PageMap) and can run

@@ -211,8 +211,10 @@ Works today, honestly scoped:
   `--cache-ram BYTES|auto` (opt-in, default 0: off) keeps conversations' KV pages in pinned host RAM
   and copies them back on the next turn, bit for bit. It helps only when the work written during the
   gap fits between the GPU pool's size and the tier's (≈ 11–185 pages of 64 on bella's 7B f16 at 6G):
-  the tier is written as pages fill, so it also holds the pool's pages. An exclusive tier is pending
-  ([design](docs/design/agent-workload.md) §6 row B).
+  the tier is written as pages fill, so it also holds the pool's pages. **Sizing: useful capacity ≈
+  `--cache-ram` − the GPU pool's KV bytes**; on bella's 7B f16 (pool ≈ 5.4–6.0 GiB) 6G buys almost nothing
+  and about 20G is where it works (the 4090 replay 1ed0: 20G over a 5.25 GiB pool). An exclusive tier is
+  pending ([design](docs/design/agent-workload.md) §6 row B).
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the
@@ -608,7 +610,10 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   On the GPU the **whole size is page-locked (unswappable) RAM from server start**, used or
   not: a thread pins it in 64 MiB pieces while the server already runs (or, with
   `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 8 GiB
-  at start. Size it to what you keep warm, and leave the rest of the machine room: under a
+  at start. The tier is inclusive (pages are copied as they fill, so it also holds what the GPU pool
+  still has): its useful capacity is about `--cache-ram` minus the GPU pool's KV bytes (positions ×
+  KV bytes a position: 56 KiB on Qwen2.5-7B f16), so it must be sized well above the pool. Size it to
+  what you keep warm, and leave the rest of the machine room: under a
   cgroup memory limit, pinned memory can't be reclaimed (the CPU path's pages are ordinary
   memory, taken as they are stored). Off where the cache has
   no page image (a CPU/GPU split, several GPUs, MoE, deepseek2). It lives as long as the

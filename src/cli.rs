@@ -50,9 +50,9 @@ usage:
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
-             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
-             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
-             [--cache-ram BYTES|auto]
+            [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
+            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
+            [--cache-ram BYTES|auto]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -171,8 +171,10 @@ flags:
               On the GPU the whole size is pinned (unswappable) RAM from start. Opt-in: the tier
               copies pages as they fill, so it holds about its size, the GPU pool's pages included;
               it helps only when the work written during a gap fits between the pool's size and
-              the tier's (about 11-185 pages of 64 on bella's 7B f16 at 6G); an exclusive tier is
-              pending (docs/design/agent-workload.md §6)
+              the tier's. Sizing: useful capacity ~ --cache-ram minus the GPU pool's KV bytes (7B
+              f16: 56 KiB a position; bella's pool ~5.4-6.0 GiB, so 6G buys almost nothing, about
+              20G is where it works). An exclusive tier is pending
+              (docs/design/agent-workload.md §6)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
