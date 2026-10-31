@@ -49,6 +49,9 @@ pub(crate) struct Agree {
     max_abs_top: f32,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
+    /// Positions where the logits under test have a NaN or an infinity
+    /// (`max_abs` can't show one: `f32::max` drops NaN).
+    pub(crate) nonfinite: usize,
 }
 
 /// Reference `r` vs `o` logits after the prompt `ids` and after each of
@@ -152,6 +155,7 @@ impl Agree {
         let (ar, ao) = (crate::argmax(lr), crate::argmax(lo));
         self.positions += 1;
         self.top1 += (ar == ao) as usize;
+        self.nonfinite += lo.iter().any(|x| !x.is_finite()) as usize;
         let k = kl(lr, lo);
         self.max_kl = self.max_kl.max(k);
         if k > 0.5 {
@@ -454,6 +458,55 @@ pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     } else {
         assert!(ag.max_abs < 6.0, "max logit difference");
     }
+}
+
+/// The sanity backstops a debug build's FP8 gate keeps
+/// (`numerics::assert_sane_vs_exact`), with no statistics: something was
+/// graded, every logit finite, and the whole-vocabulary max |dlogit| below
+/// 12 (`assert_graded_with`'s `Top1::Binomial` backstop).
+pub(crate) fn assert_sane(ag: &Agree) {
+    assert!(ag.positions > 0, "nothing graded");
+    assert!(
+        ag.nonfinite == 0,
+        "{} of {} positions with a non-finite logit",
+        ag.nonfinite,
+        ag.positions
+    );
+    assert!(
+        ag.max_abs < 12.0,
+        "max logit difference: all {} (< 12)",
+        ag.max_abs
+    );
+}
+
+/// `assert_sane`: a NaN or infinite logit fails though `max_abs` misses
+/// it, a max |dlogit| of 12 fails, and top-1, KL and outliers aren't
+/// looked at (137/147, the first debug run's batched arm, passes).
+#[test]
+fn sane_backstops() {
+    let ok = |a: Agree| std::panic::catch_unwind(|| assert_sane(&a)).is_ok();
+    let lr = [1.0f32, 2.0, 3.0];
+    let tallied = |lo: [f32; 3]| {
+        let mut a = Agree::default();
+        a.tally(&lr, &lo);
+        a
+    };
+    assert!(ok(tallied([1.0, 2.0, 3.5])));
+    let nan = tallied([1.0, f32::NAN, 3.0]);
+    assert_eq!((nan.nonfinite, nan.max_abs), (1, 0.0), "max_abs drops NaN");
+    assert!(!ok(nan));
+    assert!(!ok(tallied([1.0, 2.0, f32::INFINITY])));
+    assert!(!ok(Agree::default()), "nothing graded");
+    let a = |max_abs| Agree {
+        positions: 147,
+        top1: 137,
+        max_abs,
+        sum_kl: 147.0,
+        max_kl: 5.0,
+        ..Agree::default()
+    };
+    assert!(ok(a(11.9)));
+    assert!(!ok(a(12.0)));
 }
 
 /// `top_k` against a full sort.

@@ -406,8 +406,11 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 /// arm graded, and a fast kernel seen in each (decode on a fresh net: its
 /// steps are batched passes of one row; the batched arm's prefixes all
 /// past the GEMV's 16 rows). At >= 1000 positions per arm in a release
-/// build (`Sizes::FP8`, the binding run); a debug-assertions build runs
-/// every arm and route on fewer (`Sizes::FP8_DEBUG`: the lock timeout).
+/// build (`Sizes::FP8`, the binding run of record for the statistical
+/// bars); a debug-assertions build runs every arm and route on fewer
+/// (`Sizes::FP8_DEBUG`: the lock timeout) for the checks only it makes,
+/// with the sanity backstops and no statistical grading
+/// (`assert_sane_vs_exact`: lead ruling, 10-31, after 1031-115732-b712).
 #[test]
 fn gpu_fp8_graded_vs_fp8_ref() {
     if f8_gpu().is_none() {
@@ -457,7 +460,10 @@ fn gpu_fp8_graded_vs_fp8_ref() {
         );
     }
     let what = "0.5B FP8 cuda fast vs fp8-ref";
-    assert_graded_vs_exact_with(what, &g, false, Top1::Binomial);
+    match cfg!(debug_assertions) {
+        false => assert_graded_vs_exact_with(what, &g, false, Top1::Binomial),
+        true => super::numerics::assert_sane_vs_exact(what, &g),
+    }
     let _ = fp8::F8S;
 }
 

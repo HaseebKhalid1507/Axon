@@ -797,6 +797,37 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
     );
 }
 
+/// The FP8 gate in a debug-assertions build (lead ruling, 10-31): no
+/// statistics. The graded bars (the binomial top-1, the KL mean, the
+/// outlier count, the verify rows) are a test of >= 1000 positions per arm,
+/// whose run of record is the release build (the debug build does the same
+/// arithmetic); `Sizes::FP8_DEBUG`'s 98-150 positions can't carry them (job
+/// 1031-115732-b712: the batched arm's 137/147 against a floor of 142,
+/// 2 SE 4.4, where the release build's 1000-position arms pass). Kept:
+/// every arm graded with a fast kernel seen running (the per-arm count is
+/// the caller's), and the sanity backstops on the net under test
+/// (`assert_sane`: finite logits, max |dlogit| < 12 over the whole
+/// vocabulary). The numbers are printed, labelled info only.
+pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
+    report_graded(&format!("{what} (debug build: info only, not graded)"), g);
+    assert!(
+        !g.fast_kernels || g.launches() > 0,
+        "{what}: fast kernels, but none ran in any arm"
+    );
+    let errs: Vec<String> = (g.arms.iter())
+        .filter_map(|a| {
+            catch_unwind(AssertUnwindSafe(|| super::assert_sane(&a.mode)))
+                .err()
+                .map(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
+        })
+        .collect();
+    assert!(errs.is_empty(), "{}", errs.join("\n"));
+    eprintln!(
+        "{what}: debug build: sanity checks only (every arm ran a fast kernel, finite logits, max \
+         |dlogit| < 12); the statistical bars are the release build's run of record"
+    );
+}
+
 /// A GPU of another architecture than GPU 0's, as device 1 (the cross-arch
 /// floor), if this host has one.
 fn other_arch_gpu() -> Option<&'static Gpu> {
