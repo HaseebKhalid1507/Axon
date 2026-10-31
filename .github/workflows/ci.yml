@@ -18,7 +18,11 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 around 10-28 and the Nehalem qemu step
+    # then dies with an illegal instruction 0.04 s into the test binary (#173's runs
+    # 40920095496 / 40920119299 / 40920649257; main was green on 24.04 on 10-27).
+    # Bump deliberately, with a CI run that shows the qemu step still passes.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # Pinned to the toolchain on the dev machine, so new lints in a fresh

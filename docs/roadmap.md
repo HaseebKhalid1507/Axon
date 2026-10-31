@@ -22,7 +22,8 @@ instead of dropping, and priority classes in the scheduler. Track spec: [design/
 Haseeb's words, in order: **"make inference cheap and fast"**, **"run the best models"**, and **"run at datacenters
 without wasting resources: squeeze every drop."**
 
-Two tiers serve those, under two numerics modes ([design/determinism-modes.md](design/determinism-modes.md), proposed):
+Two tiers serve those, under two numerics modes ([design/determinism-modes.md](design/determinism-modes.md), accepted
+2026-10-29; the scaffolding, no fast kernel yet: #173):
 
 | tier | hardware | what "cheap and fast" means there | numerics | who it competes with |
 |---|---|---|---|---|
@@ -88,6 +89,11 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 Newest first, as of `39624db`; the numbers are the PRs' own MEASURED headlines, with the PRs' own labels
 (TAINTED, ESTIMATED) kept. Older entries (as of `764792f`, then `69adfa2`) follow the first list.
 
+- **Shortest-first admission and `--step-ms 80` are the `serve` defaults** (#167; #165's rule S, pre-registered,
+  decided on an H100 SXM, job 1027-084258-1ce4). sjf80 against fifo60 (the defaults before) at mix C=128, 2 rounds:
+  aggregate 1,983.5 vs 1,843.2 tok/s (+7.6 %), goodput 809.2 vs 504.3 (+60.5 %), ITL p99 99.9 ms (≤ 105), short TTFT
+  p50 187.5 vs 2,286.8 ms; C=64 aggregate +4.6 %; 768/768 requests identical (MEASURED). `--admit-order fifo
+  --step-ms 60` is the scheduling of before. #139's own rule had kept 80 report-only; #165 gave it its decision.
 - **A measured step budget in `serve`; shortest-first admission opt-in** (#131, roadmap item 1 (c)(d); supersedes
   #126). `--step-ms 60` is the default (`--prefill-ms` is its old name, kept as an alias): a step's prompt chunk is
   what fits beside the decode step at the cost the server measures. `--admit-order sjf` (with `--prefill-lanes`,
@@ -154,7 +160,8 @@ Newest first, as of `39624db`; the numbers are the PRs' own MEASURED headlines, 
 As of `764792f`:
 
 - **Determinism-modes ADR** (#101): `--numerics exact | fast`, merged as **PROPOSED**
-  ([design/determinism-modes.md](design/determinism-modes.md)); the decision is Haseeb's. Nothing built.
+  ([design/determinism-modes.md](design/determinism-modes.md)); the decision is Haseeb's. Nothing built. *(10-29:
+  accepted; M1/M2/M3/M5/M8 built in #173, M4 and M6 deferred.)*
 - **gpt-oss stage 1** (#98): attention, sinks, windows, router and head on the GPU, MXFP4 experts on the CPU. bella
   tg128 46.6 vs 23.4 tok/s (1.99× llama.cpp `-ot exps=CPU`), prefill 0.27× ([log](log/2026-10-18-gpt-oss-s1.md)).
 - **attn_blk_mq** (#84): one K/V tile load for 16 queries of one sequence, used for ≤ 32 queries. Its kill rule
@@ -220,8 +227,9 @@ pod, so item 1 starts by measuring. **Item 1(a) was measured on 10-26** ([log](l
 **Item 2 status 10-26: SHELVED per its pre-registered probe rule** ([log](log/2026-10-26-w4a8-probe.md)). The T3
 upper-bound probe (TMA + RS wgmma, warp-specialized, no exact epilogue at all) measured 224.8 TMAC/s at gate
 3,584 × 18,944, nb 1,024 on an H100 SXM, below the rule's 240 (= 180 / 0.75 for the ≥ 25 % exact-epilogue cost).
-M6 was rejected separately (#148). Per item 4's text, FP8 under `--numerics fast` is now the replacement path. That
-needs Haseeb's decision on the determinism-modes ADR, and nothing has been started.
+M6 was rejected separately (#148). Per item 4's text, FP8 under `--numerics fast` is now the replacement path. The
+determinism-modes ADR was accepted 10-29 (Haseeb) and its mode scaffolding built (#173, no kernels); the FP8 kernel
+itself has not been started.
 
 **The order below is the review's ranking, adopted here as a proposal; Haseeb decides, except the agent rows (2A, 2B, 2C): north star: owner, 10-26; ranking: lead (Jawz), 10-27.** Costs and gains are the
 review's ESTIMATES; the kill rules are written before building, as for every round.
@@ -240,10 +248,10 @@ The agent rows' gains, costs and rules are the design's ESTIMATES and pre-regist
 | 2A | **Agent workload, PR A: trace + replay harness, baseline board** (ranking: lead, 10-27; in item 2's slot). `scripts/agent_trace.py` (numbers only from Synaps' logs: no message text; raw traces stay out of this public repo, only the scripts and a synthetic example are committed), `scripts/agent_replay.py` (open-loop OpenAI-API replay, md5 of every reply), agent-32k at speed 1 and 4, 7B f16 + q8 on bella vs llama-server and ollama. **No engine changes.** | the first measured number for the mission's agent-swarm tier: TTFT-new / -resume / -turn, goodput, ITL p99, warm/GB, re-prefill tokens | 2 builder-days, $0 (the H100 vLLM / SGLang cells wait for 2C) | ships regardless (it is the ruler). If TTFT-resume p50 on main ≤ 1.0 s *and* re-prefill < 10 % of prompt tokens, 2B / 2C drop below item 3; if the measured cross-session shared prefix < 2k tokens, 2C becomes dedupe-only | 2B, 2C, then D–F of the design (scheduling, disk tier, multi-tenant) |
 | 3 | **One MoE resident on the GPU:** Moonlight-16B-A3B now, Qwen3-30B-A3B as the headline (PR A → D of the r16 pick-4 spec. PRs A–C are merged (#120, #122, #127; `--gpu-experts`, default 0). Qwen3-30B-A3B residency is #146. Kill rule PASS: Moonlight `auto` vs 0 on bella, tg ×2.06, pp ×3.40, MEASURED, TAINTED ([log](log/2026-10-24-moe-resident-c.md)). Bench of record (RTX 4090, main 8508a75, 2026-10-26, [board](benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)): Qwen3-30B-A3B all-resident: prefill ×1.31–1.32 llama.cpp's best placement (the rule names `--cpu-moe`, not run; best is stricter, 12,212 vs 9,289: passes), but decode ×0.87. Moonlight all-resident: ×0.96 tg / ×0.81 pp512 / ×0.57 pp2100. Axon's CPU-expert path trails llama.cpp's at partial offload on the EPYC 75F3 pod; on Parabellum (main 39624db) it led partial-offload decode 1.46–1.68× but trailed prefill 0.71–0.84×: the decode gap is host-dependent, prefill trails on both hosts. The run used a 24 GB 4090 at ctx 4096, not the budgeted 32–48 GB pod at 8k. T2b (the MoE decode step, #154): decode +8.8 % on the 30B (241.6 vs 222.1 tok/s), but its kill rule (≥ 252.5) is MISSED: ×0.95 llama.cpp, a ~5 % decode gap remains; merged default-on per methodology step 9, line closed (no follow-ups without a fresh pick)). | Moonlight decode on bella ~6 ms per step → ~160 tok/s (today 54–62); prefill ×3–5; Qwen3-30B-A3B fully resident on a 24 GB card, the first ≥ 30B-class model with a number vs llama.cpp and vLLM | ~5 builder-days; ~$10 (one 32–48 GB pod session for 30B-A3B at 8k) | resident decode < 1.5× the CPU-expert decode on bella → stop at PR B; 30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline | the Kimi K2 / DeepSeek template (experts resident per layer); gpt-oss-20b on 24 GB; an honest "best models" row |
 | 2B, 2C | **Agent workload, PRs B and C: two tracks after 2A** (ranking: lead, 10-27; ahead of item 4). **2B** tiered KV: `--cache-ram` (kvstore's pinned RAM tier), evict to RAM instead of dropping on reclaim, restore on admit, `/slots` save/restore, restart survival. **2C** shared-prefix pages: refcounted `PageMap`, token-chain index, copy-on-write tail page, prefill once / join many, `AXON_SHARE_KV=0` off. 2C's sharing is exact by construction (design §2.1); both are gated on the replay md5 equal to main's | 2B: TTFT-resume (2–10 min gap, 25k) ≈ 10 s → ≤ 0.3 s on bella 7B; 2C: a fan-out burst's siblings prefill once, and warm sessions per GB ≥ 1.4× | 2B 3–4 builder-days, $0; 2C 4–6 builder-days, $0, + $4–6 of H100 for the vLLM / SGLang cells | 2B: TTFT-resume p50 ≤ 0.3 s *and* md5 == main *and* aggregate / ITL p99 within 2 % at speed 4, else stays behind `--cache-ram 0`. 2C (fan-out cell fixed in A: 8 siblings, A's p50 shared span + a private delta of A's p50 `new`): siblings 2–8 TTFT p50 ≤ 0.25× main *and* warm/GB ≥ 1.4× on agent-32k at speed 4 *and* md5 == main under `AXON_PAGE_SHUFFLE`, C=1 decode within 2 %, else dedupe-only (itself gated on md5 and C=1) | agent scheduling (D), the disk tier (E), multi-tenant (F); on the H100 board, more warm sessions and lower TTFT (ESTIMATED) |
-| 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** *Behind 2B / 2C (ranking: lead, 10-27); blocked on the ADR decision.* The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel (item 2 did, 10-26; ranking: lead, 10-27: behind 2B / 2C). Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
+| 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** *Behind 2B / 2C (ranking: lead, 10-27); the ADR is accepted (10-29) and its scaffolding is #173.* The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel (item 2 did, 10-26; ranking: lead, 10-27: behind 2B / 2C). Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
 | 5 | **Adoption floor:** `lib.rs` (a split, not a rewrite), a tagged v0.1, the honest board on the README, one sentence for "why not vLLM". **Status 10-25: done except the tag.** #117 split the crate (`src/lib.rs`, `examples/embed.rs`), put the board ("Where it stands") and "Why not vLLM?" on the README, and wrote `CHANGELOG.md` and draft [release notes](release-0.1.md); #124 closed #118's v0.1 blockers (A opaque `Backend`, B env errors). **v0.1.0 is not tagged**: the tag and date are Haseeb's; the rest of #118 (stderr, env-only config, leaks, `serve`'s exits) stays open. | the first external user; embedding without a subprocess | 3 builder-days, $0 | none (hygiene); outcome to check: one external issue or PR within 30 days | a second human reading the code |
 
-**The ADR, per the review (OPINION; [ADR](design/determinism-modes.md) is PROPOSED, the decision is Haseeb's):** adopt
+**The ADR, per the review (OPINION; [ADR](design/determinism-modes.md) was PROPOSED then; accepted 10-29 by Haseeb, with M1 now, `serve --datacenter`, M4 and M6 deferred):** adopt
 the mode scaffolding (M1–M3, M5) now; build no fast kernel until item 2 reports; not M4 (CPU fast prefill). Its one
 correction to the ADR: "nearly free on the GPU" should read "nearly free on sm_89 / sm_120; unmeasured on sm_90" until
 item 1's inexact-gemmh2 bound exists.
@@ -291,9 +299,13 @@ Also open:
   gpt-oss, #98, and deepseek2, #89); what's left lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Native safetensors, then FP8 / NVFP4 weights** (the FP8 plan, `specs/fp8-safetensors.md`).
   Stage A, the loader (Hugging Face checkpoint directories of qwen2 / qwen3 / llama, BF16 run as the
-  GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). Next: B, FP8
-  per-channel dense on the GPU (sm_89 / sm_120); C, FP8 128×128 block scales (DeepSeek-style, MoE
-  experts from per-expert tensors); D, NVFP4.
+  GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). B, FP8
+  per-channel dense (RedHatAI `*-FP8-dynamic`): #177 ([log](log/2026-10-30-fp8-weights.md)) loads them, runs them
+  as Q8_0 in exact mode (the default; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar) and natively under `--numerics fast`, which
+  **fails its bars on bella** (7B tg128 32 vs Q4_K_M 85–101 tok/s, top-1 95.9 % vs 97 %; unmeasured on H100).
+  - **FP8 fast decode: give F8 nets the decode-graph gemv path; re-gate on bella + H100.**
+
+  Then C, FP8 128×128 block scales (DeepSeek-style, MoE experts from per-expert tensors); D, NVFP4.
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
   ([benchmarks-gpu.md](benchmarks-gpu.md)).
 - **Gemma 3 27B (head_dim 128) on CUDA.** Needs the head-128 windowed attention kernels and the
@@ -560,10 +572,12 @@ models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 
 ## Not planned, and why
 
-- **Split-KV or f16-accumulate attention, NCCL-style ring all-reduce, atomics in reductions: not in `exact`
-  mode.** Each would break the bit-identity contract (decode == prefill == verify, deterministic output). Multi-GPU
-  in exact mode uses fixed-order reductions. Where they are allowed, and what they are measured to buy (little, on
-  today's kernels), is the subject of [design/determinism-modes.md](design/determinism-modes.md).
+- **Split-KV or f16-accumulate attention, NCCL-style ring all-reduce, atomics in reductions: not in exact
+  mode.** Each would break the bit-identity contract (decode == prefill == verify, deterministic output), which is
+  `--numerics exact`, the default. Multi-GPU in exact mode uses fixed-order reductions. They are allowed in
+  `--numerics fast` (the default under `serve --datacenter`), gated by tolerance against exact mode, each only once a
+  measured gap names it, with a kill rule ([design/determinism-modes.md](design/determinism-modes.md) §4.6, accepted
+  2026-10-29); what they are measured to buy on today's kernels is little (its §2). None is built yet.
 - **More single-stream 7B GEMM tuning on consumer GPUs.** The kernels are at bandwidth or power limits
   (above). An earlier experimental GEMM ("gemm3") was a no-go. Hopper is the exception.
 - **AVX-512 and ARM/NEON CPU kernels.** No machine is available to measure them on. A

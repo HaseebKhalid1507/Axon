@@ -16,6 +16,7 @@ use crate::hybrid::{HybridCache, HybridQwen2, Placement};
 use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
 use crate::moe::{MoeCache, MoeQwen3};
+use crate::numerics::Numerics;
 use crate::sample::{self, Cand, CandSpec};
 
 /// 0..n in chunks of pb (the last shorter).
@@ -508,11 +509,11 @@ pub fn head_gpu() -> Result<usize, String> {
 ///     let _ = &mut b.0;
 /// }
 /// ```
-pub struct Backend<'a>(pub(crate) Inner<'a>);
+pub struct Backend<'a>(pub(crate) Inner<'a>, pub(crate) Numerics);
 
 /// What a `Backend` holds.
 pub(crate) enum Inner<'a> {
-    Cpu(Qwen2<'a>),
+    Cpu(Box<Qwen2<'a>>),
     /// Its `Gpu` and kernel module are leaked: they live as long as the
     /// process, which is as long as the CLI needs them (the weights and
     /// caches are still freed on drop).
@@ -559,6 +560,9 @@ pub struct Placing {
     /// A MoE model's experts resident on the GPU (`--gpu-experts`; None:
     /// $AXON_GPU_EXPERTS, else 0).
     pub gpu_experts: Option<crate::cuda::qwen2::experts::GpuExperts>,
+    /// The numerics mode (`--numerics`; `crate::numerics`): fast mode's
+    /// kernel modules compile with `cuda::FAST_DEFINE`.
+    pub numerics: Numerics,
 }
 
 /// The shortest cache a paged serve keeps the whole model on the GPU for
@@ -605,12 +609,13 @@ impl Placing {
             defer_q6k8: false,
             paged: false,
             gpu_experts: None,
+            numerics: Numerics::Exact,
         }
     }
 }
 
 /// How `Backend::new` places a model: device, context, GPU layers, KV type,
-/// fit. Build it from `BackendOptions::default()` with the setters, each
+/// fit, numerics mode. Build it from `BackendOptions::default()` with the setters, each
 /// returning the options:
 ///
 /// ```no_run
@@ -634,6 +639,7 @@ impl Placing {
 ///     gpu_layers: None,
 ///     kv: axon::KvType::F16,
 ///     fit: false,
+///     numerics: axon::Numerics::Exact,
 /// };
 /// ```
 ///
@@ -655,11 +661,12 @@ pub struct BackendOptions {
     pub(crate) gpu_layers: Option<usize>,
     pub(crate) kv: KvType,
     pub(crate) fit: bool,
+    pub(crate) numerics: Numerics,
 }
 
 impl Default for BackendOptions {
     /// The CPU, a 4096-token context (flat, not model-derived: see
-    /// `max_ctx`), no layer split, f16 KV, no fit.
+    /// `max_ctx`), no layer split, f16 KV, no fit, exact numerics.
     fn default() -> BackendOptions {
         BackendOptions {
             device: Device::Cpu,
@@ -667,6 +674,7 @@ impl Default for BackendOptions {
             gpu_layers: None,
             kv: KvType::F16,
             fit: false,
+            numerics: Numerics::Exact,
         }
     }
 }
@@ -716,6 +724,18 @@ impl BackendOptions {
         self.fit = fit;
         self
     }
+
+    /// The numerics mode (default `Numerics::Exact`: decode == batched
+    /// prefill == verify, bit for bit). `Numerics::Fast` may run kernels
+    /// that change the float order (graded against exact, not equal) and
+    /// has its own identity; no backend has a fast kernel yet, so today it
+    /// runs the exact kernels under the fast identity
+    /// (docs/design/determinism-modes.md).
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
+    pub fn numerics(mut self, n: Numerics) -> BackendOptions {
+        self.numerics = n;
+        self
+    }
 }
 
 impl<'a> Backend<'a> {
@@ -743,8 +763,60 @@ impl<'a> Backend<'a> {
             o.gpu_layers,
             o.kv,
             o.fit,
-            Placing::of(o.max_ctx),
+            Placing {
+                numerics: o.numerics,
+                ..Placing::of(o.max_ctx)
+            },
         )
+    }
+
+    /// The numerics mode it was made in (`BackendOptions::numerics`).
+    pub fn numerics(&self) -> Numerics {
+        self.1
+    }
+
+    /// Whether it runs any fast-set kernel. False in `Numerics::Exact`;
+    /// in `Numerics::Fast`, false means it runs exact mode's kernels under
+    /// fast mode's identity, which is every backend today: no fast kernel
+    /// exists yet (docs/design/determinism-modes.md). An embedder can tell
+    /// from it whether fast mode is still exact's bits on this backend.
+    pub fn fast_kernels(&self) -> bool {
+        crate::numerics::fast_kernels(self)
+    }
+
+    /// `Backend(inner, num)`, checked in debug builds: each of its GPU
+    /// models runs the kernel module of mode `num` (`Module::fast`), so a
+    /// fast module never sits under an exact identity, nor an exact one
+    /// under a fast identity's kvsave key.
+    pub(crate) fn of(inner: Inner<'a>, num: Numerics) -> Backend<'a> {
+        let b = Backend(inner, num);
+        debug_assert!(
+            b.gpu_nets()
+                .iter()
+                .all(|n| n.fast() == (num == Numerics::Fast)),
+            "a {num} backend over another mode's kernel module"
+        );
+        b
+    }
+
+    /// Its GPU models: the whole model, a split's or a MoE's GPU half, a
+    /// pipeline's stages; none on the CPU.
+    pub(crate) fn gpu_nets(&self) -> Vec<&CudaQwen2<'static>> {
+        match &self.0 {
+            Inner::Cpu(_) => Vec::new(),
+            Inner::Cuda(n) => vec![&**n],
+            Inner::Hybrid(n) => n.gpu_net().into_iter().collect(),
+            Inner::Pipeline(n) => n.stages(),
+            Inner::Moe(n) => vec![n.gpu_net()],
+        }
+    }
+
+    /// Fast-set kernel launches on its GPU models so far
+    /// (`CudaQwen2::fast_launched`): the fast-vs-exact gate's proof that a
+    /// fast kernel ran in the arm it grades. 0 on the CPU (no fast kernel).
+    #[cfg_attr(not(test), allow(dead_code))] // the gate reads it
+    pub(crate) fn fast_launches(&self) -> u64 {
+        self.gpu_nets().iter().map(|n| n.fast_launches()).sum()
     }
 
     /// `new`, as `p` says (`axon serve`'s default: `Placing`). With
@@ -766,6 +838,7 @@ impl<'a> Backend<'a> {
         // error, not a panic in a later forward pass.
         crate::quant::env_check()?;
         let split_ctx = p.split_ctx;
+        let num = p.numerics;
         let long = fit && split_ctx < max_ctx;
         // `kv` is the whole KV choice: this reads no AXON_KV (the CLI parses
         // it and passes the type it names; an embedder passes its own). The
@@ -797,7 +870,7 @@ impl<'a> Backend<'a> {
             if let Some(warn) = crate::model::check_ram_dense(m, ctx)? {
                 eprintln!("axon: {warn}");
             }
-            return Ok(Backend(Inner::Cpu(Qwen2::new(m))));
+            return Ok(Backend::of(Inner::Cpu(Box::new(Qwen2::new(m))), num));
         }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
@@ -825,6 +898,7 @@ impl<'a> Backend<'a> {
                 if long { max_ctx } else { split_ctx },
                 split_ctx,
                 ckv,
+                num,
             );
         }
         let ordinal = gpus.map_or(0, |l| l[0]);
@@ -838,13 +912,15 @@ impl<'a> Backend<'a> {
                 fit,
                 !p.defer_q6k8,
                 p.gpu_experts,
+                num,
             );
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
-        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
+        let module: &'static Module<'static> =
+            Box::leak(Box::new(Kernels::module_for_mode(gpu, m, num)?));
         let whole_gpu = |ctx: usize, fit: bool| {
             CudaQwen2::with_kv_q6k8(gpu, module, m, ctx, ckv, fit, !p.defer_q6k8)
-                .map(|n| Backend(Inner::Cuda(Box::new(n))))
+                .map(|n| Backend::of(Inner::Cuda(Box::new(n)), num))
         };
         let auto = gpu_layers.is_none();
         let stream = crate::hybrid::stream_setting();
@@ -911,7 +987,7 @@ impl<'a> Backend<'a> {
         let h =
             HybridQwen2::new_with_stream(Some((gpu, module)), m, split_ctx, g, ckv, stream, auto)?;
         eprintln!("split:       {}", h.describe(split_ctx));
-        Ok(Backend(Inner::Hybrid(Box::new(h))))
+        Ok(Backend::of(Inner::Hybrid(Box::new(h)), num))
     }
 
     /// A qwen3moe model on GPU `ordinal`: attention, routers and head there
@@ -929,6 +1005,7 @@ impl<'a> Backend<'a> {
         fit: bool,
         q6k8: bool,
         gpu_experts: Option<crate::cuda::qwen2::experts::GpuExperts>,
+        num: Numerics,
     ) -> Result<Backend<'a>, String> {
         let n = crate::hybrid::block_count(m)?;
         if gpu_layers.is_some_and(|g| g < n) {
@@ -939,16 +1016,17 @@ impl<'a> Backend<'a> {
             ));
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
-        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
+        let module: &'static Module<'static> =
+            Box::leak(Box::new(Kernels::module_for_mode(gpu, m, num)?));
         let router: &'static Module<'static> =
-            Box::leak(Box::new(Kernels::moe_module_for(gpu, m)?));
+            Box::leak(Box::new(Kernels::moe_module_for_mode(gpu, m, num)?));
         let want = match gpu_experts {
             Some(w) => w,
             None => crate::cuda::qwen2::experts::GpuExperts::from_env()?,
         };
         let n = MoeQwen3::new_with(gpu, module, router, m, max_ctx, kv, fit, q6k8, want)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
-        Ok(Backend(Inner::Moe(Box::new(n))))
+        Ok(Backend::of(Inner::Moe(Box::new(n)), num))
     }
 
     /// The model's layers over the GPUs `ordinals` (in order), a
@@ -963,12 +1041,13 @@ impl<'a> Backend<'a> {
         max_ctx: usize,
         split_ctx: usize,
         kv: CacheKv,
+        num: Numerics,
     ) -> Result<Backend<'a>, String> {
         let mut devs = Vec::with_capacity(ordinals.len());
         for &o in ordinals {
             let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(o)?));
             let module: &'static Module<'static> =
-                Box::leak(Box::new(Kernels::module_for(gpu, m)?));
+                Box::leak(Box::new(Kernels::module_for_mode(gpu, m, num)?));
             devs.push((gpu, module));
         }
         let floor = crate::hybrid::KEEP_CTX_FLOOR.min(max_ctx);
@@ -978,7 +1057,7 @@ impl<'a> Backend<'a> {
         };
         let p = PipelineQwen2::new(&devs, m, ctx, kv, None)?;
         eprintln!("pipeline:    {}", p.describe(ctx));
-        Ok(Backend(Inner::Pipeline(Box::new(p))))
+        Ok(Backend::of(Inner::Pipeline(Box::new(p)), num))
     }
 
     /// The context the cache was planned for: the GPU's, the split's or
@@ -998,7 +1077,10 @@ impl<'a> Backend<'a> {
 macro_rules! dispatch {
     ($self:expr, $cache:expr, |$n:ident, $c:ident| $body:expr) => {
         match (&$self.0, &mut $cache.0) {
-            (Inner::Cpu($n), CacheInner::Cpu($c)) => $body,
+            (Inner::Cpu($n), CacheInner::Cpu($c)) => {
+                let $n = &**$n;
+                $body
+            }
             (Inner::Cuda($n), CacheInner::Cuda($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
@@ -1036,7 +1118,7 @@ impl Lm for Backend<'_> {
 
     fn new_cache(&self, max_ctx: usize) -> BackendCache {
         BackendCache(match &self.0 {
-            Inner::Cpu(n) => CacheInner::Cpu(Lm::new_cache(n, max_ctx)),
+            Inner::Cpu(n) => CacheInner::Cpu(Lm::new_cache(&**n, max_ctx)),
             Inner::Cuda(n) => CacheInner::Cuda(Box::new(n.new_cache(max_ctx))),
             Inner::Hybrid(n) => CacheInner::Hybrid(Box::new(n.new_cache(max_ctx))),
             Inner::Pipeline(n) => CacheInner::Pipeline(Box::new(n.new_cache(max_ctx))),

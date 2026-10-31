@@ -164,9 +164,9 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   [roadmap](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides), [reviews/](reviews/README.md)):
   - **H100 step anatomy** (item 1 (a)): the kit is draft PR #125 (`AXON_SERVE_TRACE`, gemmh2 variants,
     `pool_feed_cost`), rehearsed on bella; the pod session waits for approval.
-  - **The shortest-first default on the H100** (#139): #131 shipped the measured step budget and kept
-    `--admit-order sjf` opt-in after it missed its kill rule on the laptop cells; one H100 session at mix C = 64 /
-    128 decides whether it becomes the default. Not booked.
+  - **The shortest-first default on the H100** (#139, #165): decided. `--admit-order sjf --step-ms 80` passed
+    #165's pre-registered rule S on an H100 SXM (mix C=128: +7.6 % aggregate, +60.5 % goodput, ITL p99 99.9 ms) and
+    is the default (#167).
   - Later in the order: an exact Hopper GEMM (item 2), FP8 under `fast` if that GEMM misses (item 4).
 - **One MoE resident on the GPU, next steps** (item 3; PRs A–C are on main for deepseek2):
   - the **Moonlight bench of record** against llama.cpp (`--n-cpu-moe`), since #127's ×2.06 / ×3.40 was against
@@ -176,8 +176,10 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   `--parallel N` silently serving fewer slots) is fixed by #141: it's refused at start.
 - **Library API for embedders:** the rest of #118 (stderr from library code, env-only config, leaks, `serve`'s
   exits). The v0.1.0 tag is Haseeb's call.
-- **Determinism modes** (`--numerics exact | fast`): an ADR merged as PROPOSED
-  ([design/determinism-modes.md](design/determinism-modes.md)); nothing is built until it is decided.
+- **Determinism modes** (`--numerics exact | fast`): the ADR is accepted (2026-10-29,
+  [design/determinism-modes.md](design/determinism-modes.md)); its scaffolding is built (#173: the flag, the
+  identity line, `serve --datacenter`, the graded test harness, the cache keys). No fast kernel exists yet: `fast`
+  runs the exact kernels under its own identity.
 - **Batched speculative decoding in `serve`:** the first attempt (#90) is closed; a second (latency-guarded gate v2,
   then multi-row verify) is designed ([research/spec-gate-v2-20261024.md](research/spec-gate-v2-20261024.md)), below
   the line in the proposed order.
@@ -189,7 +191,7 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   results, the serving boards (RTX 4090 and H100 SXM vs vLLM / SGLang), with caveats.
 - [design/multi-gpu.md](design/multi-gpu.md): pipeline parallel, then tensor parallel; bit-identity analysis.
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
-- [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (PROPOSED).
+- [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (accepted 2026-10-29).
 - [determinism.md](determinism.md): what is bit-identical, and the identity tuple behind `system_fingerprint`.
 - [serve-apis.md](serve-apis.md): `axon serve`'s routes (chat completions, completions, Responses, ollama).
 - [testing.md](testing.md): the test tiers and what to run when.

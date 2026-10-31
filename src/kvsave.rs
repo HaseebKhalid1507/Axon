@@ -5,7 +5,7 @@
 //! restored cache continues as the uninterrupted one would. They are only
 //! that function *for one identity*: the model file, the KV type, the RoPE
 //! table, the backend and its numerics (kernel sources, GPU architecture,
-//! driver). A file records its identity in the header; one made under
+//! driver; the numerics mode, `crate::numerics`). A file records its identity in the header; one made under
 //! another identity is never loaded as bytes, only as tokens, which are
 //! prefilled again. A file is never wrong, only slower.
 //!
@@ -34,6 +34,7 @@
 use crate::cuda::qwen2::{CudaCache, CudaQwen2};
 use crate::lm::{Backend, BackendCache, CacheInner, Inner, Lm};
 use crate::model::{KvCache, Qwen2};
+use crate::numerics::Numerics;
 use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -419,7 +420,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
             return None;
         }
         let (layers, kvd, hd) = self.kv_shape();
-        let num = crate::cuda::numerics_tag(self.gpu()).ok()?;
+        let num = crate::cuda::numerics_tag(self.gpu(), self.fast()).ok()?;
         let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
         Some(json!({
@@ -461,12 +462,20 @@ impl<'g> KvIo for CudaQwen2<'g> {
 }
 
 impl KvIo for Backend<'_> {
+    /// The model's (`Qwen2`'s, `CudaQwen2`'s) and, in the fast numerics
+    /// mode, `numerics_mode` ("fast/1.2"): a session saved in one mode is
+    /// restored into the other as tokens (prefilled again), never as bytes.
+    /// Exact mode adds nothing, so files saved before the modes still load.
     fn kv_ident(&self, cache: &BackendCache) -> Option<Value> {
-        match (&self.0, &cache.0) {
+        let mut v = match (&self.0, &cache.0) {
             (Inner::Cpu(n), CacheInner::Cpu(c)) => n.kv_ident(c),
             (Inner::Cuda(n), CacheInner::Cuda(c)) => n.kv_ident(c),
             _ => None,
+        }?;
+        if let (Numerics::Fast, Value::Object(o)) = (self.numerics(), &mut v) {
+            o.insert("numerics_mode".into(), json!(self.numerics().tag()));
         }
+        Some(v)
     }
 
     fn kv_save(

@@ -140,8 +140,13 @@ Works today, honestly scoped:
   (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
   [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
   `--outtype f16` would round them). CPU only for now
-  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
-  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  (the GPU has no F16 matrix kernels). **FP8 checkpoints** (compressed-tensors per-channel e4m3 with
+  dynamic per-token activations, RedHatAI's `*-FP8-dynamic`) run everywhere: in exact mode (the
+  default) as Q8_0 converted at load (today's kernels and bit contract; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar), on the CPU as the exact dequant (slow; the accuracy reference), and on the
+  GPU natively with `--numerics fast` (sm_89+: e4m3 tensor cores, [fp8-weights.md](docs/design/fp8-weights.md)).
+  Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
+  without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other
+  architectures are refused with a message (roadmap). The pre-tokenizer must be one
   Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
   `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
@@ -210,7 +215,7 @@ Works today, honestly scoped:
   ([design](docs/design/agent-workload.md) §6 row B).
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
+Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the
 GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and `qwen3moe`'s can be:
 `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched speculative decoding in
 `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
@@ -274,18 +279,19 @@ axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
                                           (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
-          [--ctx N] [--gpu-layers N] [--gpus L] [--gpu-experts N|auto] [--kv T]
+          [--ctx N] [--gpu-layers N] [--gpus L] [--gpu-experts N|auto] [--kv T] [--numerics M]
                                           generation (default 32 tokens; greedy unless --temp)
-axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
+axon logits <model.gguf> "<prompt>" [-k K] [--numerics M]
+                                          top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
           [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L]
-          [--gpu-experts N|auto] [--kv T] [--session F]
+          [--gpu-experts N|auto] [--kv T] [--numerics M] [--session F]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
 axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
           [--device D] [--gpu-layers N] [--kv T] [--parallel N] [--step-ms MS]
-          [--admit-order fifo|sjf] [...]
+          [--admit-order sjf|fifo] [--numerics M] [--datacenter] [...]
                                           OpenAI-compatible HTTP server (below)
 axon --help | --version
 ```
@@ -331,6 +337,13 @@ Defaults, as `axon --help` gives them:
   `axon serve` runs a pipeline one request at a time.
 - `--kv T`: `f16`, or `q8` (cuda only; on a split, the GPU layers' cache, so more
   layers fit).
+- `--numerics M` (gen, logits, chat, serve): `exact`, or `fast`. `exact` is the
+  bit-identity contract ([docs/determinism.md](docs/determinism.md)); `fast` may run
+  kernels that change the float order (graded against exact, not equal) under its own
+  identity, and promises tolerance on every path, never bits (batching, cache reuse,
+  drafting). No fast kernel exists yet: `fast` runs the exact kernels and says so once.
+  `serve --datacenter` implies `--numerics fast` (and, today, nothing else); an explicit
+  `--numerics` wins. Why: [docs/design/determinism-modes.md](docs/design/determinism-modes.md).
 - `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
   whole model doesn't fit with it, a shorter context if at least half of it (or 4096)
   fits, else a split. For `serve`, see below: its default is the whole trained context.
@@ -418,21 +431,23 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 an explicit N that doesn't fit in GPU memory at start is refused, the automatic sizing falls back and says so),
 `--prefill-chunk N` (at least N prompt tokens a batched step feeds while others decode;
 default 256; `--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time
-while requests decode, default 60: the prompt tokens it feeds beside their decode step are
+while requests decode, default 80: the prompt tokens it feeds beside their decode step are
 what fits at the cost the server measures as steps run, per pass, per prompt token and per
 decode row count, and a step feeds at most the prompts that fit; 0: exactly `--prefill-chunk`
 tokens; `--prefill-ms` is its old name, still accepted), `--step-tokens N`
 (pin a step's prompt tokens; this also lifts the bound on prompts per step),
-`--admit-order fifo|sjf` (`fifo`, default: first come first
-served, one per step; `sjf`, opt-in, `AXON_ADMIT=sjf`: shortest prompt first, several per
-step, which cuts short prompts' tail TTFT under load but not yet their median: it missed its
-kill rule on a laptop GPU and stays opt-in until an H100 run decides,
-[#139](https://github.com/HaseebKhalid1507/Axon/issues/139)), `--admit-age-ms MS` (sjf: a request
-waiting this long starts before shorter ones, default 3000; 0: never), `--prefill-lanes N`
-(prompts prefilling at once, default 2; with sjf only prompts longer than a step's chunk
-count, default parallel/16 within 2..8, and short ones never wait for a lane). The
-scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
-`AXON_STEP_COST=legacy` with the default fifo. `--quiet`
+`--admit-order sjf|fifo` (`sjf`, default: shortest prompt first, several per step; `fifo`,
+`AXON_ADMIT=fifo`: first come first served, one per step). With `--step-ms 80` this default
+passed a pre-registered rule on an H100 SXM, mix C=128 against fifo at 60 ms: aggregate
++7.6 %, goodput +60.5 %, ITL p99 99.9 ms, C=64 aggregate +4.6 %, identical outputs
+([#165](https://github.com/HaseebKhalid1507/Axon/issues/165)). `--admit-age-ms MS` (sjf: a
+request waiting this long starts before shorter ones, default 3000; 0 removes the starvation
+bound, a long prompt can then wait as long as shorter ones keep arriving, and `serve` says so),
+`--prefill-lanes N` (prompts prefilling at once: with sjf, prompts longer than a step's chunk,
+default parallel/16 within 2..8, and short ones never wait for a lane; with fifo, all of them,
+default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for the fixed
+budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COST=legacy`.
+`--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -599,7 +614,7 @@ scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
   no page image (a CPU/GPU split, several GPUs, MoE, deepseek2). It lives as long as the
   process (surviving a restart is a later stage). `/metrics` adds `axon_kv_ram_*`.
 - A request's `priority` field is accepted and ignored (requests start in arrival order, or
-  shortest prompt first with `--admit-order sjf`).
+  shortest prompt first by default; `--admit-order fifo` for arrival order).
 
 #### Tool calling
 
@@ -753,8 +768,8 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
-| `AXON_ADMIT=sjf` | `serve`: same as `--admit-order sjf` (opt-in; default fifo) |
-| `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with the default fifo admission, the scheduling of before, decision for decision |
+| `AXON_ADMIT=fifo\|sjf` | `serve`: same as `--admit-order` (any case; default sjf); any other value refuses to start |
+| `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
 
 ## Numbers
@@ -911,7 +926,7 @@ The GPU, after that:
   context: when to use it, llama.cpp agreement, retrieval and short-context cost
 - [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
   [Hopper](docs/design/hopper.md) designs, and the [determinism-modes ADR](docs/design/determinism-modes.md)
-  (`--numerics exact | fast`, proposed)
+  (`--numerics exact | fast`, accepted 2026-10-29)
 
 ## Contributing
 
