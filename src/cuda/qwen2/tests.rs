@@ -3289,6 +3289,92 @@ fn gpu_qkv_one_launch_matches_three() {
     }
 }
 
+/// WP-A4's T arm: a layer's Q4_K `down` with gemm2s kept only up to
+/// AXON_DOWN_TILE_T_MIN_NB tokens (`bgemm_at`, gemm2t past it where
+/// `tile_t_from`'s waves pick it) == main's routing (`bgemm`: gemm2s up to
+/// TILE_T_MIN_NB), byte for byte: the 7B's down (3584 x 18944) and a shape
+/// whose gemm2s grid is one block past a wave on this GPU (gemm2t picked
+/// on any SM count), epilogue mode 0 with a bias and mode 1 (the residual
+/// add, as down into x), every decode batch size the override moves.
+/// (Per kernel, gemm2t == gemm2s == the decode GEMV at these sizes:
+/// `gpu_batched_products_match_gemv_bits`.)
+#[test]
+fn gpu_down_tile_t_matches_bgemm() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    // (gemmh2 takes Hopper's Q4_K products ahead of the tiles.)
+    let gemmh = km.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0");
+    if net.bf.gemm_t.is_none() || gemmh {
+        return;
+    }
+    let sms = net.bf.sms;
+    let mut rng = Rng(0x0a4d_0e7e_2026_1031);
+    let mut moved = 0;
+    for (cols, rows) in [(18944usize, 3584usize), (4864, 64 * (sms + 1))] {
+        let wd = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wd).unwrap();
+        let mt = Mat {
+            qt: Q4_K,
+            off: 0,
+            rb: quant::row_bytes(Q4_K, cols),
+            rows,
+            cols,
+            c8: None,
+            ws: None,
+        };
+        let bias = g.upload(&rng.vec(rows, 3.0)).unwrap();
+        for nb in [17usize, 24, 31, 32, 33, 48, 63, 64] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let ast = act_stride_t(cols);
+            let init = rng.vec(rows * nb, 5.0);
+            if !net.takes_gemvm(rows, nb)
+                && batch::tile_t_from(rows, G2_BM, nb, sms, batch::SMALL)
+                && !batch::tile_t(rows, G2_BM, nb, sms)
+            {
+                moved += 1;
+            }
+            for mode in [0i32, 1] {
+                let run = |t_min: usize| -> Vec<u32> {
+                    let out = g.upload(&init).unwrap();
+                    let b = if mode == 0 { bias.arg() } else { Arg::Ptr(0) };
+                    // SAFETY: w holds the matrix, act nb tokens of cols
+                    // inputs, out nb rows of `rows` floats, bias rows floats.
+                    unsafe {
+                        net.bgemm_at(&w, &mt, act.arg(), ast, nb, b, mode, out.arg(), rows, t_min)
+                    }
+                    .unwrap();
+                    g.sync().unwrap();
+                    bits(&out.read().unwrap())
+                };
+                let want = run(batch::TILE_T_MIN_NB);
+                for t_min in [batch::SMALL, 31] {
+                    assert!(
+                        run(t_min) == want,
+                        "down {rows} x {cols} nb {nb} mode {mode} t_min {t_min}: != main's routing"
+                    );
+                }
+            }
+        }
+    }
+    // Not vacuous: the second shape takes gemm2t past SMALL on any SM count.
+    assert!(moved > 0, "no batch size took the moved route");
+    eprintln!(
+        "down: gemm2t from 17 / 32 tokens == main's routing, bit for bit ({moved} sizes moved)"
+    );
+}
+
 /// Every product kernel against gemv_ref, the canonical order written out
 /// one thread per output: the decode GEMV (per token), gemvn, gemvm and
 /// the GEMMs, bit for bit, every weight type, random widths up to the 7B's

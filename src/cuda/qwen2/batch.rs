@@ -392,7 +392,15 @@ fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
 /// pool's and verify's batches) is unmeasured with gemm2t (TILE_T_TIME is
 /// from nb 1024 / 1088), so those keep gemm2s.
 pub(super) fn tile_t(rows: usize, br: usize, nb: usize, sms: usize) -> bool {
-    if nb <= TILE_T_MIN_NB {
+    tile_t_from(rows, br, nb, sms, TILE_T_MIN_NB)
+}
+
+/// `tile_t` with gemm2s kept up to min_nb tokens instead of TILE_T_MIN_NB
+/// (`BatchFns::down_t_min_nb`). gemm2t and gemm2s give the same bits per
+/// output (`gpu_batched_products_match_gemv_bits`: both == the decode GEMV),
+/// so min_nb moves only the speed.
+pub(super) fn tile_t_from(rows: usize, br: usize, nb: usize, sms: usize, min_nb: usize) -> bool {
+    if nb <= min_nb {
         return false;
     }
     let tiles = nb.div_ceil(64);
@@ -756,6 +764,10 @@ pub(super) struct BatchFns<'m> {
     pub(super) gemm_x: Option<[Func<'m>; 2]>,
     /// AXON_QKV_FUSE=0: never `bgemm_g2x` (q, k, v as before).
     pub(super) qkv_fuse: bool,
+    /// AXON_DOWN_TILE_T_MIN_NB: the most tokens a layer's Q4_K / Q5_K `down`
+    /// keeps gemm2s for whatever `tile_t`'s waves say (default TILE_T_MIN_NB,
+    /// main's routing; at least SMALL). WP-A4's T arm: 31, gemm2t from 32.
+    pub(super) down_t_min_nb: usize,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
     /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
@@ -976,6 +988,10 @@ impl<'m> BatchFns<'m> {
                 None
             },
             qkv_fuse: std::env::var("AXON_QKV_FUSE").map_or(true, |v| v != "0"),
+            down_t_min_nb: std::env::var("AXON_DOWN_TILE_T_MIN_NB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(TILE_T_MIN_NB, |v: usize| v.max(SMALL)),
             gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0") {
                 let (a, b) = (
                     module.function("gemmh2_q4_k")?,
@@ -1159,6 +1175,42 @@ impl<'g> CudaQwen2<'g> {
         out: Arg,
         ostride: usize,
     ) -> Result<(), String> {
+        // SAFETY: the caller's contract.
+        unsafe {
+            self.bgemm_at(
+                wts,
+                mt,
+                act,
+                astride,
+                nb,
+                bias,
+                mode,
+                out,
+                ostride,
+                TILE_T_MIN_NB,
+            )
+        }
+    }
+
+    /// `bgemm` with `tile_t`'s gemm2s floor at t_min tokens (`tile_t_from`;
+    /// the same bits at any t_min).
+    ///
+    /// # Safety
+    /// As `bgemm`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn bgemm_at(
+        &self,
+        wts: &DevBuf,
+        mt: &Mat,
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        bias: Arg,
+        mode: i32,
+        out: Arg,
+        ostride: usize,
+        t_min: usize,
+    ) -> Result<(), String> {
         let bf = &self.bf;
         if mt.qt == F8_E4M3 {
             // SAFETY: the caller's contract.
@@ -1247,7 +1299,7 @@ impl<'g> CudaQwen2<'g> {
                     let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
                     // Q4_K / Q5_K: 128 x 64 where it pays (`tile_t`).
                     if let (Some((ft, _)), true) = (&bf.gemm_t, matches!(mt.qt, Q4_K | Q5_K))
-                        && tile_t(mt.rows, G2_BM, nb, bf.sms)
+                        && tile_t_from(mt.rows, G2_BM, nb, bf.sms, t_min)
                     {
                         return self.gpu.launch(
                             &ft[(mt.qt == Q5_K) as usize],
@@ -2585,14 +2637,27 @@ impl<'g> CudaQwen2<'g> {
             match l.post_ffn {
                 // gemma3: as the post-attention norm (b.up free again).
                 Some(pf) => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    let tm = self.bf.down_t_min_nb;
+                    self.bgemm_at(
+                        wts,
+                        down,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        null,
+                        0,
+                        b.up.arg(),
+                        dim,
+                        tm,
+                    )?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                     post_add(pf)?;
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    let tm = self.bf.down_t_min_nb;
+                    self.bgemm_at(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim, tm)?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                 }
