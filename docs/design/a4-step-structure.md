@@ -473,7 +473,7 @@ For the 7B's down on 46 SMs it gives gemm2t/gemm2s = 0.82, and the micro-bench m
 
 **Known modelling gap:** `gemm_cost` (the prefill wave planner, passes > 32 tokens) still prices every Q4_K product with the
 64 floor. That includes `down` in a pass of 33..64 tokens, which now runs gemm2t on bella. It only steers how a long prompt is
-split into passes, and those passes are a quarter of the batch max or more (≥ 288 tokens at the default). Bits are unaffected.
+split into passes, and its passes are at least a quarter of the batch max (288 tokens at 1152). Bits are unaffected.
 
 ### 8.4 Final-head gates (`fe20964`)
 
