@@ -1,0 +1,33 @@
+[axon-run 11:57:33] submitted 1031-115733-027c by /home/haseeb/.cache/axon-fp8dbg: /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-567edfe hybrid:: cuda::tests:: model:: cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits cuda::qwen2::tests::lm_chunk_ranges cuda::qwen2::tests::magic_i2f_is_cvt_rn cuda::qwen2::tests::q6k8_never_costs_context cuda::qwen2::tests::ref_spread_zero_fails_by_name cuda::qwen2::tests::teacher_forced_dump cuda::qwen2::tests::tile_t_picks cuda::qwen2::tests::top1_binomial_rule cuda::qwen2::tests::top_k_is_the_largest cuda::qwen2::tests::wave_passes_shapes lineedit:: cuda::qwen2::experts:: cuda::qwen2::tests::fp8:: sample:: cuda::qwen2::moe:: cli:: identity:: cuda::qwen2::yarn_eval:: generate:: vmath:: moe::q3res_tests:: rope::
+[axon-run 12:03:54] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 12:03:54] scope axon-job-1031-115733-027c-1793462634.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 12:03:54] job 1031-115733-027c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-115733-027c-1793462634 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-567edfe hybrid:: cuda::tests:: model:: cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits cuda::qwen2::tests::lm_chunk_ranges cuda::qwen2::tests::magic_i2f_is_cvt_rn cuda::qwen2::tests::q6k8_never_costs_context cuda::qwen2::tests::ref_spread_zero_fails_by_name cuda::qwen2::tests::teacher_forced_dump cuda::qwen2::tests::tile_t_picks cuda::qwen2::tests::top1_binomial_rule cuda::qwen2::tests::top_k_is_the_largest cuda::qwen2::tests::wave_passes_shapes lineedit:: cuda::qwen2::experts:: cuda::qwen2::tests::fp8:: sample:: cuda::qwen2::moe:: cli:: identity:: cuda::qwen2::yarn_eval:: generate:: vmath:: moe::q3res_tests:: rope:: --test-threads 4
+axon-q 12:03:54 start slot 8-15: /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-567edfe hybrid:: cuda::tests:: model:: cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q
+
+running 247 tests
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test cuda::qwen2::experts::tests::cuda_experts_qwen3moe_match_cpu ... ok
+test cuda::qwen2::experts::tests::resident_placement_and_identity ... ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_profile_counts_every_layer ... ok
+test cuda::qwen2::moe::tests::moe_profile_lines_sum ... ok
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor ... ok
+test cli::tests::drafting_matches_greedy ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_load_diag ... ignored
+[axon-run 12:04:38] signal 15: stopping the job
+[axon-run 12:04:39] exit 143 after 44.3s (host bella)
