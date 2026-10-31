@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-oomctl",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1031-081724-d651",
+   "name": "kvtier-oomctl",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "oomctl.sh",
+   "started": 1793459424.7712827,
+   "ended": 1793459561.4575984,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d22e857334eac8defe5d85b76d5919962c9149cdc7f0cc81456d18938e0b032e",
+   "log_bytes": 2738
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-31 11:12:42 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

@@ -1,0 +1,29 @@
+[axon-run 08:17:24] submitted 1031-081724-d651 by /home/haseeb/.cache/axon-oomctl: /home/haseeb/.cache/axon-oomctl/oomctl.sh
+[axon-run 11:10:24] scope axon-job-1031-081724-d651-1793459424.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 11:10:24] job 1031-081724-d651 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-081724-d651-1793459424 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-oomctl/oomctl.sh
+axon-q 11:10:24 start slot 16-23: /home/haseeb/.cache/axon-oomctl/oomctl.sh
+kernel 7.2.11-1-cachyos lru_gen 0x0007 min_ttl_ms 100 thp [always] madvise never
+=== RUN base 11:10:24 /home/haseeb/.cache/axon-kvtier/axon-test-dbg-base-fde94b6
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+thread 'cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo' (475956) panicked at src/testutil.rs:117:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.68s
+PEAK base VmHWM 227484 kB elapsed 1 s
+=== END base rc=101 11:10:25
+=== RUN cand 11:10:25 /home/haseeb/.cache/axon-kvtier/axon-test-dbg-c96dfe6
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 813 filtered out; finished in 67.27s
+PEAK cand VmHWM 8360260 kB elapsed 68 s
+=== END cand rc=0 11:11:33
+=== RUN base 11:11:33 /home/haseeb/.cache/axon-kvtier/axon-test-dbg-base-fde94b6
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+thread 'cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo' (481534) panicked at src/testutil.rs:117:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.41s
+PEAK base VmHWM 4 kB elapsed 0 s
+=== END base rc=101 11:11:33
+=== RUN cand 11:11:33 /home/haseeb/.cache/axon-kvtier/axon-test-dbg-c96dfe6
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 813 filtered out; finished in 66.01s
+PEAK cand VmHWM 8374308 kB elapsed 67 s
+=== END cand rc=0 11:12:40
+RC 1
+[axon-run 11:12:40] exit 1 after 135.4s (host bella)
