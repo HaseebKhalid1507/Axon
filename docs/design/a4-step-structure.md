@@ -1,7 +1,9 @@
 # WP-A4 / WP-C1: decode-step structure, exact mode, consumer GPUs first
 
-**Status: Checkpoint 1 (built: (i), and (ii) for Q4_K behind its switch; gates and A/B submitted, pending).** CP0
-review: shady 7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`); its MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
+**Status: Checkpoint 2, the PR.** (i) ships: −2.3 % at nb 32 d600, which passes its pre-registered bar of −1.8 %, by the lead's
+ruling (§7). (ii) was dropped by M2 with no A/B, because the 32-row tiles were 7–15 % slower than today's gemm2s and 35–41 % slower than
+gemm2t. Its code was removed in `05b48b6`. CP0 review: shady 7/10 BUILD-WITH-MUSTS (commit comment on `70f5fd0`). Its
+MUSTs M1–M3 are folded in below (§4, §5). Branch `feat/a4-step-structure` off `origin/main` `fde94b6`. Scope: the
 spec's WP-A4 (i) and (ii) (`specs/beat-vllm-scope.md` §6 Track A, the same package as Track C's WP-C1), in **exact**
 mode, built and judged on bella (RTX 5070 Ti Laptop, sm_120, 46 SMs, 12 GB). (iii), the lm_head on the fast GEMM, is
 out of scope. Hopper (the spec's H100 kill rule) comes after this, on a pod the lead books.
@@ -118,6 +120,10 @@ Launches per layer for 17 ≤ nb ≤ 128: 3 → 1 on Q4_K-v layers, 3 → 2 on Q
 
 ### 2.2 (ii) 32-row tiles for `down`
 
+**Dropped (§7).** M2's micro-bench measured the 32-row tiles 7–15 % slower than gemm2s, the tile the router gives the 7B's
+`down` at nb 32 and 64. They were 35–41 % slower than gemm2t. Kernels, router, switch and test were removed in `05b48b6`. The design
+below is kept as the record.
+
 **Today** (`ffn_half`, `batch.rs:2555` mode 0 and `2562` mode 1): `down` (7B: 3584 rows × 18944 cols) is one
 `bgemm`: 56 gemm2s CTAs at nb ≤ 64, and gemm2t (also 56) at nb 128 on bella.
 
@@ -218,14 +224,12 @@ forced variant of the new kernel.
 
 1. `cuda::qwen2::tests::gpu_batched_products_match_gemv_bits`: every batched product kernel == the per-token decode
    GEMV, bit for bit, on the 0.5B's real tensors and synthetic shapes. Extended: nb ∈ {1, 6, 7, 8, 13, 17, 24, 31, 32,
-   33, 48, 64, 65, 66, 77, 96, 128, 129}, and `gemm2_names(Q4_K)` now includes `gemm2r_q4_k` and `gemm2r2_q4_k`. So
-   the 32-row tiles are checked against the GEMV directly. `gpu_products_match_reference_bits` (against
-   `gemv_ref`, the order written out) uses the same list.
+   33, 48, 64, 65, 66, 77, 96, 128, 129}. `gpu_products_match_reference_bits` (against `gemv_ref`, the order
+   written out) uses the same list. (CP1 also put gemm2r/gemm2r2 in `gemm2_names`; they went with (ii).)
 2. `cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo`: pool rows == each request run alone (decode GEMV),
    0.5B and Llama 1B. Extended to 128 slots, nb up to 128, and the switches as configurations: vm_max 16 and 32 (fuse
-   on), then by shape with fuse off, fuse on, fuse on + r32 three stages, and fuse off + r32 two stages. The Llama's
-   q, k (and v on 8 layers) are Q4_K, so it takes the fused launch. The 0.5B's 12 Q4_K `down` layers and the Llama's 8
-   take the 32-row tiles at nb 17..64 where gemvm doesn't.
+   on), then by shape with fuse off and fuse on. The Llama's q and k (and v on 8 layers) are Q4_K, so it takes the
+   fused launch. (CP1's r32 configurations went with (ii).)
 3. `pool_steps_match_solo_in_any_order`, `pool_wide_long_steps_match_solo`, `pool_rows_of_one_slot_match_verify`:
    unchanged, must stay green.
 
@@ -238,7 +242,7 @@ New tests:
    (3584 + 512 + 512 × 3584), an odd one (1000 + 136 + 72 × 1536), and two matrices (333 + 77 × 768); with and
    without biases; nb ∈ {17, 24, 32, 33, 48, 64, 65, 96, 128}. Transitively against the GEMV: `bgemm`'s kernels at
    these sizes are test 1's.
-5. `gpu_down_rows32_matches_rows64` (`tests.rs`): gemm2r and gemm2r2 == gemm2s (and gemm2t), byte for byte, Q4_K,
+5. *(Removed with (ii) in `05b48b6`.)* `gpu_down_rows32_matches_rows64` (`tests.rs`): gemm2r and gemm2r2 == gemm2s (and gemm2t), byte for byte, Q4_K,
    epilogue mode 0 (plain, bias) and mode 1 (residual), the same nb set. Shapes: the 7B's down (3584 × 18944) and odd
    ones whose K stage counts (74, 1, 3, 4, 5, 14) leave the last pass through the 3- or 2-slot ring partial. A K-quant
    stage is one whole 256-wide block, so that is the only partial stage there is. (ii-b)'s Q6_K shapes join this test
@@ -246,10 +250,11 @@ New tests:
 
 Gates:
 
-6. **md5 gate vs main** (AGENTS.md "The md5 gate"): greedy `axon gen` on the 0.5B, 1.5B and 7B. What it does **not**
-   cover, plainly: `gen` decodes at nb 1, so no decode step reaches either change. (ii) is off by default, so the gate
-   never runs it. (i) runs only in a prefill pass of 17..128 tokens, and the gate's prompts are not chosen to make one.
-   So the md5 gate shows that default-path output is unchanged; tests 1, 2, 4 and 5 are the proof for (i) and (ii).
+6. **md5 gate vs main** (AGENTS.md "The md5 gate", `.a4bin/md5.sh`): greedy `axon gen -n 64` on 11 (model, device,
+   kv) configs (0.5B, Llama 1B, 7B, Llama 3.1 8B, Qwen3 0.6B, gemma3 1B; cpu, cuda, cuda `--kv q8`) × 3 prompts.
+   `gen` decodes at nb 1, so decode never reaches (i). The final gate adds prompt P2 (~70 tokens), which prefills in
+   one pass inside `bgemm_g2x`'s 17..128 range. That runs the fused launch on the Q4_K-q/k models (Llama 1B, 7B,
+   8B). P1 (6 tokens) and P3 (~700) do not reach it. Tests 1, 2 and 4 remain the proof for decode batch sizes.
 7. **Serve identity:** `serve_load.py texts` at `--c 1` and `--c 8`, against main's `--c 1` digest. Its 16 requests
    keep nb ≤ 16 (gemvmx), so it doesn't reach the new code either.
 
@@ -258,11 +263,86 @@ numerics change, and does not ship.
 
 ## 6. Plan
 
-- **CP1 (this commit series):** (i) at nb 17..128, both tile layouts (gemm2x: every tile gemm2s's; gemm2xt: q's
-  gemm2t's), in one launch; Q4_K only. (ii) for Q4_K: gemm2r / gemm2r2 and `tile_r32`, off unless `AXON_DOWN_R32` is
-  set. Switches `AXON_QKV_FUSE=0` and `AXON_DOWN_R32` (unset/0 = off). Tests 1, 2, 4, 5; the §4 job.
-- After the A/B: drop or keep each part by §4's rule. If (ii) qualifies and passes, set `TILE_R32_TIME` from the
-  micro-bench and turn its router on by default; otherwise remove it.
-- Then A6 before (ii-b) (review: A6's host overlap is the better consumer-GPU bet), decided with §4's `HOST` data.
-- fmt/clippy/CPU suites, the md5 and serve gates, then the PR (template: methodology, benchmarks, models, hardware,
-  gates). Pods (4090, H100 kill rule) only if the lead books them.
+- **Done (CP1 → PR):** (i) at nb 17..128, in both tile layouts (gemm2x: every tile is gemm2s's; gemm2xt: q's tiles are gemm2t's), as one
+  launch, Q4_K only, on by default, off with `AXON_QKV_FUSE=0`. (ii) is built, micro-benched, dropped and removed (§7).
+- **Not done:** (ii-b) Q6_K is never started (M2). The full release, debug and scalar suites are not run on the final head. The serve
+  identity gate (test 7) is not run either: it can't reach (i) at nb ≤ 16.
+- **Next, by §7's data:** A6 (iii)'s host overlap has at most ≈ 0.1 % of a graphed pool step to win inside
+  `step_checked`. A6's case rests on the serve loop's between-step host time and on feed passes (A6 (i)/(ii)), which
+  `pool_step_cost` doesn't see. One lead from the micro-bench, not built: gemm2t runs the 7B's `down` 21 % faster than
+  gemm2s at nb 32 in isolation, with the same bits (§7). `TILE_T_MIN_NB` = 64 keeps gemm2s there.
+- Pods (4090, the H100 kill rule) only if the lead books them.
+
+## 7. Results (bella, `05b48b6`'s code paths; MEASURED)
+
+### 7.1 M2 micro-bench: (ii) dropped
+
+Job `1030-130922-c603` (CP1's `ab.sh`, step 1), `cuda_gemm_tile_bench`, `AXON_BENCH_SHAPE=down`, the 7B's Q4_K down
+(3584 × 18944), 7 rounds, median µs per launch. The job was TAINTED: foreign GPU load mean 7.1 %, max 39 %
+(zen-bin). These are same-job ratios, and the margins are far outside any drift.
+
+| nb | gemm2s (today's tile) | gemm2t | gemm2r (32 rows, 3 st) | gemm2r2 (32 rows, 2 st) | best r32 / gemm2s |
+|---|---|---|---|---|---|
+| 32 | 183.8 | 145.0 | 203.8 | 195.9 | **1.066** |
+| 64 | 196.8 | 162.2 | 223.9 | 227.2 | **1.138** |
+
+The rule required ≤ 0.95 at both nb, and neither variant qualifies. By the pre-registered rule (§4), (ii) is dropped with no
+A/B and removed (`05b48b6`), and (ii-b) never starts. This is shady's point, measured: a 32-row CTA stages the same activation
+tile for half the rows. Registers: gemm2r 132, gemm2r2 128, gemm2s 185, no spills.
+
+### 7.2 The pool A/B: (i)
+
+`c603`'s step 2 (rotated M A B C) is not used. Its first round was cold, and main-vs-main swung 35 %. The lead reran (i) alone
+with `.a4bin/ab2.sh` (job `1031-045802-1654`, `--timing bella --low`): one discarded warm-up, then
+`M A A M F M A A M F M A A M`. M is main `fde94b6`. A is the candidate (`7b32b3a`, defaults: (i) on, (ii) off; the same
+code paths as `05b48b6`). F is the candidate with `AXON_QKV_FUSE=0`, an A/A control that must equal M. 7B Q4_K_M,
+f16 KV, graphs on. Each cell is the median of 5 × 40-step windows inside one run. The table shows the median over runs (M 6, A 6, F 2).
+
+**Taint, disclosed:** the job was flagged TAINTED by its max sample (Xorg 54 %, one screen wake). The mean foreign
+load was 0.9 % over 188 samples. The lead accepted the run, because the in-job F control measures the noise floor directly.
+
+| depth | nb | M ms/step | M spread (6 runs) | A ms/step | A vs M | F vs M | A, drift-paired per AA block |
+|---|---|---|---|---|---|---|---|
+| 600 | 16 | 18.709 | 5.4 % | 18.683 | −0.1 % | −0.1 % | +1.9, −0.0, −0.3 |
+| 600 | 32 | 22.439 | 4.6 % | 21.922 | **−2.3 %** | +0.0 % | −1.7, −2.6, +0.1 |
+| 600 | 64 | 26.792 | 7.3 % | 26.188 | −2.3 % | −0.7 % | −0.6, −2.3, −1.2 |
+| 600 | 128 | 42.832 | 7.1 % | 41.873 | −2.2 % | +0.9 % | +0.3, −2.6, −2.6 |
+| 256 | 16 | 17.604 | 3.9 % | 17.599 | −0.0 % | +0.4 % | +0.1, −0.0, −0.8 |
+| 256 | 32 | 21.445 | 8.2 % | 21.086 | −1.7 % | +0.1 % | −1.6, −1.4, −2.6 |
+| 256 | 64 | 24.084 | 6.8 % | 23.694 | −1.6 % | −0.2 % | −1.7, −1.6, −2.4 |
+| 256 | 128 | 37.559 | 7.2 % | 36.791 | −2.0 % | +0.3 % | −2.1, −2.0, −1.1 |
+
+"Drift-paired" is each `A A` pair's mean against the mean of the two Ms around it (blocks 1–4, 6–9, 11–14). M's spread
+is mostly a monotonic drift over the 18-minute job: at nb 32 d600, M1 21.67 ms rises to M14 22.67 ms. The ABBA order is there
+to cancel exactly that. F against its neighbouring Ms is +0.4 / 0.0 % at nb 32 d600, and within −0.8 to +2.9 % per block over
+all cells.
+
+**Ruling (lead, 10-31):**
+
+1. The run is accepted, with the disclosure above.
+2. (i) **passes** its pre-registered bar at nb 32 d600: the median gives −2.3 %, against a bar of −1.8 %.
+3. (ii) is dropped by M2 (§7.1).
+4. nb 128 is informational only. Under M3 it decides nothing, because M's spread is over 0.5 %.
+
+**Disclosed against the letter of §4.** §4's pass for (i) also asks for "more than 2 × the A/A spread of that cell".
+Read literally, as M's max − min over its 6 runs, that spread is 4.6 %, and the clause fails. M's spread is a drift that the
+design cancels. A drift-free A/A, F against its neighbouring Ms (≤ 0.4 % at that cell), meets the clause by a wide margin. On the
+drift-paired statistic, nb 32 d600 is −1.4 % (one of three blocks is +0.1 %) and nb 32 d256 is −1.9 %. Over the 6 cells where (i) fires, the drift-paired mean is
+≈ −1.6 %. The pattern is consistent: nb 16 (no fusion) gives 0.0 to −0.1 % by median, and every cell where it fires gives −1.6 to −2.3 %.
+
+### 7.3 Host time per step (A4 vs A6)
+
+The candidate's `HOST` lines, the same job: the host time `step_checked` spends outside the GPU's work, from entry to the graph
+launch's return plus its tail after the picks' read. Median over runs, ms/step:
+
+| depth | nb 16 | nb 32 | nb 64 | nb 128 | step (A) |
+|---|---|---|---|---|---|
+| 600, A | 0.021 | 0.021 | 0.017 | 0.020 | 18.7–41.9 ms |
+| 600, F | 0.016 | 0.018 | 0.019 | 0.019 | |
+| 256, A | 0.018 | 0.017 | 0.022 | 0.021 | 17.6–36.8 ms |
+| 256, F | 0.021 | 0.019 | 0.022 | 0.023 | |
+
+So 0.016–0.023 ms of a 17.6–42.8 ms graphed step, ≤ 0.13 %. Inside the pool step, the host is not the cost. A6 (iii)'s
+host overlap can only win host time spent outside `step_checked`: the serve loop's scheduling and row building between
+steps. A6 (i)/(ii)'s feed passes are not seen here either, so A6 needs its own serve-level measurement. On this
+data, A4 (i)'s −2 % is already larger than anything A6 (iii) could hide inside the step.
