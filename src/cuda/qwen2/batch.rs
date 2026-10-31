@@ -366,7 +366,9 @@ pub(super) const TILE_T_MIN_NB: usize = 64;
 /// gemm2t from 32 tokens where `tile_t_from`'s waves pick it. MEASURED on
 /// bella (46 SMs; docs/design/a4-step-structure.md §8): the 7B's down (3584
 /// x 18944) at nb 32 / 64 on gemm2t 145 / 162 us, on gemm2s 184 / 197
-/// (`cuda_gemm_tile_bench`, job 1030-130922-c603); the 7B's pool step -2.5 %
+/// (`cuda_gemm_tile_bench`, job 1030-130922-c603: TAINTED, foreign GPU
+/// load mean 7.1 %, but interleaved, and the slowest gemm2t round beats the
+/// fastest gemm2s round); the 7B's pool step -2.5 %
 /// at nb 32 (paired, job 1031-065003-733e). At hidden sizes <= 8192 the
 /// waves move no down on a 4090 (128 SMs) or an H100 (132).
 pub(super) const DOWN_T_MIN_NB: usize = 31;

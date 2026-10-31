@@ -468,6 +468,10 @@ change on a 4090 or an H100, so the lead's rule needs no `--timing 4090` job, an
 
 **Unmeasured cards, OPINION:** the smaller cards' moves come from the same wave model, which predicted this one well.
 For the 7B's down on 46 SMs it gives gemm2t/gemm2s = 0.82, and the micro-bench measured 0.79 at nb 32 and 0.82 at nb 64.
+The micro-bench (`1030-130922-c603`) was TAINTED: foreign GPU load mean 7.1 %, max 39 %. Its kernels ran
+interleaved, in a shuffled order each round, and the per-round ranges don't overlap. Even the slowest gemm2t round beats
+the fastest gemm2s round (0.82 at nb 32, 0.89 at nb 64), so the ratios are taken to hold. The step gain itself was
+measured separately, in the pool A/B (`1031-065003-733e`).
 `TILE_T_TIME` itself was fitted on a 20-SM RTX 4050. The floor is not restricted by SM count. If a smaller card regresses,
 `AXON_DOWN_TILE_T_MIN_NB=64` is the switch back.
 

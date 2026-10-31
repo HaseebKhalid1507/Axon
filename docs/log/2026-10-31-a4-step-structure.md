@@ -46,4 +46,6 @@ touch different products, so the gain is assumed to carry over (unmeasured on th
   10-31: removed.
 - **(ii) 32-row `down` tiles** (built in `7b32b3a`, removed in `05b48b6`). The M2 micro-bench (`1030-130922-c603`)
   measured them 7–15 % slower than gemm2s and 35–41 % slower than gemm2t. That bench is also where the gemm2t lead came
-  from: 145 vs 184 µs for the 7B's down at nb 32.
+  from: 145 vs 184 µs for the 7B's down at nb 32. The bench was TAINTED (foreign GPU load mean 7.1 %, max 39 %). Its kernels
+  ran interleaved and their per-round ranges don't overlap: the slowest gemm2t round beats the fastest gemm2s round (0.82 at
+  nb 32, 0.89 at nb 64).
