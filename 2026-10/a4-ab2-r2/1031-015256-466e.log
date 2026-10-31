@@ -1,0 +1,2 @@
+[axon-run 01:52:56] submitted 1031-015256-466e by /home/haseeb/.cache/axon-wt-a4: /home/haseeb/.cache/axon-wt-a4/.a4bin/ab2.sh
+[axon-run 01:52:56] timing job waiting: foreign GPU load 21 % (Xorg 105425 21%), quiet 0 s of the 120 s needed (on bella; > 10 %)
