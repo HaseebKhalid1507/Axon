@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-c96dfe6-dbg-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1031-111303-d2e4",
+   "name": "kvtier-c96dfe6-dbg-t1-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "c96dfe6",
+   "binary": "axon-test-dbg-c96dfe6",
+   "started": 1793460264.6121926,
+   "ended": 1793460612.3842301,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "1b1f6a753de8d7bcb94b9404bb9fcecfd36b492d56c727461920bd41e98b3f81",
+   "log_bytes": 11461
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-31 11:30:16 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
