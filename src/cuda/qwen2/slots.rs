@@ -2304,7 +2304,8 @@ mod tests {
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
     /// request's results and tokens == running it alone, under each
-    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape); by shape up to 128
+    /// rows (WP-A4).
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2318,7 +2319,7 @@ mod tests {
             .into_iter()
             .flatten()
             .collect();
-        let (slots, ctx, steps) = (64usize, 256usize, 2usize);
+        let (slots, ctx, steps) = (128usize, 256usize, 2usize);
         for m in ms {
             let mut net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
             let v = net.vocab;
@@ -2341,7 +2342,7 @@ mod tests {
                 // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
                 // doesn't apply there, so once).
                 let nbs: &[usize] = match vm {
-                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    0 => &[9, 12, 16, 17, 32, 33, 48, 64, 65, 96, 128],
                     _ => &[17, 33, 48, 64],
                 };
                 for &nb in nbs {

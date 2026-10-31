@@ -271,6 +271,7 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 | Startup vs others (r4-startup scout) | GPU short-prompt TTFT axon 0.85 s (7B) vs llama-cli 1.33 s vs ollama cold 1.97 s | bella, 881d7b6, 10-15 (before #21/#41) |
 | Hybrid 32B, 28/64 layers (#16) | pp560 ~390 vs llama.cpp `-ngl 28` 211; decode 4.8–5.8 vs 3.5–3.7 | bella, 10-14 |
 | Multi-GPU PP (#34) | 2×4090: 7B prefill 1.46×, 32B 1.55× one GPU; decode 1.00× | 4090 pod, 10-16 |
+| Pool step, Q4_K `down` on gemm2t from nb 32 (#178) | 7B graphed pool step −2.5 % at nb 32 and 64 (paired, the floor alone vs the fusion arm), ±0.1 % at nb 16 and 128; same bits. q\|k\|v in one launch: −1.8 %, not beyond its noise term, dropped | bella, fde94b6 base, 10-31, pre-registered; **TAINTED** (one Xorg sample at 41 %, mean 1.2 %), accepted on its in-job A/A control. The shipped head (floor without the fusion) was not timed: the −2.5 % is T vs A, the fusion arm. 4090 / H100 / 5090: no route changes (wave model), not run |
 
 ## New models and types since the boards
 
