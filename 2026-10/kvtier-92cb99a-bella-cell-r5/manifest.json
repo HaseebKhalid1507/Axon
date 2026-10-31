@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-92cb99a-bella-cell-r5",
+ "verdict": "ALL PASS; TAINTED timing",
+ "jobs": [
+  {
+   "job": "1031-015256-ef2b",
+   "name": "kvtier-92cb99a-bella-cell",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=96% mean=7.6%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "92cb99a",
+   "binary": "timing-bella2.sh",
+   "started": 1793427925.2820785,
+   "ended": 1793429037.4917862,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=96% mean=7.6%",
+   "redactions": {},
+   "log_sha256": "cf8ee63e682073ae369492fab79fbc164880e6c1464446f7faa86b0f4f87f56f",
+   "log_bytes": 12398
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-31 02:43:57 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
