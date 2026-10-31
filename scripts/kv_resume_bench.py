@@ -13,6 +13,23 @@ Every server binary runs `--rounds` times, interleaved (A B / B A / ...).
 Raw prompts (/v1/completions), greedy, so the replies are deterministic and
 their md5s are printed for the base-vs-candidate check.
 
+Eviction is sized and checked, per round (since the bella runs 1030-195012-05d7
+and 1031-045801-3742): a server sizes its paged pool from the VRAM free at its
+start, so on a desktop GPU the pool moves between starts (bella 7B f16, default
+--parallel: 1570-1698 pages of 64). The session and its 3 others need 1656
+pages; above that nothing pushed it out, and "resume" timed a prefix-cache hit
+(main 0.1-0.3 s with no tier). So:
+- Pressure: after the `--others` sessions (hashed, as before), unhashed
+  pressure sessions (seeds 200+) are sent until the floor page counts of the
+  session and everything after it exceed the pool the server logged
+  ("KV: N pages x P"), so the LRU must have pushed the session out.
+- Check: the GPU's own prefix-cache hit on the resume, `resume_cached` minus
+  the tier's restored tokens over that request, must be 0, and a resume with
+  nothing cached must take at least half the first turn's time (a cold
+  prefill). A round that fails is VOID: printed with its reason, kept in the
+  JSON (`void`), left out of every median, and the run exits 3. A tier that
+  restored nothing after a real eviction is not void: that's a result.
+
 usage: kv_resume_bench.py --model M --bin NAME=PATH[:ARGS] ... [--rounds 3]
        [--gap 120] [--tokens 25000] [--others 3] [--new 157] [--out FILE]
 ARGS are extra `axon serve` flags, comma-separated (e.g.
@@ -25,6 +42,7 @@ import http.client
 import json
 import os
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -166,6 +184,39 @@ def pct(xs, q):
     return xs[int(q * (len(xs) - 1))] if xs else None
 
 
+def pool_pages(logp, limit=10):
+    """(pages, tokens per page) of the server's paged pool, from its banner
+    ("KV: N pages x P = T tokens"); None if it never says."""
+    for _ in range(limit):
+        m = re.search(r"KV: (\d+) pages x (\d+) = \d+ tokens", open(logp, errors="replace").read())
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        time.sleep(1)
+    return None
+
+
+def kept_pages(usage, page):
+    """Pages a finished request's KV keeps in the pool, rounded down (an
+    under-count, so pressure sized from it can only be more than needed)."""
+    return (usage["prompt_tokens"] + usage.get("completion_tokens", 0) - 1) // page
+
+
+def void_reason(res):
+    """Why a round's resume wasn't from an evicted session, or None. The GPU's
+    own prefix cache must hold none of it (tokens cached on the resume beyond
+    what the RAM tier restored during it), and a resume with nothing cached
+    must be a cold prefill (at least half the first turn's time)."""
+    cached = res.get("resume_cached") or 0
+    restored = res.get("resume_restored") or 0
+    gpu = cached - restored
+    if gpu > 0:
+        return (f"not evicted: {gpu} of {res.get('resume_prompt')} prompt tokens still in the GPU pool "
+                f"(cached {cached}, tier restored {restored}; pool {res.get('pool_pages')} pages)")
+    if cached == 0 and res["ttft_resume"] < 0.5 * res["a1_s"]:
+        return f"no cold prefill: ttft {res['ttft_resume']:.3f} s with nothing cached vs first turn {res['a1_s']:.3f} s"
+    return None
+
+
 def trace_stats(path):
     """AXON_SERVE_TRACE lines: the host time between consecutive steps while
     requests run (a step with requests running, then the next step: what the
@@ -213,6 +264,8 @@ def one_round(name, path, extra, env, a, port, rnd):
         for o in outs0:
             md5.update((o or "").encode())
         if not a.startup_only:
+            pool = pool_pages(logp)
+            res["pool_pages"] = pool and pool[0]
             nw = calibrate(port, a.tokens)
             sessions = [text(100 + i, nw) for i in range(a.others + 1)]
             t = time.perf_counter()
@@ -220,15 +273,30 @@ def one_round(name, path, extra, env, a, port, rnd):
             res["a1_s"] = time.perf_counter() - t
             res["a_tokens"] = ua["prompt_tokens"]
             md5.update(a1.encode())
+            page = pool[1] if pool else 64
+            kept = kept_pages(ua, page)
             for s_ in sessions[1:]:
-                r, _ = complete(port, s_, 64)
+                r, u = complete(port, s_, 64)
+                kept += kept_pages(u, page)
                 md5.update(r.encode())
+            # Pressure: more sessions (not hashed: their count follows the
+            # pool) until the session and what came after it can't all fit.
+            extra = 0
+            while pool and kept <= pool[0] and extra < 8:
+                _, u = complete(port, text(200 + extra, nw), 64)
+                kept += kept_pages(u, page)
+                extra += 1
+            res["pressure_extra"], res["pressure_pages"] = extra, kept
             time.sleep(a.gap)
             new = text(7, int(nw * a.new / a.tokens) + 1)
+            restored0 = metric(port, "axon_kv_ram_restored_tokens_total")
             ttft, times, a2, u2 = stream(port, sessions[0] + a1 + "\n" + new, 64)
+            restored1 = metric(port, "axon_kv_ram_restored_tokens_total")
             md5.update(a2.encode())
             res.update(ttft_resume=ttft, resume_prompt=u2 and u2["prompt_tokens"],
-                       resume_cached=u2 and u2.get("prompt_tokens_details", {}).get("cached_tokens"))
+                       resume_cached=u2 and u2.get("prompt_tokens_details", {}).get("cached_tokens"),
+                       resume_restored=None if restored1 is None else restored1 - (restored0 or 0))
+            res["void"] = void_reason(res)
             # The write-behind's cost: short streams decode while a fresh long
             # prompt prefills (its pages written behind with the tier on).
             itl, outs, fresh = itl_cell(port, a.itl_streams, 500,
@@ -286,12 +354,20 @@ def main():
             row = one_round(name, path, extra, env, a, a.port, r)
             row["round"] = r
             rows.append(row)
-    print("\n## summary (medians over rounds, raw per round)")
+    voids = [x for x in rows if x.get("void")]
+    print("\n## eviction check (a VOID round is left out of every median below)")
+    for x in rows:
+        print(f"{'VOID' if x.get('void') else 'OK  '} {x['bin']} r{x['round']}: pool {x.get('pool_pages')} pages, "
+              f"pressure +{x.get('pressure_extra')} ({x.get('pressure_pages')} pages kept), "
+              f"cached {x.get('resume_cached')}, restored {x.get('resume_restored')}, "
+              f"ttft {x.get('ttft_resume')}" + (f": {x['void']}" if x.get("void") else ""))
+    print("\n## summary (medians over valid rounds, raw per valid round)")
     keys = ["startup_s", "itl0_p50_ms", "itl0_p99_ms", "itl0_max_ms", "ttft_resume", "resume_cached",
-            "itl_p50_ms", "itl_p99_ms", "trace_gap_max_ms", "trace_gaps_over_20ms", "trace_step_p99_ms",
-            "pinned_bytes"]
+            "resume_restored", "itl_p50_ms", "itl_p99_ms", "trace_gap_max_ms", "trace_gaps_over_20ms",
+            "trace_step_p99_ms", "pinned_bytes", "pool_pages", "pressure_extra"]
     for name, _, _, _ in bins:
-        rs = [x for x in rows if x["bin"] == name]
+        rs = [x for x in rows if x["bin"] == name and not x.get("void")]
+        print(f"VALID {name}: {len(rs)} of {sum(x['bin'] == name for x in rows)} rounds")
         parts = []
         for k in keys:
             vals = [x.get(k) for x in rs]
@@ -304,7 +380,9 @@ def main():
         json.dump(rows, f, indent=1)
     md5s = {x["md5"] for x in rows}
     print("MD5 " + ("SAME" if len(md5s) == 1 else f"DIFFER {sorted(md5s)}"))
-    return 0 if len(md5s) == 1 else 1
+    if voids:
+        print(f"EVICTION VOID {len(voids)} of {len(rows)} rounds: the cell is short of its rounds")
+    return 1 if len(md5s) != 1 else 3 if voids else 0
 
 
 if __name__ == "__main__":
