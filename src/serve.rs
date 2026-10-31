@@ -159,7 +159,9 @@ pub struct Opts {
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
     /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
-    /// default).
+    /// default; opt-in until the tier is exclusive: it is written as pages
+    /// fill, so it holds about its own size, the GPU pool's pages included,
+    /// agent-workload.md §6 row B's result).
     pub cache_ram: tier::CacheRam,
     /// How its page-locked memory is taken (AXON_KV_RAM_ALLOC).
     pub cache_ram_alloc: tier::Alloc,

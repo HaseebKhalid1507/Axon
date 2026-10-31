@@ -155,7 +155,11 @@ flags:
   --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
               or auto: half the RAM available, at most 8G) when their slot is reused, and copy
               them back on the next turn instead of prefilling again (same bits; default 0: off).
-              On the GPU the whole size is pinned (unswappable) RAM from start
+              On the GPU the whole size is pinned (unswappable) RAM from start. Opt-in: the tier
+              copies pages as they fill, so it holds about its size, the GPU pool's pages included;
+              it helps only when the work written during a gap fits between the pool's size and
+              the tier's (about 11-185 pages of 64 on bella's 7B f16 at 6G); an exclusive tier is
+              pending (docs/design/agent-workload.md §6)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.

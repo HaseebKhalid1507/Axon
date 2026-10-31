@@ -227,3 +227,29 @@ Added after rule B was applied, at the foreman's request. It is information, not
   - ITL p99 68.2 → 63.8 ms (−6.5 %).
 - **What it is:** the first evidence, on the 4090, for the heavy-eviction case required before any default flip. It
   is not that gate, which needs `AXON_SERVE_TRACE` and bella.
+
+## Update 2026-10-31: the bella cell, and the verdict (rule B's else branch)
+
+- **The bench checked nothing about eviction (fixed in 440fe18, script only).** On bella's defaults the pool is sized
+  from the VRAM free at each start (1,570–1,744 pages of 64 seen). The 25k session plus its 3 others keep 1,656
+  pages, so with a pool of 1,657 or more nothing pushed the session out and "TTFT-resume" timed a GPU prefix hit.
+  e437 and 5c99 (10-27) were such hits in every round on both arms; 05d7 and 3742 in 4 and 5 of 6. 440fe18 adds
+  pressure sessions (unhashed) up to the logged pool and voids any round whose session the GPU still held.
+- **The cell of record, 1031-063509-f763** (92cb99a vs main 6f06544, `--cache-ram 6G`, 440fe18): every round
+  evicted (pool 1,744, +1 pressure session), md5 same. TTFT-resume base 8.318 / 8.682 / 8.694 s, tier 7.028 /
+  7.066 / 7.052 s, restored = cached = **6,592 of 26,496 tokens** in every round. TAINTED (one Xorg 99 % sample at
+  job start, the rest ≤ 14 %); the restored count isn't a timing.
+- **Cause: the tier is inclusive.** Pages are written as they fill (write-behind); `spill_page`, the hook that
+  would write a page when the GPU drops it, is unwired until PR C3. So RAM holds a copy of what the GPU holds, and
+  its LRU (unheld leaves) drops the oldest session's tail when it fills. 7B f16 page = 3,670,016 B; 6 GiB = 1,755
+  pages (pinned 6,440,878,080 B, exactly). Pages written in f763: shorts 4 × 4, calibration probe 47, session 414,
+  others 413 + 412 + 413, pressure 414 = 2,129; 374 over, so LRU dropped 16 + 47 + 311 of the session's pages,
+  leaving 103 = 6,592 tokens: the measured count. No partial pin, early stop or accounting error.
+- **Why the earlier passes passed:** 7f15 / ef2b (bella, pools ≤ 1,625, no extra) and a975 / fbcb (4090, pool
+  1,536 at `--parallel 3`) wrote 1,715 pages, under 1,755, so the whole session survived (26,496 restored). An
+  inclusive tier helps only when the work written during the gap fits between the pool's size and the tier's:
+  ≈ 11–185 pages on bella at 6G, under half a 25k session.
+- **Verdict (lead, 10-31):** the TTFT-resume clause is not met on bella; per the rule's else branch #166 ships with
+  `--cache-ram` opt-in, default 0 (off, main's behaviour), documented with this limit (help, README). No tuning.
+  Next (roadmap): an exclusive tier (spill at GPU eviction, or drop GPU-resident copies first, PR C3), then the
+  bella cell again.

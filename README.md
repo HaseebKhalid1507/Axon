@@ -203,6 +203,11 @@ Works today, honestly scoped:
   runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
   uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
+  `--cache-ram BYTES|auto` (opt-in, default 0: off) keeps conversations' KV pages in pinned host RAM
+  and copies them back on the next turn, bit for bit. It helps only when the work written during the
+  gap fits between the GPU pool's size and the tier's (≈ 11–185 pages of 64 on bella's 7B f16 at 6G):
+  the tier is written as pages fill, so it also holds the pool's pages. An exclusive tier is pending
+  ([design](docs/design/agent-workload.md) §6 row B).
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
