@@ -1,0 +1,41 @@
+[axon-run 12:07:43] submitted 1031-120743-e8dc by /home/haseeb/.cache/axon-fp8dbg: /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-5b4f24a cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::sane_backstops --exact --nocapture --test-threads 1
+[axon-run 12:20:15] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 12:20:15] scope axon-job-1031-120743-e8dc-1793463615.scope in app-axonjobs.slice: MemoryMax 9164 MB, MemoryHigh 8247 MB, no swap, oomd pressure kill 80% (claim 5427 MB): an OOM here kills only this job
+[axon-run 12:20:15] job 1031-120743-e8dc -> bella: systemd-run --user --scope --quiet --unit=axon-job-1031-120743-e8dc-1793463615 --slice=app-axonjobs.slice -p MemoryMax=9164M -p MemoryHigh=8247M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-5b4f24a cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::sane_backstops --exact --nocapture --test-threads 1
+axon-q 12:20:16 start slot 16-23: /home/haseeb/.cache/axon-fp8dbg/axon-test-dbg-5b4f24a cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::sane_backstops --exact --nocapture --test-threads 1
+
+running 2 tests
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [decode] vs exact: top-1 146/150 (97.3%), KL mean 1.05e-2 max 1.31e-1 (> 0.5: []), max |dlogit| 3.694 (top-20 3.426), flip margins [0.060121536, 0.022907257, 0.01235199, 0.07218361]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [decode]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 140/150 (93.3%), KL mean 1.48e-2 max 3.03e-1 (> 0.5: []), max |dlogit| 4.891 (top-20 3.645), flip margins [0.15996742, 0.037984848, 0.046535492, 0.7651081, 1.1905766, 0.52973557, 0.01235199, 0.119600296, 0.16781425, 0.19072437]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [decode]: ΔNLL vs exact -1.58e-2 ± inf (floor -4.79e-2 ± inf), 47 teacher-forced positions; fast-set launches 52416
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [batched prefill] vs exact: top-1 137/147 (93.2%), KL mean 9.50e-3 max 1.28e-1 (> 0.5: []), max |dlogit| 2.188 (top-20 1.328), flip margins [0.5313902, 0.08348465, 0.06299877, 0.10305023, 0.09131622, 0.0049533844, 0.041160583, 0.07608318, 0.1468544, 0.3483572]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [batched prefill]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 142/147 (96.6%), KL mean 8.25e-3 max 7.55e-2 (> 0.5: []), max |dlogit| 2.025 (top-20 1.258), flip margins [0.06299877, 0.06239891, 0.0872488, 0.104429245, 0.0049533844]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [batched prefill]: ΔNLL vs exact +4.81e-3 ± inf (floor +1.91e-2 ± inf), 147 teacher-forced positions; fast-set launches 50400
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [cached prefix + batched rest] vs exact: top-1 93/98 (94.9%), KL mean 1.37e-2 max 3.79e-1 (> 0.5: []), max |dlogit| 5.374 (top-20 1.939), flip margins [0.5078478, 0.5229645, 0.28632736, 0.49912453, 0.20977879]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [cached prefix + batched rest]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 94/98 (95.9%), KL mean 1.11e-2 max 9.22e-2 (> 0.5: []), max |dlogit| 2.308 (top-20 1.249), flip margins [0.08995247, 0.6071167, 0.042822838, 0.034114838]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [cached prefix + batched rest]: ΔNLL vs exact -3.52e-3 ± 3.8e-2 (floor +6.05e-3 ± 7.0e-2), 98 teacher-forced positions; fast-set launches 33600
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [under load (pool steps)] vs exact: top-1 116/128 (90.6%), KL mean 1.12e-2 max 1.37e-1 (> 0.5: []), max |dlogit| 2.194 (top-20 1.387), flip margins [0.18975258, 0.04377365, 0.016300201, 0.5655613, 0.024055481, 0.006259918, 0.101976395, 0.35173988, 0.041160583, 0.02226448, 0.30932522, 0.3705349]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [under load (pool steps)]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 115/128 (89.8%), KL mean 1.27e-2 max 1.99e-1 (> 0.5: []), max |dlogit| 3.745 (top-20 2.561), flip margins [0.18864441, 0.18975258, 0.38422203, 0.05790806, 0.02889824, 0.4533825, 8.010864e-5, 0.07150459, 0.033721924, 0.05491638, 0.041160583, 0.7928648, 0.36968327]
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded) [under load (pool steps)]: ΔNLL vs exact -2.41e-2 ± 1.4e-2 (floor +9.43e-3 ± 1.8e-2), 128 teacher-forced positions; fast-set launches 11088
+0.5B FP8 cuda fast vs fp8-ref (debug build: info only, not graded): ΔNLL vs exact, every arm -8.24e-3 ± 9.2e-3 (floor +5.60e-3 ± 1.5e-2; a smoke check, scripts/numerics_dnll.py for a table); verify rows 660/704 the reference's picks (floor 675/704); fast kernels true, launches 147504
+0.5B FP8 cuda fast vs fp8-ref: debug build: sanity checks only (every arm ran a fast kernel, finite logits, max |dlogit| < 12); the statistical bars are the release build's run of record
+ok
+test cuda::qwen2::tests::sane_backstops ... 
+thread 'cuda::qwen2::tests::sane_backstops' (817171) panicked at src/cuda/qwen2/tests.rs:469:5:
+1 of 1 positions with a non-finite logit
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'cuda::qwen2::tests::sane_backstops' (817171) panicked at src/cuda/qwen2/tests.rs:469:5:
+1 of 1 positions with a non-finite logit
+
+thread 'cuda::qwen2::tests::sane_backstops' (817171) panicked at src/cuda/qwen2/tests.rs:468:5:
+nothing graded
+
+thread 'cuda::qwen2::tests::sane_backstops' (817171) panicked at src/cuda/qwen2/tests.rs:475:5:
+max logit difference: all 12 (< 12)
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 258.93s
+
+[axon-run 12:24:35] exit 0 after 259.2s (host bella)
