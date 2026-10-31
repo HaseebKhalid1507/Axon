@@ -358,20 +358,18 @@ pub(super) struct WaveGeom {
 /// 512-row k / v, whose grids are partly a wave either way, 88 %.
 pub(super) const TILE_T_TIME: usize = 82;
 
-/// The most tokens `bgemm_g2x` fuses q, k and v for (the decode pool's
-/// steps; prefill passes past it keep their launches and `gemm_cost`).
-pub(super) const G2X_MAX_NB: usize = 128;
-
-/// gemm2x_q4_k's (t false) or gemm2xt_q4_k's (t true: gemm2t's tile for
-/// the first matrix, gemm2s's for the rest) dynamic shared memory.
-pub(super) fn gemm2x_smem(t: bool) -> usize {
-    let s = gemm2_smem(Q4_K, 64, 3);
-    if t { s.max(gemm2t_smem(Q4_K)) } else { s }
-}
-
 /// The most tokens a product keeps gemm2s for whatever `tile_t`'s waves say
 /// (one 64-token tile; review of #100, MUST 1).
 pub(super) const TILE_T_MIN_NB: usize = 64;
+
+/// TILE_T_MIN_NB for a layer's Q4_K / Q5_K `down` (`BatchFns::down_t_min_nb`):
+/// gemm2t from 32 tokens where `tile_t_from`'s waves pick it. MEASURED on
+/// bella (46 SMs; docs/design/a4-step-structure.md §8): the 7B's down (3584
+/// x 18944) at nb 32 / 64 on gemm2t 145 / 162 us, on gemm2s 184 / 197
+/// (`cuda_gemm_tile_bench`, job 1030-130922-c603); the 7B's pool step -2.5 %
+/// at nb 32 (paired, job 1031-065003-733e). At hidden sizes <= 8192 the
+/// waves move no down on a 4090 (128 SMs) or an H100 (132).
+pub(super) const DOWN_T_MIN_NB: usize = 31;
 
 /// `gemm_cost`'s waves of `ctas` blocks of `macs` MACs each on sms SMs.
 fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
@@ -390,7 +388,8 @@ fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
 /// it loses where gemm2s's grid barely fills the GPU (the 7B's 512-row k /
 /// v on a 4090). Never at nb <= TILE_T_MIN_NB: one token tile (the decode
 /// pool's and verify's batches) is unmeasured with gemm2t (TILE_T_TIME is
-/// from nb 1024 / 1088), so those keep gemm2s.
+/// from nb 1024 / 1088), so those keep gemm2s. (The down's floor is
+/// DOWN_T_MIN_NB, measured.)
 pub(super) fn tile_t(rows: usize, br: usize, nb: usize, sms: usize) -> bool {
     tile_t_from(rows, br, nb, sms, TILE_T_MIN_NB)
 }
@@ -758,15 +757,10 @@ pub(super) struct BatchFns<'m> {
     /// activation copies per MAC, the same bits. None without int8 tensor
     /// cores or with AXON_GEMM_TILE=64 (gemm2s everywhere, as before).
     pub(super) gemm_t: Option<([Func<'m>; 2], Func<'m>)>,
-    /// gemm2x_q4_k and gemm2xt_q4_k: a layer's Q4_K q, k (and v) in one
-    /// launch, every tile gemm2s's, or q's gemm2t's (`CudaQwen2::bgemm_g2x`;
-    /// the same bits). None without int8 tensor cores.
-    pub(super) gemm_x: Option<[Func<'m>; 2]>,
-    /// AXON_QKV_FUSE=0: never `bgemm_g2x` (q, k, v as before).
-    pub(super) qkv_fuse: bool,
-    /// AXON_DOWN_TILE_T_MIN_NB: the most tokens a layer's Q4_K / Q5_K `down`
-    /// keeps gemm2s for whatever `tile_t`'s waves say (default TILE_T_MIN_NB,
-    /// main's routing; at least SMALL). WP-A4's T arm: 31, gemm2t from 32.
+    /// The most tokens a layer's Q4_K / Q5_K `down` keeps gemm2s for
+    /// whatever `tile_t_from`'s waves say: DOWN_T_MIN_NB, or
+    /// AXON_DOWN_TILE_T_MIN_NB (at least SMALL; 64 is TILE_T_MIN_NB, the
+    /// other products' floor and the down's before WP-A4).
     pub(super) down_t_min_nb: usize,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
@@ -976,22 +970,10 @@ impl<'m> BatchFns<'m> {
             } else {
                 None
             },
-            gemm_x: if module.mma() {
-                let (a, b) = (
-                    module.function("gemm2x_q4_k")?,
-                    module.function("gemm2xt_q4_k")?,
-                );
-                a.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
-                b.set_max_shared(gemm2x_smem(true))?;
-                Some([a, b])
-            } else {
-                None
-            },
-            qkv_fuse: std::env::var("AXON_QKV_FUSE").map_or(true, |v| v != "0"),
             down_t_min_nb: std::env::var("AXON_DOWN_TILE_T_MIN_NB")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .map_or(TILE_T_MIN_NB, |v: usize| v.max(SMALL)),
+                .map_or(DOWN_T_MIN_NB, |v: usize| v.max(SMALL)),
             gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0") {
                 let (a, b) = (
                     module.function("gemmh2_q4_k")?,
@@ -1936,12 +1918,8 @@ impl<'g> CudaQwen2<'g> {
             // and k, else one by one.
             let one =
                 |m: (&Mat, Arg, Arg)| self.bgemm(wts, m.0, b.act.arg(), ast, nb, m.1, 0, m.2, qkvw);
-            let x = |ms: &[(&Mat, Arg, Arg)]| -> Result<bool, String> {
-                Ok(self.bgemm_x(wts, ms, b.act.arg(), ast, nb, qkvw)?
-                    || self.bgemm_g2x(wts, ms, b.act.arg(), ast, nb, qkvw)?)
-            };
-            if !x(&[q, k, v])? {
-                if !x(&[q, k])? {
+            if !self.bgemm_x(wts, &[q, k, v], b.act.arg(), ast, nb, qkvw)? {
+                if !self.bgemm_x(wts, &[q, k], b.act.arg(), ast, nb, qkvw)? {
                     one(q)?;
                     on("q")?;
                     one(k)?;
@@ -2738,111 +2716,6 @@ impl<'g> CudaQwen2<'g> {
             )?;
         }
         Ok(true)
-    }
-
-    /// Two or three Q4_K products of the same activations (q, k, v) in one
-    /// gemm2x launch, mode 0, if they qualify: SMALL < nb <= G2X_MAX_NB, one
-    /// width, and the small matrices' blocks fit the SMs the first one's last
-    /// wave leaves idle (they add no wave). The first matrix takes the tile
-    /// `bgemm` gives it (gemm2t where `tile_t` picks it, else gemm2s), the
-    /// others gemm2s's (where `bgemm` may give them gemvm32: the same bits).
-    /// Ok(false): nothing launched (the caller runs them one by one).
-    ///
-    /// # Safety
-    /// As `bgemm`, for every matrix.
-    pub(super) unsafe fn bgemm_g2x(
-        &self,
-        wts: &DevBuf,
-        ms: &[(&Mat, Arg, Arg)],
-        act: Arg,
-        astride: usize,
-        nb: usize,
-        ostride: usize,
-    ) -> Result<bool, String> {
-        let bf = &self.bf;
-        if bf.gemm_x.is_none() || !bf.qkv_fuse || bf.gemmh.is_some() {
-            return Ok(false);
-        }
-        if nb <= SMALL || nb > G2X_MAX_NB || !(2..=3).contains(&ms.len()) {
-            return Ok(false);
-        }
-        let m0 = ms[0].0;
-        if ms
-            .iter()
-            .any(|(m, _, _)| m.qt != Q4_K || m.cols != m0.cols || m.rb != m0.rb)
-        {
-            return Ok(false);
-        }
-        let t = bf.gemm_t.is_some() && tile_t(m0.rows, G2_BM, nb, bf.sms);
-        let tiles = nb.div_ceil(64);
-        let first = tiles * m0.rows.div_ceil(if t { G2T_BM } else { G2_BM });
-        let rest: usize = ms[1..]
-            .iter()
-            .map(|(m, _, _)| tiles * m.rows.div_ceil(G2_BM))
-            .sum();
-        if first + rest > first.div_ceil(bf.sms) * bf.sms {
-            return Ok(false);
-        }
-        // SAFETY: the caller's.
-        unsafe { self.launch_g2x(wts, ms, act, astride, nb, ostride, t)? };
-        Ok(true)
-    }
-
-    /// gemm2x_q4_k (t false) or gemm2xt_q4_k (t true) over `ms` (2 or 3
-    /// Q4_K matrices of one width), whatever `bgemm_g2x`'s routing.
-    ///
-    /// # Safety
-    /// As `bgemm`, for every matrix.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) unsafe fn launch_g2x(
-        &self,
-        wts: &DevBuf,
-        ms: &[(&Mat, Arg, Arg)],
-        act: Arg,
-        astride: usize,
-        nb: usize,
-        ostride: usize,
-        t: bool,
-    ) -> Result<(), String> {
-        let fs = self.bf.gemm_x.as_ref().ok_or("no gemm2x")?;
-        let m0 = ms[0].0;
-        let at = |i: usize| ms.get(i);
-        let null = Arg::Ptr(0);
-        let rows = |i: usize| at(i).map_or(0, |(m, _, _)| m.rows);
-        let ty = rows(0).div_ceil(if t { G2T_BM } else { G2_BM })
-            + rows(1).div_ceil(G2_BM)
-            + rows(2).div_ceil(G2_BM);
-        let mut args = Vec::with_capacity(18);
-        for i in 0..3 {
-            args.push(at(i).map_or(null, |(m, _, _)| wts.arg_at(m.off)));
-        }
-        for i in 0..3 {
-            args.push(Arg::I32(rows(i) as i32));
-        }
-        for i in 0..3 {
-            args.push(at(i).map_or(null, |&(_, b, _)| b));
-        }
-        for i in 0..3 {
-            args.push(at(i).map_or(null, |&(_, _, o)| o));
-        }
-        args.extend_from_slice(&[
-            Arg::U64(m0.rb as u64),
-            Arg::I32(m0.cols as i32),
-            act,
-            Arg::U64(astride as u64),
-            Arg::I32(nb as i32),
-            Arg::U64(ostride as u64),
-        ]);
-        // SAFETY: the caller's contract; gemm2x's signature (prefill.cu).
-        unsafe {
-            self.gpu.launch(
-                &fs[t as usize],
-                (nb.div_ceil(64) as u32, ty as u32, 1),
-                (256, 1, 1),
-                gemm2x_smem(t) as u32,
-                &args,
-            )
-        }
     }
 
     /// Whether a product of `rows` outputs over nb tokens (of a gemvm type)

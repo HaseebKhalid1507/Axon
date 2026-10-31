@@ -3178,124 +3178,14 @@ fn gpu_batched_products_match_gemv_bits() {
     }
 }
 
-/// A matrix with its bias and output (`bgemm_g2x`'s segments).
-type MatArgs<'a> = (&'a Mat, Arg, Arg);
-
-/// WP-A4 (i): a layer's Q4_K q, k (and v) in one gemm2x / gemm2xt launch
-/// == the launches `bgemm` makes for each at that batch size (main's
-/// routing on this GPU: k / v on gemvm32 where `takes_gemvm` picks it, q on
-/// gemm2t where `tile_t` does, else gemm2s), byte for byte over the whole
-/// q|k|v buffer, with and without biases, for every decode batch size past
-/// gemvmx. Both fused variants at every size, whatever the router picks,
-/// and the router's own choice. (Those launches == the per-token GEMV:
-/// `gpu_batched_products_match_gemv_bits`, the same kernels and sizes.)
-#[test]
-fn gpu_qkv_one_launch_matches_three() {
-    let Some(g) = crate::testutil::gpu() else {
-        return;
-    };
-    let Some(m) = crate::testutil::model() else {
-        return;
-    };
-    let km = Kernels::module(&g).unwrap();
-    if !km.mma() {
-        return;
-    }
-    let mut net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
-    net.bf.qkv_fuse = true;
-    let mut rng = Rng(0x0a4f_05ed_2026_1030);
-    // (cols, rows of q, k, v; 0 = no v): the 7B's, odd sizes, two matrices.
-    for (cols, rs) in [
-        (3584usize, [3584usize, 512, 512]),
-        (1536, [1000, 136, 72]),
-        (768, [333, 77, 0]),
-    ] {
-        let n = if rs[2] == 0 { 2 } else { 3 };
-        let rb = quant::row_bytes(Q4_K, cols);
-        let mut wd = Vec::new();
-        let mut mats = Vec::new();
-        for &rows in &rs[..n] {
-            mats.push(Mat {
-                qt: Q4_K,
-                off: wd.len(),
-                rb,
-                rows,
-                cols,
-                c8: None,
-                ws: None,
-            });
-            wd.extend(synth_matrix(&mut rng, Q4_K, rows, cols));
-        }
-        let w = g.upload(&wd).unwrap();
-        let ostride: usize = rs.iter().sum();
-        let biases: Vec<DevBuf> = rs[..n]
-            .iter()
-            .map(|&r| g.upload(&rng.vec(r, 3.0)).unwrap())
-            .collect();
-        for nb in [17usize, 24, 32, 33, 48, 64, 65, 96, 128] {
-            let xs: Vec<Vec<f32>> = (0..nb)
-                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
-                .collect();
-            let act = quantize_batch(&g, &km, &xs, cols);
-            let ast = act_stride_t(cols);
-            for with_bias in [false, true] {
-                let run = |fill: f32, how: &dyn Fn(&[MatArgs])| -> Vec<u32> {
-                    let out = g.upload(&vec![fill; nb * ostride]).unwrap();
-                    let mut at = 0;
-                    let ms: Vec<(&Mat, Arg, Arg)> = mats
-                        .iter()
-                        .enumerate()
-                        .map(|(i, mt)| {
-                            let o = out.arg_at(at * 4);
-                            at += mt.rows;
-                            let b = if with_bias {
-                                biases[i].arg()
-                            } else {
-                                Arg::Ptr(0)
-                            };
-                            (mt, b, o)
-                        })
-                        .collect();
-                    how(&ms);
-                    g.sync().unwrap();
-                    bits(&out.read().unwrap())
-                };
-                let what = format!("cols {cols} rows {rs:?} nb {nb} bias {with_bias}");
-                // SAFETY (every launch): w holds the matrices, act nb tokens
-                // of cols inputs, out nb rows of ostride floats.
-                let want = run(0.0, &|ms| {
-                    for &(mt, b, o) in ms {
-                        unsafe { net.bgemm(&w, mt, act.arg(), ast, nb, b, 0, o, ostride) }.unwrap();
-                    }
-                });
-                for t in [false, true] {
-                    let got = run(1.0, &|ms| {
-                        unsafe { net.launch_g2x(&w, ms, act.arg(), ast, nb, ostride, t) }.unwrap()
-                    });
-                    assert!(got == want, "{what}: gemm2x (t {t}) != bgemm's launches");
-                }
-                let got = run(1.0, &|ms| {
-                    if !unsafe { net.bgemm_g2x(&w, ms, act.arg(), ast, nb, ostride) }.unwrap() {
-                        for &(mt, b, o) in ms {
-                            unsafe { net.bgemm(&w, mt, act.arg(), ast, nb, b, 0, o, ostride) }
-                                .unwrap();
-                        }
-                    }
-                });
-                assert!(got == want, "{what}: bgemm_g2x's routing");
-            }
-        }
-        eprintln!("q|k|v cols {cols} rows {rs:?}: one launch == bgemm's, bit for bit");
-    }
-}
-
-/// WP-A4's T arm: a layer's Q4_K `down` with gemm2s kept only up to
-/// AXON_DOWN_TILE_T_MIN_NB tokens (`bgemm_at`, gemm2t past it where
-/// `tile_t_from`'s waves pick it) == main's routing (`bgemm`: gemm2s up to
-/// TILE_T_MIN_NB), byte for byte: the 7B's down (3584 x 18944) and a shape
-/// whose gemm2s grid is one block past a wave on this GPU (gemm2t picked
-/// on any SM count), epilogue mode 0 with a bias and mode 1 (the residual
-/// add, as down into x), every decode batch size the override moves.
+/// WP-A4: a layer's Q4_K `down` with gemm2s kept only up to DOWN_T_MIN_NB
+/// tokens (or SMALL, AXON_DOWN_TILE_T_MIN_NB's least; `bgemm_at`, gemm2t
+/// past it where `tile_t_from`'s waves pick it) == the routing before it
+/// (`bgemm`: gemm2s up to TILE_T_MIN_NB), byte for byte: the 7B's down (3584
+/// x 18944) and a shape whose gemm2s grid is one block past a wave on this
+/// GPU (gemm2t picked on any SM count), epilogue mode 0 with a bias and
+/// mode 1 (the residual add, as down into x), every decode batch size the
+/// floor moves.
 /// (Per kernel, gemm2t == gemm2s == the decode GEMV at these sizes:
 /// `gpu_batched_products_match_gemv_bits`.)
 #[test]
@@ -3340,7 +3230,7 @@ fn gpu_down_tile_t_matches_bgemm() {
             let ast = act_stride_t(cols);
             let init = rng.vec(rows * nb, 5.0);
             if !net.takes_gemvm(rows, nb)
-                && batch::tile_t_from(rows, G2_BM, nb, sms, batch::SMALL)
+                && batch::tile_t_from(rows, G2_BM, nb, sms, batch::DOWN_T_MIN_NB)
                 && !batch::tile_t(rows, G2_BM, nb, sms)
             {
                 moved += 1;
@@ -3359,7 +3249,7 @@ fn gpu_down_tile_t_matches_bgemm() {
                     bits(&out.read().unwrap())
                 };
                 let want = run(batch::TILE_T_MIN_NB);
-                for t_min in [batch::SMALL, 31] {
+                for t_min in [batch::SMALL, batch::DOWN_T_MIN_NB] {
                     assert!(
                         run(t_min) == want,
                         "down {rows} x {cols} nb {nb} mode {mode} t_min {t_min}: != main's routing"
@@ -3368,10 +3258,11 @@ fn gpu_down_tile_t_matches_bgemm() {
             }
         }
     }
-    // Not vacuous: the second shape takes gemm2t past SMALL on any SM count.
+    // Not vacuous: the second shape takes gemm2t past 31 tokens on any SM
+    // count.
     assert!(moved > 0, "no batch size took the moved route");
     eprintln!(
-        "down: gemm2t from 17 / 32 tokens == main's routing, bit for bit ({moved} sizes moved)"
+        "down: gemm2t from 17 / 32 tokens == the 64 floor's routing, bit for bit ({moved} sizes moved)"
     );
 }
 
@@ -4522,6 +4413,31 @@ fn tile_t_picks() {
         }
     }
     assert!(tile_t(18944, 64, batch::TILE_T_MIN_NB + 1, 20));
+}
+
+/// The down's floor (DOWN_T_MIN_NB, WP-A4), what it routes: on bella (46
+/// SMs, where it was measured) the 7B's 3584-row down takes gemm2t at nb 32
+/// to 64; on a 4090 (128 SMs), an H100 (132) and a 5090 (170) no down of a
+/// hidden size up to 8192 moves, so those keep the 64 floor's routing.
+#[test]
+fn down_tile_t_floor_routes() {
+    use batch::{DOWN_T_MIN_NB, tile_t, tile_t_from};
+    for nb in 1..=batch::TILE_T_MIN_NB {
+        assert_eq!(
+            tile_t_from(3584, 64, nb, 46, DOWN_T_MIN_NB),
+            nb > 31,
+            "bella nb {nb}"
+        );
+        for sms in [128, 132, 170] {
+            for rows in (128..=8192).step_by(128) {
+                assert_eq!(
+                    tile_t_from(rows, 64, nb, sms, DOWN_T_MIN_NB),
+                    tile_t(rows, 64, nb, sms),
+                    "{rows} rows nb {nb} {sms} SMs"
+                );
+            }
+        }
+    }
 }
 
 #[test]
