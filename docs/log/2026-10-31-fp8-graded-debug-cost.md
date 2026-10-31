@@ -39,19 +39,35 @@ agreement 137/147 (floor 142, 2 SE 4.4)` (288.6 s). This was the risk the first 
 rule's allowance at 147 positions is 4.4 tokens, and a 5-token gap at that size is noise. The bars are a
 statistical test sized for >= 1000 positions; at 98-150 they would either fail on noise or have to be loosened.
 The lead ruled not to loosen them: the debug job checks what only debug checks, the release job grades.
+The release run backs this (MEASURED, 9e47, the same batched arm at 1029 positions): the fast path agrees on
+974/1029 (94.7 %), its floor on 970/1029 (94.3 %). At n = 147 and p = 0.947, SE ≈ 2.7 tokens: b712's 137/147
+(93.2 %) is 0.8 SE below the fast path's own release rate (139.1 expected). The outlier was the debug **floor**:
+142/147 (96.6 %) against its release rate of 94.3 % (138.6 expected), 1.2 SE above. The small subset drew a lucky
+floor; the fast path was in line.
 
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
 | the test alone, debug, 567edfe (grading at 147 positions) | **FAILED** on top-1, batched arm 137/147 vs floor 142 (2 SE 4.4), 288.6 s: the motivating evidence for the split | 1031-115732-b712 |
 | A4's debug shard 1/3 filter list, 567edfe | killed: the old binary would fail the same test | 1031-115733-027c |
-| the test alone, release, 567edfe (release path unchanged by 5b4f24a) | PENDING | 1031-115732-9e47 |
-| the test + `sane_backstops` alone, debug, 5b4f24a (`--nocapture`, wall time) | PENDING | |
-| A4's debug shard 1/3 filter list (d64f's argv), default threads, 5b4f24a | PENDING | |
+| the test alone, release, 567edfe (release path unchanged by 5b4f24a) | **PASS**, 1,362 s; every arm graded (batched 974/1029 vs floor 970) | 1031-115732-9e47 |
+| the test + `sane_backstops` alone, debug, 5b4f24a (`--nocapture`, wall time) | **PASS**, 2/2, 259 s | 1031-120743-e8dc |
+| A4's debug shard 1/3 filter list (d64f's argv), default threads, 5b4f24a | **PASS**, 234 passed / 0 failed / 13 ignored, 1,581 s, no lock timeouts | 1031-120743-fac0 |
+| CI | green at 13c6e32 | GitHub Actions |
 | clippy -D warnings (lib + tests), rustfmt | clean at 5b4f24a | local |
 
 ## Results
-PENDING (the debug wall time before → after).
+- The test's debug wall time: before, over 2,700 s holding the GPU test lock in d64f (4 threads; 60 GPU tests
+  failed on the lock timeout); after, **259 s** alone (e8dc).
+- The shard that broke (d64f's filter list, 4 threads): 234 passed / 0 failed in 1,581 s, no lock timeouts (fac0).
+- Release unchanged: 1,362 s alone, the binding accuracy run (9e47).
 
 ## What didn't work
-n/a
+567edfe's first version kept the statistical bars in debug at the smaller size; it failed on noise (b712, above).
+
+## Follow-ups (shady's SHOULDs, 10-31; test code, so not in this PR: they would force a re-gate)
+- Keep the top-20 max |dlogit| < 6 bound in `assert_sane` (a per-position bound, not a statistic; e8dc's worst
+  was 3.43, release's 4.09).
+- Assert `nonfinite == 0` in `assert_graded_with` too, so release catches a NaN explicitly rather than through
+  `sum_kl <= 2 * floor` happening to be false.
+- State the `MOE_DEBUG` exception next to "same arithmetic" (the MoE router module only; not on this path).
