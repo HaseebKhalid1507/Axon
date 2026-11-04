@@ -195,13 +195,17 @@ impl Faults {
     /// 100 ms while it waits): once it is past the count a test read after
     /// a reply, what the engine does after a reply (a pool's `end_solo`
     /// spill, the one cache's write, a batch's last write-behind) is done.
+    /// Acquire, against `idle`'s Release: what the engine wrote before it
+    /// waited (its metrics, `said`) is visible to a test that saw the count
+    /// move, by the memory model rather than x86's ordering.
     pub fn idles(&self) -> u64 {
-        self.idles.load(Relaxed)
+        self.idles.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The engine waits for a request with nothing to do (`idles`).
     pub(super) fn idle(&self) {
-        self.idles.fetch_add(1, Relaxed);
+        self.idles
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// What `off` said so far, each line with the counters then.

@@ -6430,6 +6430,10 @@ fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl 
                 wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
                 arm(6);
                 let a3 = completion_usage(addr, &a3p, 16);
+                // A's turn 3 was admitted to the batch (`admit`), not run
+                // alone after D (`lend_solo`): D still decodes at its reply.
+                let running = !d.is_finished();
+                assert!(running, "{what}: D ended before A's turn 3: it ran alone");
                 (Some(d.join().unwrap().0), a3)
             }),
             false => {
