@@ -1,0 +1,33 @@
+[axon-run 17:40:16] submitted 1104-174016-69d0 by /home/haseeb/.cache/axon-wt-a2-gate: /home/haseeb/.cache/axon-agent/a2/mutants-r2.sh /home/haseeb/.cache/axon-wt-a2-gate
+[axon-run 18:03:34] scope axon-job-1104-174016-69d0-1793833414.scope in app-axonjobs.slice: MemoryMax 4024 MB, MemoryHigh 3621 MB, no swap, oomd pressure kill 80% (claim 2000 MB): an OOM here kills only this job
+[axon-run 18:03:34] job 1104-174016-69d0 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-174016-69d0-1793833414 --slice=app-axonjobs.slice -p MemoryMax=4024M -p MemoryHigh=3621M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-agent/a2/mutants-r2.sh /home/haseeb/.cache/axon-wt-a2-gate
+axon-q 18:03:34 waiting: stagger
+axon-q 18:03:40 start slot 16-23: /home/haseeb/.cache/axon-agent/a2/mutants-r2.sh /home/haseeb/.cache/axon-wt-a2-gate
+first-arrival order                          killed: AssertionError: primes follow
+copies share own text                        killed: AssertionError: a copy has its own text
+fork from original parent                    killed: AssertionError
+no blob hashing                              killed: AssertionError: not refused: hashes to
+extra layers allowed                         killed: KeyError: 'application/vnd.ollama.image.adapter'
+primes not replicated                        killed: AssertionError: [(0, 0, 1200)]
+no size check                                killed: AssertionError: not refused: its manifest says
+provenance without sha                       killed: TypeError: 'NoneType' object is not subscriptable
+ladder filler differs by N (shady 2a)        killed: AssertionError: N = S must be the canonical cell
+dirty = [] (shady 2b)                        killed: AssertionError: ('an edited file', ('c19233284420e628db56303362d36988df80de6a', []))
+N_warm turn <= -> <                          killed: AssertionError: - speed 1, axon q8: N_warm = 8 (8: turn 0.21 s, re-prefill 2.0% ok (n=3); 16: turn 0.5 s, re-p
+N_warm re-prefill <= -> <                    killed: AssertionError: - speed 1, axon q8: N_warm = 8 (8: turn 0.21 s, re-prefill 2.0% ok (n=3); 16: turn 0.5 s, re-p
+N_warm median -> mean                        killed: AssertionError: - speed 1, axon q8: N_warm = 8 (8: turn 0.21 s, re-prefill 2.0% ok (n=3); 16: turn 1.3 s, re-p
+cell order not rotated                       killed: AssertionError: (1, [('axon', 1.0, 2), ('llama', 1.0, 2), ('axon', 1.0, 4), ('llama', 1.0, 4), ('axon', 4.0, 2
+one engine process for every cell            killed: AssertionError: [('start', 'axon', 1000), ('run', 'axon', 1000, 1.0, 2), ('stop', None, 1000), ('start', 'llam
+N_warm reads tainted runs                    killed: AssertionError: - speed 1, axon q8: N_warm = 24 (8: turn 0.21 s, re-prefill 2.0% ok (n=3); 16: turn 0.5 s, re-
+no NON-MONOTONE flag                         killed: AssertionError: - speed 1, llama q8: N_warm = 16 (8: turn 0.7 s, re-prefill 2.0% MISS (n=2); 16: turn 0.3 s, r
+ollama N_warm 'none'                         killed: AssertionError: - speed 1, ollama q8: N_warm = none (8: turn 0.3 s, re-prefill n/a (n=2))
+only the first manifest checked              killed: AssertionError: not refused: not run --model alone
+config blob not recorded                     killed: AssertionError: {'blobs': 4, 'config': None, 'layers': [{'type': 'model', 'digest': 'sha256:0b42f9c972a183fae0
+assume-unchanged not scanned                 killed: AssertionError: ('an edit hidden by assume-unchanged', ('ed94b6d0e351fdfb1852f5dfd21d0d973048017f', []))
+script bytes not compared to HEAD            killed: AssertionError: ('the script differs from HEAD', ('213e7e0b1036d16aa6e09ab866075c7e2408ee14', []))
+untracked copy names a commit                killed: AssertionError: ('4d265e03a91b58bef115335c7767412c2db989a6', ['scripts/agent_replay.py', 'scripts/copy.py'])
+hash cache ignores ctime                     killed: AssertionError: ('the script differs from HEAD', ('fcb98b4ce14ef3ac931b22378e8a5014f0c38934', []))
+stop time not recorded                       killed: KeyError: 'stop_s'
+MUTANTS: 25 killed, 0 survived or missing
+[axon-run 18:03:43] exit 0 after 8.5s (host bella)
+[axon-run 18:03:44] EXPECT ok: output matches /MUTANTS: 25 killed, 0 survived/

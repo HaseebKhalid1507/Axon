@@ -1,0 +1,31 @@
+[axon-run 17:40:15] submitted 1104-174015-8c2d by /home/haseeb/.cache/axon-wt-a2-gate: /home/haseeb/.cache/axon-wt-a2-gate/scripts/examples/harness-selftest/capture_dry.sh
+[axon-run 18:03:18] scope axon-job-1104-174015-8c2d-1793833398.scope in app-axonjobs.slice: MemoryMax 5524 MB, MemoryHigh 4971 MB, no swap, oomd pressure kill 80% (claim 3000 MB): an OOM here kills only this job
+[axon-run 18:03:18] job 1104-174015-8c2d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-174015-8c2d-1793833398 --slice=app-axonjobs.slice -p MemoryMax=5524M -p MemoryHigh=4971M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-wt-a2-gate/scripts/examples/harness-selftest/capture_dry.sh
+axon-q 18:03:18 start slot 16-23: /home/haseeb/.cache/axon-wt-a2-gate/scripts/examples/harness-selftest/capture_dry.sh
+capture_dry: scripts at d88ffc790d718f8c042d11ec0941e707cea94e09 (0 tracked files modified)
+agent_proxy: 127.0.0.1:19922 -> http://127.0.0.1:19921, capture /home/haseeb/.cache/axon-agent/raw/selftest-1872606.jsonl (pi)
+client ok
+privacy check /home/haseeb/.cache/axon-agent/traces/harness-selftest-1872606.json.tmp: PASS (0 findings)
+agent_trace_proxy: /home/haseeb/.cache/axon-agent/traces/harness-selftest-1872606.json: {"requests": 5, "sessions": 3, "subagent_sessions": 1, "main": 4, "side": 1, "compact": 0, "dropped_non200": 0, "injected_usage": 2, "missing_usage": 0, "prompt_tokens": 150, "cached_tokens": 100, "reuse_pct": 66.7, "mean_prompt": 30, "tool_calls": 2, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 2, "tool_err_harness": 1, "tool_err_any": 1, "side_req": 1, "compact_events": 0, "tasks": {"bugfix": {"prompt_tokens": 120, "cached_tokens": 90, "reuse_pct": 75.0, "mean_prompt": 40, "tool_calls": 2, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 2, "tool_err_harness": 1, "tool_err_any": 1, "side_req": 0, "compact_events": 0, "requests": 3, "rounds": 1, "req_per_round": 3.0}, "explain": {"prompt_tokens": 30, "cached_tokens": 10, "reuse_pct": 33.3, "mean_prompt": 15, "tool_calls": 0, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 0, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 1, "compact_events": 0, "requests": 2, "rounds": 1, "req_per_round": 2.0}}}
+agent_trace_proxy: removed the raw capture /home/haseeb/.cache/axon-agent/raw/selftest-1872606.jsonl (--keep-raw keeps it)
+SELFTEST OK
+CAPTURE DRY selftest: ok
+TASK pi bugfix r1 rc 0 0s tests FAIL
+SMOKE pi: 1 request(s) reached the proxy; routes:       1 "route":"chat" 
+SMOKE pi converted: 1 requests, 1 sessions, tool calls 0 , reuse 50.0 %
+CAPTURE DRY pi: ok (pi-coding-agent 0.85.1-1, /usr/bin/pi)
+TASK opencode bugfix r1 rc 0 1s tests FAIL
+SMOKE opencode: 2 request(s) reached the proxy; routes:       2 "route":"chat" 
+SMOKE opencode converted: 2 requests, 2 sessions, tool calls 0 , reuse 50.0 %
+CAPTURE DRY opencode: ok (opencode 2.2.5-1.1, /usr/bin/opencode)
+TASK codex bugfix r1 rc 0 1s tests FAIL
+SMOKE codex: 1 request(s) reached the proxy; routes:       1 "route":"resp" 
+SMOKE codex converted: 1 requests, 1 sessions, tool calls 0 , reuse 0.0 %
+CAPTURE DRY codex: ok (openai-codex 0.166.0-1.1, /usr/bin/codex)
+TASK crush bugfix r1 rc 0 0s tests FAIL
+SMOKE crush: 2 request(s) reached the proxy; routes:       2 "route":"chat" 
+SMOKE crush converted: 2 requests, 2 sessions, tool calls 0 , reuse 60.0 %
+CAPTURE DRY crush: ok (crush-bin 0.99.0-1, /usr/bin/crush)
+CAPTURE DRY PASS (4 harnesses driven)
+[axon-run 18:03:29] exit 0 after 10.6s (host bella)
+[axon-run 18:03:34] EXPECT ok: output matches /CAPTURE DRY PASS/

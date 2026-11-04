@@ -1,0 +1,49 @@
+[axon-run 17:40:16] submitted 1104-174016-2168 by /home/haseeb/.cache/axon-wt-a2-gate: /usr/sbin/python3 -u /home/haseeb/.cache/axon-agent/a2/restart_probe.py /home/haseeb/.cache/axon-wt-a2-gate /home/haseeb/.cache/axon-agent/a2/restart-d88ffc7
+[axon-run 18:03:44] scope axon-job-1104-174016-2168-1793833424.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 18:03:44] job 1104-174016-2168 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-174016-2168-1793833424 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/sbin/python3 -u /home/haseeb/.cache/axon-agent/a2/restart_probe.py /home/haseeb/.cache/axon-wt-a2-gate /home/haseeb/.cache/axon-agent/a2/restart-d88ffc7
+axon-q 18:03:44 waiting: stagger
+axon-q 18:04:01 start slot 16-23: /usr/sbin/python3 -u /home/haseeb/.cache/axon-agent/a2/restart_probe.py /home/haseeb/.cache/axon-wt-a2-gate /home/haseeb/.cache/axon-agent/a2/restart-d88ffc7
+ollama store: /home/haseeb/.cache/axon-agent/a2/restart-d88ffc7/ollama-models (24 blobs linked from /var/lib/ollama, manifests+manifests-v2 copied)
+harness d88ffc790d718f8c042d11ec0941e707cea94e09 dirty []; model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fe
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-af281d9 serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18701 --ctx 32768 --parallel 16 --kv f16
+axon ready: --ctx 32768 --parallel 16 --kv f16; paged pool 98176 tokens; tokenization check 512 words = 512 tokens
+RESTART axon kv f16 round 0: start to ready 2.14 s, stop 3.21 s (98176 KV tokens; --ctx 32768 --parallel 16 --kv f16; paged pool 98176 tokens; tokenization check 512 words )
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 65536 -np 2 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18702 --host 127.0.0.1 --metrics
+llama ready: -c 65536 -np 2 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+RESTART llama kv f16 round 0: start to ready 2.20 s, stop 3.41 s (65536 KV tokens; -c 65536 -np 2 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, )
+start ollama kv f16: ollama serve
+ollama ready: ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, keep_alive -1 (65536 tokens); ollama_check after start: manifests/registry.ollama.ai/library/axon-q7/latest + 0 other manifest(s), same blobs; tokenization check 512 words = 512 tokens
+RESTART ollama kv f16 round 0: start to ready 4.83 s, stop 3.21 s (65536 KV tokens; ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, )
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-af281d9 serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18704 --ctx 32768 --parallel 16 --kv f16
+axon ready: --ctx 32768 --parallel 16 --kv f16; paged pool 98176 tokens; tokenization check 512 words = 512 tokens
+RESTART axon kv f16 round 1: start to ready 1.13 s, stop 3.21 s (98176 KV tokens; --ctx 32768 --parallel 16 --kv f16; paged pool 98176 tokens; tokenization check 512 words )
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 65536 -np 2 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18705 --host 127.0.0.1 --metrics
+llama ready: -c 65536 -np 2 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+RESTART llama kv f16 round 1: start to ready 2.19 s, stop 3.21 s (65536 KV tokens; -c 65536 -np 2 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, )
+start ollama kv f16: ollama serve
+ollama ready: ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, keep_alive -1 (65536 tokens); ollama_check after start: manifests/registry.ollama.ai/library/axon-q7/latest + 0 other manifest(s), same blobs; tokenization check 512 words = 512 tokens
+RESTART ollama kv f16 round 1: start to ready 4.74 s, stop 3.21 s (65536 KV tokens; ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, )
+start axon kv q8: /home/haseeb/.cache/axon-agent/bin/axon-af281d9 serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18707 --ctx 32768 --parallel 16 --kv q8
+axon ready: --ctx 32768 --parallel 16 --kv q8; paged pool 190464 tokens; tokenization check 512 words = 512 tokens
+RESTART axon kv q8 round 0: start to ready 1.14 s, stop 3.21 s (190464 KV tokens; --ctx 32768 --parallel 16 --kv q8; paged pool 190464 tokens; tokenization check 512 words )
+start llama kv q8: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 163840 -np 5 -kvu --cache-reuse 256 -ctk q8_0 -ctv q8_0 --port 18708 --host 127.0.0.1 --metrics
+llama ready: -c 163840 -np 5 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+RESTART llama kv q8 round 0: start to ready 2.19 s, stop 3.21 s (163840 KV tokens; -c 163840 -np 5 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -fa on (--cache-ram default 8192 MiB)
+start ollama kv q8: ollama serve
+ollama ready: ollama 0.40.13; OLLAMA_NUM_PARALLEL=5 OLLAMA_CONTEXT_LENGTH=32768 KV q8 flash attention, keep_alive -1 (163840 tokens); ollama_check after start: manifests/registry.ollama.ai/library/axon-q7/latest + 0 other manifest(s), same blobs; tokenization check 512 words = 512 tokens
+RESTART ollama kv q8 round 0: start to ready 4.57 s, stop 3.21 s (163840 KV tokens; ollama 0.40.13; OLLAMA_NUM_PARALLEL=5 OLLAMA_CONTEXT_LENGTH=32768 KV q8 flash attention, k)
+start axon kv q8: /home/haseeb/.cache/axon-agent/bin/axon-af281d9 serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18710 --ctx 32768 --parallel 16 --kv q8
+axon ready: --ctx 32768 --parallel 16 --kv q8; paged pool 190464 tokens; tokenization check 512 words = 512 tokens
+RESTART axon kv q8 round 1: start to ready 1.14 s, stop 3.21 s (190464 KV tokens; --ctx 32768 --parallel 16 --kv q8; paged pool 190464 tokens; tokenization check 512 words )
+start llama kv q8: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 163840 -np 5 -kvu --cache-reuse 256 -ctk q8_0 -ctv q8_0 --port 18711 --host 127.0.0.1 --metrics
+llama ready: -c 163840 -np 5 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+RESTART llama kv q8 round 1: start to ready 2.26 s, stop 3.21 s (163840 KV tokens; -c 163840 -np 5 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -fa on (--cache-ram default 8192 MiB)
+start ollama kv q8: ollama serve
+ollama ready: ollama 0.40.13; OLLAMA_NUM_PARALLEL=5 OLLAMA_CONTEXT_LENGTH=32768 KV q8 flash attention, keep_alive -1 (163840 tokens); ollama_check after start: manifests/registry.ollama.ai/library/axon-q7/latest + 0 other manifest(s), same blobs; tokenization check 512 words = 512 tokens
+RESTART ollama kv q8 round 1: start to ready 4.25 s, stop 3.21 s (163840 KV tokens; ollama 0.40.13; OLLAMA_NUM_PARALLEL=5 OLLAMA_CONTEXT_LENGTH=32768 KV q8 flash attention, k)
+kv f16: ENGINE RESTARTS (one per cell per engine): axon 2 x start 1.6 s [1.1-2.1] + stop 3.2 s [3.2-3.2]; llama 2 x start 2.2 s [2.2-2.2] + stop 3.3 s [3.2-3.4]; ollama 2 x start 4.8 s [4.7-4.8] + stop 3.2 s [3.2-3.2]; total 37 s of 72 s board wall (51.3%)
+kv q8: ENGINE RESTARTS (one per cell per engine): axon 2 x start 1.1 s [1.1-1.1] + stop 3.2 s [3.2-3.2]; llama 2 x start 2.2 s [2.2-2.3] + stop 3.2 s [3.2-3.2]; ollama 2 x start 4.4 s [4.2-4.6] + stop 3.2 s [3.2-3.2]; total 35 s of 72 s board wall (48.7%)
+mean start + stop per cell: axon 4.6 s, llama 5.5 s, ollama 7.8 s
+RESTART PROBE END ok /home/haseeb/.cache/axon-agent/a2/restart-d88ffc7
+[axon-run 18:05:16] exit 0 after 91.9s (host bella)
+[axon-run 18:05:19] EXPECT ok: output matches /RESTART PROBE END ok/
