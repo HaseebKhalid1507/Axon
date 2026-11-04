@@ -13,14 +13,16 @@
 - **(a) Per-kernel share of a feed pass** (`pool_feed_anatomy`, new, test-only, 7B, paged pool as serve):
   - for n 16–768 tokens at depth 0–6,000: the pass's wall time (`feed_slot` + sync, what a serve step pays);
   - its kernels: the same pass captured in a CUDA graph and replayed;
-  - split into GEMM (q/k/qkv/wo/gate/gate_up/down), attention (rope_kv/attn/combine) and other, by an event
-    after each segment.
+  - split into GEMM (q/k/v4/v6/qkv/wo/gate/gate_up/down/down4/down6), attention (rope_kv/attn/combine) and other,
+    by an event after each segment, in one profiled pass per point. The v4/v6/down4/down6 names were added to this
+    list on 11-04: the harness has mapped them since ff6f1c3, before the session.
 - **(b) Launch share:** wall − graph replay = launch + gaps, the most a graph-captured feed could save. A bucketed
   scheme would also have to pass the position through a buffer. Enqueue time is reported too.
 - **In-situ weighting:**
   - every server runs with `AXON_SERVE_TRACE`;
-  - the anatomy is weighted by the fifo60 C=128 cells' feed passes (sizes MEASURED from the trace; depths
-    ESTIMATED from the prompt set: shorts at 0, long-prompt chunks token-weighted over the long prompts);
+  - the anatomy is weighted by the fifo60 C=128 cells' feed passes (sizes MEASURED from the trace as per-step
+    means; depths ESTIMATED from the prompt set: shorts at 0, long-prompt chunks token-weighted over the long
+    prompts);
   - cross-checked by comparing the grid's predicted feed time with the trace's measured one.
 - **(c) #139:**
   - arms fifo/sjf × `--step-ms` 50/60/80, C=64 and C=128, 2 rounds;
@@ -46,6 +48,12 @@ other cells are reported.
 - **`--step-ms 80`** is reported only.
 - **BITS** must hold across all arms, or the comparisons are void.
 
+**Note added 11-04 (review, after the session; the rule above is left exactly as committed in 65c71de).**
+"Verbatim thresholds" is not accurate. Spec §8.2 (c) also requires sjf's short TTFT p50 to be ≤ 3 step times
+(ESTIMATED 3 × 60 ms = 180 ms on the H100), and the rule as committed left that clause out. With it, sjf60's (c)
+clause at C=128 fails as well (953.5 ms > 180 ms). No verdict changes: "Together" already fails at C=128 / 60, and
+sjf80's 173.0 ms at C=128 is under 180 ms.
+
 ## Session plan
 - Kit `~/.cache/axon-feedanat/h100` (`sess_h100.sh`, `anat.py`, `sd/`, `kcache-sm90a/`, SHA256SUMS): prebuilt
   binaries, sm_90a kernel cache for NVRTC 13.2/13.3/13.4.
@@ -64,7 +72,8 @@ other cells are reported.
     mapped explicitly: an unknown one panics in the test and stops `anat.py`, which recomputes the classes itself.
   - Wall, graph replay and enqueue were timed in separate blocks, and drift landed on wall − graph (−14 to +12 %);
     they are now timed in turn every repetition. Checked on bella: 1027-014519-e6bd, 40 grid rows; launch + gaps
-    0–2 % at most points (13 % at one).
+    0–2 % at most points (13 % at one). The PR's gate-log comment for e6bd reads FAIL (rc 1, `ANAL INCOMPLETE`).
+    That is by design: the job ran the anatomy alone (`AXON_SESS_SKIP=sweep`), so the analysis had no cells.
   - The grid now goes to n = 1024: H100 passes are ~470 tokens at p50 under 60 ms, more at 80.
 
 ## Results
@@ -75,6 +84,8 @@ driver 595.91.07). Binaries and kit at 86953be (main 0c23a87 + the harness), 7B 
 skipped or timed out. FOREIGN_GPU max 0 %. Kernel cache 1 → 4 entries (the kit's; nothing compiled on the pod).
 **Cost:** pod up 03:09:38, down 03:27:00 (17.4 min); ledger **$1.399** (cap $2.50).
 Raw log, kit scripts and SHA256SUMS: https://gist.github.com/HaseebKhalid1507/aa8b1af9b814d181d28ab9980320c495
+`anat.py`, the rule as executed: sha256 `f20651a3133840a3fef24ea15b89dc08844a2c635d04dcac4fd23b24da4146d5` (the
+kit's SHA256SUMS; the gist's copy hashes the same).
 
 **Bits:** 768 of 768 requests identical (text_sha, completion_tokens) across the 6 arms.
 
@@ -125,9 +136,10 @@ launch + gaps = wall − graph replay.
 | 6000 | 768 | 63.46 | 0.77 | 62.78 | 73 | 23 | 3 | 1 |
 | 6000 | 1024 | 79.73 | 0.77 | 79.10 | 77 | 19 | 3 | 1 |
 
-**Weighted over the fifo60 C=128 cells' feed passes** (pass sizes MEASURED from the serve trace; depths ESTIMATED
-from the prompt set): **GEMM 78.4 %, attention 15.0 %, other 4.3 %, launch + gaps 2.3 %.** Calibration: the grid
-predicts 41.32 s of feed time for those cells' passes, and the trace measured 44.78 s (ratio 1.08).
+**Weighted over the fifo60 C=128 cells' feed passes** (pass sizes MEASURED from the serve trace as per-step means;
+depths ESTIMATED from the prompt set): **GEMM 78.4 %, attention 15.0 %, other 4.3 %, launch + gaps 2.3 %.**
+Calibration: the grid predicts 41.32 s of feed time for those cells' passes, and the trace measured 44.78 s (ratio
+1.08). Both the per-step means and the unallocated 8 % are bounded under "Caveats" below; neither moves the verdict.
 
 ### (c) #139 cells (medians of 2 rounds; one server per arm-round, fixed salt per (round, C), the showdown SLO)
 
@@ -144,6 +156,7 @@ predicts 41.32 s of feed time for those cells' passes, and the trace measured 44
 | 128 | fifo50 | 2 | 1,570.0 (±2 %) | 8,860.5 | 17,589.5 | 19,637.8 | 19,637.8 | 47.0 | 62.8 | 46.0 | 0.102 | 163.3 |
 | 128 | sjf50 | 2 | 1,678.8 (±0 %) | 5,624.6 | 22,697.2 | 16,987.8 | 16,987.8 | 47.0 | 69.5 | 47.2 | 0.293 | 500.0 |
 | 128 | fifo80 | 2 | 1,984.8 (±0 %) | 861.7 | 12,040.6 | 13,514.8 | 13,514.8 | 31.0 | 101.1 | 53.2 | 0.367 | 792.5 |
+| 128 | sjf80 | 2 | 2,013.4 (±0 %) | 173.0 | 12,736.0 | 13,578.5 | 13,578.5 | 29.8 | 100.1 | 51.2 | 0.369 | 812.3 |
 
 ### Step traces (`AXON_SERVE_TRACE`, s)
 
@@ -182,20 +195,53 @@ predicts 41.32 s of feed time for those cells' passes, and the trace measured 44
     bound (the W4A8 probe skeleton at the serve's M = 384 / 512 on fused gate_up and down, Q6_K included, with a
     measured exact epilogue), and a weighted exact speedup ≥ 1.34× (= feeds −20 %, ~−11 % of the C=128 cell's wall).
   - The GEMM time by shape at n = 512: gate_up 52 %, down 29 % (the Q6_K layers 15 %), q/wo 13 %, k/v 4.5 %; all
-    GEMMs at 102 TMAC/s, against a 325 TMAC/s mma.sync peak.
+    GEMMs at 102 TMAC/s (~107 with the event overhead scaled out; see Caveats), against a 325 TMAC/s mma.sync peak.
 - **#139, deciding cell C=128 at `--step-ms 60`:**
-  - (c) clause, sjf against fifo: short TTFT p50 0.41×, long TTFT max 0.95×, aggregate +2.1 %: PASS.
+  - (c) clause, sjf against fifo: short TTFT p50 0.41×, long TTFT max 0.95×, aggregate +2.1 %: PASS. This is the clause
+    as pre-registered. The spec's "≤ 3 step times" part was left out of the rule, and with it the clause would
+    fail (953.5 > 180 ms; see the note under the rule).
   - "Together": sjf's short TTFT p50 is 953.5 ms, over the 500 ms bound (aggregate 1,885 ≥ 1,812 passes): **FAIL**.
   - **sjf stays opt-in.**
 - **#139 `--step-ms 50`:** fifo50 against fifo60 at C=128: ITL p50 47.0 ms (passes), slo_ok 0.102 (needs ≥ 0.5),
   aggregate −14.9 %: **FAIL**. 60 stays the default.
 - **#139 `--step-ms 80`** (reported only, per the rule): fifo80 against fifo60 at C=128 is +7.5 % aggregate, slo_ok
   0.367 vs 0.279, ITL p99 101.1 vs 80.0 ms. sjf80 meets every (c) and "Together" threshold at C=128 (short p50 173 ms,
-  aggregate 2,013). The rule makes no default change on 80. A default of `--step-ms 80` (with or without sjf) would
-  need its own pre-registered decision.
+  under the spec's 180 ms too; aggregate 2,013). The rule makes no default change on 80. A default of `--step-ms 80`
+  (with or without sjf) would need its own pre-registered decision.
 
 ## Observed, not pre-registered
 - **Tile cliff at n = 384.** A 384-token pass costs 29.5 ms of GEMM against 32.7 ms at 512: 85 against 102 TMAC/s
-  over all GEMMs, with down at 77 against 103 and q/wo at 63 against 85. fifo60 C=128 passes run at p50 ≈ 390 tokens.
+  over all GEMMs, with down at 77 against 103 and q/wo at 63 against 85. fifo60 C=128 passes run at p50 ≈ 390 tokens
+  (a median of per-step means). These TMAC/s use the event profile's GEMM ms, which include event overhead, and more of
+  it at 384 than at 512 (Caveats). Scaled to the graph replay they are ~93 against ~107 TMAC/s, a ratio of 0.86 rather
+  than 0.83: the cliff is smaller but still there.
 - sjf at C=128, against fifo at the same step: short TTFT p99 is higher (15.6 vs 14.1 s at 60) and long TTFT p99 lower
   (14.8 vs 15.6 s). Goodput is +35 % at 60 (746 vs 552), 3.1× at 50 (500 vs 163) and +2.5 % at 80 (812 vs 793).
+
+## Caveats (added 11-04, from review; the numbers above are unchanged)
+- **The class split comes from one profiled pass per (depth, n).** Wall, graph replay and enqueue are medians of 9. The
+  GEMM / attention / other split comes from a single pass with an event after each segment, scaled to the graph
+  replay (class % = class ms / event ms × graph / wall).
+  - The event timeline runs 1.33–2.75 ms over the graph replay: 2.1–22.4 % of it, and ≤ 4.9 % at n ≥ 512.
+  - At n = 384 it carries an extra 0.4–1.1 ms at 4 of the 5 depths (all but 2,000).
+  - The tile-cliff TMAC/s use the unscaled GEMM ms. Scaled by graph / event, they are 92.3–93.1 at n = 384 against
+    106.3–107.3 at n = 512 over the 5 depths (ratio ~0.86, not 0.83). The pick's brief gates on M = 384 / 512, so this
+    caveat applies there.
+- **Empty marker intervals.** At n ≥ 64, three markers close no kernel of their own: `qkv` after k / v4 / v6, `gate`
+  before the fused gate_up, and `down` after down4 / down6. Their intervals are pure event overhead, 0.25–0.26 ms per
+  pass on the H100, and are booked as GEMM: about 1.3 % of a pass at n = 256, under 1 % at n ≥ 384.
+- **Pass sizes are per-step means.** `AXON_SERVE_TRACE` logs a step's feed passes and tokens (`feeds`, `fed`), not each
+  pass. So `anat.py` books a step's passes at n = fed / feeds, and "tokens per pass p50" in the trace table is a median
+  of per-step means. A short prompt fed in the same step as a long-prompt chunk is booked inside one mean-sized pass,
+  at the long-chunk depth once that mean is ≥ 128 tokens. That pass has a smaller n than the chunk and a greater depth
+  than the short, and both give a lower GEMM share on the grid, so this bias runs against branch 1.
+- **The 8 % calibration gap is not allocated.** The grid predicts 41.32 s of feed time for the fifo60 C=128 passes; the
+  trace measured 44.78 s. That leaves 3.46 s (7.7 % of the measured time) unexplained. "Capturing feeds would save at
+  most ~2 %" holds on the grid. If the whole gap were launch or host time, launch + gaps would be 9.8 %, still < 25 %,
+  and GEMM would be 78.4 × 41.32 / 44.78 = 72.3 %, still ≥ 65 %. The verdict holds either way.
+- **A 1-slot pool.** The harness feeds one slot of `pool(1, ctx)`, whose pages are taken in order. Serve's 128-slot
+  pool hands pages to many slots, so in situ, attention may cost more than on the grid. Any such cost is inside the
+  calibration gap above, which is bounded.
+- **Grid points over the pool's pass are dropped without a line** (`filter(n <= pass)` in the harness). The H100's pass
+  max was 1152, so all 40 points ran. A skip line is a follow-up: it is a code change, which this docs-only fix
+  doesn't make.
