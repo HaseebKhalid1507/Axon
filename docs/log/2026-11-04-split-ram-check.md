@@ -40,15 +40,19 @@
 | `--gpus` pipeline | every layer on the GPUs, no CPU half | none needed |
 | serve's KV RAM tier (`--cache-ram`) | off on a split (no page image) | none needed |
 
-Follow-ups, not in this PR:
-- FP8 checkpoints with `AXON_REPACK=0` still build an arena (their FP8 → F8S rows) that `dense_ram_need(repack =
-  false)` doesn't count; #142's CPU check has the same blind spot. Small (the FP8 0.5B only in practice).
-
-Follow-up candidate the cgroup demo shows (not #143's, which is the CPU half; also on main):
-- The GPU half's host-side memory (the CUDA context, the upload) is taken before any check runs. Under a cap below
-  it (about 0.2 GiB at these caps: the refusals' "only X available" put what's in use at the check at 0.18-0.37 GiB)
-  the run is killed in CUDA init or the upload, as on main (the 0.5B at 56 and 184 MiB below; inferred from where
-  the cap falls, the killed runs print nothing).
+Follow-ups, not in this PR (filed after shady's review):
+- #183: FP8 checkpoints with `AXON_REPACK=0` still build an arena (their FP8 → F8S rows, `build`'s
+  `(repack || qtype == F8_E4M3)`) that `dense_ram_need_keep(repack = false)` doesn't count; #142's CPU check has the
+  same blind spot. Few configs hit it (FP8 safetensors with `AXON_REPACK=0`), but one that does misses about the
+  whole arena: ~352 MiB on the FP8 0.5B (its 168 layer matrices, from the safetensors header at F8S's row size). The
+  fix is one condition mirroring `build`'s rule.
+- #184 (the cgroup demo shows it; not #143's, which is the CPU half; also on main): the GPU half's host-side memory
+  (the CUDA context, the upload) is taken before any check runs. Under a cap below it (about 0.2 GiB at these caps:
+  the refusals' "only X available" put what's in use at the check at 0.18-0.37 GiB) the run is killed in CUDA init
+  or the upload, as on main (the 0.5B at 56 and 184 MiB below; inferred from where the cap falls, the killed runs
+  print nothing).
+- #185: the refusal names no remedy; it should suggest fewer CPU layers (more `--gpu-layers`) or a smaller `--ctx`,
+  especially for the auto split.
 
 ## How it was verified
 Tests (all in the tier filter `model:: hybrid:: gguf::mem lm:: qwen2::stream`):
@@ -111,9 +115,9 @@ the source files' hashes, and model.rs's test module changed). So the md5 gate a
 | gate | result | job |
 |---|---|---|
 | tier tests, release (bella) | PASS 122 / 0 / 3 ignored (582 s) | 1104-094511-cde8 |
-| tier tests, debug assertions (bella) | not run to the end: bella rebooted at ~10:56 mid-run ("runner gone without an rc") | 1104-094512-39e4 |
+| tier tests, debug assertions (bella) | not run to the end: killed mid-run when bella shut down at 10:54:32 ("runner gone without an rc") | 1104-094512-39e4 |
 | the same, rerun (`-r2`) | PASS 122 / 0 / 3 ignored (1276 s) | 1104-142638-daac |
-| the new tests' output under debug assertions (`--nocapture`) | PASS 5 / 0 (11 s; finished 10:55:35, before the reboot) | 1104-094512-0a6e |
+| the new tests' output under debug assertions (`--nocapture`) | PASS 5 / 0 (11 s; ran 10:55:24-35, between bella's two shutdowns at 10:54:32 and 10:56:37) | 1104-094512-0a6e |
 | clippy -D warnings (lib, lib tests, bin), rustfmt | clean | local |
 
 0a6e's output shows the fixed arm in debug: of the 12 real-split cells, the 0.5B's and Qwen3-0.6B's one-CPU-layer
@@ -142,8 +146,13 @@ Cgroup demo (1104-090952-3d81), half the layers on the GPU, `-n 8`. Caps in MiB:
 | qwen2.5-3b (18/36) | 1009 | OOM at 753, 881, 994 | **refused** at 753 (0.56), 881 (0.68); OOM at 994 | both run, same text (1009, 1073, 2018) |
 | Llama-3.2-3B (14/28) | 1211 | OOM at 955, 1083, 1196 | **refused** at 955 (0.57), 1083 (0.69); OOM at 1196 | both run, same text (1211, 1275, 2422) |
 
-- No refusal where main ran. The OOM 15 MiB under main's smallest cap is the tolerance's band (34 MiB here): within
-  it a load isn't refused (#142's rule), it may then be killed.
+- No refusal where main ran, in the configs the demo ran: gen's prompt-sized context (a KV floor of 14-15 tokens)
+  and, below, the 3B at `--ctx 32768` with streaming on. Not covered: the KV floor (min(ctx, 8192) positions, #142's
+  rule) now applies to a split's CPU half, so a split with no stream planned (`AXON_STREAM=0`, VRAM short for the
+  streamer, f32 KV) at `--ctx` ≥ 8192 under a tight cap is refused where main's run lived on lazy KV while its
+  context stayed short. That's intended (#142's rule for the CPU), not measured here.
+- The OOM 15 MiB under main's smallest cap is the tolerance's band (34 MiB here): within it a load isn't refused
+  (#142's rule), it may then be killed.
 - The 0.5B is never refused: its CPU half is 125 MiB, and at 56 and 184 MiB the run presumably dies before the check (the
   GPU half's host memory; the follow-up above), at 297 it is in the tolerance's band.
 - The refusal reads e.g. `qwen2: the CPU half of the split (18 of 36 layers) needs about 0.80 GiB of RAM (its
@@ -160,4 +169,16 @@ Streaming (the 3B at 18/36, `--ctx 32768`: the CPU layers' pinned KV is 18 x 1 K
 | 1662 | runs, streamed | runs, streamed |
 
 The branch runs a 32K-context split in 480 MiB less than main by not pinning what doesn't fit. In the tolerance's
-band at 1598 MiB it gives up streaming (slower prefill, same bits) where main just managed it.
+band at 1598 MiB it gives up streaming where main just managed it. A cache that gives up streaming has a
+non-streamed split's bits, not the streamed run's: prompts of at least `AXON_STREAM_MIN` (32) tokens come out
+differently from main's streamed run (the md5 gate 1104-090951-357d, the 3B at 18/36, prompt 2: streamed
+`c1931ca3389e`, `AXON_STREAM=0` `27d54f0a1bf3`; main and the branch agree in each). This section shows the memory
+behaviour only: its prompt ("The capital of France is", ~6 tokens) never streams prefill, and its text isn't
+compared.
+
+## Review
+- shady 8/10 APPROVE after 1 docs MUST, on 03e6a8c (code final there). MUST: the "same bits" claim for the
+  streaming give-up band above was false (fixed: non-streamed bits, which differ from main's streamed run on
+  prompts ≥ AXON_STREAM_MIN). SHOULDs, all docs: the no-refusal claim scoped to the demo's configs (the KV floor
+  on split CPU halves at `--ctx` ≥ 8192 isn't covered); the FP8 + `AXON_REPACK=0` follow-up's size (#183); the
+  remedy in the refusal (#185); 39e4's timeline. #184 filed for the GPU half's host memory.
