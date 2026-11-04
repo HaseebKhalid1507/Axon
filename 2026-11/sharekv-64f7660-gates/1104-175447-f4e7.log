@@ -1,0 +1,37 @@
+[axon-run 17:54:47] submitted 1104-175447-f4e7 by /home/haseeb/.cache/axon-sharekv: /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-64f7660 ./serve_load.py ./turns.py
+[axon-run 18:17:33] scope axon-job-1104-175447-f4e7-1793834253.scope in app-axonjobs.slice: MemoryMax 12505 MB, MemoryHigh 11254 MB, no swap, oomd pressure kill 80% (claim 6197 MB): an OOM here kills only this job
+[axon-run 18:17:33] job 1104-175447-f4e7 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-175447-f4e7-1793834253 --slice=app-axonjobs.slice -p MemoryMax=12505M -p MemoryHigh=11254M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-64f7660 ./serve_load.py ./turns.py
+axon-q 18:17:33 start slot 16-23: /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-64f7660 ./serve_load.py ./turns.py
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 1107 MiB
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main C=1: "digest": "8dd1d2cae1681575" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main C=8: "digest": "8dd1d2cae1681575" [same]
+  main KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main-cr C=8: "digest": "8dd1d2cae1681575" [same]
+  main-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+RESTORE qwen2.5-1.5b-instruct-q4_k_m main-cr: restored_tokens=878 restored_pages=13 hits=14 written_pages=33
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand C=1: "digest": "8dd1d2cae1681575" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand C=8: "digest": "8dd1d2cae1681575" [same]
+  cand KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-shuffle C=8: "digest": "8dd1d2cae1681575" [same]
+  cand-shuffle KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-plain C=8: "digest": "8dd1d2cae1681575" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-cr C=8: "digest": "8dd1d2cae1681575" [same]
+  cand-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+RESTORE qwen2.5-1.5b-instruct-q4_k_m cand-cr: restored_tokens=880 restored_pages=13 hits=14 written_pages=33
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main C=1: "digest": "9eb689790183d2ff" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main C=8: "digest": "9eb689790183d2ff" [same]
+  main KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main-cr C=8: "digest": "9eb689790183d2ff" [same]
+  main-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+RESTORE Qwen2.5-7B-Instruct-Q4_K_M main-cr: restored_tokens=880 restored_pages=13 hits=14 written_pages=33
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand C=1: "digest": "9eb689790183d2ff" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand C=8: "digest": "9eb689790183d2ff" [same]
+  cand KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-shuffle C=8: "digest": "9eb689790183d2ff" [same]
+  cand-shuffle KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-plain C=8: "digest": "9eb689790183d2ff" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-cr C=8: "digest": "9eb689790183d2ff" [same]
+  cand-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+RESTORE Qwen2.5-7B-Instruct-Q4_K_M cand-cr: restored_tokens=876 restored_pages=13 hits=14 written_pages=33
+SERVEID PASS
+[axon-run 18:20:58] exit 0 after 204.8s (host bella)

@@ -1,0 +1,73 @@
+[axon-run 17:54:46] submitted 1104-175446-fe6f by /home/haseeb/.cache/axon-sharekv: /usr/bin/bash md5.sh ./axon-base-af281d9 ./axon-64f7660 md5out-64f7660
+[axon-run 18:16:30] VRAM: claiming the learned 2039 MB instead of --vram 4000 (name:sharekv-*-md5)
+[axon-run 18:16:30] scope axon-job-1104-175446-fe6f-1793834190.scope in app-axonjobs.slice: MemoryMax 4648 MB, MemoryHigh 4183 MB, no swap, oomd pressure kill 80% (claim 1952 MB): an OOM here kills only this job
+[axon-run 18:16:30] job 1104-175446-fe6f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-175446-fe6f-1793834190 --slice=app-axonjobs.slice -p MemoryMax=4648M -p MemoryHigh=4183M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash md5.sh ./axon-base-af281d9 ./axon-64f7660 md5out-64f7660
+axon-q 18:16:30 start slot 16-23: /usr/bin/bash md5.sh ./axon-base-af281d9 ./axon-64f7660 md5out-64f7660
+base	qwen2.5-0.5b-q4_k_m	cpu	p1	de11b4bf48c9	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p1	de11b4bf48c9	rc=0
+base	qwen2.5-0.5b-q4_k_m	cpu	p2	9031d0e99ea7	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p2	9031d0e99ea7	rc=0
+base	qwen2.5-0.5b-q4_k_m	cpu	p3	f6979b93fb55	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p3	f6979b93fb55	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p1	c0dfbb1ca4f2	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p1	c0dfbb1ca4f2	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p2	9031d0e99ea7	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p2	9031d0e99ea7	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p3	f6979b93fb55	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p3	f6979b93fb55	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	1c3ca55ba717	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	1c3ca55ba717	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	7a4e319790a1	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	7a4e319790a1	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	f6979b93fb55	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	f6979b93fb55	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p1	54381a7d049c	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p1	54381a7d049c	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p2	5e174cec9863	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p2	5e174cec9863	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p3	d2c5d72da64a	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p1	a21a6d55c9dc	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p1	a21a6d55c9dc	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p2	b9e8a942d145	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p2	b9e8a942d145	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p3	d2c5d72da64a	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p2	50bd2170dff7	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p2	50bd2170dff7	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p3	d2c5d72da64a	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p1	897464655057	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p1	897464655057	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p2	09ed84e14ff0	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p2	09ed84e14ff0	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p3	a1f895adbb59	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p1	cc9424ad2c9b	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p1	cc9424ad2c9b	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p2	f08ef9437981	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p2	f08ef9437981	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p3	a1f895adbb59	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p1	06a8ab9e1747	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p1	06a8ab9e1747	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p2	97725ad0fd98	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p2	97725ad0fd98	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p3	a1f895adbb59	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p1	cf46be5fb096	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p1	cf46be5fb096	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p2	3a62d44e170f	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p2	3a62d44e170f	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p3	9550d71f3d45	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p3	9550d71f3d45	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p1	9959475a1edd	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p1	9959475a1edd	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p2	e7b089fdcdc6	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p2	e7b089fdcdc6	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p3	9550d71f3d45	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p3	9550d71f3d45	rc=0
+MD5: 33 of 33 identical; 0 nonzero rc
+[axon-run 18:17:31] exit 0 after 60.8s (host bella)
