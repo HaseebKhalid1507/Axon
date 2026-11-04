@@ -303,7 +303,7 @@ pub(super) fn dims(m: &Model, kv: CacheKv) -> Result<Option<crate::model::Ds2Gpu
 pub(super) fn plan_layers<'m>(
     m: &'m Model,
     cfg: Ds2GpuCfg,
-    uploads: &mut Vec<(&'m Tensor, usize)>,
+    uploads: &mut super::Arena<'m>,
     push_vec: &mut dyn FnMut(Vec<f32>) -> usize,
 ) -> Result<MlaNet, String> {
     let n_layers = meta(m, "block_count").map_or(0, |v| v as usize);

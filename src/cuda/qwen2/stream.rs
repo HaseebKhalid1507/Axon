@@ -297,6 +297,7 @@ impl<'g> CudaQwen2<'g> {
                 rows: m.rows,
                 cols: m.cols,
                 c8: None,
+                ws: None,
             };
             let [q, k, v, o, gate, up, down] = &l.mats;
             if gate.rows != self.ffn

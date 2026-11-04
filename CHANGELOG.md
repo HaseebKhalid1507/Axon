@@ -4,6 +4,64 @@ All notable changes to Axon. Versions follow [SemVer](https://semver.org/); befo
 can change in any minor release. Each entry names its pull requests (#N on GitHub); the engineering log (`docs/log/`) has the
 measurements behind them.
 
+## Unreleased (after 0.1.0's draft)
+
+### KV RAM tier, opt-in (#166)
+- **`axon serve --cache-ram BYTES|auto`: keep conversations' KV pages in host RAM, off by default.** When a slot goes to
+  another conversation, its KV pages stay in host memory, and its next turn copies the longest stored prefix back
+  instead of prefilling it again: the same bits (the md5 gate against main, with the tier off and on). Default 0:
+  without the flag the server is main's, byte for byte (`/metrics` included).
+- **The whole size is pinned from server start.** On the GPU, `--cache-ram` is page-locked (unswappable) host RAM
+  from start, used or not; `auto` is half the RAM available after the model, at most 8 GiB.
+- **The tier is inclusive, so it helps only when sized well above the GPU KV pool.** Pages are copied as they fill,
+  so the tier also holds what the GPU still has: useful capacity ≈ `--cache-ram` − the GPU pool's KV bytes. On
+  bella's 7B f16 (pool ≈ 5.4–6.0 GiB) 6G buys almost nothing; about 20G is where it works (the 4090 replay
+  1027-155046-1ed0: TTFT-resume p50 13.5 → 0.11 s at 20G).
+- **It failed its pre-registered bella cell.** 1031-063509-f763 (7B f16, `--cache-ram 6G`, a 25k session evicted by
+  real pressure): 6,592 of 26,496 tokens restored, TTFT-resume 7.05 s vs main 8.68 s, short of the 0.3 s bar. Hence
+  opt-in (rule B's else branch). Next: an exclusive tier (C3), then the bella cell again
+  ([docs/log/2026-10-27-kv-ram-tier.md](docs/log/2026-10-27-kv-ram-tier.md)).
+
+### FP8 checkpoints (#177)
+- **FP8 checkpoints load, as Q8_0 by default.** compressed-tensors per-channel e4m3 checkpoints with dynamic per-token
+  activations (RedHatAI's `*-FP8-dynamic`) load from their directory. In exact mode (the default) the FP8 matrices
+  become Q8_0 at load and run on the existing kernels under the exact contract (identity `weights=fp8-q8`). Accuracy:
+  the 7B passes both bars (KL ≤ 0.01, top-1 ≥ 97 %) against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %); the 0.5B
+  scores 96.7 % top-1 against HF F32, below the 97 % bar. On the CPU the checkpoint runs as its exact dequant
+  (`weights=fp8-ref`, the accuracy reference). Block-scaled FP8 and other FP8 forms are refused by name.
+- **Native FP8 is opt-in and fails its bars on sm_120.** `--numerics fast` on sm_89+ runs the weights natively (e4m3
+  tensor cores, `weights=fp8-native`). On bella (RTX 5070 Ti Laptop) the 7B misses both pre-registered bars: tg128
+  32 tok/s vs a bar of 47–55 (Q4_K_M: 85–101), top-1 95.9 % vs 97 %. It isn't measured on an H100. Follow-up: decode
+  graphs for FP8 nets ([docs/log/2026-10-30-fp8-weights.md](docs/log/2026-10-30-fp8-weights.md)).
+- **Every GGUF fast-mode fingerprint changes once; no output does.** `NUMERICS_VERSION_FAST` 1 → 2 (the first fast
+  kernels), so `numerics=fast/1.1` becomes `fast/1.2` in every fast-mode identity, GGUF models included; their
+  output bits are unchanged (the md5 gate against main, exact and fast). Exact-mode fingerprints don't change.
+- **Fast-mode sessions saved before restore once as tokens.** A `chat --session` file saved in fast mode carries
+  `fast/1.1` in its identity. That no longer matches, so the session restores once as tokens (prefilled again)
+  instead of as KV bytes, which is slower but never wrong (`src/kvsave.rs`). Exact-mode sessions are unaffected.
+
+### Release note: every fingerprint changes once (numerics modes, #173)
+- **Every `system_fingerprint` changes, once; no output does.** The identity tuple's first line was `numerics=1`; it is
+  now `numerics=exact/1` (the numerics mode and its own version), so every fingerprint (`axon gen`'s `identity:`,
+  `axon serve`'s responses, `GET /identity`, `axon info`) has a new value. The kernels, the sampler and every output
+  bit are unchanged (the md5 gate against main: same greedy bytes). A client that caches or replays by
+  `(system_fingerprint, prompt, params, seed)` will miss once and repopulate. `GET /identity`'s `numerics` is now a
+  string (`"exact/1"`, was the number `1`). `chat --session` files from before still restore as bytes (exact mode's
+  session identity didn't change). Decision: Haseeb, 2026-10-29 (ship it now rather than with the next numerics bump);
+  [docs/design/determinism-modes.md](docs/design/determinism-modes.md) §7.
+- **`--numerics exact|fast`** on `gen`, `logits`, `chat` and `serve` (default `exact`, today's contract), and
+  `axon::Numerics` / `BackendOptions::numerics` in the library. `fast` may run kernels that change the float order,
+  graded against exact instead of matched bit for bit, under its own identity (`numerics=fast/1.1` as #173 shipped it, `fast/1.2` since #177: exact's counter
+  and fast's own, so a change to code both modes run moves both; its own NVRTC modules and session identity). Fast
+  mode promises tolerance on every path, bits on none (batching, cache reuse, chunking, drafting). **No fast kernel
+  exists yet**: `fast` runs the exact kernels and says so once; `Backend::fast_kernels()` tells an embedder which.
+  `axon info` prints each placement's fingerprint in both modes.
+- **`serve --datacenter`**: the datacenter bundle; today it only implies `--numerics fast` (an explicit `--numerics`
+  wins).
+- `scripts/numerics_dnll.py` and `axon logits` with `AXON_LOGITS_NLL=1` and `AXON_LOGITS_PREFIX=N` (the first N tokens
+  in batched passes): teacher-forced ΔNLL between two binaries or modes, per batched prefix (`--prefix`, default
+  0,24,160), with an SE clustered by window.
+
 ## [0.1.0] - unreleased (draft; not tagged)
 
 The first version: everything merged to `main` from the start of the project (2026-10-10) through PR #113

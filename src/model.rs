@@ -7,8 +7,9 @@ use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, IQ4_NL, MXFP4, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
-    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q,
-    row_bytes,
+    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi,
+    fp8::{self, F8_E4M3},
+    r8, r8q, row_bytes,
 };
 use crate::vmath;
 
@@ -22,6 +23,9 @@ struct Weight<'a> {
     /// The tensor's bytes; None when repacked (they may have been released).
     data: Option<&'a [u8]>,
     r8: Option<R8>,
+    /// An FP8 matrix's CPU form (`quant::fp8::F8S` rows in the arena) and
+    /// its type (`F8S`, or an emulation's: `fp8_cpu_qt`).
+    f8s: Option<Box<(R8, u32)>>,
 }
 
 /// A repacked matrix: bytes off..off + len of the shared arena.
@@ -38,9 +42,54 @@ impl std::ops::Deref for R8 {
     }
 }
 
+/// An FP8 matrix's per-row scales (`blk.N.<kind>.scale`, F32: the loader's).
+fn fp8_scales(m: &Model, t: &Tensor) -> Vec<f32> {
+    let name = format!(
+        "{}.scale",
+        t.name.strip_suffix(".weight").unwrap_or(&t.name)
+    );
+    let s = find(m, &name);
+    m.tensor_data(s)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+thread_local! {
+    /// Tests: `fp8_cpu_qt`'s answer for models built on this thread.
+    static FP8_CPU_QT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// The CPU's type for FP8 matrices (docs/design/fp8-weights.md D7): `F8S`
+/// (f32 activations, `fp8-ref`), or an emulation of the GPU's activation
+/// rounding, AXON_FP8_CPU_ACT=e4m3-tok (`F8S_TOK`) or e4m3-128 (`F8S_G128`).
+pub(crate) fn fp8_cpu_qt() -> u32 {
+    if let Some(q) = FP8_CPU_QT.with(|c| c.get()) {
+        return q;
+    }
+    match std::env::var("AXON_FP8_CPU_ACT").as_deref() {
+        Ok("e4m3-tok") => fp8::F8S_TOK,
+        Ok("e4m3-128") => fp8::F8S_G128,
+        Ok("f32") | Err(_) => fp8::F8S,
+        Ok(v) => panic!("AXON_FP8_CPU_ACT={v}: f32, e4m3-tok or e4m3-128"),
+    }
+}
+
+/// Tests: build CPU models of FP8 checkpoints with type `qt` inside `f`.
+#[cfg(test)]
+pub(crate) fn with_fp8_cpu_qt<R>(qt: u32, f: impl FnOnce() -> R) -> R {
+    FP8_CPU_QT.with(|c| c.set(Some(qt)));
+    let r = f();
+    FP8_CPU_QT.with(|c| c.set(None));
+    r
+}
+
 /// Bytes of the r8/r8q form of `t`, if it has one.
 fn repacked_len(t: &Tensor) -> Option<usize> {
     let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+    if qt == F8_E4M3 {
+        return Some(rows * crate::quant::row_bytes(fp8::F8S, n));
+    }
     if r8q::can_repack(qt, rows, n) {
         Some(r8q::repacked_len(qt, rows, n))
     } else if r8::can_repack(qt, rows, n) {
@@ -71,7 +120,7 @@ fn r8_arena(len: usize) -> memmap2::MmapMut {
 
 impl<'a> Weight<'a> {
     fn qt(&self) -> u32 {
-        self.t.qtype.id
+        self.f8s.as_ref().map_or(self.t.qtype.id, |f| f.1)
     }
 
     fn rows(&self) -> usize {
@@ -85,6 +134,16 @@ impl<'a> Weight<'a> {
     /// release a tensor read elsewhere: the token embedding (a tied output
     /// matrix is the same tensor).
     fn load(m: &'a Model, t: &'a Tensor, dst: Option<&mut [u8]>, release: bool) -> Weight<'a> {
+        if t.qtype.id == F8_E4M3 {
+            // FP8: its F8S rows (with the scales) into the arena slot
+            // (`repacked_len`), attached with the arena (`build_skip`).
+            let dst = dst.expect("an FP8 matrix has an arena slot");
+            fp8::f8_to_f8s(m.tensor_data(t), &fp8_scales(m, t), t.dims[0] as usize, dst);
+            if release {
+                m.release(t);
+            }
+            return Weight::absent(t);
+        }
         let repacked = dst.is_some();
         let w = Self::load_bytes(t, m.tensor_data(t), dst);
         if repacked && release {
@@ -101,6 +160,7 @@ impl<'a> Weight<'a> {
             t,
             data: None,
             r8: None,
+            f8s: None,
         }
     }
 
@@ -113,6 +173,7 @@ impl<'a> Weight<'a> {
                 t,
                 data: Some(data),
                 r8: None,
+                f8s: None,
             };
         };
         let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
@@ -125,6 +186,7 @@ impl<'a> Weight<'a> {
             t,
             data: None,
             r8: None,
+            f8s: None,
         }
     }
 
@@ -152,7 +214,10 @@ impl<'a> Weight<'a> {
     }
 
     /// The tensor's bytes (not repacked).
-    fn bytes(&self) -> &'a [u8] {
+    fn bytes(&self) -> &[u8] {
+        if let Some(f) = &self.f8s {
+            return &f.0;
+        }
         self.data.unwrap_or_else(|| match self.r8 {
             Some(_) => panic!("{}: repacked weight has no raw bytes", self.t.name),
             None => panic!(
@@ -1144,11 +1209,12 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         }
     }
 
+    let fp8_file = crate::safetensors::is_fp8(m);
     // `rows` = None: a vector of `cols` elements; Some(r): a cols x r matrix.
     let check = |name: &str, cols: usize, rows: Option<usize>| -> std::io::Result<&Tensor> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
-        if !SUPPORTED_TYPES.contains(&q.id) {
+        if !(SUPPORTED_TYPES.contains(&q.id) || q.id == F8_E4M3 && fp8_file) {
             return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = match rows {
@@ -1494,7 +1560,8 @@ impl<'a> Qwen2<'a> {
             .into_iter()
             .chain((0..k).flat_map(held))
         {
-            let len = if repack && hold {
+            // FP8 matrices always get a slot: their F8S form (`Weight::load`).
+            let len = if (repack || t.qtype.id == F8_E4M3) && hold {
                 repacked_len(t)
             } else {
                 None
@@ -1643,12 +1710,17 @@ impl<'a> Qwen2<'a> {
             let ws = output
                 .iter_mut()
                 .chain(layers.iter_mut().flat_map(|l| l.weights_mut()));
+            let f8qt = fp8_cpu_qt();
             for (w, p) in ws.zip(&plan) {
-                w.r8 = p.map(|(off, len)| R8 {
+                let r = p.map(|(off, len)| R8 {
                     map: map.clone(),
                     off,
                     len,
                 });
+                match w.t.qtype.id == F8_E4M3 {
+                    true => w.f8s = r.map(|r| Box::new((r, f8qt))),
+                    false => w.r8 = r,
+                }
             }
         }
 
@@ -5180,6 +5252,7 @@ pub(crate) mod tests {
                 t: w.t,
                 data: Some(data),
                 r8: None,
+                f8s: None,
             };
             let a = net.matvec(w, inp);
             let b = net.matvec(&plain, inp);

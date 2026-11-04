@@ -1,7 +1,10 @@
 # ADR: what bit-identity costs, and making it a mode
 
-**Status: proposed.** Decision requested from Haseeb; nothing here is built. Written against `origin/main` `05fb70c`
-(2026-10-19). Answers the outside review's questions "Is bit-identity a product or a dev tool? If it's a dev tool, why
+**Status: accepted** (2026-10-29, Haseeb: "lets try fast"). §7 records the answers to its four questions. Built: M1,
+M2, M3, M5 and M8 (the mode scaffolding, no kernels; PR #173, [log](../log/2026-10-29-numerics-modes.md), "As built"
+under §4.7). Deferred: M4 (CPU fast prefill) and M6 (exact split-K; its 4090 attempt, #148, was killed on its kill rule:
+[experiments-rejected.md](../experiments-rejected.md)). M7 waits on a measured gap (§4.6). Written against `origin/main`
+`05fb70c` (2026-10-19). Answers the outside review's questions "Is bit-identity a product or a dev tool? If it's a dev tool, why
 is it a global constraint instead of a mode?" and "what is the plan for tensor parallel with fixed-order reductions,
 and have you costed it against NCCL?" (`fable-bigpicture-20261019`, §5 risk 1, §7 and §8 recommendation 3), and its
 mission-drift question, whose answer is the new "Mission and positioning" section of [roadmap.md](../roadmap.md).
@@ -300,6 +303,8 @@ numerics=exact/1           today's line becomes this (SCHEME stays axon-identity
 numerics=fast/1            the fast kernel set, its own counter
 ```
 
+(As built: `numerics=fast/1.1`, exact's counter and fast's own; see "As built" in §4.7.)
+
 Rules:
 - `NUMERICS_VERSION_EXACT` bumps exactly as the rule at `src/identity.rs:55-64` says today. **Nothing about exact mode's
   cadence changes.**
@@ -392,6 +397,53 @@ M1–M3 and M5 are the whole mode and cost under a week with no kernel work. M4 
 exists on a branch. M6 is exact-mode work that removes the strongest single argument for a GPU fast set. M7 is gated on
 measurement by rule.
 
+**As built (2026-10-29, PR #173; [log](../log/2026-10-29-numerics-modes.md)).** Where the build differs from the plan
+above, and why:
+
+- **M1: `fast` is accepted, not refused.** With no fast kernel on a backend, `--numerics fast` runs the exact kernels,
+  prints one notice (`no fast kernels on this backend yet; running exact kernels; identity says fast`) and identifies
+  as fast everywhere: `numerics=fast/1.1` in the tuple and the fingerprint, `-DAXON_FAST` in its NVRTC modules' options
+  (their own kernel-cache entries), `numerics_mode` in its kvsave identity. Why not refuse: (1) M2's
+  `serve --datacenter` implies fast; refusing fast would make the bundle refuse to start until a kernel lands, so no
+  deployment could adopt the flag now and keep it; (2) M3 and M5 need a fast mode that runs, or their tests are
+  skipped everywhere and the first fast kernel lands on untested scaffolding; (3) it is honest: a fast fingerprint
+  promises tolerance, never exact bits, so a client that gets exact bits under it was promised less than it got, and
+  the first fast kernel bumps `NUMERICS_VERSION_FAST`, which tells fingerprint-caching clients. The notice keeps anyone
+  from reading `fast` as faster today.
+- **M1: the counters are tied, structurally.** §4.3's rule "a change to a shared kernel bumps both" leaned on whoever
+  bumped `NUMERICS_VERSION_EXACT` remembering the second counter. Instead fast's tag carries exact's counter:
+  `numerics=fast/<exact>.<fast>`, `fast/1.1` today. Code both modes run (every kernel today, the request-to-text code)
+  bumps `NUMERICS_VERSION_EXACT` alone and moves both modes' fingerprints; `NUMERICS_VERSION_FAST` counts fast-only
+  changes (a fast kernel, its routing). Free now, since no client holds a fast fingerprint yet.
+- **M1: the mode is a `Backend`'s** (`BackendOptions::numerics`, public; `axon::Numerics`, non-exhaustive), and the
+  CLI's per process. Exact modules' NVRTC options are main's, byte for byte, so their cache keys, cubins and bits are
+  too (the md5 gate checks the bits). The `numerics` field's JSON (`GET /identity`) is now the string `"exact/1"` (was
+  the number 1). Nothing in Axon reads the field back (fingerprints are compared as hashes), so §4.3's "'1' alone is
+  read as 'exact/1' for one release" has no reader to apply to.
+- **M2: `--datacenter` implies only `--numerics fast` today**; an explicit `--numerics` wins over it, so a datacenter
+  can serve exact.
+- **M3: the floor** is the cross-arch one (exact on a second GPU of another architecture in the same process) when the
+  host has one, else this GPU's f16 vs q8 KV cache, both exact; on the CPU, the r8 vs per-row kernels. No Axon host has
+  two architectures in one box today, so the cross-arch branch is written but not yet exercised. The fast-mode χ² on
+  the real model (§4.4) is not in this step: with no fast kernel, fast's verify rows are exact's, so the existing
+  identity-F tests already cover it bit for bit; it belongs to the first fast kernel's PR, next to the kernel that
+  breaks B. The ΔNLL hook is `scripts/numerics_dnll.py` (through `axon logits` with `AXON_LOGITS_NLL=1`) plus the same
+  measurement in-process in the graded tests.
+- **M3: the gate has one grading per path a batch-variant kernel can change** (`cuda::qwen2::tests::numerics`,
+  review round 1): *decode* (prompts and text from position 0, a token per step); *batched prefill* (prefixes of 24, 160
+  and 520 tokens in one `prefill_logits` call: a gemvm pass, a tensor-core GEMM pass ≥ 128 rows, a long pass ≥ 512;
+  the pass's last row, 16 positions decoded on the cache it wrote, and every row's `verify_argmax` pick); *cached
+  prefix* (64 tokens in the cache, 96 more in a second pass); *under load* (40 sequences stepped together in one pool,
+  every row's logits against that sequence alone). Each arm is graded on its own, so a prefill GEMM can't pass on the
+  strength of decode positions it never touched. The script takes `--prefix N,...` (`AXON_LOGITS_PREFIX`: the first N
+  tokens in batched passes). And a fast kernel must be *seen* running: GPU backends count fast-set launches
+  (`CudaQwen2::fast_launched`, called by every fast launch site), and with `fast_kernels` the gate requires the count
+  to move; without, it requires 0. Over HTTP, `identity_checks` holds every path (cached, streamed, under load) and
+  fast == exact to bits only while the backend has no fast kernel, then delegates them to these arms: fast mode's
+  promise is tolerance on every path (determinism.md's table), not "a fixed reply on a fixed placement".
+- **M5: exact sessions are unchanged.** A fast-mode backend adds `numerics_mode` to its kvsave identity; exact adds
+  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact.
+
 ---
 
 ## 5. Positioning (the mission-drift question)
@@ -446,9 +498,31 @@ contract where it is free, and nothing in the contract should block FP8 where it
   *Keep it global and never do FP8*: forfeits the datacenter tier by construction. (d) *Three tiers*: a looser third tier
   is an approximation mode, not a numerics mode; a stricter one (cross-arch exact) is a possible future `exact-xarch`.
 
-## 7. Open questions for Haseeb
+## 7. Open questions for Haseeb, answered
+
+Answered 2026-10-29 (Haseeb: "lets try fast"; the lead's answers to the four questions):
 
 1. M1 changes every fingerprint once. Ship it with the next NUMERICS bump that would happen anyway, or now?
-2. `serve --datacenter` as the name of the bundle, or `--profile datacenter`?
+   **Now.** It ships with a release note (CHANGELOG.md): every fingerprint changes once, no output bit does.
+2. `serve --datacenter` as the name of the bundle, or `--profile datacenter`? **`serve --datacenter`.**
 3. Is CPU fast prefill (M4, the one measured 1.3–1.6×) worth 8–12 h now, given nobody runs CPU prefill at scale?
+   **No: deferred, out of scope.**
 4. M6 (fixed-chunk split-K in exact mode) is a one-time exact-bits change. Approve the principle before the H100 hour?
+   **Deferred, out of scope** (its 4090 attempt, #148, already failed its kill rule).
+
+**Open, for WP-A1 (raised in #173's review; not decided here):** what is a *precision* change graded against? The M3
+floor is a **reordering** floor: two accepted float orders of one model (f16 vs q8 KV, two architectures, two CPU
+kernel sets), and `assert_graded`'s bounds are relative to it (mean KL ≤ 2× the floor's, flips within its spread). The
+first fast kernels planned change precision, not just order:
+- **FP8 (e4m3) activations and weights.** Rounding an activation to e4m3 is several times the RMS error of today's int8
+  per-32 blocks (ESTIMATED: ~2⁻⁴ relative vs absmax/254), and FP8 weights made from a Q4_K file are a requantization:
+  closer to "another quantization of the same weights", which the gate's own teeth test (`graded_catches_another_model`,
+  Q4_0 vs Q4_K_M) exists to *reject*.
+- **W4A16** drops the activation quantization: closer to the unquantized model than exact mode is, and still a large
+  delta from exact. Graded against a reordering floor, it can fail for being *more* accurate.
+
+Candidates, none chosen: an absolute ΔNLL budget (per model class, with its SE) alongside `assert_graded`; llama.cpp's
+own CPU-vs-CUDA spread as the reference (§4.2's "vs llama.cpp" row, the MoE gate's wording); a ΔNLL bound relative to
+the floor's (`|Δ| ≤ |floor Δ| + 2·SE`); a per-kernel bound at its routing site (§4.2's products row already says "FP8
+kernels get their own bound"). WP-A1 decides before its first kernel is booked, and records the floor numbers this
+PR's harness measures on the reference GPU (KL, top-1, max |Δ| per arm, and the Q4_0 control's margin) next to it.

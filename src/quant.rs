@@ -44,6 +44,7 @@ pub const Q6_K: u32 = 14;
 pub const IQ4_NL: u32 = 20;
 pub const MXFP4: u32 = 39;
 
+pub mod fp8;
 mod iq4nl;
 mod k23;
 mod mxfp4;
@@ -77,6 +78,8 @@ fn block_info(qtype_id: u32) -> (usize, usize) {
         Q5_K => (QK_K, Q5_K_BYTES),
         Q6_K => (QK_K, Q6_K_BYTES),
         MXFP4 => (QK8_0, MXFP4_BYTES),
+        fp8::F8_E4M3 => (1, 1),
+        fp8::F8S | fp8::F8S_TOK | fp8::F8S_G128 => (fp8::F8S_QK, fp8::F8S_BYTES),
         _ => panic!(
             "quant: unsupported qtype {} ({})",
             qtype_id,
@@ -292,6 +295,11 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
                 *o = rd_f16(bytes, i * 2);
             }
         }
+        fp8::F8_E4M3 => {
+            for (o, &c) in out.iter_mut().zip(bytes) {
+                *o = fp8::e4m3_to_f32(c);
+            }
+        }
         _ => {
             let f: fn(&[u8], &mut [f32]) = match qtype_id {
                 Q4_0 => dequant_q4_0_block,
@@ -306,6 +314,7 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
                 Q5_K => dequant_q5_k_block,
                 Q6_K => dequant_q6_k_block,
                 MXFP4 => mxfp4::dequant_mxfp4_block,
+                fp8::F8S | fp8::F8S_TOK | fp8::F8S_G128 => fp8::dequant_f8s_block,
                 _ => unreachable!(),
             };
             for i in 0..nb {
@@ -570,7 +579,14 @@ impl QuantizedAct {
         .then(|| quantize_b32(x));
         let k = (wants(&[Q2_K, Q3_K, Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K))
             .then(|| quantize_k(x));
-        let x = if wants(&[F32, F16]) {
+        // FP8 (docs/design/fp8-weights.md D7): f32, or the emulation's
+        // e4m3 round trip; one F8S kind per model.
+        let x = if let Some(&e) = qtypes
+            .iter()
+            .find(|&&t| matches!(t, fp8::F8S_TOK | fp8::F8S_G128))
+        {
+            fp8::act_round_trip(e, x)
+        } else if wants(&[F32, F16, fp8::F8S]) {
             x.to_vec()
         } else {
             Vec::new()
@@ -2746,7 +2762,7 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
     let n = x.len();
     let name = || crate::gguf::qtype(qtype_id).name;
     match qtype_id {
-        F32 | F16 => {
+        F32 | F16 | fp8::F8S | fp8::F8S_TOK | fp8::F8S_G128 => {
             assert_eq!(
                 x.x.len(),
                 n,
