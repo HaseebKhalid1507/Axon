@@ -41,10 +41,29 @@ bookkeeping: a refs store per page `ensure` takes, a decrement and compare per p
 planning, not per token). The timing A/B below measures it.
 
 ## How it was verified
-(pending: gates at the head below)
+All on bella (RTX 5070 Ti Laptop, sm_120), at `0b22e9c` (code identical to `5564c69`; `0b22e9c` is docs only), main
+`af281d9` as the base.
+- The touched modules' tests (`cuda::qwen2::pages::`, `cuda::qwen2::slots::`, `serve::`, `lm::`; 193, of which 9
+  are `#[ignore]` benches), release and debug assertions + overflow checks.
+- md5 gate (`md5.sh`, axon-podjob): greedy `gen -n 64`, main vs this head interleaved in one job, CPU / CUDA f16 /
+  CUDA `--kv q8` × qwen2.5-0.5b, Qwen3-0.6B, Llama-3.2-1B, gemma-3-1b × 3 prompts (one ~600 tokens).
+- Serve identity (`serveid.sh`, axon-podjob): the C=1 and C=8 reply digests of main, main `--cache-ram 2G`, and this
+  head plain / `AXON_PAGE_SHUFFLE=1` / `AXON_PAGED_KV=0` / `--cache-ram 2G`, Qwen2.5 1.5B and 7B Q4_K_M.
+- clippy `-D warnings` (lib, tests, bin; debug and release cfgs), rustfmt, CI.
 
 ## Results
-(pending)
+| gate | job | result |
+|---|---|---|
+| touched modules' tests, release | 1104-171647-06a8 | PASS 184 / 0 failed / 9 ignored |
+| same, debug assertions + overflow checks | 1104-171647-9b0d | PASS 184 / 0 failed / 9 ignored |
+| md5 `gen` vs main | 1104-170831-4345 | PASS 33 / 33 identical, 0 nonzero rc |
+| serve identity vs main | 1104-170831-522e | PASS 16 / 16 runs print main's C=1 digest (1.5B `5e320d8f66a1cca5`, 7B `393d877192f2e4d7`) |
+| serve timing A/B, `--timing bella` | 1104-170832-990d | PENDING (waiting on desktop GPU load) |
+| CI (`check`) | GitHub Actions run 41921677516 | PASS |
+
+The first release / debug test jobs (1104-170829-af78, 1104-170830-b3e9) were killed by the foreman, not failed: the
+scratch submit script claimed no RAM, the scheduler's default (4000 MB) throttled the release run at MemoryHigh (PSI
+73 %), and both were resubmitted with 10093 / 18000 MB as the -r2 jobs above. The script now claims 10500 / 18000.
 
 ## What didn't work
 - CI on 89f977f failed on the release build's dead-code lint. The local clippy ran at opt-level 0 only, where
