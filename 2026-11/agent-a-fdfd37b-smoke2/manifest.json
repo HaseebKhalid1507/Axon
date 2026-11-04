@@ -1,0 +1,29 @@
+{
+ "label": "agent-a-fdfd37b-smoke2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1104-142616-adbc",
+   "name": "agent-a-fdfd37b-smoke2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fdfd37b",
+   "binary": "agent_replay_smoke.sh",
+   "started": 1793820376.6184921,
+   "ended": 1793820470.8933651,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6e481a3cb6c76ecfefc4b26529d9a779291359bfa7e8b8aab8707cee062ddfab",
+   "log_bytes": 7986
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-04 14:27:52 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

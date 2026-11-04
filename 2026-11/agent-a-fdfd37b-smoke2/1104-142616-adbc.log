@@ -1,0 +1,122 @@
+[axon-run 14:26:16] submitted 1104-142616-adbc by /home/haseeb/.cache/axon-wt-agent-a: /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_replay_smoke.sh /home/haseeb/.cache/axon-agent/bin/axon-e04b808 axon,ollama
+[axon-run 14:26:16] scope axon-job-1104-142616-adbc-1793820376.scope in app-axonjobs.slice: MemoryMax 18049 MB, MemoryHigh 16244 MB, no swap, oomd pressure kill 80% (claim 11350 MB): an OOM here kills only this job
+[axon-run 14:26:16] job 1104-142616-adbc -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-142616-adbc-1793820376 --slice=app-axonjobs.slice -p MemoryMax=18049M -p MemoryHigh=16244M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_replay_smoke.sh /home/haseeb/.cache/axon-agent/bin/axon-e04b808 axon,ollama
+axon-q 14:26:16 start slot 16-23: /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_replay_smoke.sh /home/haseeb/.cache/axon-agent/bin/axon-e04b808 axon,ollama
+harness fdfd37b05de3209c680e94eded93372b89efe6fd  axon /home/haseeb/.cache/axon-agent/bin/axon-e04b808 sha256 8428c91aa032e58f
+privacy check ./scripts/examples/agent-trace-synthetic.json: PASS (0 findings)
+committed traces: 1, PASS
+CHECK --synthetic reproduces scripts/examples/agent-trace-synthetic.json byte for byte
+wrote /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616/trace-anon.json: 2703 requests from 3 log days
+  usage_lines: 2789
+  pings_dropped: 86
+  requests: 2703
+  chained: 2621
+  chains: 82
+  forks: 25
+  dispatches: 20
+  bursts: 11
+  starts_unpaired: 379
+  chained_share: 0.9697
+  prompt_p50_p90_p99: [122761, 282447, 365533]
+  cached_share_of_prompt_tokens: 0.9808
+  new_p50_p90_p99: [1334, 4020, 13069]
+  output_p50_p90_p99_mean: [438, 1939, 7549, 879.0]
+  gap_ms_p50_p90_p99: [8050, 95753, 3149217]
+  in_flight_p50_p90_p99_max: [11, 20, 28, 29]
+  chain_starts: 82
+  chain_start_sys_prefix_p10_p50_p90: [0, 76269, 346085]
+  chain_starts_with_sys_hit: 64
+  subagent_start_sys_prefix_p25_p50_p75: [0, 0, 7070]
+  subagent_chains: 20
+  requests_per_chain_p50_p90: [19, 86]
+  history_parents: 39
+  history_subagents: 561
+  history_fanout_p50_p90_max: [4, 27, 259]
+  history_msgs_p50_p90: [180, 893]
+privacy check /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616/trace-anon.json: PASS (0 findings)
+privacy check /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616/trace-anon.json: PASS (0 findings)
+cell speed 4.0: {'scale': 0.05, 'clip': 32768, 'window_s': 120.0, 'speed': 4.0, 'seed': 1234, 'trace_start_ms': 162833682, 'n_requests': 50, 'n_sessions': 10, 'n_primes': 7, 'prime_tokens': 52528, 'prompt_p50': 7808}
+model /home/haseeb/.cache/axon-wt-agent-a/models/qwen2.5-1.5b-instruct-q4_k_m.gguf sha256 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e
+ollama store: /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616/ollama-models (24 blobs linked from /var/lib/ollama, manifests copied); axon-q15 -> manifests/registry.ollama.ai/library/axon-q15/latest, weights sha256:6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e = sha256(--model), 4 blobs ok
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-e04b808 serve /home/haseeb/.cache/axon-wt-agent-a/models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device cuda --port 18601 --ctx 32768 --parallel 16 --kv f16
+axon ready: --ctx 32768 --parallel 16 --kv f16; paged pool 334464 tokens; tokenization check 512 words = 512 tokens
+RUN axon kv f16 speed 4 round 0: requests=50 errors=0 first_error=None wall_s=30.3 prime_s=6.1 ttft_new_p50=0.877 ttft_resume_p50=0.016 ttft_turn_p50=0.039 goodput_tok_s=107.48 itl_p99_ms=73.48 warm_per_gb=0.834 reprefill_share=0.0003 reprefill_net_share=-0.0005 out_tokens_short=0 prompt_mismatch=0 prompt_checked=50 preempted=0 prefills_unfed=0 tainted=True (37 s)
+start ollama kv f16: ollama serve
+ollama ready: ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, keep_alive -1 (65536 tokens); tokenization check 512 words = 512 tokens
+RUN ollama kv f16 speed 4 round 0: requests=50 errors=3 first_error=ollama: prediction aborted, token repeat limit reached wall_s=32.0 prime_s=6.8 ttft_new_p50=1.551 ttft_resume_p50=0.175 ttft_turn_p50=0.199 goodput_tok_s=52.84 itl_p99_ms=29.75 warm_per_gb=3.193 reprefill_share=None reprefill_net_share=None out_tokens_short=0 prompt_mismatch=0 prompt_checked=47 preempted=None prefills_unfed=None tainted=True (40 s)
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | axon f16 (n=1: r0) | ollama f16 (n=1: r0) |
+|---|---|---|
+| TTFT-new p50 s | 0.877 | 1.55 |
+| TTFT-new p99 s (max when n < 100) | 1.78 | 2.58 |
+|   n new | 3 | 3 |
+| TTFT-resume p50 s | 0.016 | 0.175 |
+| TTFT-resume p99 s (max when n < 100) | 0.016 | 0.175 |
+|   n resume | 1 | 1 |
+| resume 30s-2m p50 | n/a | n/a |
+|   n 30s-2m | 0 | 0 |
+| resume 2-10m p50 | 0.016 | 0.175 |
+|   n 2-10m | 1 | 1 |
+| resume >10m p50 | n/a | n/a |
+|   n >10m | 0 | 0 |
+| TTFT-turn p50 s | 0.039 | 0.199 |
+|   n turn | 46 | 46 |
+| goodput tok/s | 107 | 52.8 |
+| ITL p99 ms | 73.5 | 29.8 |
+| warm/GB (GPU KV budget) | 0.834 | 3.19 |
+| re-prefill share (clamped) | 0.0003 | n/a |
+| re-prefill share (net) | -0.0005 | n/a |
+| preempted (axon /slots) | 0 | n/a |
+| output tok/s | 109 | 75.2 |
+| replies short of max_tokens | 0 | 0 |
+| prompt counts checked (engine-reported) | 50 | 47 |
+| prompt-count mismatches | 0 | 0 |
+| wall s | 30.3 | 32 |
+| errors (all kinds) | 0 | 3 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 | 3 |
+| tainted runs | 1/1 (r0) | 1/1 (r0) |
+| reply md5 stable over rounds | yes | yes |
+BOARD END ok (3 request errors)
+CHECK axon: 50 requests, 50 prompt counts checked, 0 mismatches, 0 errors (0 engine aborts), md5 73ad74b6f2c8ed0ba855ebab5acc2cb5; --ctx 32768 --parallel 16 --kv f16; paged pool 334464 tokens; tokenization check 512 words = 512 tokens
+CHECK ollama: 50 requests, 47 prompt counts checked, 0 mismatches, 3 errors (3 engine aborts), md5 e76e88bd878d3800c6fbdd7a168cd29f; ollama 0.40.13; OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, keep_alive -1 (65536 tokens); tokenization check 512 words = 512 tokens; offloaded 29/29 layers to GPU
+CHECK meta.json: model sha256 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e, axon binary sha256 8428c91aa032e58f
+CHECK ollama 0.40.13 on /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616/ollama-models (24 blobs linked from /var/lib/ollama, manifests copied): axon-q15 -> manifests/registry.ollama.ai/library/axon-q15/latest, weights sha256:6a1a2eb6d156 = sha256(--model), 4 blobs
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | axon f16 (n=1: r0) | ollama f16 (n=1: r0) |
+|---|---|---|
+| TTFT-new p50 s | 0.877 | 1.55 |
+| TTFT-new p99 s (max when n < 100) | 1.78 | 2.58 |
+|   n new | 3 | 3 |
+| TTFT-resume p50 s | 0.016 | 0.175 |
+| TTFT-resume p99 s (max when n < 100) | 0.016 | 0.175 |
+|   n resume | 1 | 1 |
+| resume 30s-2m p50 | n/a | n/a |
+|   n 30s-2m | 0 | 0 |
+| resume 2-10m p50 | 0.016 | 0.175 |
+|   n 2-10m | 1 | 1 |
+| resume >10m p50 | n/a | n/a |
+|   n >10m | 0 | 0 |
+| TTFT-turn p50 s | 0.039 | 0.199 |
+|   n turn | 46 | 46 |
+| goodput tok/s | 107 | 52.8 |
+| ITL p99 ms | 73.5 | 29.8 |
+| warm/GB (GPU KV budget) | 0.834 | 3.19 |
+| re-prefill share (clamped) | 0.0003 | n/a |
+| re-prefill share (net) | -0.0005 | n/a |
+| preempted (axon /slots) | 0 | n/a |
+| output tok/s | 109 | 75.2 |
+| replies short of max_tokens | 0 | 0 |
+| prompt counts checked (engine-reported) | 50 | 47 |
+| prompt-count mismatches | 0 | 0 |
+| wall s | 30.3 | 32 |
+| errors (all kinds) | 0 | 3 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 | 3 |
+| tainted runs | 1/1 (r0) | 1/1 (r0) |
+| reply md5 stable over rounds | yes | yes |
+SMOKE END ok /home/haseeb/.cache/axon-agent/smoke-merge-1104-142616
+[axon-run 14:27:49] exit 0 after 93.2s (host bella)
+[axon-run 14:27:50] EXPECT ok: output matches /SMOKE END ok/
