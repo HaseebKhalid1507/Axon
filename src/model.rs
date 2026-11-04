@@ -6501,7 +6501,10 @@ mod ram_dense_tests {
         let want = dense_load_bytes(need, !m.file_backed()) + need.kv_per_pos * ctx as u64;
         let tol = ram_tolerance();
         let at = |bytes: u64| check_ram_split(&m, true, k, ctx, &|| host(bytes));
-        let e = at(want - tol - 1).unwrap_err();
+        let short = want
+            .checked_sub(tol + 1)
+            .expect("the half past the tolerance");
+        let e = at(short).unwrap_err();
         assert!(
             e.contains(&format!(
                 "the CPU half of the split ({k} of {n} layers) needs about"
@@ -6524,7 +6527,10 @@ mod ram_dense_tests {
         // Every layer on the CPU is the whole CPU model's estimate.
         let all = dense_ram_need_keep(&m, true, elem, n);
         let whole = dense_load_bytes(all, !m.file_backed()) + all.kv_per_pos * ctx as u64;
-        let e = check_ram_split(&m, true, n, ctx, &|| host(whole - tol - 1)).unwrap_err();
+        let short = whole
+            .checked_sub(tol + 1)
+            .expect("the model past the tolerance");
+        let e = check_ram_split(&m, true, n, ctx, &|| host(short)).unwrap_err();
         assert!(
             e.contains(&format!(
                 "the CPU model (--gpu-layers 0: all {n} layers on the CPU) needs"

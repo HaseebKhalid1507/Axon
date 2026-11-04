@@ -1568,8 +1568,8 @@ fn assert_half_is_the_estimate(h: &HybridQwen2, m: &Model, ctx: usize, what: &st
 
 /// Every layer on the CPU (no GPU opened; the CLI's --gpu-layers 0): the
 /// split's check is the whole CPU model's, refused one byte under the
-/// tolerance (--gpu-layers 0 named), built at exactly its need, and the
-/// built half is the estimate.
+/// tolerance (--gpu-layers 0 named), built at the tolerance under its
+/// need (the edge), and the built half is the estimate.
 #[test]
 fn hybrid_ram_check_every_layer_on_the_cpu() {
     let Some(m) = mapped(M05) else {
@@ -1579,7 +1579,14 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
     let ctx = 256;
     let need = half_need(&m, n, ctx);
     let tol = crate::model::ram_tolerance();
-    match build_at(None, &m, ctx, 0, need - tol - 1) {
+    let short = need.checked_sub(tol + 1).unwrap_or_else(|| {
+        panic!(
+            "the whole 0.5B ({} MiB) within the tolerance ({} MiB)",
+            need >> 20,
+            tol >> 20
+        )
+    });
+    match build_at(None, &m, ctx, 0, short) {
         Ok(_) => panic!("built {n} CPU layers with {} bytes too few", tol + 1),
         Err(e) => assert!(
             e.contains(&format!(
@@ -1588,15 +1595,20 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
             "{e}"
         ),
     }
-    let h = build_at(None, &m, ctx, 0, need).expect("at its need");
+    let h = build_at(None, &m, ctx, 0, need - tol).expect("at the edge");
     assert_half_is_the_estimate(&h, &m, ctx, "0.5b");
 }
 
 /// #143 on real splits (GPU): for 1, n/2, n-1 and n GPU layers, the CPU
-/// half's arena and KV are the estimate's (`assert_half_is_the_estimate`);
-/// the build is refused one byte under the tolerance (after the GPU half:
-/// the refusal names the split) and goes ahead at exactly the CPU half's
-/// need. All of it on the GPU (no CPU half) never reads the RAM.
+/// half's arena and KV are the estimate's (`assert_half_is_the_estimate`).
+/// A half that needs more than the tolerance is refused one byte under it
+/// (after the GPU half: the refusal names the split) and goes ahead at the
+/// edge, the tolerance under its need. One that needs less (the 0.5B's
+/// last layer, 12 MiB against 34 MiB on 8 CPUs) is refused by no RAM
+/// figure, so it's built with 0 bytes available: the check doesn't refuse
+/// it. The largest half (one GPU layer) must be past the tolerance on every
+/// model, so the refusal is shown on each, whatever the CPU count. All of
+/// it on the GPU (no CPU half) never reads the RAM.
 #[test]
 fn hybrid_ram_check_on_real_splits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1610,26 +1622,48 @@ fn hybrid_ram_check_on_real_splits() {
         let n = block_count(&m).unwrap();
         let ctx = 512;
         let tol = crate::model::ram_tolerance();
+        let mut refused = Vec::new();
         for gl in [1, n / 2, n - 1, n] {
             let k = n - gl;
             let need = half_need(&m, k, ctx);
-            if k > 0 {
-                match build_at(Some((&g, &km)), &m, ctx, gl, need - tol - 1) {
-                    Ok(_) => panic!("{rel} k={k}: built {} bytes short", tol + 1),
-                    Err(e) => assert!(
-                        e.contains(&format!("the CPU half of the split ({k} of {n} layers)")),
-                        "{rel}: {e}"
-                    ),
+            // The RAM it's built at, and what was shown before.
+            let (ram, shown) = match need.checked_sub(tol + 1) {
+                Some(short) if k > 0 => {
+                    match build_at(Some((&g, &km)), &m, ctx, gl, short) {
+                        Ok(_) => panic!("{rel} k={k}: built {} bytes short", tol + 1),
+                        Err(e) => assert!(
+                            e.contains(&format!("the CPU half of the split ({k} of {n} layers)")),
+                            "{rel}: {e}"
+                        ),
+                    }
+                    refused.push(k);
+                    (
+                        need - tol,
+                        "refused 1 byte under the tolerance, built at it",
+                    )
                 }
-            }
-            let h = build_at(Some((&g, &km)), &m, ctx, gl, need)
+                // Within the tolerance (or no CPU half): no RAM figure
+                // refuses it, not even none at all.
+                _ if k > 0 => (0, "within the tolerance: built with 0 bytes available"),
+                _ => (0, "no CPU half"),
+            };
+            let h = build_at(Some((&g, &km)), &m, ctx, gl, ram)
                 .unwrap_or_else(|e| panic!("{rel} k={k}: {e}"));
             assert_half_is_the_estimate(&h, &m, ctx, rel);
             eprintln!(
-                "{rel}: {gl}/{n} GPU layers: CPU half needs {} MiB (arena + KV of {ctx})",
-                need >> 20
+                "{rel}: {gl}/{n} GPU layers: CPU half needs {} MiB (arena + KV of {ctx}), \
+                 tolerance {} MiB: {shown}",
+                need >> 20,
+                tol >> 20
             );
         }
+        assert!(
+            refused.contains(&(n - 1)),
+            "{rel}: the largest CPU half ({} of {n} layers) is within the tolerance ({} MiB): \
+             the refusal wasn't shown",
+            n - 1,
+            tol >> 20
+        );
         // No CPU half: nothing to check, whatever the RAM.
         let h = HybridQwen2::build(
             Some((&g, &km)),
