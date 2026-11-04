@@ -6544,6 +6544,7 @@ fn serve_cuda_cache_ram_off() {
 ///    most), reclaims V (the one idle slot holding pages), whose spill has
 ///    room now (Q's last page goes) and copies V's first page: the armed
 ///    fault fails that copy.
+///
 /// The tier is off; the admission goes on as with `--cache-ram 0`: each
 /// reply, its cached tokens included, == that run's.
 #[test]
