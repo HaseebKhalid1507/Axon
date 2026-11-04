@@ -27,6 +27,7 @@
 use crate::cuda::qwen2::stream::{HostLayer, StreamKv, Streamer};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Module};
+use crate::gguf::mem::Avail;
 use crate::gguf::{Model, Tensor};
 use crate::kv::Half as F16;
 use crate::lm::Lm;
@@ -329,7 +330,9 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// a `max_ctx`-token cache (the GPU half's of type `kv`; the CPU half's
     /// is f16, or f32 for `KvType::F32`, kv::use_f32). Each half loads only its own weights, and
     /// the GPU's are handed back to `m` once uploaded (`Model::release`;
-    /// on a copy of the file they can't be read again). Streaming off (PR
+    /// on a copy of the file they can't be read again). Err (after the GPU
+    /// half's upload) if the CPU half's weights and KV floor don't fit in
+    /// the RAM available (`model::check_ram_split`, #143). Streaming off (PR
     /// B's behavior); the CLI uses `new_with_stream`.
     #[cfg_attr(not(test), allow(dead_code))] // tests and PR B's exact path
     pub(crate) fn new(
@@ -361,10 +364,16 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     ) -> Result<HybridQwen2<'m, 'g>, String> {
         let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
         let margin = if auto { DESKTOP_MARGIN as usize } else { 0 };
-        Self::build(dev, m, max_ctx, gpu_layers, kv, stream, repack, margin)
+        let ram = crate::gguf::mem::avail;
+        Self::build(
+            dev, m, max_ctx, gpu_layers, kv, stream, repack, margin, &ram,
+        )
     }
 
     /// `new_with_stream`, the CPU's layers repacked or not (`repack`).
+    /// `ram`: the RAM available when the CPU half is about to be built
+    /// (`gguf::mem::avail`; tests pass their own), refused on as
+    /// `model::check_ram_split` says.
     #[allow(clippy::too_many_arguments)]
     fn build(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
@@ -375,6 +384,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         stream: bool,
         repack: bool,
         margin: usize,
+        ram: &dyn Fn() -> Option<Avail>,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
         if m.arch == "gemma3" {
             return Err(
@@ -430,6 +440,14 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         };
         if g > 0 {
             release_gpu_part(m, k, n);
+        }
+        // The CPU half's RAM, refused on before it's committed (#143) and
+        // read now, after the GPU half: on a copy of the file the GPU's
+        // bytes have just gone back, and what the CUDA context holds in
+        // host memory is in use. A KV cache too long to fit whole is a
+        // note, as on the CPU (`check_ram_dense`).
+        if let Some(note) = crate::model::check_ram_split(m, repack, k, max_ctx, ram)? {
+            eprintln!("axon: {note}");
         }
         let cpu = (k > 0).then(|| Qwen2::new_layers(m, repack, k));
         let halves = [
@@ -596,6 +614,37 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         self.gpu.as_ref().map_or("f16", |g| g.kv_name())
     }
 
+    /// `Lm::new_cache`, with `ram` the RAM available (`gguf::mem::avail`;
+    /// tests pass their own). A streamed cache page-locks the CPU layers'
+    /// K and V buffers whole (`stream_kv`): unlike the CPU's lazy cache,
+    /// every position's pages are taken at once, so it streams only if
+    /// they fit (`pin_verdict`); else it's an ordinary cache and says so.
+    pub(crate) fn cache_with(
+        &self,
+        max_ctx: usize,
+        ram: &dyn Fn() -> Option<Avail>,
+    ) -> HybridCache<'g> {
+        let mut cpu = self.cpu.as_ref().map(|n| n.new_cache(max_ctx));
+        let gpu = self.gpu.as_ref().map(|n| Lm::new_cache(n, max_ctx));
+        // The slots after the GPU half's cache, which `new` planned for.
+        let skv = match (&self.stream, &self.gpu, &mut cpu) {
+            (Some(_), Some(g), Some(c)) => {
+                let host: Vec<(&[F16], &[F16])> = c
+                    .f16_layers()
+                    .expect("streaming needs an f16 CPU cache")
+                    .into_iter()
+                    .map(|(k, v)| (&*k, &*v))
+                    .collect();
+                pin_verdict(pinned_bytes(&host), max_ctx, ram())
+                    .and_then(|()| g.stream_kv(max_ctx, &host))
+                    .map_err(|e| eprintln!("note: this cache won't stream: {e}"))
+                    .ok()
+            }
+            _ => None,
+        };
+        HybridCache { skv, cpu, gpu }
+    }
+
     /// Both halves, each with its cache.
     fn split<'a>(
         &'a self,
@@ -619,6 +668,36 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
 }
 
 type Half<'a, 'm> = Option<(&'a Qwen2<'m>, &'a mut KvCache)>;
+
+/// The RAM `stream_kv` page-locks for the CPU layers' K and V buffers
+/// `host`: each its own mapping (`kv::KvBuf`), in whole pages.
+fn pinned_bytes(host: &[(&[F16], &[F16])]) -> u64 {
+    let page = |b: &[F16]| (std::mem::size_of_val(b) as u64).next_multiple_of(4096);
+    host.iter().map(|(k, v)| page(k) + page(v)).sum()
+}
+
+/// Whether a cache of `ctx` positions may page-lock `pinned` bytes of RAM
+/// for streaming, `avail` available (None: unknown, as the RAM checks take
+/// it). Pinned pages can't be swapped or reclaimed, and under a cgroup
+/// limit taking more than the room is an OOM kill. So, unlike
+/// `model::check_ram_split`'s refusal, which lets a load within the
+/// tolerance through, the tolerance is kept free here: not streaming only
+/// costs prefill speed.
+fn pin_verdict(pinned: u64, ctx: usize, avail: Option<Avail>) -> Result<(), String> {
+    pin_verdict_tol(pinned, ctx, crate::model::ram_tolerance(), avail)
+}
+
+fn pin_verdict_tol(pinned: u64, ctx: usize, tol: u64, avail: Option<Avail>) -> Result<(), String> {
+    match avail {
+        Some(a) if a.bytes < pinned + tol => Err(format!(
+            "page-locking the CPU layers' KV cache of {ctx} tokens takes {:.2} GiB of RAM and \
+             only {:.2} GiB is available (bound by {a})",
+            pinned as f64 / GIB,
+            a.bytes as f64 / GIB
+        )),
+        _ => Ok(()),
+    }
+}
 
 /// Whether tensor `name` is the GPU half's alone (with layers k..n): its
 /// layers, the output norm and head, and the embedding if the CPU doesn't
@@ -663,24 +742,7 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     }
 
     fn new_cache(&self, max_ctx: usize) -> HybridCache<'g> {
-        let mut cpu = self.cpu.as_ref().map(|n| n.new_cache(max_ctx));
-        let gpu = self.gpu.as_ref().map(|n| Lm::new_cache(n, max_ctx));
-        // The slots after the GPU half's cache, which `new` planned for.
-        let skv = match (&self.stream, &self.gpu, &mut cpu) {
-            (Some(_), Some(g), Some(c)) => {
-                let host: Vec<(&[F16], &[F16])> = c
-                    .f16_layers()
-                    .expect("streaming needs an f16 CPU cache")
-                    .into_iter()
-                    .map(|(k, v)| (&*k, &*v))
-                    .collect();
-                g.stream_kv(max_ctx, &host)
-                    .map_err(|e| eprintln!("note: this cache won't stream: {e}"))
-                    .ok()
-            }
-            _ => None,
-        };
-        HybridCache { skv, cpu, gpu }
+        self.cache_with(max_ctx, &crate::gguf::mem::avail)
     }
 
     fn forward(&self, token: u32, pos: usize, c: &mut HybridCache<'g>) -> Vec<f32> {

@@ -123,6 +123,10 @@ The first version: everything merged to `main` from the start of the project (20
   refused at load with a message naming the limit (exit 2), instead of being OOM-killed. A longer `--ctx` that
   wouldn't fit whole prints a note. The MoE RAM refusal's figures are now GiB, as the dense one's, and a cgroup
   limit is printed in MiB.
+- **Behaviour change (#143):** the CPU half of a `--gpu-layers` split gets the same refusal, for its layers' repacked
+  weights and their KV floor, after the GPU half has loaded (`the CPU half of the split (k of n layers) needs
+  about …`), instead of being OOM-killed. A split cache that would stream prefill through the GPU page-locks the CPU
+  layers' whole KV cache at once; when the RAM available can't hold that, the cache doesn't stream (a note says so).
 
 ### CUDA
 - GPU backend: foundations (#7), decode (#8), batched prefill and speculative verify (#10), an 8-bit KV cache
