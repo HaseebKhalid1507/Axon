@@ -1,0 +1,121 @@
+[axon-run 15:28:14] submitted 1104-152814-8b5f by /home/haseeb/.cache/axon-tieroff: /usr/bin/bash loop5.sh ./t-1e0f248-rel 5
+[axon-run 15:28:14] scope axon-job-1104-152814-8b5f-1793824094.scope in app-axonjobs.slice: MemoryMax 13024 MB, MemoryHigh 11721 MB, no swap, oomd pressure kill 80% (claim 8000 MB): an OOM here kills only this job
+[axon-run 15:28:14] job 1104-152814-8b5f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-152814-8b5f-1793824094 --slice=app-axonjobs.slice -p MemoryMax=13024M -p MemoryHigh=11721M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash loop5.sh ./t-1e0f248-rel 5
+axon-q 15:28:14 start slot 16-23: /usr/bin/bash loop5.sh ./t-1e0f248-rel 5
+== serve::tests::serve_cpu_cache_ram_off run 1/5
+
+running 1 test
+test serve::tests::serve_cpu_cache_ram_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 12.53s
+
+== serve::tests::serve_cpu_cache_ram_off run 2/5
+
+running 1 test
+test serve::tests::serve_cpu_cache_ram_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 13.57s
+
+== serve::tests::serve_cpu_cache_ram_off run 3/5
+
+running 1 test
+test serve::tests::serve_cpu_cache_ram_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 14.18s
+
+== serve::tests::serve_cpu_cache_ram_off run 4/5
+
+running 1 test
+test serve::tests::serve_cpu_cache_ram_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 13.49s
+
+== serve::tests::serve_cpu_cache_ram_off run 5/5
+
+running 1 test
+test serve::tests::serve_cpu_cache_ram_off ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 13.68s
+
+== serve::tests::serve_cuda_cache_ram_off run 1/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 22.61s
+
+== serve::tests::serve_cuda_cache_ram_off run 2/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 22.42s
+
+== serve::tests::serve_cuda_cache_ram_off run 3/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 22.50s
+
+== serve::tests::serve_cuda_cache_ram_off run 4/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 22.70s
+
+== serve::tests::serve_cuda_cache_ram_off run 5/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 22.63s
+
+== serve::tests::serve_cuda_cache_ram_off_in_reclaim run 1/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 1.72s
+
+== serve::tests::serve_cuda_cache_ram_off_in_reclaim run 2/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 1.70s
+
+== serve::tests::serve_cuda_cache_ram_off_in_reclaim run 3/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 1.70s
+
+== serve::tests::serve_cuda_cache_ram_off_in_reclaim run 4/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 1.72s
+
+== serve::tests::serve_cuda_cache_ram_off_in_reclaim run 5/5
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 1.72s
+
+loop5: 15 passed, 0 failed
+[axon-run 15:31:24] exit 0 after 189.8s (host bella)
