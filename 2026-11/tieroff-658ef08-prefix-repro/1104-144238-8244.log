@@ -1,0 +1,17 @@
+[axon-run 14:42:38] submitted 1104-144238-8244 by /home/haseeb/.cache/axon-tieroff: /home/haseeb/.cache/axon-tieroff/t-658ef08-rel serve_cuda_cache_ram_off_in_reclaim --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+[axon-run 14:49:11] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 14:49:11] scope axon-job-1104-144238-8244-1793821751.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17673 MB): an OOM here kills only this job
+[axon-run 14:49:11] job 1104-144238-8244 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-144238-8244-1793821751 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-tieroff/t-658ef08-rel serve_cuda_cache_ram_off_in_reclaim --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+axon-q 14:49:11 start slot 16-23: /home/haseeb/.cache/axon-tieroff/t-658ef08-rel serve_cuda_cache_ram_off_in_reclaim --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+
+thread 'axon-engine' (473197) panicked at src/serve/engine.rs:794:36:
+on
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+axon serve: the engine failed on an admission: on; exiting
+[axon-run 14:49:13] exit 70 after 1.8s (host bella)
