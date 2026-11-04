@@ -42,7 +42,7 @@ Metrics (per run; the board takes medians over rounds):
                 Axon usage.prompt_tokens_details.cached_tokens, llama-server timings.prompt_n; ollama: n/a (its
                 prompt_eval_count is the whole prompt, cached or not: used as the prompt-count check instead)
 """
-import argparse, hashlib, http.client, json, math, os, random, re, signal, statistics, struct, subprocess, sys
+import argparse, hashlib, http.client, json, math, os, random, re, shutil, signal, statistics, struct, subprocess, sys
 import threading, time, urllib.parse
 
 # --------------------------------------------------------------------------------------------- vocabulary
@@ -684,10 +684,13 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
                f'(--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true)')
         model = 'llama'
     else:
-        wait_http(port, '/api/version', proc, 120, log)
+        try:
+            a.ollama_version = json.loads(wait_http(port, '/api/version', proc, 120, log))['version']
+        except (KeyError, ValueError):
+            a.ollama_version = 'unknown'
         tokens = npar * a.clip
-        cfg = (f'OLLAMA_NUM_PARALLEL={npar} OLLAMA_CONTEXT_LENGTH={a.clip} KV {kv} flash attention, keep_alive -1 '
-               f'({tokens} tokens)')
+        cfg = (f'ollama {a.ollama_version}; OLLAMA_NUM_PARALLEL={npar} OLLAMA_CONTEXT_LENGTH={a.clip} KV {kv} '
+               f'flash attention, keep_alive -1 ({tokens} tokens)')
         model = a.ollama_model
     if kind in ('axon', 'llama'):
         # the server's own model id (axon serve refuses any other name)
@@ -714,6 +717,38 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     print(f'{kind} ready: {cfg}', flush=True)
     record_engine(logdir, proc, kind, port, 'ready')
     return proc, eng, tokens, cfg
+
+
+def ollama_mirror(src, dst, model):
+    """A user-owned OLLAMA_MODELS for the board's own `ollama serve`, built inside the board's out dir (11-04).
+    The system store `src` (owned by the ollama user, mode 755) is read-only to us, and ollama 0.40.13 (bella,
+    upgraded from 0.40.6 on 10-31) migrates a store on first use by creating `manifests-v2` in it; against
+    /var/lib/ollama that failed with EACCES (kill smoke 1104-090227-04aa). The mirror: `blobs/` is a directory of
+    per-file symlinks into src/blobs (no copy of the GGUFs; anything ollama writes there, and any prune, stays in
+    the mirror), and src's manifest dirs are copied. One per board: it is never stale, two boards never share it,
+    and it records which manifests the board ran with. `src` is only read."""
+    if os.path.lexists(dst):
+        shutil.rmtree(dst)
+    sb = os.path.join(src, 'blobs')
+    os.makedirs(os.path.join(dst, 'blobs'))
+    for f in sorted(os.listdir(sb)):
+        os.symlink(os.path.join(sb, f), os.path.join(dst, 'blobs', f))
+    copied = [d for d in ('manifests', 'manifests-v2') if os.path.isdir(os.path.join(src, d))]
+    if not copied:
+        raise SystemExit(f'ollama store {src}: no manifests dir')
+    for d in copied:
+        shutil.copytree(os.path.join(src, d), os.path.join(dst, d), symlinks=True)
+    # The model must resolve before an engine starts: its manifest, and every blob it names.
+    name, _, tag = model.partition(':')
+    m = os.path.join(dst, 'manifests', 'registry.ollama.ai', 'library', name, tag or 'latest')
+    if not os.path.exists(m):
+        return f'{dst} ({len(os.listdir(sb))} blobs linked, {"+".join(copied)} copied; {model}: not under manifests/)'
+    j = json.load(open(m))
+    digests = [x['digest'] for x in [j.get('config') or {}] + j.get('layers', []) if x.get('digest')]
+    missing = [d for d in digests if not os.path.exists(os.path.join(dst, 'blobs', d.replace(':', '-')))]
+    if missing:
+        raise SystemExit(f'ollama model {model}: blobs missing from {src}: {missing}')
+    return f'{dst} ({len(os.listdir(sb))} blobs linked, {"+".join(copied)} copied; {model}: {len(digests)} blobs ok)'
 
 
 def ollama_offload(logdir, port):
@@ -1040,6 +1075,10 @@ def cmd_board(a):
     meta = dict(model=os.path.basename(a.model), kv=a.kv, engines=engines, rounds=a.rounds, speeds=speeds,
                 trace=os.path.basename(a.trace), kv_elems_per_token=bpt, cells={str(k): cell_desc(a, v) for k, v in cells.items()},
                 started=time.strftime('%Y-%m-%d %H:%M:%S'), gpu=gpu_name())
+    if 'ollama' in engines and not a.ollama_models:
+        a.ollama_models = os.path.join(a.out, 'ollama-models')
+        meta['ollama_models'] = ollama_mirror(a.ollama_source, a.ollama_models, a.ollama_model)
+        print(f'ollama store: {meta["ollama_models"]}', flush=True)
     axon_tokens = a.kv_tokens
     port = a.port
     for rnd in range(a.round_offset, a.round_offset + a.rounds):
@@ -1061,6 +1100,7 @@ def cmd_board(a):
                         print(f'{kind}: start failed ({e}); retrying with {budget} KV tokens', flush=True)
                 if kind == 'ollama':
                     cfg += ollama_offload(a.out, port)
+                    meta.setdefault('engine_versions', {})['ollama'] = a.ollama_version
                 if kind == 'axon' and not a.kv_tokens:
                     axon_tokens = tokens
                 meta.setdefault('config', {})[kind] = cfg
@@ -1203,7 +1243,10 @@ def main():
             p.add_argument('--llama-parallel', type=int, default=0, help='default: KV budget // clip')
             p.add_argument('--ollama', default='ollama')
             p.add_argument('--ollama-model', default='axon-q7')
-            p.add_argument('--ollama-models', default='/var/lib/ollama')
+            p.add_argument('--ollama-models', help='OLLAMA_MODELS for the board\'s ollama, used as is (default: a '
+                           'user-owned mirror of --ollama-source in OUT/ollama-models; see ollama_mirror)')
+            p.add_argument('--ollama-source', default='/var/lib/ollama', help='the system store the mirror links '
+                           'to (only read)')
             p.add_argument('--kv-tokens', type=int, help='KV budget for the baselines (default: Axon\'s pool)')
             p.add_argument('--port', type=int, default=18600)
             p.add_argument('--cpu', action='store_true', help='smoke only: engines on the CPU')

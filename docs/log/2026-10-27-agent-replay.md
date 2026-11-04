@@ -204,6 +204,24 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
   - Checked by `agent_board_kill_smoke.sh`.
 - **ollama's chat template** (above).
 - **The ideal-cache hit** is now assigned at send time, not at thread start (≤ 0.04 pp on f16).
+- **11-04, ollama 0.40.13:** bella's ollama was upgraded from 0.40.6 on 10-31 at 15:26 (pacman log: 0.40.6 had
+  been installed since 10-20). The new version migrates its model
+  store on first use, creating `manifests-v2`. The board's own `ollama serve` runs as the user, and pointed
+  `OLLAMA_MODELS` at the system store `/var/lib/ollama` (owned by the ollama user, mode 755). Every ollama start
+  then failed its warm-up with `HTTP 500: mkdir /var/lib/ollama/manifests-v2: permission denied` (kill smoke
+  `1104-090227-04aa`; the axon and llama-server cases passed).
+  - **Fix:** without `--ollama-models`, the board builds a user-owned store in `OUT/ollama-models` (`ollama_mirror`).
+    Its `blobs/` holds per-file symlinks into the system store's blobs, so no GGUF is copied and anything ollama
+    writes stays in the mirror; the manifests are copied.
+    - Before any engine starts, the model's manifest and every blob it names must resolve.
+    - The mirror is per board, so it is never stale and two concurrent boards never share one.
+    - The system store is only read; it stays the system service's.
+  - **Recorded:** the ollama version, read from `/api/version`, goes into each run's config and into `meta.json`
+    (`engine_versions`, `ollama_models`).
+  - **The 10-27 boards and the q8 rerun ran ollama 0.40.6.** A board run now gets 0.40.13: a different engine
+    build, so it is not comparable with the 10-27 ollama columns without a rerun.
+  - `agent_board_kill_smoke.sh` now skips other users' `/proc/*/environ` quietly. It used to print a
+    "Permission denied" line for each.
 
 
 ## Baseline board, q8 (MEASURED; job `1027-083752-1e62`, fixed harness 8588874 + 1ba07d9)
@@ -382,6 +400,8 @@ ollama speed-1 column is the rerun; ollama speed 4 is the board's.
 
 ## Next steps
 - **q8 ollama speed 1: done**, job `1027-145644-71fd` (3 clean rounds, r3–r5). It is folded into the q8 table above.
+- **ollama moved on:** bella runs ollama 0.40.13 since 10-31; every ollama number in this entry is 0.40.6. A
+  baseline comparison after 10-31 reruns ollama, and the board records the version.
 - **Main moved on:** this PR was merged with main `e04b808` on 11-04. Any B/C/D gate reruns the board on its own
   base, main vs candidate, as the spec requires. These numbers are main `d8a296c`'s.
 - **f16, deferred:** the ollama column is non-comparable (chat template) and llama s4 is n = 1 clean. A targeted

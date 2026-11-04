@@ -21,7 +21,8 @@ tagged() {  # pids (our uid) whose environment carries AXON_KILL_SMOKE_TAG=$1
   for e in /proc/[0-9]*/environ; do
     p=${e#/proc/}; p=${p%/environ}
     [ "$p" = $$ ] && continue
-    tr '\0' '\n' < "$e" 2>/dev/null | grep -qx "AXON_KILL_SMOKE_TAG=$1" && echo "$p"
+    [ -O "$e" ] || continue   # other users' processes (unreadable anyway): skip quietly
+    tr '\0' '\n' 2>/dev/null < "$e" | grep -qx "AXON_KILL_SMOKE_TAG=$1" && echo "$p"
   done
 }
 case_run() {  # name signal target engines wait_kind
