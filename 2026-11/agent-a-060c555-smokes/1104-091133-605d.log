@@ -1,0 +1,12 @@
+[axon-run 09:11:33] submitted 1104-091133-605d by /home/haseeb/.cache/axon-agent: /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_board_kill_smoke.sh
+[axon-run 09:39:44] scope axon-job-1104-091133-605d-1793803184.scope in app-axonjobs.slice: MemoryMax 10726 MB, MemoryHigh 9653 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 09:39:44] job 1104-091133-605d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-091133-605d-1793803184 --slice=app-axonjobs.slice -p MemoryMax=10726M -p MemoryHigh=9653M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_board_kill_smoke.sh
+axon-q 09:39:44 start slot 16-23: /home/haseeb/.cache/axon-wt-agent-a/scripts/agent_board_kill_smoke.sh
+KILL SMOKE term-llama: ok (2 tagged processes before SIGTERM to the pid, none after 20 s)
+KILL SMOKE term-ollama: ok (3 tagged processes before SIGTERM to the pid, none after 20 s)
+/home/haseeb/.cache/axon-wt-agent-a/scripts/agent_board_kill_smoke.sh: line 47: 2568361 Killed                     AXON_KILL_SMOKE_TAG=$tag setsid python3 -u "$W/scripts/agent_replay.py" board --cpu --engines "$engines" --kv f16 --rounds 1 --speeds 4 --model "$M/qwen2.5-0.5b-q4_k_m.gguf" --ollama-model axon-oracle --axon "$AX" --llama-server "$LS" --trace "$W/scripts/examples/agent-trace-synthetic.json" --window-s 300 --scale 0.05 --clip 4096 --kv-tokens 8192 --port $((19000 + RANDOM % 500 * 10)) --out "$out" > "$out/board.log" 2>&1
+KILL SMOKE kill-llama: ok (2 tagged processes before SIGKILL to the pid, none after 20 s)
+KILL SMOKE group-axon: ok (2 tagged processes before SIGTERM to the group, none after 20 s)
+KILL SMOKE PASS
+[axon-run 09:41:19] exit 0 after 94.9s (host bella)
+[axon-run 09:41:22] EXPECT ok: output matches /KILL SMOKE PASS/
