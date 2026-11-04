@@ -99,7 +99,7 @@ tolerance. The other 7 CPU-half cells (0.5B k = 23, 12; Qwen3 k = 27, 14; Llama-
 against 34) were genuine refusals. The product's `avail + tolerance` can't overflow on a real figure (`mem::avail`
 is None for `max` and v1's unlimited, so `avail.bytes` is MemAvailable or a cgroup's room).
 
-### Round 2 (cbd2715 test fix + 03e6a8c merge of main 9948129; gatewatch `splitram-03e6a8c-tests`)
+### Round 2 (cbd2715 test fix + 03e6a8c merge of main 9948129; gatewatch `splitram-03e6a8c-tests`, `splitram-03e6a8c-dbg-r2`)
 cbd2715 changes test code only (the refusal arm per k as above; the other `- tol - 1` sites use `checked_sub` with a
 message), and main's #157 adds only tests (`src/cuda/qwen2/slots.rs`, `mod tests`) and a log. The release `axon`
 binary built at 03e6a8c runs the same bytes as 0a45942's: 29 of its 30 allocated sections are byte-identical
@@ -110,10 +110,15 @@ the source files' hashes, and model.rs's test module changed). So the md5 gate a
 
 | gate | result | job |
 |---|---|---|
-| tier tests, release (bella) | pending | 1104-094511-cde8 |
-| tier tests, debug assertions (bella) | pending | 1104-094512-39e4 |
-| the new tests' output under debug assertions (`--nocapture`) | pending | 1104-094512-0a6e |
+| tier tests, release (bella) | PASS 122 / 0 / 3 ignored (582 s) | 1104-094511-cde8 |
+| tier tests, debug assertions (bella) | not run to the end: bella rebooted at ~10:56 mid-run ("runner gone without an rc") | 1104-094512-39e4 |
+| the same, rerun (`-r2`) | PASS 122 / 0 / 3 ignored (1276 s) | 1104-142638-daac |
+| the new tests' output under debug assertions (`--nocapture`) | PASS 5 / 0 (11 s; finished 10:55:35, before the reboot) | 1104-094512-0a6e |
 | clippy -D warnings (lib, lib tests, bin), rustfmt | clean | local |
+
+0a6e's output shows the fixed arm in debug: of the 12 real-split cells, the 0.5B's and Qwen3-0.6B's one-CPU-layer
+halves (12 and 18 MiB, under the 34 MiB tolerance) print "within the tolerance: built with 0 bytes available"; the 7
+others with a CPU half "refused 1 byte under the tolerance, built at it"; the 3 with every layer on the GPU "no CPU half".
 
 ## Results
 The estimate is the build, exactly (round 1's output; arena rounded to 2 MB pages):
