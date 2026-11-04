@@ -7,8 +7,9 @@ use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, IQ4_NL, MXFP4, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
-    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q,
-    row_bytes,
+    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi,
+    fp8::{self, F8_E4M3},
+    r8, r8q, row_bytes,
 };
 use crate::vmath;
 
@@ -22,6 +23,9 @@ struct Weight<'a> {
     /// The tensor's bytes; None when repacked (they may have been released).
     data: Option<&'a [u8]>,
     r8: Option<R8>,
+    /// An FP8 matrix's CPU form (`quant::fp8::F8S` rows in the arena) and
+    /// its type (`F8S`, or an emulation's: `fp8_cpu_qt`).
+    f8s: Option<Box<(R8, u32)>>,
 }
 
 /// A repacked matrix: bytes off..off + len of the shared arena.
@@ -38,9 +42,54 @@ impl std::ops::Deref for R8 {
     }
 }
 
+/// An FP8 matrix's per-row scales (`blk.N.<kind>.scale`, F32: the loader's).
+fn fp8_scales(m: &Model, t: &Tensor) -> Vec<f32> {
+    let name = format!(
+        "{}.scale",
+        t.name.strip_suffix(".weight").unwrap_or(&t.name)
+    );
+    let s = find(m, &name);
+    m.tensor_data(s)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+thread_local! {
+    /// Tests: `fp8_cpu_qt`'s answer for models built on this thread.
+    static FP8_CPU_QT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// The CPU's type for FP8 matrices (docs/design/fp8-weights.md D7): `F8S`
+/// (f32 activations, `fp8-ref`), or an emulation of the GPU's activation
+/// rounding, AXON_FP8_CPU_ACT=e4m3-tok (`F8S_TOK`) or e4m3-128 (`F8S_G128`).
+pub(crate) fn fp8_cpu_qt() -> u32 {
+    if let Some(q) = FP8_CPU_QT.with(|c| c.get()) {
+        return q;
+    }
+    match std::env::var("AXON_FP8_CPU_ACT").as_deref() {
+        Ok("e4m3-tok") => fp8::F8S_TOK,
+        Ok("e4m3-128") => fp8::F8S_G128,
+        Ok("f32") | Err(_) => fp8::F8S,
+        Ok(v) => panic!("AXON_FP8_CPU_ACT={v}: f32, e4m3-tok or e4m3-128"),
+    }
+}
+
+/// Tests: build CPU models of FP8 checkpoints with type `qt` inside `f`.
+#[cfg(test)]
+pub(crate) fn with_fp8_cpu_qt<R>(qt: u32, f: impl FnOnce() -> R) -> R {
+    FP8_CPU_QT.with(|c| c.set(Some(qt)));
+    let r = f();
+    FP8_CPU_QT.with(|c| c.set(None));
+    r
+}
+
 /// Bytes of the r8/r8q form of `t`, if it has one.
 fn repacked_len(t: &Tensor) -> Option<usize> {
     let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+    if qt == F8_E4M3 {
+        return Some(rows * crate::quant::row_bytes(fp8::F8S, n));
+    }
     if r8q::can_repack(qt, rows, n) {
         Some(r8q::repacked_len(qt, rows, n))
     } else if r8::can_repack(qt, rows, n) {
@@ -71,7 +120,7 @@ fn r8_arena(len: usize) -> memmap2::MmapMut {
 
 impl<'a> Weight<'a> {
     fn qt(&self) -> u32 {
-        self.t.qtype.id
+        self.f8s.as_ref().map_or(self.t.qtype.id, |f| f.1)
     }
 
     fn rows(&self) -> usize {
@@ -85,6 +134,16 @@ impl<'a> Weight<'a> {
     /// release a tensor read elsewhere: the token embedding (a tied output
     /// matrix is the same tensor).
     fn load(m: &'a Model, t: &'a Tensor, dst: Option<&mut [u8]>, release: bool) -> Weight<'a> {
+        if t.qtype.id == F8_E4M3 {
+            // FP8: its F8S rows (with the scales) into the arena slot
+            // (`repacked_len`), attached with the arena (`build_skip`).
+            let dst = dst.expect("an FP8 matrix has an arena slot");
+            fp8::f8_to_f8s(m.tensor_data(t), &fp8_scales(m, t), t.dims[0] as usize, dst);
+            if release {
+                m.release(t);
+            }
+            return Weight::absent(t);
+        }
         let repacked = dst.is_some();
         let w = Self::load_bytes(t, m.tensor_data(t), dst);
         if repacked && release {
@@ -101,6 +160,7 @@ impl<'a> Weight<'a> {
             t,
             data: None,
             r8: None,
+            f8s: None,
         }
     }
 
@@ -113,6 +173,7 @@ impl<'a> Weight<'a> {
                 t,
                 data: Some(data),
                 r8: None,
+                f8s: None,
             };
         };
         let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
@@ -125,6 +186,7 @@ impl<'a> Weight<'a> {
             t,
             data: None,
             r8: None,
+            f8s: None,
         }
     }
 
@@ -152,7 +214,10 @@ impl<'a> Weight<'a> {
     }
 
     /// The tensor's bytes (not repacked).
-    fn bytes(&self) -> &'a [u8] {
+    fn bytes(&self) -> &[u8] {
+        if let Some(f) = &self.f8s {
+            return &f.0;
+        }
         self.data.unwrap_or_else(|| match self.r8 {
             Some(_) => panic!("{}: repacked weight has no raw bytes", self.t.name),
             None => panic!(
@@ -765,9 +830,19 @@ pub(crate) struct DenseNeed {
 /// f32 4). Only layers below the block count, as `build` (an extra
 /// nextn/MTP block isn't loaded).
 pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed {
-    let layers = m.n_layers() as i32;
-    let ours = |t: &&Tensor| t.layer >= 0 && t.layer < layers;
-    let tied = find_opt(m, "output.weight").is_none();
+    dense_ram_need_keep(m, repack, kv_elem, usize::MAX)
+}
+
+/// `dense_ram_need` of `Qwen2::new_layers(m, repack, keep)`, the CPU half
+/// of a split (`hybrid::HybridQwen2`): layers 0..keep (every layer at
+/// most) and their KV, and the output head only when that's every layer,
+/// as `build` keeps it (else the GPU half holds it; `tied` is then false).
+/// The embedding is in neither: `embed` reads the model's own bytes.
+pub(crate) fn dense_ram_need_keep(m: &Model, repack: bool, kv_elem: u64, keep: usize) -> DenseNeed {
+    let layers = m.n_layers() as usize;
+    let (k, has_head) = (keep.min(layers), keep >= layers);
+    let ours = |t: &&Tensor| usize::try_from(t.layer).is_ok_and(|l| l < k);
+    let tied = has_head && find_opt(m, "output.weight").is_none();
     let out = if tied {
         "token_embd.weight"
     } else {
@@ -790,7 +865,7 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
         return need;
     }
     for t in (m.tensors.iter()).filter(|t| t.dims.len() >= 2) {
-        let head = t.name == out;
+        let head = has_head && t.name == out;
         let layer = ours(&t)
             && t.name.starts_with("blk.")
             && DENSE_MATS.iter().any(|s| t.name.ends_with(s));
@@ -841,12 +916,52 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
     let need = dense_ram_need(m, repack, elem);
     dense_verdict(
         &m.arch,
+        None,
         need,
         !m.file_backed(),
         dense_tolerance(affinity_cpus()),
         ctx,
         crate::gguf::mem::avail(),
     )
+}
+
+/// `check_ram_dense` for the CPU half of a split (`hybrid::HybridQwen2`,
+/// #143): its `keep` layers built as `Qwen2::new_layers(m, repack, keep)`
+/// (`dense_ram_need_keep`) and their KV floor, refused as the whole CPU
+/// model is, the split named. Run right before that half is built, after
+/// the GPU half's upload: on a copy of the file the GPU's bytes have been
+/// handed back by then (`Model::release`), so `avail` (called once, and
+/// only if there is a CPU half) reads the RAM the CPU half has. Ok(None)
+/// with no CPU half (keep 0) and for a MoE model (no layer split: `moe`).
+/// A streamed prefill page-locks the CPU layers' whole cache (no lazy
+/// pages): `hybrid` checks that per cache, as it's made.
+pub(crate) fn check_ram_split(
+    m: &Model,
+    repack: bool,
+    keep: usize,
+    ctx: usize,
+    avail: &dyn Fn() -> Option<crate::gguf::mem::Avail>,
+) -> Result<Option<String>, String> {
+    if keep == 0 || moe::is_moe(m) {
+        return Ok(None);
+    }
+    let elem = if crate::kv::use_f32() { 4 } else { 2 };
+    let need = dense_ram_need_keep(m, repack, elem, keep);
+    let n = m.n_layers() as usize;
+    dense_verdict(
+        &m.arch,
+        Some((keep.min(n), n)),
+        need,
+        !m.file_backed(),
+        ram_tolerance(),
+        ctx,
+        avail(),
+    )
+}
+
+/// `dense_tolerance` of this process's CPUs (`affinity_cpus`).
+pub(crate) fn ram_tolerance() -> u64 {
+    dense_tolerance(affinity_cpus())
 }
 
 /// The anonymous memory a dense CPU load commits on top of what's in use
@@ -879,8 +994,12 @@ pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool) -> u64 {
 
 /// `check_ram_dense`'s decision (pure): Err to refuse, Ok(Some(warning))
 /// when the full `ctx`-token KV cache wouldn't fit beside the weights.
+/// `split`: Some((k, n)) for a split's CPU half of k of the n layers
+/// (`check_ram_split`; k = n with no GPU layers), None for the whole CPU
+/// model.
 fn dense_verdict(
     arch: &str,
+    split: Option<(usize, usize)>,
     need: DenseNeed,
     copied: bool,
     tolerance: u64,
@@ -895,8 +1014,13 @@ fn dense_verdict(
     let kv = need.kv_per_pos * floor as u64;
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     if avail.bytes + tolerance < load + kv {
+        let what = match split {
+            None => "the CPU model".to_string(),
+            Some((k, n)) if k < n => format!("the CPU half of the split ({k} of {n} layers)"),
+            Some((_, n)) => format!("the CPU model (--gpu-layers 0: all {n} layers on the CPU)"),
+        };
         return Err(format!(
-            "{arch}: the CPU model needs about {:.2} GiB of RAM ({} {:.2} GiB, the KV cache of \
+            "{arch}: {what} needs about {:.2} GiB of RAM ({} {:.2} GiB, the KV cache of \
              {floor} tokens {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
             gib(load + kv),
             match copied {
@@ -912,9 +1036,13 @@ fn dense_verdict(
     Ok((ctx > floor && avail.bytes < load + full).then(|| {
         // Worded as serve's `ram_note`.
         format!(
-            "note: a KV cache of {ctx} tokens takes {:.1} GiB, {:.1} GiB of RAM is free beside \
+            "note: {} of {ctx} tokens takes {:.1} GiB, {:.1} GiB of RAM is free beside \
              the model (bound by {avail}): the run is OOM-killed if its context fills (--ctx N \
              for another)",
+            match split {
+                None => "a KV cache",
+                Some(_) => "the CPU layers' KV cache",
+            },
             gib(full),
             gib(avail.bytes.saturating_sub(load))
         )
@@ -1144,11 +1272,12 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         }
     }
 
+    let fp8_file = crate::safetensors::is_fp8(m);
     // `rows` = None: a vector of `cols` elements; Some(r): a cols x r matrix.
     let check = |name: &str, cols: usize, rows: Option<usize>| -> std::io::Result<&Tensor> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
-        if !SUPPORTED_TYPES.contains(&q.id) {
+        if !(SUPPORTED_TYPES.contains(&q.id) || q.id == F8_E4M3 && fp8_file) {
             return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = match rows {
@@ -1494,7 +1623,8 @@ impl<'a> Qwen2<'a> {
             .into_iter()
             .chain((0..k).flat_map(held))
         {
-            let len = if repack && hold {
+            // FP8 matrices always get a slot: their F8S form (`Weight::load`).
+            let len = if (repack || t.qtype.id == F8_E4M3) && hold {
                 repacked_len(t)
             } else {
                 None
@@ -1643,12 +1773,17 @@ impl<'a> Qwen2<'a> {
             let ws = output
                 .iter_mut()
                 .chain(layers.iter_mut().flat_map(|l| l.weights_mut()));
+            let f8qt = fp8_cpu_qt();
             for (w, p) in ws.zip(&plan) {
-                w.r8 = p.map(|(off, len)| R8 {
+                let r = p.map(|(off, len)| R8 {
                     map: map.clone(),
                     off,
                     len,
                 });
+                match w.t.qtype.id == F8_E4M3 {
+                    true => w.f8s = r.map(|r| Box::new((r, f8qt))),
+                    false => w.r8 = r,
+                }
             }
         }
 
@@ -5180,6 +5315,7 @@ pub(crate) mod tests {
                 t: w.t,
                 data: Some(data),
                 r8: None,
+                f8s: None,
             };
             let a = net.matvec(w, inp);
             let b = net.matvec(&plain, inp);
@@ -6089,15 +6225,15 @@ mod ram_dense_tests {
         };
         let want = need.arena + need.kv_per_pos * 1000;
         assert_eq!(
-            dense_verdict("qwen3", need, false, TOL, 1000, host(want)),
+            dense_verdict("qwen3", None, need, false, TOL, 1000, host(want)),
             Ok(None)
         );
         assert_eq!(
-            dense_verdict("qwen3", need, false, TOL, 1000, None),
+            dense_verdict("qwen3", None, need, false, TOL, 1000, None),
             Ok(None)
         );
         assert_eq!(
-            dense_verdict("qwen3", need, false, TOL, 1000, host(want - TOL)),
+            dense_verdict("qwen3", None, need, false, TOL, 1000, host(want - TOL)),
             Ok(None),
             "within the tolerance"
         );
@@ -6109,7 +6245,7 @@ mod ram_dense_tests {
                 v1: false,
             },
         };
-        let e = dense_verdict("qwen3", need, false, TOL, 1000, Some(cg)).unwrap_err();
+        let e = dense_verdict("qwen3", None, need, false, TOL, 1000, Some(cg)).unwrap_err();
         for s in [
             "qwen3: the CPU model needs about",
             "GiB of RAM (its repacked weights",
@@ -6143,7 +6279,7 @@ mod ram_dense_tests {
     /// not fitting is refused.
     #[test]
     fn long_ctx_warns_not_refuses() {
-        let w = dense_verdict("llama", L8, false, TOL, 131072, host(6 * GIB))
+        let w = dense_verdict("llama", None, L8, false, TOL, 131072, host(6 * GIB))
             .expect("refused a load whose weights and floor KV fit");
         let w = w.expect("no warning for a 16 GiB cache beside 6 GiB");
         assert!(
@@ -6152,11 +6288,11 @@ mod ram_dense_tests {
         );
         // Short enough to fit whole: no warning.
         assert_eq!(
-            dense_verdict("llama", L8, false, TOL, 4096, host(6 * GIB)),
+            dense_verdict("llama", None, L8, false, TOL, 4096, host(6 * GIB)),
             Ok(None)
         );
         // The weights and the floor don't fit: refused.
-        let e = dense_verdict("llama", L8, false, TOL, 131072, host(5 * GIB)).unwrap_err();
+        let e = dense_verdict("llama", None, L8, false, TOL, 131072, host(5 * GIB)).unwrap_err();
         assert!(e.contains("the KV cache of 8192 tokens 1.00 GiB"), "{e}");
     }
 
@@ -6191,9 +6327,9 @@ mod ram_dense_tests {
             "reads in place: nothing repacked"
         );
         // A copy the arena wouldn't fit beside, but its repack does.
-        assert!(dense_verdict("llama", L8, true, TOL, 16, host(GIB)).is_ok());
-        assert!(dense_verdict("llama", L8, false, TOL, 16, host(GIB)).is_err());
-        let e = dense_verdict("llama", L8, true, TOL, 16, host(256 * MIB)).unwrap_err();
+        assert!(dense_verdict("llama", None, L8, true, TOL, 16, host(GIB)).is_ok());
+        assert!(dense_verdict("llama", None, L8, false, TOL, 16, host(GIB)).is_err());
+        let e = dense_verdict("llama", None, L8, true, TOL, 16, host(256 * MIB)).unwrap_err();
         assert!(e.contains("(repacking the copy 0.53 GiB"), "{e}");
     }
 
@@ -6227,6 +6363,185 @@ mod ram_dense_tests {
         assert_eq!(dense_tolerance(192), 80 * MIB);
         assert_eq!(dense_tolerance(24), 38 * MIB);
         assert_eq!(dense_tolerance(8), 34 * MIB);
+    }
+
+    /// #143: a split's CPU half (`Qwen2::new_layers(m, true, k)`) is what
+    /// `dense_ram_need_keep` counts, for every k: the arena it builds (2 MB
+    /// pages) and the KV a position of the cache it makes, on the fixtures
+    /// and the test models (gemma3 too, though `hybrid` refuses to split
+    /// it). k = 0 builds nothing; k >= n is the whole CPU model, head
+    /// included (`dense_ram_need`'s figures exactly); below n there's no
+    /// head share, tied or not (the GPU half holds the head).
+    #[test]
+    fn split_need_matches_the_built_cpu_half() {
+        let elem = if crate::kv::use_f32() { 4 } else { 2 };
+        // A fresh model per build: a build hands its bytes back, which a
+        // copy can't read again.
+        let check = |load: &dyn Fn() -> Model, what: &str| {
+            let n = load().n_layers() as usize;
+            let whole = dense_ram_need(&load(), true, elem);
+            for keep in [0, 1, n / 2, n - 1, n, n + 3] {
+                let m = load();
+                let need = dense_ram_need_keep(&m, true, elem, keep);
+                let net = Qwen2::new_layers(&m, true, keep);
+                let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+                assert_eq!(
+                    need.arena,
+                    built.next_multiple_of(2 << 20),
+                    "{what} k={keep}"
+                );
+                let c = net.new_cache(4);
+                assert_eq!(
+                    need.kv_per_pos * 4,
+                    c.bits().len() as u64 * elem,
+                    "{what} k={keep}: KV"
+                );
+                match keep {
+                    0 => assert_eq!(
+                        (need.arena, need.kv_per_pos, need.growth, need.largest),
+                        (0, 0, 0, 0),
+                        "{what}: no CPU half"
+                    ),
+                    k if k >= n => assert_eq!(need, whole, "{what} k={k}: the whole model"),
+                    k => {
+                        assert_eq!((need.head, need.tied), (0, false), "{what} k={k}: no head");
+                        assert!(
+                            need.arena > 0 && need.largest > 0 && need.growth <= need.arena,
+                            "{what} k={k}"
+                        );
+                        assert!(need.arena <= whole.arena, "{what} k={k}");
+                    }
+                }
+            }
+            eprintln!(
+                "{what}: {n} layers, half (k={}) arena {} MiB of {} MiB, KV {} of {} B a position",
+                n / 2,
+                dense_ram_need_keep(&load(), true, elem, n / 2).arena >> 20,
+                whole.arena >> 20,
+                dense_ram_need_keep(&load(), true, elem, n / 2).kv_per_pos,
+                whole.kv_per_pos
+            );
+        };
+        for (arch, mt) in [("qwen3", crate::quant::Q8_0), ("llama", crate::quant::Q8_0)] {
+            check(&|| tests::dense_fixture(arch, mt).0, arch);
+        }
+        let models: [(&dyn Fn() -> Option<Model>, &str); 4] = [
+            (&crate::testutil::model, "qwen2.5-0.5b"),
+            (&crate::testutil::qwen3_model, "qwen3-0.6b"),
+            (&crate::testutil::llama_model, "llama-3.2-1b"),
+            (&crate::testutil::gemma3_model, "gemma3-1b"),
+        ];
+        for (load, what) in models {
+            match load() {
+                Some(_) => check(&|| load().unwrap(), what),
+                None => eprintln!("{what}: not present, not checked"),
+            }
+        }
+    }
+
+    /// The split's refusal: worded as the CPU model's with the split named
+    /// (k of n layers) and the bound; its long-context note names the CPU
+    /// layers' cache. `check_ram_split` judges the CPU half alone: refused
+    /// one byte under the tolerance, through at exactly its need; no CPU
+    /// half (k = 0) or a MoE model is never refused, and the RAM isn't read.
+    #[test]
+    fn split_refusal_wording_and_cap() {
+        let half = DenseNeed {
+            arena: 2400 * MIB,
+            head: 0,
+            tied: false,
+            largest: 56 * MIB,
+            growth: 24 * MIB,
+            kv_per_pos: 64 << 10,
+        };
+        let cg = |bytes| {
+            Some(Avail {
+                bytes,
+                bound: Bound::Cgroup {
+                    path: "/app.slice/split.scope".into(),
+                    limit: 3 << 30,
+                    v1: false,
+                },
+            })
+        };
+        let e =
+            dense_verdict("llama", Some((16, 32)), half, false, TOL, 8192, cg(GIB)).unwrap_err();
+        for s in [
+            "llama: the CPU half of the split (16 of 32 layers) needs about 2.84 GiB of RAM",
+            "(its repacked weights 2.34 GiB, the KV cache of 8192 tokens 0.50 GiB)",
+            "only 1.00 GiB is available (bound by cgroup /app.slice/split.scope memory.max",
+        ] {
+            assert!(e.contains(s), "{s:?} not in {e}");
+        }
+        let w = dense_verdict(
+            "llama",
+            Some((16, 32)),
+            half,
+            false,
+            TOL,
+            32768,
+            cg(3 * GIB),
+        )
+        .expect("weights and floor fit")
+        .expect("the full cache doesn't");
+        assert!(
+            w.contains("note: the CPU layers' KV cache of 32768 tokens takes 2.0 GiB"),
+            "{w}"
+        );
+
+        // A real model's CPU half: the cap at its own need.
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let n = m.n_layers() as usize;
+        let k = n / 2;
+        let elem = if crate::kv::use_f32() { 4 } else { 2 };
+        let need = dense_ram_need_keep(&m, true, elem, k);
+        let ctx = 4096;
+        let want = dense_load_bytes(need, !m.file_backed()) + need.kv_per_pos * ctx as u64;
+        let tol = ram_tolerance();
+        let at = |bytes: u64| check_ram_split(&m, true, k, ctx, &|| host(bytes));
+        let short = want
+            .checked_sub(tol + 1)
+            .expect("the half past the tolerance");
+        let e = at(short).unwrap_err();
+        assert!(
+            e.contains(&format!(
+                "the CPU half of the split ({k} of {n} layers) needs about"
+            )),
+            "{e}"
+        );
+        assert_eq!(at(want - tol), Ok(None), "within the tolerance");
+        assert_eq!(at(want), Ok(None));
+        assert_eq!(at(16 * GIB), Ok(None));
+        // No CPU half, or no layer split: the RAM isn't even read.
+        let read = std::cell::Cell::new(false);
+        let probe = || {
+            read.set(true);
+            host(0)
+        };
+        assert_eq!(check_ram_split(&m, true, 0, ctx, &probe), Ok(None));
+        let (moe, _) = tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+        assert_eq!(check_ram_split(&moe, true, 1, ctx, &probe), Ok(None));
+        assert!(!read.get(), "the RAM was read with nothing to check");
+        // Every layer on the CPU is the whole CPU model's estimate.
+        let all = dense_ram_need_keep(&m, true, elem, n);
+        let whole = dense_load_bytes(all, !m.file_backed()) + all.kv_per_pos * ctx as u64;
+        let short = whole
+            .checked_sub(tol + 1)
+            .expect("the model past the tolerance");
+        let e = check_ram_split(&m, true, n, ctx, &|| host(short)).unwrap_err();
+        assert!(
+            e.contains(&format!(
+                "the CPU model (--gpu-layers 0: all {n} layers on the CPU) needs"
+            )),
+            "{e}"
+        );
+        assert_eq!(check_ram_split(&m, true, n, ctx, &|| host(whole)), Ok(None));
+        assert_eq!(
+            dense_ram_need_keep(&m, true, elem, n),
+            dense_ram_need(&m, true, elem)
+        );
     }
 
     /// The CPU count behind the tolerance is the affinity mask's.

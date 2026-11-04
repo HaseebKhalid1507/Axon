@@ -2427,6 +2427,86 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The numerics mode is in a session file's identity (ADR M5): a file
+    /// saved by an exact-mode chat is restored into a fast-mode one as
+    /// tokens (prefilled again; `numerics_mode` is named as why), and the
+    /// other way round, never as bytes; within one mode it loads as bytes.
+    /// The conversation goes on either way, as a fresh prefill would. On
+    /// the GPU too (the fast module's own `numerics_tag`), when there is one.
+    #[test]
+    fn session_across_numerics_modes() {
+        use crate::kvsave::Session;
+        use crate::lm::{Backend, BackendOptions, Device};
+        use crate::numerics::Numerics;
+        let Some(m0) = crate::testutil::model() else {
+            return;
+        };
+        let path = crate::testutil::model_path().unwrap();
+        let tok = Tokenizer::from_gguf(&m0);
+        let mut devices = vec![Device::Cpu];
+        if crate::testutil::gpu().is_some() {
+            devices.push(Device::Cuda);
+        }
+        for d in devices {
+            // A model each: the CPU model releases what it repacks.
+            let (me, mf) = (
+                crate::testutil::model().unwrap(),
+                crate::testutil::model().unwrap(),
+            );
+            let mk = |m, n| {
+                let o = BackendOptions::default()
+                    .device(d)
+                    .max_ctx(2048)
+                    .numerics(n);
+                Backend::new(m, o).unwrap()
+            };
+            let (e, f) = (mk(&me, Numerics::Exact), mk(&mf, Numerics::Fast));
+            assert_eq!(
+                (e.numerics(), f.numerics()),
+                (Numerics::Exact, Numerics::Fast)
+            );
+            let hd = crate::kvsave::KvIo::kv_shape(&e).2;
+            let ident = crate::kvsave::model_ident(&m0, &path, hd).unwrap();
+            for (a, b, what) in [(&e, &f, "exact -> fast"), (&f, &e, "fast -> exact")] {
+                let what = format!("{d:?} {what}");
+                let file = session_path(&format!("modes-{d:?}-{}", a.numerics()));
+                let mut x = Chat::new(a, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+                x.max_reply = 16;
+                x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+                x.save_session(&mut Session::new(file.clone(), ident.clone()))
+                    .unwrap();
+                let image = cache_image(&x);
+                // The same mode: bytes.
+                let mut same = Chat::new(a, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+                let r = (same.load_session(&mut Session::new(file.clone(), ident.clone())))
+                    .unwrap()
+                    .unwrap();
+                assert!(r.from_file, "{what}: same mode {r:?}");
+                drop(same);
+                // The other mode: tokens, prefilled again.
+                let mut y = Chat::new(b, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+                y.max_reply = 16;
+                let r = (y.load_session(&mut Session::new(file.clone(), ident.clone())))
+                    .unwrap()
+                    .unwrap();
+                let why = r.why.clone().unwrap_or_default();
+                assert!(
+                    !r.from_file && why.contains("numerics_mode"),
+                    "{what}: {r:?}"
+                );
+                assert_eq!((y.hist.clone(), y.fed), (x.hist.clone(), x.fed), "{what}");
+                if !crate::numerics::fast_kernels(b) && !crate::numerics::fast_kernels(a) {
+                    // Both run the exact kernels: the same rows.
+                    assert!(cache_image(&y) == image, "{what}: re-prefilled cache");
+                }
+                let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+                let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+                assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "{what}");
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+    }
+
     /// `turns_match_fresh_prefill` split across devices (`--gpu-layers`):
     /// layers 0..12 on the CPU, the rest and the head on the GPU.
     #[test]

@@ -381,6 +381,51 @@ fn gpu_kernel_cache_hit_miss_corrupt() {
     assert_eq!(st, CacheStatus::Off);
 }
 
+/// The fast numerics mode's define (ADR M5): exact's options are the ones
+/// given, untouched (main's cache keys and bits); fast's add `FAST_DEFINE`
+/// last.
+#[test]
+fn fast_define_in_the_options() {
+    use crate::numerics::Numerics;
+    assert_eq!(super::FAST_DEFINE, "-DAXON_FAST");
+    assert_eq!(super::mode_opts(&KERNEL_OPTS, Numerics::Exact), KERNEL_OPTS);
+    let f = super::mode_opts(&KERNEL_OPTS, Numerics::Fast);
+    assert_eq!(f[..KERNEL_OPTS.len()], KERNEL_OPTS);
+    assert_eq!(f[KERNEL_OPTS.len()..], [super::FAST_DEFINE]);
+}
+
+/// A fast module is its own NVRTC cache entry (the define is in the key):
+/// exact and fast each miss once, then hit, and each knows its mode;
+/// kvsave's `numerics_tag` tells them apart, and exact's is main's
+/// (KERNELS and KERNEL_OPTS, nothing added).
+#[test]
+fn gpu_fast_module_own_cache_entry() {
+    use crate::numerics::Numerics;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let dir = TempCache::new("fast");
+    let load = |n: Numerics| {
+        let opts = super::mode_opts(&["--std=c++17"], n);
+        let (m, st) = Module::load_in(&g, IOTA, &opts, Some(&dir.0)).unwrap();
+        run_iota(&g, &m);
+        assert_eq!(m.fast(), n == Numerics::Fast);
+        st
+    };
+    assert_eq!(load(Numerics::Exact), CacheStatus::Miss);
+    assert_eq!(load(Numerics::Fast), CacheStatus::Miss, "fast: its own key");
+    assert_eq!(load(Numerics::Exact), CacheStatus::Hit);
+    assert_eq!(load(Numerics::Fast), CacheStatus::Hit);
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
+    let (e, f) = (
+        super::numerics_tag(&g, false).unwrap(),
+        super::numerics_tag(&g, true).unwrap(),
+    );
+    assert_ne!(e, f);
+    let main = super::fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
+    assert!(e.starts_with(&format!("kernels {main:032x} ")), "{e}");
+}
+
 const IOTA: &str = "extern \"C\" __global__ void iota(float* p, float s, unsigned n) \
                     { if (threadIdx.x < n) p[threadIdx.x] = s * threadIdx.x; }";
 

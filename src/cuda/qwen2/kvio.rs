@@ -38,7 +38,7 @@ impl Rows<'_, '_> {
 
     /// Enqueue the copies of positions lo..hi (inside one page) between the
     /// device and `host` at `at`, in image order; `to_dev`: host to device.
-    fn page(
+    pub(crate) fn page(
         &self,
         host: &mut HostBuf,
         at: usize,
@@ -133,7 +133,7 @@ impl Rows<'_, '_> {
         Ok(())
     }
 
-    fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
+    pub(crate) fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
         let rows_ok = match &self.tab {
             None => self.base + hi <= self.max_ctx,
             Some(t) => {
@@ -214,6 +214,30 @@ impl<'g> CudaQwen2<'g> {
 
     pub(crate) fn gpu(&self) -> &'g Gpu {
         self.gpu
+    }
+
+    /// Whether it runs the fast numerics mode's module (`Module::fast`).
+    pub(crate) fn fast(&self) -> bool {
+        self.fast
+    }
+
+    /// Count one launch of a fast-set kernel (`#ifdef AXON_FAST` code, or a
+    /// product routed to one in fast mode). Every such launch site calls it,
+    /// so the fast-vs-exact gate (`cuda::qwen2::tests::numerics`) can tell
+    /// a graded arm that ran a fast kernel from one that ran only exact
+    /// ones. No kernel calls it yet: none exists (`numerics::fast_kernels`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fast_launched(&self) {
+        debug_assert!(self.fast, "a fast-set kernel launched from an exact module");
+        self.fast_launches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Fast-set kernel launches so far (`fast_launched`).
+    #[cfg_attr(not(test), allow(dead_code))] // the fast-vs-exact gate reads it
+    pub(crate) fn fast_launches(&self) -> u64 {
+        self.fast_launches
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn kv_dims(&self) -> (usize, usize, usize) {
@@ -418,6 +442,54 @@ mod tests {
             });
             report(&format!("H2D 2D per {page}-pos page"), s);
         }
+        // The RAM tier's costs (serve --cache-ram): a pinned slab's
+        // allocation (cuMemHostAlloc + zeroing), and one page's D2H / H2D
+        // alone (the write-behind's unit), each a median of n.
+        for mib in [64usize, 256] {
+            let t = time(&g, n, || drop(g.host_alloc(mib << 20).unwrap()));
+            eprintln!(
+                "BW host_alloc {mib:>4} MiB (+ free)          {:8.2} ms",
+                t * 1e3
+            );
+            // SAFETY: never read: allocated and freed.
+            let t = time(&g, n, || {
+                drop(unsafe { g.host_alloc_uninit(mib << 20) }.unwrap())
+            });
+            eprintln!(
+                "BW host_alloc_uninit {mib:>4} MiB (+ free)   {:8.2} ms",
+                t * 1e3
+            );
+            let al = g.host_allocator();
+            let t = time(&g, n, || {
+                let a = al.alloc(mib << 20).unwrap();
+                // SAFETY: ours, never adopted, no copy.
+                unsafe { al.free(a) };
+            });
+            eprintln!(
+                "BW HostAllocator {mib:>4} MiB (+ free)      {:8.2} ms",
+                t * 1e3
+            );
+        }
+        let page = 64 * row * arrays;
+        let s = time(&g, 31, || {
+            host.copy_2d_from(0, 64 * row, &dev, 0, ctx * row, (64 * row, arrays))
+                .unwrap()
+        });
+        eprintln!(
+            "BW D2H one 64-pos page ({:.2} MiB)       {:8.3} ms {:7.2} GB/s",
+            page as f64 / (1u64 << 20) as f64,
+            s * 1e3,
+            page as f64 / s / 1e9
+        );
+        let s = time(&g, 31, || {
+            host.copy_2d_to(0, 64 * row, &dev, 0, ctx * row, (64 * row, arrays))
+                .unwrap()
+        });
+        eprintln!(
+            "BW H2D one 64-pos page                  {:8.3} ms {:7.2} GB/s",
+            s * 1e3,
+            page as f64 / s / 1e9
+        );
         // The file path's staging, to and from RAM (pre-touched: no page
         // faults) and, with AXON_BW_FILE, a file.
         let mut img = vec![1u8; bytes];

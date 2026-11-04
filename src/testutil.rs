@@ -46,6 +46,24 @@ pub fn fixtures() -> PathBuf {
 ///
 /// A missing model is a test failure, not a silent pass. CI doesn't have the
 /// 470 MB file, so it opts out explicitly with `AXON_SKIP_MODEL_TESTS=1`.
+/// The FP8 0.5B checkpoint (RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic in
+/// models/hf/, or AXON_TEST_FP8_MODEL), None (skipped, said so) when absent.
+pub fn fp8_model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic"),
+    };
+    if !path.join("model.safetensors").exists() {
+        eprintln!(
+            "skipping: the FP8 checkpoint {} is not present",
+            path.display()
+        );
+        return None;
+    }
+    Some(path)
+}
+
 pub fn model_path() -> Option<PathBuf> {
     let path = match std::env::var_os("AXON_TEST_MODEL") {
         Some(p) => PathBuf::from(p),

@@ -196,7 +196,10 @@ impl PageMap {
     }
 
     /// Whether slot `slot` may write its `i`th page: it alone holds it and
-    /// the index doesn't (a shared or indexed page is immutable).
+    /// the index doesn't (a shared or indexed page is immutable). Release
+    /// builds don't ask yet: the checks are debug builds' (`assert_writable`)
+    /// until PR C3 maps and pins pages in `serve`.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn writable(&self, slot: usize, i: usize) -> bool {
         let p = self.pages[slot][i] as usize;
         self.refs[p] == 1 && !self.pinned[p]
