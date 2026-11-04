@@ -1,0 +1,46 @@
+[axon-run 17:54:48] submitted 1104-175448-a7de by /home/haseeb/.cache/axon-sharekv: /usr/bin/bash servetime.sh ./axon-base-af281d9 ./axon-64f7660 ./serve_load.py
+[axon-run 18:19:07] timing job 1104-175448-a7de rerouted bella → 4090 by hand after 24m queued (sharekv-64f7660-servetime). Its numbers are 4090 numbers, not bella's.
+[axon-run 18:27:45] job 1104-175448-a7de -> pod1 [RTX 4090 sm_89 secure] (pod mbr157bmyd6ytk): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 11000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/servetime-e745104916d0 /usr/bin/bash servetime.sh ./axon-base-af281d9 ./axon-64f7660 ./serve_load.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (ded2fcb7e58367b1d50179fa) + source of /home/haseeb/.cache/axon-podjob/servetime-e745104916d0
+
+sent 7,474,487 bytes  received 125 bytes  2,135,603.43 bytes/sec
+total size is 24,305,163  speedup is 3.25
+
+sent 168 bytes  received 35 bytes  81.20 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261104-232758-bash-1527 on pod1 (GPU, 11000 MB)
+[axon-node 23:27:58] GPU EXCLUSIVE taken; job wants 11000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 31.125)
+[axon-node 23:27:58] run bash (ded2fcb7e58367b1d50179fa) as /home/haseeb/.cache/axon-podjob/servetime-e745104916d0 on f04c4da4aca4, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07, 1 MiB, 0 %
+== 23:27:58 round 1 main gpu 0 %, 1 MiB
+[axon-run 18:28:32] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 18:29:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 18:29:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 23:29:49 round 1 cand gpu 0 %, 1 MiB
+== 23:30:10 round 2 cand gpu 0 %, 1 MiB
+[axon-run 18:30:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 23:30:31 round 2 main gpu 0 %, 1 MiB
+[axon-run 18:30:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 23:30:52 round 3 main gpu 0 %, 1 MiB
+== 23:31:13 round 3 cand gpu 0 %, 1 MiB
+[axon-run 18:31:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cell  metric         main med [min-max]           cand med [min-max]           cand/main
+c1    agg_tok_s         181.80 [181.60-182.20]          181.60 [181.30-181.80]       0.999
+c1    itl_ms_p50          5.42 [5.41-5.43]            5.43 [5.42-5.43]       1.002
+c1    itl_ms_p99          5.78 [5.73-5.82]            5.56 [5.48-5.82]       0.962
+c1    ttft_ms_p50        45.80 [43.00-47.20]           46.50 [45.60-49.90]       1.015
+c8    agg_tok_s        1030.70 [1030.60-1039.00]         1029.70 [1028.70-1031.20]       0.999
+c8    itl_ms_p50          7.13 [7.10-7.13]            7.14 [7.13-7.15]       1.001
+c8    itl_ms_p99          7.95 [7.91-7.97]            7.95 [7.94-8.03]       1.000
+c8    ttft_ms_p50       120.60 [120.00-150.10]          138.90 [121.30-155.90]       1.152
+c16   agg_tok_s        1539.40 [1538.70-1550.60]         1533.90 [1520.60-1536.90]       0.996
+c16   itl_ms_p50          8.23 [8.23-8.24]            8.26 [8.26-8.27]       1.004
+c16   itl_ms_p99         72.37 [71.53-72.56]           72.85 [72.30-73.05]       1.007
+c16   ttft_ms_p50       144.40 [143.50-144.80]          146.10 [144.10-148.70]       1.012
+SERVETIME-DONE 24 runs
+[axon-node 23:31:34] exit 0 after 216.4s
+[axon-node 23:31:34] peak RSS 735 MB (job process tree PSS, 2 s samples x107)
+[axon-run 18:31:36] exit 0 after 231.3s (host pod1)
+[axon-run 18:31:38] FOREIGN_GPU max=0% mean=0.0% samples=7
+[axon-run 18:31:38] TIMING CLASS: ran on pod1 (4090) (ran on 4090: bella reroute; not comparable to bella numbers)
