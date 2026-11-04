@@ -775,7 +775,8 @@ impl<'a, 't> Batch<'a, 't> {
     /// last token): copy in the rest of the longest prefix of it the tier
     /// stores (as far as the slot gets pages for it; idle prefixes give
     /// theirs up, as for a feed). The positions it holds after; `held`
-    /// says so.
+    /// says so. A tier error on the way (the copy, or a spill making room)
+    /// turns the tier off, and the slot keeps `have`.
     fn restore(&mut self, slot: usize, prompt: &[u32], have: usize) -> Result<usize, String> {
         let Some(t) = self.tier.as_mut() else {
             return Ok(have);
@@ -791,7 +792,11 @@ impl<'a, 't> Batch<'a, 't> {
                 to = self.pages().map_or(0, |p| p.held[slot]).min(to);
             }
         }
-        let t = self.tier.as_mut().expect("on");
+        // A spill that made room (`reclaim`) may have failed: the tier is
+        // off, and the slot keeps `have`, as after a failed restore (#172).
+        let Some(t) = self.tier.as_mut() else {
+            return Ok(have);
+        };
         if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
             // The slot keeps `have` (its rows past it are fed again).
             self.tier_failed("restore", &e);
