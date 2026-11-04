@@ -1,0 +1,16 @@
+[axon-run 17:04:32] submitted 1104-170432-5a13 by /home/haseeb/.cache/axon-wt-a2-gate: /home/haseeb/.cache/axon-wt-a2-gate/scripts/agent_board_kill_smoke.sh
+[axon-run 17:08:19] scope axon-job-1104-170432-5a13-1793830099.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 17:08:19] job 1104-170432-5a13 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-170432-5a13-1793830099 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-wt-a2-gate/scripts/agent_board_kill_smoke.sh
+axon-q 17:08:19 start slot 8-15: /home/haseeb/.cache/axon-wt-a2-gate/scripts/agent_board_kill_smoke.sh
+KILL SMOKE term-llama: ok (2 tagged processes before SIGTERM to the pid, none after 20 s)
+KILL SMOKE term-llama: meta.json kept (state running, model sha256 74a4da8c9fdbcd15, harness f2499250572c053f7f8e7fd31ef27a6b2ea0533e)
+KILL SMOKE term-ollama: ok (3 tagged processes before SIGTERM to the pid, none after 20 s)
+KILL SMOKE term-ollama: meta.json kept (state running, model sha256 74a4da8c9fdbcd15, harness f2499250572c053f7f8e7fd31ef27a6b2ea0533e)
+/home/haseeb/.cache/axon-wt-a2-gate/scripts/agent_board_kill_smoke.sh: line 47: 1091887 Killed                     AXON_KILL_SMOKE_TAG=$tag setsid python3 -u "$W/scripts/agent_replay.py" board --cpu --engines "$engines" --kv f16 --rounds 1 --speeds 4 --model "$M/qwen2.5-0.5b-q4_k_m.gguf" --ollama-model axon-oracle --axon "$AX" --llama-server "$LS" --trace "$W/scripts/examples/agent-trace-synthetic.json" --window-s 300 --scale 0.05 --clip 4096 --kv-tokens 8192 --port $((19000 + RANDOM % 500 * 10)) --out "$out" > "$out/board.log" 2>&1
+KILL SMOKE kill-llama: ok (2 tagged processes before SIGKILL to the pid, none after 20 s)
+KILL SMOKE kill-llama: meta.json kept (state running, model sha256 74a4da8c9fdbcd15, harness f2499250572c053f7f8e7fd31ef27a6b2ea0533e)
+KILL SMOKE group-axon: ok (2 tagged processes before SIGTERM to the group, none after 20 s)
+KILL SMOKE group-axon: meta.json kept (state running, model sha256 74a4da8c9fdbcd15, harness f2499250572c053f7f8e7fd31ef27a6b2ea0533e)
+KILL SMOKE PASS
+[axon-run 17:09:55] exit 0 after 95.9s (host bella)
+[axon-run 17:09:56] EXPECT ok: output matches /KILL SMOKE PASS/
