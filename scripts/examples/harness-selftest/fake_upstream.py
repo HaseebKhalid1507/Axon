@@ -1,6 +1,11 @@
 # A fake OpenAI-compatible server for the self-tests: /v1/models; /v1/chat/completions (JSON or SSE with usage when
 # asked; prompt_tokens = 10 x messages); /v1/responses (SSE: created, a text delta, completed with usage). Synthetic.
+#   fake_upstream.py PORT [--text-only]
+# --text-only: a streamed reply never calls a tool, so a real harness pointed at it (capture_dry.sh) gets a plain
+# answer and finishes its task instead of looping on tool calls.
 import http.server, json, socketserver, sys
+
+TEXT_ONLY = "--text-only" in sys.argv[2:]
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -24,12 +29,23 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         b = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         if self.path.startswith("/v1/responses"):
-            u = {"input_tokens": 50, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 0}}
-            done = {"id": "resp_1", "object": "response", "status": "completed", "output": [
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}], "usage": u}
-            ev = [("response.created", {"type": "response.created", "response": dict(done, status="in_progress", output=[])}),
-                  ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "done"}),
-                  ("response.completed", {"type": "response.completed", "response": done})]
+            # The full event sequence of one text message (codex 0.166 refuses a delta without its item, and a
+            # completed response without usage.total_tokens).
+            u = {"input_tokens": 50, "output_tokens": 3, "total_tokens": 53, "input_tokens_details": {"cached_tokens": 0},
+                 "output_tokens_details": {"reasoning_tokens": 0}}
+            part = {"type": "output_text", "text": "done", "annotations": []}
+            item = {"id": "msg_1", "type": "message", "status": "completed", "role": "assistant", "content": [part]}
+            done = {"id": "resp_1", "object": "response", "status": "completed", "output": [item], "usage": u}
+            at = {"item_id": "msg_1", "output_index": 0, "content_index": 0}
+            ev = [("response.created", {"response": dict(done, status="in_progress", output=[], usage=None)}),
+                  ("response.output_item.added", {"output_index": 0, "item": dict(item, status="in_progress", content=[])}),
+                  ("response.content_part.added", dict(at, part=dict(part, text=""))),
+                  ("response.output_text.delta", dict(at, delta="done")),
+                  ("response.output_text.done", dict(at, text="done")),
+                  ("response.content_part.done", dict(at, part=part)),
+                  ("response.output_item.done", {"output_index": 0, "item": item}),
+                  ("response.completed", {"response": done})]
+            ev = [(e, dict(d, type=e, sequence_number=i)) for i, (e, d) in enumerate(ev)]
             body = b"".join(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode() for e, d in ev)
             return self._send(200, body, "text/event-stream")
         n = 10 * len(b.get("messages", []))
@@ -38,7 +54,7 @@ class H(http.server.BaseHTTPRequestHandler):
             parts = [{"choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello secret text"}}]},
                      {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function",
                                                                        "function": {"name": "bash", "arguments": "{}"}}]}}]}]
-            if b.get("tools") is None:
+            if b.get("tools") is None or TEXT_ONLY:
                 parts = parts[:1]
             parts.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
             if (b.get("stream_options") or {}).get("include_usage"):

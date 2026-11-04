@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """make_repo.py DIR: a small synthetic Python project ("ledger") for the agent-harness captures
-(specs/agent-harness-traces.md section 4). ~9 modules + a unittest suite, deterministic, no dependencies.
+(docs/log/2026-11-04-agent-harness-traces.md). ~9 modules + a unittest suite, deterministic, no dependencies.
 One planted bug (pricing.apply_discount) makes test_pricing fail; everything else passes. The CLI, reports and
 formats are wired across files so a feature (a new output format) touches 3-4 files. Synthetic: no real data."""
 import os, sys, textwrap

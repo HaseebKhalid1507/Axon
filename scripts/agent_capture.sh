@@ -1,6 +1,6 @@
 #!/bin/bash
-# agent_capture.sh HARNESS [ROUNDS]: capture one agent harness's traffic against axon serve (specs/agent-harness-
-# traces.md section 4), ONE job: axon serve (Qwen2.5-7B-Instruct Q4_K_M, --ctx 32768 --kv q8 --parallel 4; the
+# agent_capture.sh HARNESS [ROUNDS]: capture one agent harness's traffic against axon serve (docs/log/2026-11-04-
+# agent-harness-traces.md), ONE job: axon serve (Qwen2.5-7B-Instruct Q4_K_M, --ctx 32768 --kv q8 --parallel 4; the
 # harness's titles / summaries go to the same model) behind scripts/agent_proxy.py; per round, each task in a fresh
 # copy of the synthetic ledger repo (examples/harness-repo/make_repo.py):
 #   bugfix   the planted bug; tests run after
@@ -15,7 +15,8 @@
 set -u
 HN=${1:?harness: pi | opencode | codex | crush}; ROUNDS=${2:-3}
 WT=$(cd "$(dirname "$0")/.." && pwd); S=$WT/scripts
-SMOKE=${AXON_CAPTURE_SMOKE:-}   # a URL: no serve, the proxy in front of that upstream, bugfix r1 only (config smoke)
+SMOKE=${AXON_CAPTURE_SMOKE:-}   # a URL: no serve, the proxy in front of that upstream, bugfix r1 only, then the
+                                # capture converted (config smoke; examples/harness-selftest/capture_dry.sh)
 [ -n "$SMOKE" ] || A=${AXON_CAPTURE_BIN:?AXON_CAPTURE_BIN: an axon binary}
 MD=${AXON_MODELS:-$HOME/Projects/axon/models}
 M=$MD/Qwen2.5-7B-Instruct-Q4_K_M.gguf
@@ -145,7 +146,13 @@ for r in $(seq $ROUNDS); do
   fi
   if [ -n "$SMOKE" ]; then
     echo "SMOKE $HN: $(grep -c '"route"' $RAW) request(s) reached the proxy; routes: $(grep -o '"route":"[a-z]*"' $RAW | sort | uniq -c | tr '\n' ' ')"
-    exit 0
+    kill $XPID 2>/dev/null; wait $XPID 2>/dev/null; trap - EXIT
+    # the converter's privacy check (agent_trace.py --check) runs inside; the capture is deleted after it
+    python3 $S/agent_trace_proxy.py $RAW --out $C/trace-smoke.json > $C/convert.log 2>&1; rc=$?
+    [ $rc = 0 ] && echo "SMOKE $HN converted: $(python3 -c "import json, sys; d = json.load(open(sys.argv[1])); s = d['summary']
+print(len(d['requests']), 'requests,', s['sessions'], 'sessions, tool calls', s['tool_calls'], ', reuse', s['reuse_pct'], '%')" $C/trace-smoke.json)" \
+      || { echo "SMOKE $HN convert FAILED rc $rc"; tail -5 $C/convert.log; }
+    exit $rc
   fi
   wf=$(newrepo feature-r$r)
   task feature $r normal $wf 0 "$P_FEATURE" 1

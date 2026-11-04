@@ -10,7 +10,7 @@ FILE: ~/.cache/axon-agent/traces/harness-<capture name>.json. The trace passes `
 before writing; refused otherwise). The capture's message digests are used here only to find prefix relations
 and are not written. The CAPTURE file is deleted after a successful conversion unless --keep-raw.
 
-How structure is recovered (spec section 3), per request in arrival order:
+How structure is recovered, per request in arrival order:
 - **Continuation:** an open session whose last request's digest list is a proper prefix of this one's. Shared =
   "session", tokens = this prompt x the prefix's share of the message bytes (ESTIMATED: apportioned by bytes).
 - **Compaction:** no session extends, but one on the same connection, active within 60 s, shares a leading prefix
@@ -117,7 +117,7 @@ def convert(recs):
 
 
 def stats(recs, reqs):
-    """Numbers for the harness comparison (spec section 7): prefix reuse, tool calls and their failures."""
+    """Numbers for the harness comparison: prefix reuse, tool calls and their failures."""
     ok = [r for r in recs if r.get("status") == 200]
     pr = sum(r.get("prompt_tokens") or 0 for r in ok)
     ca = sum(r.get("cached_tokens") or 0 for r in ok)

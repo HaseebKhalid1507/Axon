@@ -8,7 +8,7 @@ It forwards every request and response byte for byte, streaming included. The on
 with `stream: true` that lacks `stream_options.include_usage` gets it added, because the token counts come from the
 response's `usage`. The record says so (`inj`).
 
-Per request it appends ONE JSON line to FILE (spec: specs/agent-harness-traces.md section 2):
+Per request it appends ONE JSON line to FILE (docs/log/2026-11-04-agent-harness-traces.md):
   t_ms, route (enum), stream, status, ttft_ms, total_ms, prompt_tokens, completion_tokens, cached_tokens,
   n_msgs, roles {system,user,assistant,tool,other}, n_tools, n_tool_calls_req, n_tool_calls_resp, max_tokens,
   has_prev, store, keep_alive_s, conn, harness (enum), inj, h (list of 16-hex message digests), b (list of message
