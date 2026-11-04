@@ -6332,8 +6332,9 @@ fn assert_tier_off(
 }
 
 /// A KV RAM tier fault (`tier::Faults`): before turn `turn` of
-/// `cache_ram_off_case`, the `n`-th copy made for `op` from then on fails
-/// (no other op's copies count).
+/// `cache_ram_off_case` (the turns before it done, their tails included),
+/// the `n`-th copy made for `op` from then on fails (no other op's copies
+/// count).
 struct TierFault {
     op: super::tier::Op,
     turn: usize,
@@ -6348,8 +6349,11 @@ struct TierFault {
 /// the tier (`--cache-ram 0`) and the server goes on answering; the tier
 /// is off (`assert_tier_off`). A failed copy in leaves the rows it was to
 /// fill as they were (another conversation's), so a reply that used them
-/// would differ.
+/// would differ. Each turn is waited out (`Faults::idles`), so a fault
+/// fails a copy of its own turn: the off line comes in that turn, and the
+/// counters it saw are the turn before's (nothing else was copied first).
 fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl Fn(&mut Opts)) {
+    use super::tier::{Counters, Op};
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
@@ -6369,6 +6373,9 @@ fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl 
     // has a whole page to copy; checked below).
     let more = words_n("Moss", 10);
     type Usage = (Value, u64, u64, u64);
+    // After a turn: the off lines so far, and the tier's counters and
+    // pages held (none without it).
+    type After = (usize, Option<(Counters, u64)>);
     let run = |ram: u64, fault: Option<&TierFault>| {
         let pool = std::cell::Cell::new(false);
         let s = server_with(p.to_str().unwrap(), device, |o| {
@@ -6386,12 +6393,25 @@ fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl 
             _ => {}
         };
         let text = |r: &Usage| r.0.as_str().unwrap().to_string();
-        let mut r: Vec<Usage> = Vec::new();
-        let mut ask = |turn: usize, prompt: &str| -> Usage {
-            arm(turn);
-            let u = completion_usage(addr, prompt, 16);
-            r.push(u.clone());
+        let r = std::cell::RefCell::new(Vec::<(Usage, After)>::new());
+        // A turn's reply `u`: wait until the engine is done with it (a
+        // pool's `end_solo` spill, the one cache's write, a batch's
+        // write-behind all run after the reply), then take the tier's state.
+        let done = |u: Usage| -> Usage {
+            let n = s.tier_faults().idles();
+            wait_for("the engine idle", || s.tier_faults().idles() > n);
+            let m = call(addr, "GET", "/metrics", "").body;
+            let t = (ram > 0).then(|| {
+                let pages = metric(&m, "axon_kv_ram_pages").unwrap();
+                (tier_counters(&m), pages)
+            });
+            r.borrow_mut()
+                .push((u.clone(), (s.tier_faults().off_lines().len(), t)));
             u
+        };
+        let ask = |turn: usize, prompt: &str| -> Usage {
+            arm(turn);
+            done(completion_usage(addr, prompt, 16))
         };
         let a1 = ask(0, &a);
         ask(1, &b);
@@ -6417,37 +6437,71 @@ fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl 
                 (None, completion_usage(addr, &a3p, 16))
             }
         };
+        let a3 = done(a3);
         // A's rows after turn 3 (and so its stored pages, at most) are a
         // page short of turn 6's: the one cache's write after it copies.
         assert!(
             a3.2 >= a2.2 + a2.3 + 64,
             "{what}: A's turn 3: {a3:?}, turn 2: {a2:?}"
         );
-        r.push(a3.clone());
         // Later requests: the server answers on.
-        r.push(completion_usage(addr, &b, 16));
-        let a4p = format!("{a3p}{} Last", text(&a3));
-        r.push(completion_usage(addr, &a4p, 16));
+        ask(7, &b);
+        ask(8, &format!("{a3p}{} Last", text(&a3)));
         let m = call(addr, "GET", "/metrics", "").body;
-        (r, d, m, s.tier_faults().off_lines())
+        let f = s.tier_faults();
+        (r.into_inner(), d, m, f.off_lines(), f.hit())
     };
-    let (off, d0, m0, said0) = run(0, None);
+    let (off, d0, m0, said0, _) = run(0, None);
     assert!(!m0.contains("axon_kv_ram"), "{what}: off: {m0}");
     assert!(said0.is_empty(), "{what}: off: {said0:?}");
     for x in faults {
-        let w = format!("{what}, {} fails before turn {}", x.op.what(), x.turn);
-        let (on, d1, m1, said) = run(64 << 20, Some(x));
+        let w = format!("{what}, {} fails in turn {}", x.op.what(), x.turn);
+        let (on, d1, m1, said, hit) = run(64 << 20, Some(x));
         assert_eq!(off.len(), on.len());
-        for (i, (u, v)) in off.iter().zip(&on).enumerate() {
+        // From the turn whose restore failed, or the one after a write
+        // failed, the tier is off: the GPU rows are `--cache-ram 0`'s, and
+        // so are the cached tokens (a restore is trusted whole or not at
+        // all: a partial one would count its pages that landed).
+        let off_from = x.turn + usize::from(x.op != Op::Restore);
+        for (i, ((u, _), (v, t))) in off.iter().zip(&on).enumerate() {
             assert_eq!(u.0, v.0, "{w}: turn {i}: the reply");
             assert_eq!(u.2, v.2, "{w}: turn {i}: prompt tokens");
             assert_eq!(u.3, v.3, "{w}: turn {i}: completion tokens");
+            if i >= off_from {
+                assert_eq!(u.1, v.1, "{w}: turn {i}: cached tokens");
+            }
+            // The fault failed a copy of its turn: no off line before.
+            assert_eq!(t.0, usize::from(i >= x.turn), "{w}: turn {i}: {said:?}");
         }
         assert_eq!(d0, d1, "{w}: D's reply");
         assert_tier_off(&w, x.op, &said, &m1);
+        assert_eq!(hit.map(|h| h.0), Some(x.op), "{w}: the copy failed");
+        let tier = |i: usize| {
+            on[i]
+                .1
+                .1
+                .unwrap_or_else(|| panic!("{w}: turn {i}: no tier"))
+        };
+        // A's first turn stored 2 pages or more, and turn 3's restore finds
+        // them all (nothing evicted): with n = 2 its first page lands and
+        // its second fails.
+        let (a0, _) = tier(0);
+        assert!(a0[0] >= 2, "{w}: A's pages stored: {a0:?}");
+        let (pre, held) = tier(x.turn - 1);
+        assert_eq!(held, pre[0], "{w}: pages evicted before turn {}", x.turn);
+        // The copy that failed was the turn's first out (a write's) or one
+        // in (a restore's, which counts nothing until it is whole).
+        let at = said[0].1;
+        assert_eq!(at[0], pre[0], "{w}: pages written in the turn before it");
+        if x.op == Op::Restore || x.turn <= 3 {
+            assert_eq!(at, pre, "{w}: the counters");
+        } else {
+            // A's turn 3 came back from RAM before its write failed.
+            assert!(at[2] > pre[2], "{w}: no hit in the turn: {at:?}");
+        }
         // A fault after A's turn 2 came back from RAM: the tier was on.
         if x.turn > 3 {
-            assert!(said[0].1[2] > 0, "{w}: no hit before: {said:?}");
+            assert!(at[2] > 0, "{w}: no hit before: {said:?}");
         }
     }
 }
@@ -6480,9 +6534,11 @@ fn single_cache_faults() -> [TierFault; 2] {
 
 /// A pool's tier (`Batch::tier_failed`) off: B's spill after it ran alone
 /// (A's pages stored), A's turn 2's restore after its first page came back
-/// (a restore is trusted whole or not at all), and the write-behind of the
-/// batch's steps (A's turn 3 admitted while D decodes); and the one cache
-/// on the GPU (`--parallel 1`).
+/// (a restore is trusted whole or not at all; alone, `lend_solo`), and, with
+/// A's turn 3 admitted while D decodes, the write-behind of the batch's
+/// steps and A's restore in that admission (`admit` takes the positions
+/// restored as its cached ones); and the one cache on the GPU
+/// (`--parallel 1`).
 #[test]
 fn serve_cuda_cache_ram_off() {
     if crate::testutil::gpu().is_none() {
@@ -6504,6 +6560,11 @@ fn serve_cuda_cache_ram_off() {
             op: Op::WriteBehind,
             turn: 6,
             n: 1,
+        },
+        TierFault {
+            op: Op::Restore,
+            turn: 6,
+            n: 2,
         },
     ];
     cache_ram_off_case(Device::Cuda, "cuda paged f16", &pool, |o| {

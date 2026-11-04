@@ -1507,6 +1507,9 @@ fn engine(
             b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
+            // Tests: nothing to do, a request's tail included (#172).
+            #[cfg(test)]
+            e.metrics.tier_faults.idle();
             match jobs.recv_timeout(Duration::from_millis(100)) {
                 Ok(job) => waiting.push_back(job),
                 Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => continue,

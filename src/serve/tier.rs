@@ -140,6 +140,8 @@ pub struct Faults {
     /// The lines `off` said on stderr, each with the tier's counters then
     /// (`Counters`).
     said: Mutex<Vec<(String, Counters)>>,
+    /// Times the engine waited for a request with nothing to do (`idle`).
+    idles: std::sync::atomic::AtomicU64,
 }
 
 /// Tests: what a tier copy is made for, as the off line names it (`off`'s
@@ -187,6 +189,19 @@ impl Faults {
     /// The copy the last fault failed (`hit`), if one did.
     pub fn hit(&self) -> Option<(Op, usize)> {
         *self.hit.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Times the engine waited for a request with nothing to do (every
+    /// 100 ms while it waits): once it is past the count a test read after
+    /// a reply, what the engine does after a reply (a pool's `end_solo`
+    /// spill, the one cache's write, a batch's last write-behind) is done.
+    pub fn idles(&self) -> u64 {
+        self.idles.load(Relaxed)
+    }
+
+    /// The engine waits for a request with nothing to do (`idles`).
+    pub(super) fn idle(&self) {
+        self.idles.fetch_add(1, Relaxed);
     }
 
     /// What `off` said so far, each line with the counters then.

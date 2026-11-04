@@ -732,7 +732,10 @@ impl<'a, 't> Batch<'a, 't> {
     /// The tier failed (`e`, in `what`): it is off from here, as the no-pool path's;
     /// the slots' rows are untouched (what it copied in is only trusted
     /// once a restore succeeded), so serving goes on as with
-    /// `--cache-ram 0`.
+    /// `--cache-ram 0`. Anything that can reach `spill` (`reclaim`,
+    /// `make_room`, ...) can call this and leave `self.tier` None: a caller
+    /// that held the tier before such a call takes it again after, never
+    /// `expect`s it (#172: `restore` after `make_room` did, and exited).
     fn tier_failed(&mut self, what: &str, e: &str) {
         // Dropped first: its arena is freed, then stderr and /metrics say
         // so.
