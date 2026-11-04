@@ -102,6 +102,142 @@ pub fn gib(n: u64) -> String {
     format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
 }
 
+/// A tier error (`e`, in its `what`: a spill, the write-behind or a
+/// restore) turned the KV RAM tier off (its owner has dropped it): one
+/// line on stderr, the same on every path, and /metrics' tier gauges go
+/// to 0 (its counters stay).
+pub(super) fn off(what: &str, e: &str, metrics: Option<&Metrics>) {
+    let line = format!("axon serve: --cache-ram: {what}: {e}; the KV RAM tier is off from here");
+    eprintln!("{line}");
+    if let Some(m) = metrics {
+        m.kv_ram_off();
+        #[cfg(test)]
+        m.tier_faults.said(line, m);
+    }
+}
+
+/// What an injected fault's error says (`Faults`).
+#[cfg(test)]
+pub const FAULT: &str = "an injected KV RAM tier fault (a test's)";
+
+/// Tests (#172): faults injected into the KV RAM tier's copies, and the
+/// lines `off` said, per server (`Metrics::tier_faults`: the one handle a
+/// test's `Server` and the engine's tier both hold). None of it is built
+/// outside tests. A copy is a pool's `page_out` / `page_in` (a page), or
+/// the one cache's `kv_save` / `kv_load` (all the pages a write or a
+/// restore moves), each made for one `Op`. The copy an armed fault hits
+/// fails instead of running: a failed copy in leaves the rows it was to
+/// fill as they were (another conversation's), so a reply that used them
+/// anyway would differ.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Faults {
+    /// The fault armed: the op, and its copies until one fails, it counted.
+    armed: Mutex<Option<(Op, usize)>>,
+    /// The copy the armed fault failed: its op, and the slot it was for
+    /// (the one cache: 0; `PoolTier::spill_page`'s, no slot's: usize::MAX).
+    hit: Mutex<Option<(Op, usize)>>,
+    /// The lines `off` said on stderr, each with the tier's counters then
+    /// (`Counters`).
+    said: Mutex<Vec<(String, Counters)>>,
+    /// Times the engine waited for a request with nothing to do (`idle`).
+    idles: std::sync::atomic::AtomicU64,
+}
+
+/// Tests: what a tier copy is made for, as the off line names it (`off`'s
+/// `what`). An armed fault counts only its op's copies, so the copies of
+/// another (a write-behind's before a spill's) never take it.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Op {
+    /// A slot's pages before it gives its rows up (`Batch::spill`,
+    /// `PoolTier::spill_page`).
+    Spill,
+    /// The pages that filled meanwhile: an engine step's
+    /// (`Batch::write_behind`), or the one cache's after a request
+    /// (`Engine::run`).
+    WriteBehind,
+    /// A stored prefix copied in (`Batch::restore`, `Engine::job`).
+    Restore,
+}
+
+#[cfg(test)]
+impl Op {
+    /// The off line's name of it.
+    pub fn what(self) -> &'static str {
+        match self {
+            Op::Spill => "spill",
+            Op::WriteBehind => "write-behind",
+            Op::Restore => "restore",
+        }
+    }
+}
+
+/// Tests: the KV RAM tier's /metrics counters (pages written, tokens
+/// restored, hits).
+#[cfg(test)]
+pub type Counters = [u64; 3];
+
+#[cfg(test)]
+impl Faults {
+    /// The `n`-th copy made for `op` from now fails (1: the next); the
+    /// fault armed before is gone.
+    pub fn fail(&self, op: Op, n: usize) {
+        *self.armed.lock().unwrap_or_else(|p| p.into_inner()) = (n > 0).then_some((op, n));
+    }
+
+    /// The copy the last fault failed (`hit`), if one did.
+    pub fn hit(&self) -> Option<(Op, usize)> {
+        *self.hit.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Times the engine waited for a request with nothing to do (every
+    /// 100 ms while it waits): once it is past the count a test read after
+    /// a reply, what the engine does after a reply (a pool's `end_solo`
+    /// spill, the one cache's write, a batch's last write-behind) is done.
+    pub fn idles(&self) -> u64 {
+        self.idles.load(Relaxed)
+    }
+
+    /// The engine waits for a request with nothing to do (`idles`).
+    pub(super) fn idle(&self) {
+        self.idles.fetch_add(1, Relaxed);
+    }
+
+    /// What `off` said so far, each line with the counters then.
+    pub fn off_lines(&self) -> Vec<(String, Counters)> {
+        self.said.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// `off` said `line`; `m`: the counters now.
+    fn said(&self, line: String, m: &Metrics) {
+        let c = [&m.kv_ram_written, &m.kv_ram_restored, &m.kv_ram_hits].map(|c| c.load(Relaxed));
+        self.said
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((line, c));
+    }
+
+    /// A copy for `op` into or out of slot `slot` is to be made: Err if it
+    /// is the one armed.
+    fn fault(&self, op: Op, slot: usize) -> Result<(), String> {
+        let mut a = self.armed.lock().unwrap_or_else(|p| p.into_inner());
+        let Some((o, n)) = a.as_mut() else {
+            return Ok(());
+        };
+        if *o != op {
+            return Ok(());
+        }
+        *n -= 1;
+        if *n > 0 {
+            return Ok(());
+        }
+        *a = None;
+        *self.hit.lock().unwrap_or_else(|p| p.into_inner()) = Some((op, slot));
+        Err(format!("{FAULT}: a copy for a {}", op.what()))
+    }
+}
+
 /// The page store and, per sequence (a pool slot, or the one cache), the
 /// keys of the whole pages of what it holds that are stored, in order. A
 /// sequence's last stored page is held in the store (so a chain a slot is
@@ -173,6 +309,15 @@ impl<P> Tier<P> {
         if n > self.keys[s].len() {
             self.set_keys(s, ks[..n].to_vec());
         }
+    }
+
+    /// Tests: a copy for `op` (of slot `slot`) is to be made; Err instead
+    /// if a fault was armed for it (`Faults`).
+    #[cfg(test)]
+    fn fault(&self, op: Op, slot: usize) -> Result<(), String> {
+        self.metrics
+            .as_ref()
+            .map_or(Ok(()), |m| m.tier_faults.fault(op, slot))
     }
 
     fn publish(&self, written: usize, restored: usize) {
@@ -413,6 +558,10 @@ pub(super) struct PoolTier {
     arena: Arena,
     /// The slot the write-behind looks at first next (round robin).
     next: usize,
+    /// Tests: what `write`'s copies are for (`Faults`): a spill, unless
+    /// `write_some` (the write-behind) set it for the call.
+    #[cfg(test)]
+    op: Op,
 }
 
 impl PoolTier {
@@ -441,7 +590,13 @@ impl PoolTier {
             return Ok(None);
         }
         let arena = Arena::new(net, page, most, how, log)?;
-        let p = PoolTier { t, arena, next: 0 };
+        let p = PoolTier {
+            t,
+            arena,
+            next: 0,
+            #[cfg(test)]
+            op: Op::Spill,
+        };
         p.publish_pinned();
         Ok(Some(p))
     }
@@ -482,6 +637,9 @@ impl PoolTier {
         held: &[u32],
         most: usize,
     ) -> Result<usize, String> {
+        // Tests: what its copies are for (a spill, but in `write_some`).
+        #[cfg(test)]
+        let op = std::mem::replace(&mut self.op, Op::Spill);
         let mut copied = 0;
         let whole = held.len() / PAGE;
         while self.t.stored(s) < whole && copied < most {
@@ -501,6 +659,12 @@ impl PoolTier {
                 break;
             };
             let (buf, at) = self.arena.at(a);
+            // Tests: an injected fault fails the copy instead (`Faults`).
+            #[cfg(test)]
+            if let Err(e) = self.t.fault(op, s) {
+                self.arena.free.push(a);
+                return Err(e);
+            }
             if let Err(e) = net.page_out(pool, s, i, buf, at) {
                 self.arena.free.push(a);
                 return Err(e);
@@ -551,6 +715,11 @@ impl PoolTier {
             return Ok(false);
         };
         let (buf, at) = self.arena.at(a);
+        #[cfg(test)]
+        if let Err(e) = self.t.fault(Op::Spill, usize::MAX) {
+            self.arena.free.push(a);
+            return Err(e);
+        }
         if let Err(e) = net.page_out_id(pool, page, buf, at) {
             self.arena.free.push(a);
             return Err(e);
@@ -581,6 +750,10 @@ impl PoolTier {
         let n = held.len();
         for k in 0..n {
             let s = (self.next + k) % n;
+            #[cfg(test)]
+            {
+                self.op = Op::WriteBehind;
+            }
             left -= self.write(net, pool, s, &held[s], left)?;
             if left == 0 {
                 self.next = s;
@@ -622,6 +795,11 @@ impl PoolTier {
             // The whole page goes back, rows below `have` too (the same
             // bytes): #164's copy-on-write precondition, page `i` must be
             // this slot's alone (a shared partial page is copied first).
+            #[cfg(test)]
+            if let Err(e) = self.t.fault(Op::Restore, s) {
+                res = Err(e);
+                break;
+            }
             res = net.page_in(pool, s, i, buf, at);
             if res.is_err() {
                 break;
@@ -668,6 +846,8 @@ impl CacheTier {
             return Ok(());
         }
         let mut img = Vec::with_capacity((to - from) * self.t.page);
+        #[cfg(test)]
+        self.t.fault(Op::WriteBehind, 0).map_err(io::Error::other)?;
         net.kv_save(cache, from * PAGE, to * PAGE, &mut img)?;
         let mut copied = 0;
         for (i, b) in (from..to).zip(img.chunks_exact(self.t.page)) {
@@ -715,6 +895,8 @@ impl CacheTier {
                 .collect(),
             at: 0,
         };
+        #[cfg(test)]
+        self.t.fault(Op::Restore, 0).map_err(io::Error::other)?;
         net.kv_load(cache, from * PAGE, ks.len() * PAGE, &mut src)?;
         self.t.adopt_held(0, &ks, ks.len() * PAGE);
         self.t.publish(0, ks.len() * PAGE - have);

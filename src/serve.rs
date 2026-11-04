@@ -813,9 +813,8 @@ impl<'a> Engine<'a> {
                 t.write(self.net, &self.cache, &self.hist)
             })
         {
-            eprintln!("axon serve: --cache-ram: {e}; off from here");
             self.tier = None;
-            self.metrics.kv_ram_off();
+            tier::off("write-behind", &e.to_string(), Some(&*self.metrics));
         }
         self.publish_free();
         r
@@ -868,9 +867,8 @@ impl<'a> Engine<'a> {
                 }
                 Err(e) => {
                     // The cache's rows past `reuse` are unknown now: forget them.
-                    eprintln!("axon serve: --cache-ram: {e}; off from here");
                     self.tier = None;
-                    self.metrics.kv_ram_off();
+                    tier::off("restore", &e.to_string(), Some(&*self.metrics));
                 }
             }
         }
@@ -1509,6 +1507,9 @@ fn engine(
             b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
+            // Tests: nothing to do, a request's tail included (#172).
+            #[cfg(test)]
+            e.metrics.tier_faults.idle();
             match jobs.recv_timeout(Duration::from_millis(100)) {
                 Ok(job) => waiting.push_back(job),
                 Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => continue,
@@ -2145,6 +2146,11 @@ impl Server {
     /// a response (`Hold`), until it is turned off.
     pub fn hold(&self, on: bool) {
         self.sh.hold.set(on);
+    }
+
+    /// The KV RAM tier's fault hook (`tier::Faults`).
+    pub fn tier_faults(&self) -> &tier::Faults {
+        &self.sh.metrics.tier_faults
     }
 }
 

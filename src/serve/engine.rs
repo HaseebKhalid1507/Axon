@@ -725,21 +725,22 @@ impl<'a, 't> Batch<'a, 't> {
         };
         match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
             Ok(_) => t.t.truncate(s, keep / PAGE),
-            Err(e) => self.tier_failed(&e),
+            Err(e) => self.tier_failed("spill", &e),
         }
     }
 
-    /// The tier failed (`e`): it is off from here, as the no-pool path's;
+    /// The tier failed (`e`, in `what`): it is off from here, as the no-pool path's;
     /// the slots' rows are untouched (what it copied in is only trusted
     /// once a restore succeeded), so serving goes on as with
-    /// `--cache-ram 0`.
-    fn tier_failed(&mut self, e: &str) {
-        eprintln!("axon serve: --cache-ram: {e}; the KV RAM tier is off from here");
-        // Dropped first: its arena is freed, then /metrics says so.
+    /// `--cache-ram 0`. Anything that can reach `spill` (`reclaim`,
+    /// `make_room`, ...) can call this and leave `self.tier` None: a caller
+    /// that held the tier before such a call takes it again after, never
+    /// `expect`s it (#172: `restore` after `make_room` did, and exited).
+    fn tier_failed(&mut self, what: &str, e: &str) {
+        // Dropped first: its arena is freed, then stderr and /metrics say
+        // so.
         self.tier = None;
-        if let Some(m) = &self.metrics {
-            m.kv_ram_off();
-        }
+        super::tier::off(what, e, self.metrics.as_deref());
     }
 
     /// The tier's write-behind: `bytes` of copies of the slots' unstored
@@ -749,7 +750,7 @@ impl<'a, 't> Batch<'a, 't> {
             return;
         };
         if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
-            self.tier_failed(&e);
+            self.tier_failed("write-behind", &e);
         }
     }
 
@@ -777,7 +778,8 @@ impl<'a, 't> Batch<'a, 't> {
     /// last token): copy in the rest of the longest prefix of it the tier
     /// stores (as far as the slot gets pages for it; idle prefixes give
     /// theirs up, as for a feed). The positions it holds after; `held`
-    /// says so.
+    /// says so. A tier error on the way (the copy, or a spill making room)
+    /// turns the tier off, and the slot keeps `have`.
     fn restore(&mut self, slot: usize, prompt: &[u32], have: usize) -> Result<usize, String> {
         let Some(t) = self.tier.as_mut() else {
             return Ok(have);
@@ -793,10 +795,14 @@ impl<'a, 't> Batch<'a, 't> {
                 to = self.pages().map_or(0, |p| p.held[slot]).min(to);
             }
         }
-        let t = self.tier.as_mut().expect("on");
+        // A spill that made room (`reclaim`) may have failed: the tier is
+        // off, and the slot keeps `have`, as after a failed restore (#172).
+        let Some(t) = self.tier.as_mut() else {
+            return Ok(have);
+        };
         if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
             // The slot keeps `have` (its rows past it are fed again).
-            self.tier_failed(&e);
+            self.tier_failed("restore", &e);
             return Ok(have);
         }
         if to * PAGE <= have {

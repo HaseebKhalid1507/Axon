@@ -258,6 +258,11 @@ pub struct Metrics {
     /// Page-locked host memory the tier has taken (a pool's; the CPU's
     /// pages are ordinary memory: 0).
     pub kv_ram_pinned: AtomicU64,
+    /// Tests: the KV RAM tier's fault hook (#172). Not a metric: it rides
+    /// here because this is the one handle a test's server and the
+    /// engine's tier share.
+    #[cfg(test)]
+    pub tier_faults: super::tier::Faults,
 }
 
 impl Metrics {
@@ -298,6 +303,8 @@ impl Default for Metrics {
             kv_ram_restored: AtomicU64::new(0),
             kv_ram_hits: AtomicU64::new(0),
             kv_ram_pinned: AtomicU64::new(0),
+            #[cfg(test)]
+            tier_faults: Default::default(),
             sched: Mutex::default(),
         }
     }
