@@ -1,0 +1,28 @@
+[axon-run 08:47:40] submitted 1104-084740-21fb by /home/haseeb/.cache/axon-feedanat: /home/haseeb/.cache/axon-feedanat/bin/axon-test-7b4e1ef --ignored --exact cuda::qwen2::slots::tests::pool_feed_anatomy --nocapture --test-threads 1
+[axon-run 08:51:04] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 08:51:04] scope axon-job-1104-084740-21fb-1793800264.scope in app-axonjobs.slice: MemoryMax 18172 MB, MemoryHigh 16354 MB, no swap, oomd pressure kill 80% (claim 10367 MB): an OOM here kills only this job
+[axon-run 08:51:04] job 1104-084740-21fb -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-084740-21fb-1793800264 --slice=app-axonjobs.slice -p MemoryMax=18172M -p MemoryHigh=16354M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-feedanat/bin/axon-test-7b4e1ef --ignored --exact cuda::qwen2::slots::tests::pool_feed_anatomy --nocapture --test-threads 1
+axon-q 08:51:05 start slot 16-23: /home/haseeb/.cache/axon-feedanat/bin/axon-test-7b4e1ef --ignored --exact cuda::qwen2::slots::tests::pool_feed_anatomy --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_feed_anatomy ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+feed anatomy: /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs), pass max 1152, paged true
+ANAT | depth | n | wall ms | enq ms | wait ms | graph ms | ev ms | gemm ms | attn ms | other ms | launch+gaps ms (wall - graph) |
+ANAT | 0 | 16 | 3.854 | 0.431 | 3.424 | 3.835 | 5.037 | 3.894 | 0.582 | 0.560 | 0.019 |
+ANATSEG depth 0 n 16: embed 0.008, rope 0.005, rmsnorm 0.375, k 0.171, v6 0.147, qkv 0.204, rope_kv 0.126, attn 0.287, combine 0.169, wo 0.336, gate 1.638, gate_up 0.065, swiglu 0.173, down6 0.721, down 0.064, down4 0.549
+ANAT | 0 | 64 | 4.979 | 0.474 | 4.488 | 4.878 | 6.893 | 5.462 | 0.710 | 0.720 | 0.101 |
+ANATSEG depth 0 n 64: embed 0.008, rope 0.006, rmsnorm 0.476, q 0.405, k 0.403, v6 0.237, qkv 0.099, rope_kv 0.197, attn 0.317, combine 0.196, wo 0.387, gate 0.099, gate_up 1.984, swiglu 0.231, down6 0.877, down 0.099, v4 0.207, down4 0.664
+ANAT | 0 | 512 | 25.057 | 0.485 | 25.202 | 24.924 | 25.781 | 22.578 | 1.629 | 1.573 | 0.133 |
+ANATSEG depth 0 n 512: embed 0.022, rope 0.010, rmsnorm 0.823, q 1.849, k 0.420, v6 0.243, qkv 0.080, rope_kv 0.382, attn 1.003, combine 0.245, wo 1.309, gate 0.082, gate_up 10.858, swiglu 0.718, down6 4.397, down 0.082, v4 0.210, down4 3.048
+ANAT | 1000 | 16 | 3.776 | 0.431 | 3.330 | 3.734 | 4.912 | 3.710 | 0.641 | 0.562 | 0.041 |
+ANATSEG depth 1000 n 16: embed 0.006, rope 0.005, rmsnorm 0.377, k 0.171, v6 0.147, qkv 0.203, rope_kv 0.124, attn 0.345, combine 0.172, wo 0.309, gate 1.551, gate_up 0.063, swiglu 0.175, down6 0.681, down 0.063, down4 0.521
+ANAT | 1000 | 64 | 6.137 | 0.484 | 5.662 | 6.055 | 7.393 | 5.055 | 1.752 | 0.586 | 0.082 |
+ANATSEG depth 1000 n 64: embed 0.012, rope 0.006, rmsnorm 0.378, q 0.355, k 0.361, v6 0.223, qkv 0.064, rope_kv 0.140, attn 1.483, combine 0.130, wo 0.332, gate 0.064, gate_up 1.920, swiglu 0.190, down6 0.854, down 0.065, v4 0.179, down4 0.639
+ANAT | 1000 | 512 | 27.638 | 0.489 | 26.526 | 26.695 | 27.719 | 22.145 | 4.045 | 1.529 | 0.943 |
+ANATSEG depth 1000 n 512: embed 0.023, rope 0.010, rmsnorm 0.795, q 1.403, k 0.401, v6 0.235, qkv 0.064, rope_kv 0.360, attn 3.459, combine 0.226, wo 1.306, gate 0.065, gate_up 10.922, swiglu 0.702, down6 4.425, down 0.065, v4 0.200, down4 3.058
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 817 filtered out; finished in 3.70s
+
+[axon-run 08:51:08] exit 0 after 3.8s (host bella)
+[axon-run 08:51:11] EXPECT ok: output matches /^ANAT \| 1000 \| 512 \|/
