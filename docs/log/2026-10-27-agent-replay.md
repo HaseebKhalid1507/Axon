@@ -7,8 +7,13 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
   (the chat-template bug, below).
 - **Rule A, f16: fails, so B/C stay.** q8 cannot change that under the combination pre-registered below.
 - **q8 board: done** (job `1027-083752-1e62`). Rule A passes on q8, but the pre-registered combination needs both KV
-  types, so the **combined verdict is: B/C are NOT deprioritised.** ollama q8 speed 1 is rerunning (all 3 rounds
-  were tainted).
+  types, so the **combined verdict is: B/C are NOT deprioritised.**
+- **ollama q8 speed 1: rerun done** (job `1027-145644-71fd`, 3 clean rounds; all 3 board rounds were tainted). At
+  speed 1 q8, Axon leads ollama on every latency metric; table below.
+- **Merged with main `e04b808` on 11-04** (no engine change in this PR). The harness was re-smoked against main's
+  Axon: axon + ollama 0.40.13, the 1.5B, one short cell (jobs in the PR body). The board numbers stay as measured
+  at `d8a296c`:
+  the 3-engine boards (~220–240 min each) were not rerun.
 
 ## What landed
 - **`scripts/agent_trace.py`**: Synaps logs → a numbers-only trace.
@@ -37,6 +42,11 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
 - **A new subagent's shared prefix:** p50 6,006 (p25 0, p75 6,363).
 
 ## Cell, engines and how §1.3 is measured
+- **Model:** Qwen2.5-7B-Instruct Q4_K_M from **bartowski/Qwen2.5-7B-Instruct-GGUF**, file
+  `Qwen2.5-7B-Instruct-Q4_K_M.gguf`, sha256 `65b8fcd92af6…`, 4,683,074,240 B (the HF lfs oid matches; Qwen's own
+  GGUF repo ships only split `q4_k_m-0000{1,2}-of-00002` files, with other hashes). ollama's `axon-q7` names the same
+  blob (all 8 ollama engine logs of 10-27 load `sha256-65b8fcd92af6…`); since 11-04 the board asserts it
+  (`ollama_check`, below).
 - **Cell agent-32k:**
   - Scale 0.15, clip 32,768, taken from the 10-min trace window with the most sessions: 174 requests, 20 sessions,
     13 new, 7 primed (133k tokens), prompt p50 17.2k.
@@ -200,6 +210,32 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
   - Checked by `agent_board_kill_smoke.sh`.
 - **ollama's chat template** (above).
 - **The ideal-cache hit** is now assigned at send time, not at thread start (≤ 0.04 pp on f16).
+- **11-04, ollama 0.40.13:** bella's ollama was upgraded from 0.40.6 on 10-31 at 15:26 (pacman log: 0.40.6 had
+  been installed since 10-20). The new version migrates its model
+  store on first use, creating `manifests-v2`. The board's own `ollama serve` runs as the user, and pointed
+  `OLLAMA_MODELS` at the system store `/var/lib/ollama` (owned by the ollama user, mode 755). Every ollama start
+  then failed its warm-up with `HTTP 500: mkdir /var/lib/ollama/manifests-v2: permission denied` (kill smoke
+  `1104-090227-04aa`; the axon and llama-server cases passed).
+  - **Fix:** without `--ollama-models`, the board builds a user-owned store in `OUT/ollama-models` (`ollama_mirror`).
+    Its `blobs/` holds per-file symlinks into the system store's blobs, so no GGUF is copied and anything ollama
+    writes stays in the mirror; the manifests are copied.
+    - Before any engine starts, `ollama_check` must pass on the store ollama gets (the mirror, or an explicit
+      `--ollama-models`). It finds the manifest the way ollama does (`manifest/paths.go` `resolveManifestPath`,
+      the same at tag v0.40.13 as on main): `manifests-v2/ollama.com/<ns>/<model>/<tag>` first, then
+      `manifests/registry.ollama.ai/...` and `manifests/ollama.com/...`. No manifest fails the board. So do a
+      second manifest for the name that names other weights (a stale v1 entry next to a v2 one), a missing blob,
+      and a weights layer (`application/vnd.ollama.image.model`) whose digest isn't `sha256(--model)`: axon and
+      llama-server get `--model` itself, so all three engines provably run the same file.
+    - The mirror is per board, so it is never stale and two concurrent boards never share one.
+    - The system store is only read; it stays the system service's.
+  - **Recorded:** the ollama version, read from `/api/version`, goes into each run's config and into `meta.json`
+    (`engine_versions`, `ollama_models`). `meta.json` also records `model_sha256` (`--model`, hashed once per board:
+    4.7 s for the 7B), `ollama_model` (the manifest ollama loads and its weights digest) and `binaries` (sha256 of
+    the axon and llama-server binaries).
+  - **The 10-27 boards and the q8 rerun ran ollama 0.40.6.** A board run now gets 0.40.13: a different engine
+    build, so it is not comparable with the 10-27 ollama columns without a rerun.
+  - `agent_board_kill_smoke.sh` now skips other users' `/proc/*/environ` quietly. It used to print a
+    "Permission denied" line for each.
 
 
 ## Baseline board, q8 (MEASURED; job `1027-083752-1e62`, fixed harness 8588874 + 1ba07d9)
@@ -208,9 +244,11 @@ rounds. llama-server ran `-c 163840 -np 5`; ollama `NUM_PARALLEL=5`.
 
 **Prompt checks:**
 - Every engine passed the 512-word tokenization check.
-- 0 prompt-count mismatches on all 18 runs.
-- ollama's `prompt_eval_count` equals the sent prompt on every request (1,018 of 1,018), so the raw path sends
-  exactly our prompts.
+- Axon and llama-server: 0 prompt-count mismatches, every request checked during the run (174 of 174 per run).
+- **ollama: 0 of 174 checked during the run.** This board's harness (`1ba07d9`) had no ollama count yet, so its
+  "0 mismatches" is 0 of 0. Checked after the run from the saved `per_request`: `prompt_eval_count` equals the sent
+  prompt on 1,018 of 1,018 non-error requests, so the raw path sends exactly our prompts. From `46b9c0d` the board
+  checks it live, and `table` now prints a "prompt counts checked" row next to the mismatches.
 
 **The job:** rc 0, `BOARD END ok`. axon-run labelled the whole job TAINTED (FOREIGN_GPU max 49 %, mean 1.2 % over
 287 samples).
@@ -234,7 +272,8 @@ if the run's mean > 5 % or any sample > 25 %. Applied as written:
 - **Under the written rule:**
   - Tainted cells are **missing rounds**, not averaged in.
   - Axon is n = 3 at both speeds; llama-server is n = 2 at both (r1, r2); ollama s4 is n = 3.
-  - **ollama s1 has no clean round.** A targeted rerun of only that cell (3 rounds) is queued.
+  - **ollama s1 has no clean round.** A targeted rerun of only that cell (3 rounds) ran later; see "ollama q8
+    speed 1: the targeted rerun" below.
 - **A stricter reading** (any axon-run window over threshold taints the cell) would leave llama s1 with r2 only and
   s4 with r1 only (n = 1). It is not the written rule; it is stated so the reader can see the difference. Rule A
   reads only Axon, which is clean under both.
@@ -259,40 +298,80 @@ if the run's mean > 5 % or any sample > 25 %. Applied as written:
   common prefix by shifting them (not bit-reproducible, per its README), so it computes less than the prefix ideal.
   The clamped share is 0.73 %.
 
+### ollama q8 speed 1: the targeted rerun (MEASURED; job `1027-145644-71fd`)
+- **What ran:** `agent_replay.py board --engines ollama --kv q8 --speeds 1 --rounds 3 --round-offset 3` (rounds
+  numbered r3–r5), harness **`46b9c0d`**, the same trace, model blob and ollama 0.40.6 as the board.
+  - The harness: the job read the live worktree at 17:59, after `46b9c0d` (14:58). Each round has
+    `prompt_checked` 170, which only `46b9c0d`'s ollama count gives (`d7f5fd3` returns none for ollama, as the
+    board's 0 shows). Its gate-log set keeps the name it was published under, `agent-a-d7f5fd3-rerun-q8-ollama-s1`.
+    From 11-04, `agent_board.sh` prints the harness HEAD at start.
+  - Same KV budget as the board: Axon q8 r0's pool, 190,336 tokens, which gives `NUM_PARALLEL=5`, 163,840 tokens.
+  - 29/29 layers on the GPU; the 512-word tokenization check gave 512 tokens.
+  - bella, `--timing bella --low`, 17:59–18:32 on 10-27, rc 0, `BOARD END ok`.
+- **Taint, by the written per-run rule** (harness `pmon`: TAINTED if mean > 5 % or max > 25 %):
+  - r3: mean 1.6 %, max 25 %. r4: mean 1.1 %, max 19 %. r5: mean 1.0 %, max 18 %.
+  - **All 3 rounds are clean.** r3's max sits exactly on the threshold; the rule is strictly greater than 25 %.
+  - axon-run's job-level sampler: FOREIGN_GPU max 20 %, mean 1.4 % over 353 samples. Not TAINTED.
+  - **The stricter reading** (any axon-run window over the threshold taints its round, as the board section reads
+    it): two windows have mean > 5 %, 18:18:07 (6.8 %, in r4: 18:10:40–18:21:30) and 18:30:29 (6.2 %, in r5:
+    18:21:34–18:32:24). That leaves r3 alone, and the conclusion holds on r3: ollama 5.18 / 0.526 / 0.394 s
+    (TTFT-new / resume / turn p50), 17.8 tok/s goodput, ITL p99 214 ms, against Axon's 4.14 / 0.140 / 0.109 s,
+    20.7 tok/s, 119 ms.
+- **Prompts:** 174 requests per round; 0 prompt-count mismatches, 170 of 174 checked per round (the other 4 are the
+  aborts below).
+- **Errors:** 4 per round, all ollama's own "token repeat limit reached" aborts (the same guard as on the board).
+  From `d7f5fd3` on they keep their TTFT and ITL in the latency stats and add 0 to goodput.
+- **What it shows** (speed 1 q8, medians; Axon from the board's clean rounds r0–r2):
+  - TTFT-new p50: Axon 4.14 s vs ollama 5.18 s.
+  - TTFT-turn p50: 0.109 s vs 0.344 s.
+  - TTFT-resume p50: 0.140 s vs 0.526 s. The 2–10 min bucket: 0.076 s vs 5.47 s.
+  - ITL p99: 119 ms vs 202 ms.
+  - Goodput: 20.7 vs 17.6 tok/s.
+  - warm/GB: 2.55 vs 2.4.
+  - Axon's reply md5 is stable over rounds; ollama's is not (3 distinct).
+- **Caveats:**
+  - **Not interleaved with Axon.** The rerun ran 3–5 h after the board's Axon rounds, on the same host, binaries,
+    trace and KV budget. It departs from the interleaved-rounds rule, and the table says so.
+  - **Abort accounting differs between ollama's columns.** The speed-1 rerun counts aborted requests in latency
+    (`d7f5fd3`). The board's speed-4 cells dropped them, within the bounds stated in "ollama's engine-side aborts".
+
 ### Board q8, clean rounds only (`agent_replay.py table --clean-only`)
+Generated by `agent_replay.py table --clean-only board-q8-1027-122343 board-q8-rerun-ollama-s1-1027-175941`: the
+board's clean rounds plus the ollama speed-1 rerun's rounds r3–r5 (job `1027-145644-71fd`, next section). The
+ollama speed-1 column is the rerun; ollama speed 4 is the board's.
 
 **speed 1** (median of rounds; [min–max])
 
-| metric | axon q8 (n=3: r0,1,2) | llama q8 (n=2: r1,2) |
-|---|---|---|
-| TTFT-new p50 s | 4.14 [4.13–4.23] | 9.51 [8.52–10.5] |
-| TTFT-new p99 s (max when n < 100) | 7.38 [7.38–7.4] | 52.8 [49.2–56.4] |
-|   n new | 13 [13–13] | 13 [13–13] |
-| TTFT-resume p50 s | 0.14 [0.136–0.142] | 0.798 [0.768–0.829] |
-| TTFT-resume p99 s (max when n < 100) | 5.57 [5.38–5.59] | 21.3 [16.3–26.3] |
-|   n resume | 34 [34–34] | 34 [34–34] |
-| resume 30s-2m p50 | 0.182 [0.18–0.194] | 0.82 [0.81–0.829] |
-|   n 30s-2m | 29 [29–29] | 29 [29–29] |
-| resume 2-10m p50 | 0.076 [0.076–0.081] | 0.8 [0.768–0.833] |
-|   n 2-10m | 4 [4–4] | 4 [4–4] |
-| resume >10m p50 | 0.04 [0.038–0.04] | 0.226 [0.174–0.277] |
-|   n >10m | 1 [1–1] | 1 [1–1] |
-| TTFT-turn p50 s | 0.109 [0.107–0.115] | 0.647 [0.637–0.657] |
-|   n turn | 127 [127–127] | 127 [127–127] |
-| goodput tok/s | 20.7 [20.4–20.8] | 10.9 [9.98–11.8] |
-| ITL p99 ms | 119 [117–119] | 916 [858–974] |
-| warm/GB (GPU KV budget) | 2.55 [2.55–2.59] | 1.1 [1–1.2] |
-| re-prefill share (clamped) | 0.0127 [0.0127–0.0127] | 0.0075 [0.0075–0.0075] |
-| re-prefill share (net) | 0.0123 [0.0123–0.0123] | 0.0072 [0.0072–0.0072] |
-| preempted (axon /slots) | 0 [0–0] | n/a |
-| output tok/s | 33 [33–33] | 29.8 [29.7–30] |
-| replies short of max_tokens | 0 [0–0] | 0 [0–0] |
-| prompt-count mismatches | 0 [0–0] | 0 [0–0] |
-| wall s | 604 [604–604] | 668 [664–672] |
-| errors (all kinds) | 0 [0–0] | 0 [0–0] |
-|   engine aborts mid-stream (latency counted, no goodput) | n/a | n/a |
-| tainted runs | 0/3 | 0/2 |
-| reply md5 stable over rounds | yes | no (2) |
+| metric | axon q8 (n=3: r0,1,2) | llama q8 (n=2: r1,2) | ollama q8 (n=3: r3,4,5) |
+|---|---|---|---|
+| TTFT-new p50 s | 4.14 [4.13–4.23] | 9.51 [8.52–10.5] | 5.18 [4.94–5.23] |
+| TTFT-new p99 s (max when n < 100) | 7.38 [7.38–7.4] | 52.8 [49.2–56.4] | 10.5 [10.5–10.7] |
+|   n new | 13 [13–13] | 13 [13–13] | 13 [13–13] |
+| TTFT-resume p50 s | 0.14 [0.136–0.142] | 0.798 [0.768–0.829] | 0.526 [0.476–0.564] |
+| TTFT-resume p99 s (max when n < 100) | 5.57 [5.38–5.59] | 21.3 [16.3–26.3] | 15.4 [15.3–17.1] |
+|   n resume | 34 [34–34] | 34 [34–34] | 34 [34–34] |
+| resume 30s-2m p50 | 0.182 [0.18–0.194] | 0.82 [0.81–0.829] | 0.463 [0.421–0.503] |
+|   n 30s-2m | 29 [29–29] | 29 [29–29] | 29 [29–29] |
+| resume 2-10m p50 | 0.076 [0.076–0.081] | 0.8 [0.768–0.833] | 5.47 [5.45–5.54] |
+|   n 2-10m | 4 [4–4] | 4 [4–4] | 4 [4–4] |
+| resume >10m p50 | 0.04 [0.038–0.04] | 0.226 [0.174–0.277] | 7.33 [7.31–7.34] |
+|   n >10m | 1 [1–1] | 1 [1–1] | 1 [1–1] |
+| TTFT-turn p50 s | 0.109 [0.107–0.115] | 0.647 [0.637–0.657] | 0.344 [0.322–0.394] |
+|   n turn | 127 [127–127] | 127 [127–127] | 127 [127–127] |
+| goodput tok/s | 20.7 [20.4–20.8] | 10.9 [9.98–11.8] | 17.6 [17.1–17.8] |
+| ITL p99 ms | 119 [117–119] | 916 [858–974] | 202 [202–214] |
+| warm/GB (GPU KV budget) | 2.55 [2.55–2.59] | 1.1 [1–1.2] | 2.4 [2.4–2.6] |
+| re-prefill share (clamped) | 0.0127 [0.0127–0.0127] | 0.0075 [0.0075–0.0075] | n/a |
+| re-prefill share (net) | 0.0123 [0.0123–0.0123] | 0.0072 [0.0072–0.0072] | n/a |
+| preempted (axon /slots) | 0 [0–0] | n/a | n/a |
+| output tok/s | 33 [33–33] | 29.8 [29.7–30] | 31 [31–31.2] |
+| replies short of max_tokens | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| prompt-count mismatches | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| wall s | 604 [604–604] | 668 [664–672] | 602 [602–606] |
+| errors (all kinds) | 0 [0–0] | 0 [0–0] | 4 [4–4] |
+|   engine aborts mid-stream (latency counted, no goodput) | n/a | n/a | 4 [4–4] |
+| tainted runs | 0/3 | 0/2 | 0/3 |
+| reply md5 stable over rounds | yes | no (2) | no (3) |
 
 **speed 4** (median of rounds; [min–max])
 
@@ -346,8 +425,11 @@ if the run's mean > 5 % or any sample > 25 %. Applied as written:
   - Row C's fan-out gate is re-registered and is not exercised here.
 
 ## Next steps
-- **q8 ollama speed 1:** targeted rerun `1027-145644-71fd` (3 rounds, numbered r3–r5, `--timing bella --low
-  --max-min 55`).
+- **q8 ollama speed 1: done**, job `1027-145644-71fd` (3 clean rounds, r3–r5). It is folded into the q8 table above.
+- **ollama moved on:** bella runs ollama 0.40.13 since 10-31; every ollama number in this entry is 0.40.6. A
+  baseline comparison after 10-31 reruns ollama, and the board records the version.
+- **Main moved on:** this PR was merged with main `e04b808` on 11-04. Any B/C/D gate reruns the board on its own
+  base, main vs candidate, as the spec requires. These numbers are main `d8a296c`'s.
 - **f16, deferred:** the ollama column is non-comparable (chat template) and llama s4 is n = 1 clean. A targeted
   rerun (ollama s1 + s4 ×3 on the raw path, llama s4 ×2; ≈ 2 h) is needed only if a B/C gate compares against a
   baseline. Rule A doesn't.

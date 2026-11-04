@@ -24,6 +24,7 @@ mod ffi;
 pub mod qwen2;
 pub mod upload;
 
+use crate::numerics::Numerics;
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -81,6 +82,15 @@ const KERNELS: &str = kernels_src!();
 /// KERNELS + oss.cu (gpt-oss's windowed, sink attention): a module of its own, so the dense
 /// models' source, cache key and cubin stay as they are.
 const KERNELS_OSS: &str = kernels_src!(include_str!("oss.cu"));
+
+/// KERNELS + fp8.cu (FP8 checkpoints' fast-mode kernels, docs/design/fp8-weights.md D4): its own
+/// module, compiled with `F8_DEFINE`, only for an FP8 checkpoint in fast mode on sm >= 89; every
+/// other model and mode loads KERNELS, its source, options, cache key and cubin unchanged.
+const KERNELS_F8: &str = kernels_src!(include_str!("fp8.cu"));
+
+/// The define of the FP8 module (`KERNELS_F8`): decode.cu's `quant_warp` also stores its f32
+/// values for `quant_f8_tok`.
+pub(crate) const F8_DEFINE: &str = "-DAXON_F8";
 
 /// A CUDA device: its retained primary context and a stream to run on.
 /// Dropping it destroys the stream and releases the context; `DevBuf`s and
@@ -564,6 +574,54 @@ impl Gpu {
         })
     }
 
+    /// `host_alloc` without the zeroing: the bytes are whatever the driver
+    /// handed out (the RAM tier's arena, whose page slots are only ever
+    /// read by a copy after a copy has written them).
+    ///
+    /// # Safety
+    /// The caller never reads the bytes (`bytes_mut`, a copy to the
+    /// device) before something has written them.
+    pub unsafe fn host_alloc_uninit(&self, len: usize) -> Result<HostBuf<'_>, String> {
+        let mut p: *mut c_void = std::ptr::null_mut();
+        if len > 0 {
+            self.bind()?;
+            // SAFETY: context current; writes the host address.
+            let r = unsafe { (self.d.cuMemHostAlloc)(&mut p, len, 0) };
+            check(self.d, r, "cuMemHostAlloc")?;
+        }
+        Ok(HostBuf {
+            gpu: self,
+            p: p.cast(),
+            len,
+            pending: std::cell::Cell::new(false),
+        })
+    }
+
+    /// A handle that allocates page-locked host memory for this context
+    /// from another thread (`HostAllocator`).
+    pub fn host_allocator(&self) -> HostAllocator {
+        HostAllocator {
+            d: self.d,
+            ctx: self.ctx,
+        }
+    }
+
+    /// The `len` bytes at `addr`, from `HostAllocator::alloc` (not
+    /// zeroed), as a `HostBuf` of this context (freed on drop).
+    ///
+    /// # Safety
+    /// `addr` is a live `HostAllocator::alloc` of `len` bytes of this
+    /// context that nothing else owns; as `host_alloc_uninit`, its bytes
+    /// are not read before they are written.
+    pub unsafe fn adopt_host(&self, addr: usize, len: usize) -> HostBuf<'_> {
+        HostBuf {
+            gpu: self,
+            p: addr as *mut u8,
+            len,
+            pending: std::cell::Cell::new(false),
+        }
+    }
+
     /// Record everything `f` launches on the stream into a graph instead of
     /// running it. `f` must only launch kernels and make stream-ordered
     /// async copies (no sync, no alloc/free): those would end the capture
@@ -1006,6 +1064,49 @@ impl Drop for Graph<'_> {
             let _ = self.gpu.sync();
             // SAFETY: our executable graph, destroyed once, not running.
             unsafe { (self.gpu.d.cuGraphExecDestroy)(self.exec) };
+        }
+    }
+}
+
+/// Allocates page-locked host memory for one context from any thread
+/// (`Gpu::host_allocator`): the RAM tier pins its arena off the engine
+/// thread. The driver API is thread-safe; each call makes the context
+/// current on the calling thread first. Its allocations become `HostBuf`s
+/// on the context's own thread (`Gpu::adopt_host`), or are given back
+/// (`free`).
+pub struct HostAllocator {
+    d: &'static Driver,
+    ctx: CUcontext,
+}
+
+// SAFETY: a driver function table ('static, immutable) and a context
+// handle, which the CUDA driver API lets any thread make current.
+unsafe impl Send for HostAllocator {}
+
+impl HostAllocator {
+    /// `len` bytes of page-locked host memory (not zeroed): its address.
+    pub fn alloc(&self, len: usize) -> Result<usize, String> {
+        // SAFETY: ctx is the retained primary context of a live `Gpu` (the
+        // caller keeps it alive: serve leaks its `Gpu`).
+        let r = unsafe { (self.d.cuCtxSetCurrent)(self.ctx) };
+        check(self.d, r, "cuCtxSetCurrent")?;
+        let mut p: *mut c_void = std::ptr::null_mut();
+        // SAFETY: context current; writes the host address.
+        let r = unsafe { (self.d.cuMemHostAlloc)(&mut p, len, 0) };
+        check(self.d, r, "cuMemHostAlloc")?;
+        Ok(p as usize)
+    }
+
+    /// Give back an `alloc` that was never adopted.
+    ///
+    /// # Safety
+    /// `addr` is a live `alloc` of ours, adopted by nobody, with no copy
+    /// in flight.
+    pub unsafe fn free(&self, addr: usize) {
+        // SAFETY: as above; the caller's.
+        unsafe {
+            let _ = (self.d.cuCtxSetCurrent)(self.ctx);
+            (self.d.cuMemFreeHost)(addr as *mut c_void);
         }
     }
 }
@@ -1503,6 +1604,10 @@ pub struct Module<'g> {
     /// Compiled for sm_90a (hopper.cu's kernels are in it) and the driver
     /// has cuTensorMapEncodeTiled.
     hopper: bool,
+    /// Compiled with `FAST_DEFINE` (the fast numerics mode's module).
+    fast: bool,
+    /// Compiled with `F8_DEFINE` (`KERNELS_F8`: FP8 checkpoints' native kernels).
+    f8: bool,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1538,11 +1643,14 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 
 /// What decides the bits this device's kernels compute, as a string
 /// (kvsave's identity: a cache image is only loaded where it was made):
-/// the kernel sources and options, the device's architecture and
+/// the kernel sources and options (with `FAST_DEFINE` for a `fast`
+/// module: the fast numerics mode), the device's architecture and
 /// AXON_HOPPER (the sm_90a build). Not the driver or NVRTC version: the
-/// xarch audit measured the same bits across them (`driver_tag`).
-pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
-    let src = fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
+/// xarch audit measured the same bits across them (`driver_tag`). An exact
+/// module's tag is the one before the numerics modes (same options).
+pub fn numerics_tag(gpu: &Gpu, fast: bool) -> Result<String, String> {
+    let opts = mode_opts(&KERNEL_OPTS, fast_mode(fast));
+    let src = fnv128(&[KERNELS.as_bytes(), opts.join("\n").as_bytes()]);
     Ok(format!(
         "kernels {src:032x} {} hopper {}",
         gpu.info()?.arch(),
@@ -1867,6 +1975,8 @@ impl<'g> Module<'g> {
             Target::Cubin90a => 90,
         };
         m.hopper = target == Target::Cubin90a && ffi::tensor_map_encoder().is_some();
+        m.fast = opts.contains(&FAST_DEFINE);
+        m.f8 = opts.contains(&F8_DEFINE);
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
         m.arch = arch;
@@ -1953,9 +2063,20 @@ impl<'g> Module<'g> {
         self.hopper
     }
 
+    /// Whether it has fp8.cu's kernels (`KERNELS_F8`): an FP8 checkpoint's
+    /// matrices run natively on it.
+    pub fn f8(&self) -> bool {
+        self.f8
+    }
+
     /// Whether the decode kernels run the extra types (`Kernels::module_ext`).
     pub fn ext(&self) -> bool {
         self.ext
+    }
+
+    /// Whether it was built for the fast numerics mode (`FAST_DEFINE`).
+    pub fn fast(&self) -> bool {
+        self.fast
     }
 
     /// Turn programmatic dependent launch off for this module (tests: PDL
@@ -1981,6 +2102,8 @@ impl<'g> Module<'g> {
             arch: 0,
             ext: false,
             hopper: false,
+            f8: false,
+            fast: false,
         })
     }
 
@@ -2045,6 +2168,50 @@ pub(crate) const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
 /// decode kernels' type switch.
 const KERNEL_OPTS_EXT: [&str; 3] = ["--std=c++17", "--ftz=false", "-DAXON_EXT_TYPES"];
 
+/// The define every module of the fast numerics mode compiles with
+/// (`crate::numerics`; the ADR's §4.3), last in its options: so in the
+/// kernel cache's key (`Module::load_cached` hashes the options) and in
+/// `numerics_tag`, and a fast-set kernel is `#ifdef AXON_FAST` code. No
+/// source tests it yet (no fast kernel exists): today a fast module is the
+/// exact one's code under its own key. Exact modules' options are main's,
+/// unchanged, so their cache entries and bits are too.
+pub(crate) const FAST_DEFINE: &str = "-DAXON_FAST";
+
+/// `opts` for numerics mode `n`: as given for exact, `FAST_DEFINE` added
+/// for fast.
+fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
+    let mut v = opts.to_vec();
+    if n == Numerics::Fast {
+        v.push(FAST_DEFINE);
+    }
+    v
+}
+
+/// Whether `gpu` has e4m3 tensor cores (sm_89 and later, `mma.sync` e4m3).
+pub(crate) fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
+    let cc = gpu.info()?.cc;
+    Ok(cc.0 * 10 + cc.1 >= 89 && std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"))
+}
+
+/// `Numerics::Fast` if `fast`, else `Numerics::Exact`.
+fn fast_mode(fast: bool) -> Numerics {
+    if fast {
+        Numerics::Fast
+    } else {
+        Numerics::Exact
+    }
+}
+
+/// The MoE router module's options (`Kernels::moe_module`): debug builds
+/// add MOE_DEBUG (moe_router's trap), their own cache entry.
+fn moe_opts(base: &[&'static str]) -> Vec<&'static str> {
+    let mut opts = base.to_vec();
+    if cfg!(debug_assertions) {
+        opts.push("-DMOE_DEBUG");
+    }
+    opts
+}
+
 /// Whether `m` has a matrix type only `Kernels::module_ext` runs.
 pub fn needs_ext(m: &crate::gguf::Model) -> bool {
     use crate::quant::{IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q5_1, Q5_K};
@@ -2056,14 +2223,26 @@ pub fn needs_ext(m: &crate::gguf::Model) -> bool {
 impl<'m> Kernels<'m> {
     /// kernels.cu compiled for `gpu` (or from the cache): main's four
     /// quant types (Q4_K, Q6_K, Q5_0, Q8_0) in the decode kernels.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn module(gpu: &Gpu) -> Result<Module<'_>, String> {
         Ok(Module::load(gpu, KERNELS, &KERNEL_OPTS)?.0)
+    }
+
+    /// The FP8 module (`KERNELS_F8`, fast, `F8_DEFINE`): fp8.cu's kernels.
+    #[cfg(test)]
+    pub fn module_f8(gpu: &Gpu) -> Result<Module<'_>, String> {
+        let mut o = mode_opts(&KERNEL_OPTS, Numerics::Fast);
+        o.push(F8_DEFINE);
+        let mut m = Module::load(gpu, KERNELS_F8, &o)?.0;
+        m.f8 = true;
+        Ok(m)
     }
 
     /// `module` with every supported quant type in the decode kernels
     /// (AXON_EXT_TYPES). Same bits for the four (same code per type); a
     /// separate build so models without the extra types keep the smaller
     /// kernels.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn module_ext(gpu: &Gpu) -> Result<Module<'_>, String> {
         let mut m = Module::load(gpu, KERNELS, &KERNEL_OPTS_EXT)?.0;
         m.ext = true;
@@ -2074,12 +2253,9 @@ impl<'m> Kernels<'m> {
     /// models' module stays as it is. Debug builds compile it with
     /// MOE_DEBUG (moe_router's trap: a router with no eligible score),
     /// their own cache entry.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, include_str!("moe.cu"), &opts)?.0)
+        Ok(Module::load(gpu, include_str!("moe.cu"), &moe_opts(&KERNEL_OPTS))?.0)
     }
 
     /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
@@ -2087,49 +2263,70 @@ impl<'m> Kernels<'m> {
     /// moe.cu's router logits: the other modules stay as they are.
     /// Debug builds compile it with MOE_DEBUG (as `moe_module`), their
     /// own cache entry.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS_EXT.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
+        Ok(Module::load(gpu, MLA_KERNELS, &moe_opts(&KERNEL_OPTS_EXT))?.0)
     }
 
     /// `mla_module` with the reference kernels (`MLA_REF_KERNELS`; tests).
     #[cfg(test)]
     pub fn mla_ref_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut opts = KERNEL_OPTS_EXT.to_vec();
-        if cfg!(debug_assertions) {
-            opts.push("-DMOE_DEBUG");
-        }
-        Ok(Module::load(gpu, MLA_REF_KERNELS, &opts)?.0)
+        Ok(Module::load(gpu, MLA_REF_KERNELS, &moe_opts(&KERNEL_OPTS_EXT))?.0)
     }
 
     /// The router module MoE model `m` needs (`crate::moe::MoeQwen3`):
     /// `mla_module` for deepseek2, else `moe_module`.
+    #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn moe_module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if m.arch == "deepseek2" {
-            Self::mla_module(gpu)
-        } else {
-            Self::moe_module(gpu)
-        }
+        Self::moe_module_for_mode(gpu, m, Numerics::Exact)
+    }
+
+    /// `moe_module_for` in numerics mode `n` (`mode_opts`).
+    pub fn moe_module_for_mode<'g>(
+        gpu: &'g Gpu,
+        m: &crate::gguf::Model,
+        n: Numerics,
+    ) -> Result<Module<'g>, String> {
+        let (src, base) = match m.arch == "deepseek2" {
+            true => (MLA_KERNELS, &KERNEL_OPTS_EXT[..]),
+            false => (include_str!("moe.cu"), &KERNEL_OPTS[..]),
+        };
+        Ok(Module::load(gpu, src, &mode_opts(&moe_opts(base), n))?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type;
     /// gpt-oss's: KERNELS + oss.cu (`KERNELS_OSS`), with the extra types
     /// too if it has one (e.g. a Q4_0 attention requant).
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if m.arch == "gpt-oss" {
-            let ext = needs_ext(m);
-            let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
-            let mut md = Module::load(gpu, KERNELS_OSS, opts)?.0;
-            md.ext = ext;
-            Ok(md)
-        } else if needs_ext(m) {
-            Self::module_ext(gpu)
+        Self::module_for_mode(gpu, m, Numerics::Exact)
+    }
+
+    /// `module_for` in numerics mode `n`: exact's options are `module_for`'s
+    /// as they always were; fast's add `FAST_DEFINE` (its own cache entry).
+    pub fn module_for_mode<'g>(
+        gpu: &'g Gpu,
+        m: &crate::gguf::Model,
+        n: Numerics,
+    ) -> Result<Module<'g>, String> {
+        let ext = needs_ext(m);
+        // FP8 natively only in fast mode on sm >= 89 (e4m3 mma.sync); else
+        // the plain module, which runs the Q8_0 form (D1, ruling 4).
+        let f8 = crate::safetensors::is_fp8(m) && n == Numerics::Fast && f8_native_cc(gpu)?;
+        let src = if m.arch == "gpt-oss" {
+            KERNELS_OSS
+        } else if f8 {
+            KERNELS_F8
         } else {
-            Self::module(gpu)
+            KERNELS
+        };
+        let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
+        let mut o = mode_opts(opts, n);
+        if f8 {
+            o.push(F8_DEFINE);
         }
+        let mut md = Module::load(gpu, src, &o)?.0;
+        md.ext = ext;
+        Ok(md)
     }
 
     /// The kernels of `m`, which must be `Kernels::module`'s.

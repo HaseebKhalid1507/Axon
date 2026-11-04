@@ -888,6 +888,92 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     }
 }
 
+// A pool page (`pages::PAGE`, the attention block) and the RAM tier's /
+// kvsave's page are the same positions: `Batch::restore` counts the pool's
+// pages and the tier's as one unit, and `pool_page_io` moves one as the other.
+const _: () = assert!(PAGE == crate::kvsave::PAGE);
+
+impl<'g> CudaQwen2<'g> {
+    /// Image bytes of one page of `p`'s slots (`PAGE` positions, every
+    /// layer, kvsave's image layout: the RAM tier's page, `serve::tier`);
+    /// None: no image (a split's GPU half, deepseek2's MLA cache).
+    pub(crate) fn pool_page_bytes(&self, p: &CudaPool<'g>) -> Option<usize> {
+        crate::kvsave::KvIo::kv_ident(self, &p.c)?;
+        Some(PAGE * self.cache_row_bytes(&p.c))
+    }
+
+    /// Enqueue the copy of slot `slot`'s page `page` (positions
+    /// `page * PAGE..` + PAGE, which it holds) to `host` at `at`, or
+    /// (`to_dev`) from there into the slot: one strided copy per region, on
+    /// the stream, so ordered before any later work (a feed, a step, a
+    /// `release`'s table write and the reuse of its pages after it). Nothing
+    /// numeric runs: the bytes are the slot's (`Rows::page`).
+    pub(crate) fn pool_page_io(
+        &self,
+        p: &CudaPool<'g>,
+        slot: usize,
+        page: usize,
+        host: &mut HostBuf,
+        at: usize,
+        to_dev: bool,
+    ) -> Result<(), String> {
+        if slot >= p.slots || (page + 1) * PAGE > p.ctx {
+            return Err(format!(
+                "page {page} of slot {slot} (pool {} x {})",
+                p.slots, p.ctx
+            ));
+        }
+        let (base, tab) = match &p.pm {
+            None => (slot * p.ctx + page * PAGE, None),
+            Some(m) => match m.pages(slot).get(page) {
+                Some(&pg) => (0, Some(vec![pg])),
+                None => return Err(format!("slot {slot} holds no page {page}")),
+            },
+        };
+        let rows = super::kvio::Rows {
+            kv: &p.c.kv,
+            max_ctx: p.c.rows,
+            base,
+            len: PAGE,
+            tab,
+            regions: self.kv_regions(p.c.mode),
+            arrays: 2 * self.layers.len(),
+        };
+        rows.check(0, PAGE).map_err(|e| e.to_string())?;
+        rows.page(host, at, 0, PAGE, to_dev)
+    }
+
+    /// `pool_page_io` of the physical page `id` of a paged pool, whichever
+    /// slot holds it (a page evicted page by page: PR C's eviction hands
+    /// the RAM tier page ids, not slot positions). Plain pools have none.
+    pub(crate) fn pool_page_id_io(
+        &self,
+        p: &CudaPool<'g>,
+        id: u32,
+        host: &mut HostBuf,
+        at: usize,
+        to_dev: bool,
+    ) -> Result<(), String> {
+        let Some(m) = &p.pm else {
+            return Err("page ids: a plain pool has none".into());
+        };
+        if id as usize >= m.total() {
+            return Err(format!("page {id} of {}", m.total()));
+        }
+        let rows = super::kvio::Rows {
+            kv: &p.c.kv,
+            max_ctx: p.c.rows,
+            base: 0,
+            len: PAGE,
+            tab: Some(vec![id]),
+            regions: self.kv_regions(p.c.mode),
+            arrays: 2 * self.layers.len(),
+        };
+        rows.check(0, PAGE).map_err(|e| e.to_string())?;
+        rows.page(host, at, 0, PAGE, to_dev)
+    }
+}
+
 impl CudaPool<'_> {
     /// Slot `slot`'s first table entry (paged), or first row (plain): a
     /// `Place::Seq` / `RowAt` base.
@@ -2210,7 +2296,22 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            let mut p = net.pool(slots, ctx).unwrap();
+            // The case needs >= ATT_NB_MIN slots of `ctx`: a (model, cache)
+            // case whose pool the card can't hold (a 6 GB one: Qwen3-0.6B f16
+            // needs 5.07 GiB for 40 x 1152, avante job 1027-090606-5804) is
+            // skipped, said on stderr (seen with --nocapture only); the other
+            // cases still run. It can't shrink the case.
+            let mut p = match net.pool(slots, ctx) {
+                Ok(p) => p,
+                Err(e) if e.contains("of GPU memory") => {
+                    eprintln!(
+                        "skipping pool_wide_long_steps_match_solo case {} {mode:?} on this GPU: {e}",
+                        m.arch
+                    );
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
             // Slot of request i: reversed.
             let slot_of = |i: usize| slots - 1 - i;
             for (i, pr) in prompts.iter().enumerate() {
@@ -2275,6 +2376,11 @@ mod tests {
                     m.arch
                 );
             }
+            // With --nocapture a gate can count the cases run and skipped.
+            eprintln!(
+                "pool_wide_long_steps_match_solo case {} {mode:?}: ran, {slots} x {ctx}",
+                m.arch
+            );
         }
     }
 
@@ -2284,7 +2390,8 @@ mod tests {
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
     /// request's results and tokens == running it alone, under each
-    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape); by shape up to 128
+    /// rows (WP-A4).
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2298,7 +2405,7 @@ mod tests {
             .into_iter()
             .flatten()
             .collect();
-        let (slots, ctx, steps) = (64usize, 256usize, 2usize);
+        let (slots, ctx, steps) = (128usize, 256usize, 2usize);
         for m in ms {
             let mut net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
             let v = net.vocab;
@@ -2321,7 +2428,7 @@ mod tests {
                 // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
                 // doesn't apply there, so once).
                 let nbs: &[usize] = match vm {
-                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    0 => &[9, 12, 16, 17, 32, 33, 48, 64, 65, 96, 128],
                     _ => &[17, 33, 48, 64],
                 };
                 for &nb in nbs {
@@ -2676,6 +2783,310 @@ mod tests {
                 c * 1e3,
                 ns
             );
+        }
+    }
+
+    /// The RAM tier's copies (`pool_page_io`, `serve --cache-ram`): a
+    /// slot's whole pages copied out, the slot's rows then written over by
+    /// another prompt (its pages released and taken again: the copies are
+    /// ordered before), the pages copied into another slot (other physical
+    /// pages) and the rest of the prompt fed there: that slot's KV bytes and
+    /// greedy tokens == the request run alone, uninterrupted. f16 and q8;
+    /// plain, paged and shuffled pools; qwen2.5, qwen3 and gemma3 (f16: it
+    /// has no q8 GPU cache; its sliding-window layers keep every position).
+    #[test]
+    fn pool_pages_restore_exactly() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let mut ms = models();
+        ms.extend(crate::testutil::gemma3_model());
+        let steps = 20;
+        for m in ms {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 320;
+                let net = match CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false) {
+                    Ok(n) => n,
+                    // gemma3 has no q8 cache on the GPU (refused at load).
+                    Err(e) if m.arch == "gemma3" && kv != CacheKv::F16 => {
+                        assert!(e.contains("no q8 KV cache"), "{e}");
+                        continue;
+                    }
+                    Err(e) => panic!("{} {kv:?}: {e}", m.arch),
+                };
+                let v = net.vocab;
+                // 3 whole pages and 11 positions below the last token.
+                let prompt = ids(3 * PAGE + 12, 77, v);
+                let n = prompt.len();
+                let k = (n - 1) / PAGE;
+                let (want, hist, want_kv) = solo(&net, ctx, &prompt, Kind::Greedy, steps);
+                for lay in LAYS {
+                    let what = format!("{} {kv:?} {lay:?}", m.arch);
+                    let mut p = pool_of(&net, 3, ctx, lay);
+                    net.feed_slot(&mut p, 2, &ids(70, 5, v), 0).unwrap();
+                    net.feed_slot(&mut p, 0, &prompt[..n - 1], 0).unwrap();
+                    let pb = net.pool_page_bytes(&p).expect("an image");
+                    assert_eq!(pb, PAGE * net.cache_row_bytes(&p.c));
+                    let mut host = g.host_alloc(k * pb).unwrap();
+                    for i in 0..k {
+                        match &p.pm {
+                            // Odd pages by their physical id (PR C's
+                            // page-level eviction), even ones by position.
+                            Some(m) if i % 2 == 1 => {
+                                let id = m.pages(0)[i];
+                                net.pool_page_id_io(&p, id, &mut host, i * pb, false)
+                            }
+                            _ => net.pool_page_io(&p, 0, i, &mut host, i * pb, false),
+                        }
+                        .unwrap();
+                    }
+                    match &p.pm {
+                        Some(m) => assert!(
+                            net.pool_page_id_io(&p, m.total() as u32, &mut host, 0, false)
+                                .is_err()
+                        ),
+                        None => assert!(net.pool_page_id_io(&p, 0, &mut host, 0, false).is_err()),
+                    }
+                    // Past what the slot holds: refused (paged), or past ctx.
+                    if p.pm.is_some() {
+                        assert!(net.pool_page_io(&p, 0, 4, &mut host, 0, false).is_err());
+                    }
+                    assert!(net.pool_page_io(&p, 0, 5, &mut host, 0, false).is_err());
+                    // Slot 0's rows go, and are written over.
+                    net.release(&mut p, 0, 0).unwrap();
+                    net.feed_slot(&mut p, 0, &ids(n, 9, v), 0).unwrap();
+                    // Restore into slot 1, feed the rest, decode.
+                    assert_eq!(net.reserve(&mut p, 1, k * PAGE).unwrap(), 0);
+                    for i in 0..k {
+                        net.pool_page_io(&p, 1, i, &mut host, i * pb, true).unwrap();
+                    }
+                    net.feed_slot(&mut p, 1, &prompt[k * PAGE..n - 1], k * PAGE)
+                        .unwrap();
+                    let mut h = prompt.clone();
+                    for (s, w) in want.iter().enumerate() {
+                        let row = SeqRow {
+                            token: h[h.len() - 1],
+                            pos: h.len() - 1,
+                            slot: 1,
+                            head: RowHead::Argmax,
+                        };
+                        let got = net.step_rows(&mut p, &[row]).unwrap();
+                        assert_eq!(&got[0], w, "{what}: step {s}");
+                        let RowOut::Pick(t) = got[0] else {
+                            unreachable!()
+                        };
+                        h.push(t);
+                    }
+                    assert_eq!(h, hist, "{what}: tokens");
+                    assert!(
+                        pool_bytes(&net, &p, 1, hist.len() - 1) == want_kv,
+                        "{what}: KV bytes"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Anatomy of a prompt feed pass (MEASURE, `--ignored --nocapture`;
+    /// the H100 prefill-anatomy session, spec pick-20261026-fable §(d)): a
+    /// chunk of n tokens fed into one slot of a paged pool at position
+    /// `depth` (as serve's `feed` does: `feed_slot`, one pass for n <= the
+    /// pool's pass), per (depth, n), medians of AXON_FEED_REPS (9) after 2
+    /// warm-ups, wall / graph / enqueue timed in turn every repetition:
+    /// - `wall`: `feed_slot` + sync (what serve's step pays);
+    /// - `enq`: host time to enqueue the pass (load_input + `pass_at`, no
+    ///   sync), and `wait` the sync after it;
+    /// - `graph`: the same pass captured in a CUDA graph (input loaded
+    ///   outside it) and replayed + sync: the kernels without host launches,
+    ///   the floor a graph-captured feed could reach (a bucketed scheme
+    ///   would also have to pass the position through a buffer); `wall -
+    ///   graph` = the launch + gap share;
+    /// - the per-kernel profile: one pass without graphs, an event after
+    ///   each segment (`pass_at`'s hook), summed by class: GEMM (q, k,
+    ///   v4/v6, qkv, wo, gate, gate_up, down, down4/down6), attention
+    ///   (rope_kv, attn, combine), other (embed, rope, rmsnorm, post_norm,
+    ///   swiglu, head); an unknown segment panics. `ev` is their total
+    ///   (event timeline, includes in-segment gaps).
+    ///
+    /// `AXON_STEP_MODEL` (the 0.5B by default), `AXON_FEED_N`
+    /// ("16,64,128,256,384,512,768"), `AXON_FEED_DEPTHS`
+    /// ("0,1000,2000,4000,6000"). Lines start with `ANAT` (one table row
+    /// per (depth, n)) and `ANATSEG` (every segment's ms).
+    #[test]
+    #[ignore]
+    fn pool_feed_anatomy() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        let list = |var: &str, def: &str| -> Vec<usize> {
+            std::env::var(var)
+                .unwrap_or(def.into())
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect()
+        };
+        let ns = list("AXON_FEED_N", "16,64,128,256,384,512,768");
+        let depths = list("AXON_FEED_DEPTHS", "0,1000,2000,4000,6000");
+        let reps = list("AXON_FEED_REPS", "9")[0];
+        let km = Kernels::module(&g).unwrap();
+        let nmax = *ns.iter().max().unwrap();
+        let ctx = (depths.iter().max().unwrap() + nmax + 64).next_multiple_of(64);
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        net.graphs = true;
+        let mut p = net.pool(1, ctx).unwrap();
+        let pass = p.pass_max();
+        let gi = g.info().unwrap();
+        eprintln!(
+            "feed anatomy: {} ({}), {} ({} SMs), pass max {pass}, paged {}",
+            std::env::var("AXON_STEP_MODEL").unwrap_or("default 0.5B".into()),
+            m.arch,
+            gi.name,
+            gi.sms,
+            p.c.tab.is_some()
+        );
+        // Every segment `pass_at` names on a dense pass (batch.rs `on(..)`),
+        // mapped explicitly: an unknown name panics rather than landing in
+        // "other" (v6/v4, down6/down4: the Q6_K / Q4_K products, the first
+        // rehearsal's misclassification).
+        let class = |seg: &str| match seg {
+            "q" | "k" | "v4" | "v6" | "qkv" | "wo" | "gate" | "gate_up" | "down" | "down4"
+            | "down6" => 0,
+            "rope_kv" | "attn" | "combine" => 1,
+            "embed" | "rope" | "rmsnorm" | "post_norm" | "swiglu" | "head" => 2,
+            s => panic!("pool_feed_anatomy: unclassified segment {s:?}"),
+        };
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let toks: Vec<u32> = (0..ctx).map(|i| 1000 + (i * 7919 % 20000) as u32).collect();
+        eprintln!(
+            "ANAT | depth | n | wall ms | enq ms | wait ms | graph ms | ev ms | gemm ms | attn ms | \
+             other ms | launch+gaps ms (wall - graph) |"
+        );
+        for &depth in &depths {
+            if depth > 0 {
+                net.feed_slot(&mut p, 0, &toks[..depth], 0).unwrap();
+            }
+            for &n in ns.iter().filter(|&&n| n <= pass) {
+                let chunk = &toks[depth..depth + n];
+                // Pages for depth + n (and the rows the passes below rewrite).
+                net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                let base = p.base(0);
+                let place = Place::Seq { start: depth, base };
+                // The graph first: then wall, graph replay and enqueue are
+                // timed in turn every repetition (drift hits all three alike;
+                // wall - graph decides the launch share).
+                let b = p.c.b.as_mut().unwrap();
+                net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                g.sync().unwrap();
+                let c = &mut p.c;
+                let gr = g
+                    .capture(|| {
+                        net.pass_at(c, BatchIn::Loaded(n), place, Head::No, None, 0, &mut |_| {
+                            Ok(())
+                        })
+                    })
+                    .unwrap();
+                let (mut wall, mut graph) = (Vec::new(), Vec::new());
+                let (mut enq, mut wait) = (Vec::new(), Vec::new());
+                for i in 0..reps + 2 {
+                    let t = std::time::Instant::now();
+                    net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                    let w = t.elapsed().as_secs_f64() * 1e3;
+                    // The replay reads b.tokens: the chunk's, loaded above and
+                    // rewritten with the same tokens by every feed.
+                    let t = std::time::Instant::now();
+                    // SAFETY: the graph's buffers are the pool's and the
+                    // model's, alive and unmoved for its whole life here.
+                    unsafe { gr.launch().unwrap() };
+                    g.sync().unwrap();
+                    let gm = t.elapsed().as_secs_f64() * 1e3;
+                    let t = std::time::Instant::now();
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(n),
+                        place,
+                        Head::No,
+                        None,
+                        0,
+                        &mut |_| Ok(()),
+                    )
+                    .unwrap();
+                    let e = t.elapsed().as_secs_f64() * 1e3;
+                    g.sync().unwrap();
+                    if i >= 2 {
+                        wall.push(w);
+                        graph.push(gm);
+                        enq.push(e);
+                        wait.push(t.elapsed().as_secs_f64() * 1e3 - e);
+                    }
+                }
+                drop(gr);
+                let mut agg: Vec<(&str, f64)> = Vec::new();
+                for round in 0..3 {
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                    g.sync().unwrap();
+                    let mut evs = vec![("start", g.record().unwrap())];
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(n),
+                        place,
+                        Head::No,
+                        None,
+                        0,
+                        &mut |s| {
+                            evs.push((s, g.record()?));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                    if round < 2 {
+                        continue;
+                    }
+                    for i in 1..evs.len() {
+                        let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                        match agg.iter_mut().find(|a| a.0 == evs[i].0) {
+                            Some(a) => a.1 += ms,
+                            None => agg.push((evs[i].0, ms)),
+                        }
+                    }
+                }
+                let mut cls = [0.0f64; 3];
+                for (seg, ms) in &agg {
+                    cls[class(seg)] += ms;
+                }
+                let ev: f64 = cls.iter().sum();
+                let (w, gm) = (med(wall), med(graph));
+                eprintln!(
+                    "ANAT | {depth} | {n} | {w:.3} | {:.3} | {:.3} | {gm:.3} | {ev:.3} | {:.3} | \
+                     {:.3} | {:.3} | {:.3} |",
+                    med(enq),
+                    med(wait),
+                    cls[0],
+                    cls[1],
+                    cls[2],
+                    w - gm
+                );
+                let segs: Vec<String> = agg.iter().map(|(s, ms)| format!("{s} {ms:.3}")).collect();
+                eprintln!("ANATSEG depth {depth} n {n}: {}", segs.join(", "));
+            }
         }
     }
 }

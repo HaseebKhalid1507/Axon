@@ -5,6 +5,7 @@ use super::{
     MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, Server, Template, api::Message, api::Role, start,
 };
 use crate::lm::{Device, Lm};
+use crate::numerics::Numerics;
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
 use crate::{GenOpts, generate};
@@ -60,6 +61,9 @@ fn test_opts(path: &str, device: Device) -> Opts {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        cache_ram: super::tier::CacheRam::Bytes(0),
+        cache_ram_alloc: super::tier::Alloc::Thread,
+        numerics: Numerics::Exact,
     }
 }
 
@@ -506,14 +510,19 @@ fn serve_cuda_matches_gen() {
     serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
 }
 
-/// A ~2000-token greedy completion served one request at a time
+/// A ~1200-token greedy completion served one request at a time
 /// (`--parallel 1`: the real `Engine::job`, its prompt fed by
 /// `Lm::prompt_chunks`) == `axon gen`'s (one `prefill_logits`). The cut is
-/// asserted multi-pass and not the old fixed prefill_batch one on the
-/// reference net (same model and context as the server's).
+/// asserted on the reference net (same model and context as the server's):
+/// multi-pass, and not the old fixed prefill_batch cut. The prompt's
+/// length (asserted) is in max + 1 ..= max + max / 4 - 1 (1153..=1439 at
+/// the batch max 1152, 1025..=1279 at 1024), where no planner choice is
+/// the old cut on any GPU (the argument is on chat's
+/// `long_turn_matches_fresh_prefill_cuda`). It was ~2000 tokens, where the
+/// cut depends on the GPU's SMs.
 #[test]
 fn serve_cuda_long_prompt_matches_gen() {
-    let Some(_) = crate::testutil::gpu() else {
+    let Some(sms) = crate::testutil::gpu().map(|g| g.info().unwrap().sms) else {
         return;
     };
     let Some(p) = crate::testutil::model_path() else {
@@ -525,7 +534,7 @@ fn serve_cuda_long_prompt_matches_gen() {
     let tok = Tokenizer::from_gguf(&m);
     let mut prompt = String::from("A log of river readings.\n");
     let mut i = 0;
-    while tok.encode_prompt(&prompt).len() < 2000 {
+    while tok.encode_prompt(&prompt).len() < 1190 {
         prompt.push_str(&format!(
             "Day {i}: level {} cm, {} water, {} birds counted.\n",
             100 + i % 37,
@@ -547,7 +556,18 @@ fn serve_cuda_long_prompt_matches_gen() {
         let rs = net.prompt_chunks(n - 1, 0, &cache);
         eprintln!("{n} tokens: job feeds {rs:?}");
         assert!(rs.len() >= 2, "one pass: {rs:?}");
-        assert_ne!(rs, crate::lm::chunk_ranges(n - 1, net.prefill_batch()));
+        let (k, max) = (n - 1, net.prefill_batch());
+        assert!(
+            k > max && k - max < max / 4,
+            "{k} tokens, not in {}..{} (batch max {max}): see the doc",
+            max + 1,
+            max + max / 4
+        );
+        let old = crate::lm::chunk_ranges(k, max);
+        assert!(
+            crate::testutil::planner_cut_differs(&rs, &old, sms, &format!("{k} tokens")),
+            "the old prefill_batch cut, at a length no planner choice gives it"
+        );
         gen_text(&net, &tok, &prompt, 24)
     };
     drop(m);
@@ -2446,11 +2466,11 @@ fn pages_block_bounds_the_wait() {
 /// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy (the A/B's
 /// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; sjf at
 /// 32 slots lanes 2, at 128 slots 8, the model's budgets. The shipped
-/// defaults (no flags, no environment) are the A/B's measured `fifo60`
-/// arm, the whole `Sched` and the step: fifo, lanes 2 at any slot count,
-/// `--step-ms 60`, the cost model. The live "default" row follows the
-/// job's environment (AXON_ADMIT=sjf: 8 lanes at 128 slots; legacy if
-/// AXON_STEP_COST=legacy).
+/// defaults (no flags, no environment) are the H100 session's measured
+/// `sjf80` arm (#165's rule S), the whole `Sched` and the step:
+/// shortest-first, lanes slots/16 within 2..8, `--step-ms 80`, the cost
+/// model. The live "default" row follows the job's environment
+/// (AXON_ADMIT=fifo: 2 lanes at 128 slots; legacy if AXON_STEP_COST=legacy).
 #[test]
 fn serve_rollback_flags_reach_the_engine() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2463,22 +2483,22 @@ fn serve_rollback_flags_reach_the_engine() {
         ("roll", 32, 2.0, 1.0),
         ("sjf50", 32, 2.0, 0.0),
         ("sjf50", 128, 8.0, 0.0),
-        ("default", 128, 2.0, -1.0),
+        ("default", 128, 8.0, -1.0),
     ] {
         // The job's environment decides the "default" row (axon-run passes
         // AXON_*: the sjf and rollback gates run this test too).
-        let fifo = std::env::var("AXON_ADMIT").map_or(true, |v| v != "sjf");
+        let fifo = std::env::var("AXON_ADMIT").is_ok_and(|v| v.trim().eq_ignore_ascii_case("fifo"));
         if arm == "default" {
-            // With no environment, the defaults are the measured fifo60 arm,
-            // whole (shady M1/S1 on #131).
-            let none = super::engine::Sched::from_env(None, None);
-            assert_eq!((none, super::engine::STEP_MS), arm_sched("fifo60"));
+            // With no environment, the defaults are the measured sjf80 arm,
+            // whole (#165's rule S).
+            let none = super::engine::Sched::from_env(None, None).unwrap();
+            assert_eq!((none, super::engine::STEP_MS), arm_sched("sjf80"));
             let o = test_opts("x", Device::Cuda);
-            assert_eq!(o.step_ms, 60, "the default step");
+            assert_eq!(o.step_ms, 80, "the default step");
             assert_eq!(o.sched.order == super::engine::AdmitOrder::Fifo, fifo);
         }
         let lanes = match (arm, fifo) {
-            ("default", false) => 8.0,
+            ("default", true) => 2.0,
             _ => lanes,
         };
         let legacy = match legacy < 0.0 {
@@ -2504,7 +2524,96 @@ fn serve_rollback_flags_reach_the_engine() {
     }
 }
 
-/// Shortest-first admission (`--admit-order sjf`, opt-in): with 4
+/// Shortest-first can't starve a long prompt (shady on #167): 2 slots,
+/// sjf, `--admit-age-ms 1000`, four clients keeping both slots busy with
+/// short requests the whole time; one long prompt sent into that traffic
+/// must leave the engine's waiting list (GET /slots `waiting`, each with its
+/// `age_ms`) within 2 x the age bound (`pages_block`'s: past it nothing
+/// overtakes it, so it gets the next free slot), and its reply == the same
+/// request alone. Without the bound it could wait as long as shorts keep
+/// coming (a shorter prompt always sorts first).
+#[test]
+fn serve_sjf_long_prompt_admitted_within_age_bound() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let age = 1000u64;
+    let opts = |o: &mut Opts| {
+        o.ctx = Some(4096);
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.sched.order = super::engine::AdmitOrder::Sjf;
+        o.sched.age_ms = age;
+    };
+    let long_text: String = (0..120)
+        .map(|i| format!("Line {i}: the river runs past mill {}. ", i * 7))
+        .collect();
+    let long = json!({"prompt": format!("{long_text}Summary:"), "max_tokens": 4, "temperature": 0});
+    let refs = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let solo =
+        post(refs.addr, "/v1/completions", long.clone()).json()["choices"][0]["text"].clone();
+    drop(refs);
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let a = s.addr;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (waited, text) = std::thread::scope(|sc| {
+        for t in 0..4 {
+            let stop = &stop;
+            sc.spawn(move || {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let b = json!({"prompt": format!("{t}.{i} Name a colour:"), "max_tokens": 12,
+                                   "temperature": 0});
+                    assert_eq!(post(a, "/v1/completions", b).status, 200);
+                    i += 1;
+                }
+            });
+        }
+        // Both slots busy with shorts, more queued.
+        std::thread::sleep(Duration::from_millis(500));
+        let h =
+            sc.spawn(move || post(a, "/v1/completions", long).json()["choices"][0]["text"].clone());
+        // The long one's last age seen in the waiting list (the longest
+        // prompt there), until it leaves it.
+        let (mut seen, mut last) = (false, 0u64);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(60) {
+            let sl = call(a, "GET", "/slots", "").json();
+            let w = sl["waiting"].as_array().cloned().unwrap_or_default();
+            let mine = w
+                .iter()
+                .find(|x| x["prompt_tokens"].as_u64().unwrap_or(0) > 800);
+            match mine {
+                Some(x) => {
+                    seen = true;
+                    last = x["age_ms"].as_u64().unwrap_or(0);
+                }
+                None if seen => break,
+                None => {}
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = h.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        assert!(seen, "the long prompt never showed in the waiting list");
+        (last, text)
+    });
+    eprintln!(
+        "long prompt admitted after waiting ~{waited} ms under short traffic (bound {} ms)",
+        2 * age
+    );
+    // Poll granularity and one engine iteration on top of the bound.
+    assert!(
+        waited <= 2 * age + 500,
+        "the long prompt waited {waited} ms: past 2 x {age} ms"
+    );
+    assert_eq!(text, solo, "the long prompt's reply == alone");
+}
+
+/// Shortest-first admission (`--admit-order sjf`, the default): with 4
 /// requests decoding and two long prompts prefilling (both lanes of a
 /// paged pool of 8 slots), a short prompt sent next starts at once and is
 /// done before either long prompt's first token; with `--admit-order fifo`
@@ -2788,16 +2897,27 @@ fn identity_reply(a: SocketAddr, chat: bool, body: &Value, stream: bool) -> (Str
 }
 
 /// The determinism contract over HTTP (docs/determinism.md) on server `a`:
-/// each target alone, again (its prompt now cached: prefix reuse), streamed,
-/// and in the middle of `load` other requests (concurrent: batched on the
-/// GPU, queued on the CPU) gives the same text, and every response carries
-/// the fingerprint GET /identity and /v1/models report. Returns the
-/// identity and the targets' texts.
-fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<String>) {
+/// every response carries the fingerprint GET /identity and /v1/models
+/// report, and with `bits` each target alone, again (its prompt now cached:
+/// prefix reuse), streamed, and in the middle of `load` other requests
+/// (concurrent: batched on the GPU, queued on the CPU) gives the same text.
+/// Returns the identity and the targets' texts alone.
+///
+/// `bits` is exact mode's contract, and fast mode's while its backend runs
+/// no fast kernel (`Backend::fast_kernels`: none does yet, so every caller
+/// passes true today). A fast kernel may depend on the batch (its shape,
+/// what else is in it), so in fast mode with one, *every* path equality
+/// here is off, not just fast == exact: cached == fresh, streamed (served
+/// after the cached run) == alone, under load == alone. Those paths are
+/// graded instead, at the logits, by `cuda::qwen2::tests::numerics`' arms
+/// (decode, batched prefill, cached prefix, pool steps under load); here
+/// the fingerprint and a reply on every path are all that's left to check.
+fn identity_checks(a: SocketAddr, load: &[Value], what: &str, bits: bool) -> (Value, Vec<String>) {
     let id = call(a, "GET", "/identity", "").json();
     let fp = id["system_fingerprint"].as_str().unwrap().to_string();
     assert!(fp.starts_with("fp_"), "{id}");
-    assert_eq!(id["numerics"], crate::identity::NUMERICS_VERSION);
+    let modes = [Numerics::Exact.tag(), Numerics::Fast.tag()];
+    assert!(modes.iter().any(|t| id["numerics"] == *t), "{what}: {id}");
     let models = call(a, "GET", "/v1/models", "").json();
     for d in models["data"].as_array().unwrap() {
         assert_eq!(d["meta"]["identity"], id, "{what}");
@@ -2809,11 +2929,15 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
         assert_eq!(s.1, fp, "{what}: target {i}");
         // Right away, so its prompt is still the cache's (one request at a time).
         let again = identity_reply(a, *c, b, false);
-        assert_eq!(again.0, s.0, "{what}: target {i} with its prompt cached");
+        assert!(
+            !bits || again.0 == s.0,
+            "{what}: target {i} with its prompt cached"
+        );
         assert!(again.2 > 0, "{what}: target {i} reused nothing");
         assert_eq!(again.1, fp);
         let st = identity_reply(a, *c, b, true);
-        assert_eq!((&st.0, &st.1), (&s.0, &fp), "{what}: target {i} streamed");
+        assert_eq!(st.1, fp, "{what}: target {i} streamed");
+        assert!(!bits || st.0 == s.0, "{what}: target {i} streamed");
         solo.push(s);
     }
     // Under load: the targets go in after the others, interleaved with them.
@@ -2835,7 +2959,8 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     for (i, (l, s)) in loaded.iter().zip(&solo).enumerate() {
-        assert_eq!((&l.0, &l.1), (&s.0, &fp), "{what}: target {i} under load");
+        assert_eq!(l.1, fp, "{what}: target {i} under load");
+        assert!(!bits || l.0 == s.0, "{what}: target {i} under load");
     }
     (id, solo.into_iter().map(|s| s.0).collect())
 }
@@ -2864,7 +2989,7 @@ fn serve_identity() {
             // The long target is admitted in chunks while others decode.
             o.prefill_chunk = 64;
         });
-        let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"));
+        let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"), true);
         assert_eq!(id["backend"], "cuda");
         assert_eq!(
             id["kv"],
@@ -2898,7 +3023,7 @@ fn serve_identity_cpu() {
     let p = p.to_str().unwrap();
     let load: Vec<Value> = batch_bodies(true).into_iter().take(3).collect();
     let s = server_with(p, Device::Cpu, |_| {});
-    let (id, texts) = identity_checks(s.addr, &load, "cpu");
+    let (id, texts) = identity_checks(s.addr, &load, "cpu", true);
     assert_eq!(id["backend"], "cpu");
     assert!(id.get("gpu").is_none(), "{id}");
     drop(s);
@@ -2913,6 +3038,100 @@ fn serve_identity_cpu() {
     let (c, mut b) = identity_targets().swap_remove(2);
     b["seed"] = json!(4);
     assert_ne!(identity_reply(s.addr, c, &b, false).0, texts[2]);
+}
+
+/// The fast numerics mode over HTTP (ADR M1/M2) on `device`: a fast server
+/// passes `identity_checks` under its own fingerprint, which differs from
+/// the exact server's in the `numerics` field alone and is stable across a
+/// restart. While its backend runs no fast kernel (`fast_kernels_on`; none
+/// exists yet), a fast server runs the exact kernels, so it is held to
+/// exact's bits: every path the same text (alone, cached, streamed, under
+/// load) and the exact server's texts. Once one does, none of those is a
+/// bit equality any more (`identity_checks`' `bits`): fast mode promises
+/// tolerance on every path, and `cuda::qwen2::tests::numerics` grades each.
+fn identity_fast_on(device: Device, f: impl Fn(&mut Opts) + Copy) {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let bits = !fast_kernels_on(p, device);
+    let n = if device == Device::Cpu { 3 } else { usize::MAX };
+    let load: Vec<Value> = batch_bodies(true).into_iter().take(n).collect();
+    let run = |num: Numerics| {
+        let s = server_with(p, device, |o| {
+            f(o);
+            o.numerics = num;
+        });
+        let bits = num == Numerics::Exact || bits;
+        let (id, texts) = identity_checks(s.addr, &load, &format!("{device:?} {num}"), bits);
+        assert_eq!(id["numerics"], num.tag(), "{id}");
+        (id, texts)
+    };
+    let (exact, et) = run(Numerics::Exact);
+    let (fast, ft) = run(Numerics::Fast);
+    assert_ne!(fast["system_fingerprint"], exact["system_fingerprint"]);
+    let rest = |v: &Value| {
+        let mut v = v.clone();
+        let o = v.as_object_mut().unwrap();
+        o.remove("numerics");
+        o.remove("system_fingerprint");
+        v
+    };
+    assert_eq!(rest(&fast), rest(&exact), "only the numerics field differs");
+    // No fast kernel on this backend yet: the exact kernels, the same text.
+    assert!(
+        !bits || ft == et,
+        "fast mode without fast kernels runs exact's bits"
+    );
+    let s = server_with(p, device, |o| {
+        f(o);
+        o.numerics = Numerics::Fast;
+    });
+    let again = call(s.addr, "GET", "/identity", "").json();
+    assert_eq!(again, fast, "a restarted fast server");
+}
+
+/// Whether a fast backend of the model at `p` on `device` runs any fast-set
+/// kernel (`Backend::fast_kernels`): then a fast server's paths are graded,
+/// not equal (`identity_checks`).
+fn fast_kernels_on(p: &str, device: Device) -> bool {
+    let m = crate::gguf::load_with(p, Some(false)).unwrap();
+    let o = crate::lm::BackendOptions::default()
+        .device(device)
+        .max_ctx(256)
+        .numerics(Numerics::Fast);
+    crate::lm::Backend::new(&m, o).unwrap().fast_kernels()
+}
+
+#[test]
+fn serve_identity_fast_cpu() {
+    identity_fast_on(Device::Cpu, |_| {});
+}
+
+/// `identity_fast_on` on the GPU, as `serve_identity` runs it (8 slots,
+/// drafting, a long prompt chunked between decode steps).
+#[test]
+fn serve_identity_fast() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    identity_fast_on(Device::Cuda, |o| {
+        o.parallel = 8;
+        o.max_draft = 3;
+        o.prefill_chunk = 64;
+    });
+}
+
+/// `--datacenter` implies `--numerics fast`; an explicit `--numerics`
+/// wins over it either way; without either, exact.
+#[test]
+fn datacenter_bundle() {
+    use super::datacenter_numerics as dc;
+    assert_eq!(dc(false, None), Numerics::Exact);
+    assert_eq!(dc(true, None), Numerics::Fast);
+    assert_eq!(dc(true, Some(Numerics::Exact)), Numerics::Exact);
+    assert_eq!(dc(true, Some(Numerics::Fast)), Numerics::Fast);
+    assert_eq!(dc(false, Some(Numerics::Fast)), Numerics::Fast);
 }
 
 /// `call` with extra header lines (`Name: value\r\n` each).
@@ -5471,10 +5690,10 @@ fn hist_p50(m: &std::collections::BTreeMap<String, f64>, fam: &str) -> f64 {
 /// environment). roll = `--admit-order fifo --prefill-lanes 2 --step-ms
 /// 60` with AXON_STEP_COST=legacy, main's scheduling exactly
 /// (`legacy_reproduces_main_decisions`); fifo60 = the step cost model with
-/// fifo admission, **the shipped defaults** (`serve_rollback_flags_reach_
-/// the_engine`); fifo50 = the same at 50 ms (never run); sjf60 / sjf50 =
-/// shortest-first (opt-in) with the cost model; sjf50age0: no age bound.
-/// (Until 6cb98fc sjf50 was the default.)
+/// fifo admission (the defaults from #131 to #165's rule S); fifo50 = the
+/// same at 50 ms; sjf60 / sjf50 / sjf80 = shortest-first with the cost
+/// model; **sjf80 = the shipped defaults** since #165's rule S
+/// (`serve_rollback_flags_reach_the_engine`); sjf50age0: no age bound.
 fn arm_sched(arm: &str) -> (super::engine::Sched, usize) {
     use super::engine::AdmitOrder::{Fifo, Sjf};
     let (order, lanes, step_ms, legacy, age_ms) = match arm {
@@ -5483,6 +5702,7 @@ fn arm_sched(arm: &str) -> (super::engine::Sched, usize) {
         "fifo50" => (Fifo, 0, 50, false, 3000),
         "sjf60" => (Sjf, 0, 60, false, 3000),
         "sjf50" => (Sjf, 0, 50, false, 3000),
+        "sjf80" => (Sjf, 0, 80, false, 3000),
         "sjf50age0" => (Sjf, 0, 50, false, 0),
         _ => panic!("unknown A/B arm {arm}"),
     };
@@ -5544,10 +5764,14 @@ fn serve_sd_ab() {
         "serve_sd_ab: {path}, --parallel {par} --ctx {ctx}, C {cs:?}, {rounds} rounds, arms \
          {arms:?}"
     );
-    let py = |args: &[&str]| {
+    // A fixed salt per (round, C) for every arm (a client that honours
+    // SD_SALT; devstack's ignores it): the arms run the same prompts, so with
+    // the same bits they do the same work (checked below).
+    let py = |args: &[&str], salt: &str| {
         let o = std::process::Command::new("python3")
             .arg(&client)
             .args(args)
+            .env("SD_SALT", salt)
             .output()
             .expect("python3");
         (
@@ -5556,8 +5780,11 @@ fn serve_sd_ab() {
             String::from_utf8_lossy(&o.stderr).into_owned(),
         )
     };
+    let out = format!("{dir}/res");
+    let _ = std::fs::remove_dir_all(&out);
     for r in 1..=rounds {
         for &c in &cs {
+            let salt = format!("r{r} c{c} fixed");
             for k in 0..arms.len() {
                 let arm = &arms[(k + r) % arms.len()];
                 let s = server_with(&path, Device::Cuda, |o| {
@@ -5569,26 +5796,28 @@ fn serve_sd_ab() {
                 });
                 let url = format!("http://{}", s.addr);
                 let (cs_, ct) = (c.to_string(), ctx.to_string());
-                let (ok, _, err) = py(&["warm", &url, "--c", "4", "--n", "8", "--ctx", &ct]);
+                let (ok, _, err) = py(&["warm", &url, "--c", "4", "--n", "8", "--ctx", &ct], "");
                 assert!(ok, "warm: {err}");
                 let rs = r.to_string();
-                let out = format!("{dir}/res");
-                let (ok, so, err) = py(&[
-                    "cell",
-                    &url,
-                    "--workload",
-                    "mix",
-                    "--c",
-                    &cs_,
-                    "--round",
-                    &rs,
-                    "--tag",
-                    arm,
-                    "--out",
-                    &out,
-                    "--ctx",
-                    &ct,
-                ]);
+                let (ok, so, err) = py(
+                    &[
+                        "cell",
+                        &url,
+                        "--workload",
+                        "mix",
+                        "--c",
+                        &cs_,
+                        "--round",
+                        &rs,
+                        "--tag",
+                        arm,
+                        "--out",
+                        &out,
+                        "--ctx",
+                        &ct,
+                    ],
+                    &salt,
+                );
                 assert!(ok, "cell: {err}");
                 let line = so
                     .lines()
@@ -5608,6 +5837,34 @@ fn serve_sd_ab() {
             }
         }
     }
+    // BITS: every request's text and length equal across the arms, per
+    // (round, salt, g).
+    // (round, salt, g) -> each arm's (tag, text_sha, completion_tokens)
+    type Key = (i64, String, i64);
+    let mut by: std::collections::BTreeMap<Key, Vec<(String, String, i64)>> = Default::default();
+    let reqs = std::fs::read_to_string(format!("{out}/requests.jsonl")).unwrap_or_default();
+    for l in reqs.lines() {
+        let v: Value = serde_json::from_str(l).unwrap();
+        let k = (
+            v["round"].as_i64().unwrap_or(0),
+            v["salt"].as_str().unwrap_or("").to_string(),
+            v["g"].as_i64().unwrap_or(0),
+        );
+        let e = (
+            v["tag"].as_str().unwrap_or("").to_string(),
+            v["text_sha"].as_str().unwrap_or("").to_string(),
+            v["completion_tokens"].as_i64().unwrap_or(-1),
+        );
+        by.entry(k).or_default().push(e);
+    }
+    let same = (by.values())
+        .filter(|v| v.len() == arms.len() && v.iter().all(|e| (&e.1, e.2) == (&v[0].1, v[0].2)))
+        .count();
+    eprintln!(
+        "BITS: {same} of {} requests identical (text_sha, completion_tokens) across {} arms",
+        by.len(),
+        arms.len()
+    );
 }
 
 /// One arm of `serve_sched_ab` (`arm_opts`): a fresh
@@ -5864,4 +6121,662 @@ fn serve_explicit_parallel_refused_when_short() {
     // As many as fit (fewer than asked; one at a time at worst).
     let n = sl["slots"].as_array().map_or(0, |a| a.len());
     assert!((1..256).contains(&n), "{sl}");
+}
+
+/// `--cache-ram` (serve/tier.rs) on `device`: conversation A, then B and C
+/// take its slot (or the one cache) so its rows leave the GPU, then A's
+/// next turn alone (the solo path: `lend_solo`, or the one cache), then
+/// again with another request decoding (the batch: `admit`). Each reply ==
+/// the server's without the tier (`--cache-ram 0`), and only with it are
+/// A's turns' prompts copied back (`cached_tokens`, /metrics).
+fn cache_ram_case(device: Device, what: &str, f: impl Fn(&mut Opts)) {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let words = |w: &str| -> String {
+        (0..30)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let (a, b, c) = (words("Lamp"), words("Stone"), words("Reed"));
+    let run = |ram: u64| {
+        let pool = std::cell::Cell::new(false);
+        let s = server_with(p.to_str().unwrap(), device, |o| {
+            f(o);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+            pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        // A pool's arena pinned by a thread (the default) is pinned from
+        // start on: wait until all of it is in, so the turns below are
+        // stored whatever the host's pinning speed (the tier stores nothing
+        // into slabs that aren't pinned yet).
+        if ram > 0 && pool.get() {
+            let m = |name: &str| -> Option<u64> {
+                let body = call(addr, "GET", "/metrics", "").body;
+                body.lines()
+                    .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            };
+            wait_for("the KV RAM tier pinned", || {
+                let cap = m("axon_kv_ram_capacity_bytes");
+                cap.is_some() && m("axon_kv_ram_pinned_bytes") == cap
+            });
+        }
+        let text = |r: &(Value, u64, u64, u64)| r.0.as_str().unwrap().to_string();
+        let a1 = completion_usage(addr, &a, 16);
+        let a2p = format!("{a}{} And then", text(&a1));
+        completion_usage(addr, &b, 16);
+        completion_usage(addr, &c, 16);
+        let a2 = completion_usage(addr, &a2p, 16);
+        completion_usage(addr, &b, 16);
+        completion_usage(addr, &c, 16);
+        let a3p = format!("{a2p}{} Next", text(&a2));
+        let a3 = match device {
+            Device::Cuda => std::thread::scope(|sc| {
+                let g0 = g.load(Ordering::Relaxed);
+                let d = sc.spawn(|| completion_usage(addr, "The history of the Roman Empire", 200));
+                wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
+                let a3 = completion_usage(addr, &a3p, 16);
+                d.join().unwrap();
+                a3
+            }),
+            _ => completion_usage(addr, &a3p, 16),
+        };
+        let m = call(addr, "GET", "/metrics", "").body;
+        (vec![a1, a2, a3], m)
+    };
+    let (off, m0) = run(0);
+    let (on, m1) = run(64 << 20);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "{what}: turn {i}: the reply with the tier on");
+        assert_eq!(x.2, y.2, "{what}: turn {i}: prompt tokens");
+        assert!(y.1 >= x.1, "{what}: turn {i}: cached {} < {} off", y.1, x.1);
+    }
+    assert!(!m0.contains("axon_kv_ram"), "{what}: off: {m0}");
+    // A's turns 2 and 3: A's earlier rows (whole pages) came back.
+    for i in [1, 2] {
+        let pt = super::PAGE_TOKENS;
+        let floor = (on[i - 1].2 as usize / pt).saturating_sub(1) * pt;
+        assert!(
+            on[i].1 as usize >= floor && off[i].1 < on[i].1,
+            "{what}: turn {i}: {} cached on, {} off, of {} (prefix pages >= {floor})",
+            on[i].1,
+            off[i].1,
+            on[i].2
+        );
+    }
+    let metric = |name: &str| -> u64 {
+        m1.lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            .unwrap_or_else(|| panic!("{what}: no {name} in {m1}"))
+    };
+    assert!(metric("axon_kv_ram_restored_tokens_total") >= on[1].1 - off[1].1);
+    assert!(metric("axon_kv_ram_hits_total") >= 2);
+    assert!(metric("axon_kv_ram_pages") > 0);
+    assert!(metric("axon_kv_ram_capacity_bytes") > 0);
+}
+
+#[test]
+fn serve_cpu_cache_ram() {
+    cache_ram_case(Device::Cpu, "cpu", |_| {});
+}
+
+#[test]
+fn serve_cuda_cache_ram() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    cache_ram_case(Device::Cuda, "cuda paged f16", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+    });
+    cache_ram_case(Device::Cuda, "cuda paged f16, pinned at start", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+        o.cache_ram_alloc = super::tier::Alloc::Start;
+    });
+    cache_ram_case(Device::Cuda, "cuda paged q8", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+        o.kv = crate::kv::KvType::Q8;
+    });
+    cache_ram_case(Device::Cuda, "cuda plain f16", |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.paged = Some(false);
+    });
+    cache_ram_case(Device::Cuda, "cuda one at a time", |o| {
+        o.parallel = 1;
+    });
+}
+
+/// `--cache-ram` past the RAM available is refused at start; auto and a
+/// backend without a page image say what they did in the banner.
+#[test]
+fn serve_cache_ram_refused_past_ram() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut o = test_opts(p.to_str().unwrap(), Device::Cpu);
+    o.cache_ram = super::tier::CacheRam::Bytes(1 << 50);
+    let e = start(o).err().expect("a 1 PiB --cache-ram started");
+    assert!(super::is_refused(&e), "{e}");
+    assert!(
+        e.to_string().starts_with("--cache-ram 1048576.00 GiB"),
+        "{e}"
+    );
+}
+
+/// A /metrics body's value of `name`.
+fn metric(body: &str, name: &str) -> Option<u64> {
+    body.lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+}
+
+/// The KV RAM tier's counters in a /metrics body (`tier::Counters`).
+fn tier_counters(body: &str) -> super::tier::Counters {
+    [
+        "axon_kv_ram_written_pages_total",
+        "axon_kv_ram_restored_tokens_total",
+        "axon_kv_ram_hits_total",
+    ]
+    .map(|n| metric(body, n).unwrap_or_else(|| panic!("no {n} in {body}")))
+}
+
+/// Wait until a pool's KV RAM tier has pinned all of it (`cache_ram_case`).
+fn wait_tier_pinned(addr: SocketAddr) {
+    wait_for("the KV RAM tier pinned", || {
+        let m = call(addr, "GET", "/metrics", "").body;
+        let cap = metric(&m, "axon_kv_ram_capacity_bytes");
+        cap.is_some() && metric(&m, "axon_kv_ram_pinned_bytes") == cap
+    });
+}
+
+/// The tier is off (#172): it said so on stderr once, the fault injected
+/// in a copy for `op` naming `op` failed (the engine's name of what failed
+/// is the op the copy was made for), and /metrics (`m`) shows its gauges at
+/// 0 and its counters as they were when it failed (kept, and still since).
+fn assert_tier_off(
+    w: &str,
+    op: super::tier::Op,
+    said: &[(String, super::tier::Counters)],
+    m: &str,
+) {
+    assert_eq!(said.len(), 1, "{w}: the off lines: {said:?}");
+    let (line, at) = &said[0];
+    let what = op.what();
+    let want = format!(
+        "axon serve: --cache-ram: {what}: {}: a copy for a {what}; the KV RAM tier is off from here",
+        super::tier::FAULT
+    );
+    assert_eq!(*line, want, "{w}");
+    for g in [
+        "axon_kv_ram_capacity_bytes",
+        "axon_kv_ram_pinned_bytes",
+        "axon_kv_ram_bytes",
+        "axon_kv_ram_pages",
+    ] {
+        assert_eq!(metric(m, g), Some(0), "{w}: {g}");
+    }
+    assert_eq!(tier_counters(m), *at, "{w}: the counters since it is off");
+    assert!(at[0] > 0, "{w}: no page written before it failed: {at:?}");
+}
+
+/// A KV RAM tier fault (`tier::Faults`): before turn `turn` of
+/// `cache_ram_off_case` (the turns before it done, their tails included),
+/// the `n`-th copy made for `op` from then on fails (no other op's copies
+/// count).
+struct TierFault {
+    op: super::tier::Op,
+    turn: usize,
+    n: usize,
+}
+
+/// `--cache-ram`'s off path (#172) on `device` (`f`: the server's
+/// settings): `cache_ram_case`'s conversations (A, B, C; A again, alone;
+/// B, C; A again, with new text past a page, and another request decoding
+/// on a pool), then B and A again. With each of `faults` the tier fails
+/// once, mid-conversation: each reply (D's too) == the server's without
+/// the tier (`--cache-ram 0`) and the server goes on answering; the tier
+/// is off (`assert_tier_off`). A failed copy in leaves the rows it was to
+/// fill as they were (another conversation's), so a reply that used them
+/// would differ. Each turn is waited out (`Faults::idles`), so a fault
+/// fails a copy of its own turn: the off line comes in that turn, and the
+/// counters it saw are the turn before's (nothing else was copied first).
+fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl Fn(&mut Opts)) {
+    use super::tier::{Counters, Op};
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let words_n = |w: &str, n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let words = |w: &str| words_n(w, 30);
+    let (a, b, c) = (words("Lamp"), words("Stone"), words("Reed"));
+    // A's turn 3's new text: past a page (the one cache's write after it
+    // has a whole page to copy; checked below).
+    let more = words_n("Moss", 10);
+    type Usage = (Value, u64, u64, u64);
+    // After a turn: the off lines so far, and the tier's counters and
+    // pages held (none without it).
+    type After = (usize, Option<(Counters, u64)>);
+    let run = |ram: u64, fault: Option<&TierFault>| {
+        let pool = std::cell::Cell::new(false);
+        let s = server_with(p.to_str().unwrap(), device, |o| {
+            f(o);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+            pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        if ram > 0 && pool.get() {
+            wait_tier_pinned(addr);
+        }
+        let arm = |turn: usize| match fault {
+            Some(x) if x.turn == turn => s.tier_faults().fail(x.op, x.n),
+            _ => {}
+        };
+        let text = |r: &Usage| r.0.as_str().unwrap().to_string();
+        let r = std::cell::RefCell::new(Vec::<(Usage, After)>::new());
+        // A turn's reply `u`: wait until the engine is done with it (a
+        // pool's `end_solo` spill, the one cache's write, a batch's
+        // write-behind all run after the reply), then take the tier's state.
+        let done = |u: Usage| -> Usage {
+            let n = s.tier_faults().idles();
+            wait_for("the engine idle", || s.tier_faults().idles() > n);
+            let m = call(addr, "GET", "/metrics", "").body;
+            let t = (ram > 0).then(|| {
+                let pages = metric(&m, "axon_kv_ram_pages").unwrap();
+                (tier_counters(&m), pages)
+            });
+            r.borrow_mut()
+                .push((u.clone(), (s.tier_faults().off_lines().len(), t)));
+            u
+        };
+        let ask = |turn: usize, prompt: &str| -> Usage {
+            arm(turn);
+            done(completion_usage(addr, prompt, 16))
+        };
+        let a1 = ask(0, &a);
+        ask(1, &b);
+        ask(2, &c);
+        let a2p = format!("{a}{} And then", text(&a1));
+        let a2 = ask(3, &a2p);
+        ask(4, &b);
+        ask(5, &c);
+        let a3p = format!("{a2p}{} Next. {more}", text(&a2));
+        // On a pool, A's turn 3 is a batched admission (D decoding), and
+        // the batch's steps run the write-behind.
+        let (d, a3) = match pool.get() {
+            true => std::thread::scope(|sc| {
+                let g0 = g.load(Ordering::Relaxed);
+                let d = sc.spawn(|| completion_usage(addr, "The history of the Roman Empire", 200));
+                wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
+                arm(6);
+                let a3 = completion_usage(addr, &a3p, 16);
+                (Some(d.join().unwrap().0), a3)
+            }),
+            false => {
+                arm(6);
+                (None, completion_usage(addr, &a3p, 16))
+            }
+        };
+        let a3 = done(a3);
+        // A's rows after turn 3 (and so its stored pages, at most) are a
+        // page short of turn 6's: the one cache's write after it copies.
+        assert!(
+            a3.2 >= a2.2 + a2.3 + 64,
+            "{what}: A's turn 3: {a3:?}, turn 2: {a2:?}"
+        );
+        // Later requests: the server answers on.
+        ask(7, &b);
+        ask(8, &format!("{a3p}{} Last", text(&a3)));
+        let m = call(addr, "GET", "/metrics", "").body;
+        let f = s.tier_faults();
+        (r.into_inner(), d, m, f.off_lines(), f.hit())
+    };
+    let (off, d0, m0, said0, _) = run(0, None);
+    assert!(!m0.contains("axon_kv_ram"), "{what}: off: {m0}");
+    assert!(said0.is_empty(), "{what}: off: {said0:?}");
+    for x in faults {
+        let w = format!("{what}, {} fails in turn {}", x.op.what(), x.turn);
+        let (on, d1, m1, said, hit) = run(64 << 20, Some(x));
+        assert_eq!(off.len(), on.len());
+        // From the turn whose restore failed, or the one after a write
+        // failed, the tier is off: the GPU rows are `--cache-ram 0`'s, and
+        // so are the cached tokens (a restore is trusted whole or not at
+        // all: a partial one would count its pages that landed).
+        let off_from = x.turn + usize::from(x.op != Op::Restore);
+        for (i, ((u, _), (v, t))) in off.iter().zip(&on).enumerate() {
+            assert_eq!(u.0, v.0, "{w}: turn {i}: the reply");
+            assert_eq!(u.2, v.2, "{w}: turn {i}: prompt tokens");
+            assert_eq!(u.3, v.3, "{w}: turn {i}: completion tokens");
+            if i >= off_from {
+                assert_eq!(u.1, v.1, "{w}: turn {i}: cached tokens");
+            }
+            // The fault failed a copy of its turn: no off line before.
+            assert_eq!(t.0, usize::from(i >= x.turn), "{w}: turn {i}: {said:?}");
+        }
+        assert_eq!(d0, d1, "{w}: D's reply");
+        assert_tier_off(&w, x.op, &said, &m1);
+        assert_eq!(hit.map(|h| h.0), Some(x.op), "{w}: the copy failed");
+        let tier = |i: usize| {
+            on[i]
+                .1
+                .1
+                .unwrap_or_else(|| panic!("{w}: turn {i}: no tier"))
+        };
+        // A's first turn stored 2 pages or more, and turn 3's restore finds
+        // them all (nothing evicted): with n = 2 its first page lands and
+        // its second fails.
+        let (a0, _) = tier(0);
+        assert!(a0[0] >= 2, "{w}: A's pages stored: {a0:?}");
+        let (pre, held) = tier(x.turn - 1);
+        assert_eq!(held, pre[0], "{w}: pages evicted before turn {}", x.turn);
+        // The copy that failed was the turn's first out (a write's) or one
+        // in (a restore's, which counts nothing until it is whole).
+        let at = said[0].1;
+        assert_eq!(at[0], pre[0], "{w}: pages written in the turn before it");
+        if x.op == Op::Restore || x.turn <= 3 {
+            assert_eq!(at, pre, "{w}: the counters");
+        } else {
+            // A's turn 3 came back from RAM before its write failed.
+            assert!(at[2] > pre[2], "{w}: no hit in the turn: {at:?}");
+        }
+        // A fault after A's turn 2 came back from RAM: the tier was on.
+        if x.turn > 3 {
+            assert!(at[2] > 0, "{w}: no hit before: {said:?}");
+        }
+    }
+}
+
+/// The one cache's tier (the CPU's; `Engine::run` / `Engine::job`) off.
+#[test]
+fn serve_cpu_cache_ram_off() {
+    cache_ram_off_case(Device::Cpu, "cpu", &single_cache_faults(), |_| {});
+}
+
+/// The one cache's faults: its write after A's turn 3 (A's earlier turns
+/// came back from RAM: there is something to lose; the write runs after
+/// the reply, so B's and A's next turns are the ones without the tier), and
+/// A's turn 2's restore (the cache holds C's rows: they must not be used).
+fn single_cache_faults() -> [TierFault; 2] {
+    use super::tier::Op;
+    [
+        TierFault {
+            op: Op::WriteBehind,
+            turn: 6,
+            n: 1,
+        },
+        TierFault {
+            op: Op::Restore,
+            turn: 3,
+            n: 1,
+        },
+    ]
+}
+
+/// A pool's tier (`Batch::tier_failed`) off: B's spill after it ran alone
+/// (A's pages stored), A's turn 2's restore after its first page came back
+/// (a restore is trusted whole or not at all; alone, `lend_solo`), and, with
+/// A's turn 3 admitted while D decodes, the write-behind of the batch's
+/// steps and A's restore in that admission (`admit` takes the positions
+/// restored as its cached ones); and the one cache on the GPU
+/// (`--parallel 1`).
+#[test]
+fn serve_cuda_cache_ram_off() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    use super::tier::Op;
+    let pool = [
+        TierFault {
+            op: Op::Spill,
+            turn: 1,
+            n: 1,
+        },
+        TierFault {
+            op: Op::Restore,
+            turn: 3,
+            n: 2,
+        },
+        TierFault {
+            op: Op::WriteBehind,
+            turn: 6,
+            n: 1,
+        },
+        TierFault {
+            op: Op::Restore,
+            turn: 6,
+            n: 2,
+        },
+    ];
+    cache_ram_off_case(Device::Cuda, "cuda paged f16", &pool, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+    });
+    cache_ram_off_case(Device::Cuda, "cuda plain f16", &pool, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.paged = Some(false);
+    });
+    cache_ram_off_case(
+        Device::Cuda,
+        "cuda one at a time",
+        &single_cache_faults(),
+        |o| {
+            o.parallel = 1;
+        },
+    );
+}
+
+/// #172: the tier fails in a spill that a batched admission's restore makes
+/// room with (`Batch::restore` -> `make_room` -> `reclaim` -> `spill`). A
+/// paged pool of 10 KV pages (3 slots of 640 positions), a tier of 5 pages:
+/// 1. R (3 whole pages, slot 0) and Q (2, slot 1), each alone: stored, the
+///    tier full; each one's last stored page is held by its slot.
+/// 2. V (2 whole pages, slot 2) alone: no room (nothing evictable), so
+///    none of its pages is stored.
+/// 3. W (R's first sentences, under a page) alone in slot 0 (R's prefix):
+///    R's stored pages are no slot's now. The pool: 1, 3, 3 pages, 3 free.
+/// 4. D (a prompt over 4 pages; prompt and reply in 6) alone in slot 1 (the
+///    least recently used): Q's stored pages are no slot's now; D reserves
+///    all the free pages.
+/// 5. R's next turn while D decodes: D hands over (`adopt` keeps the 5 or
+///    6 pages of its rows), R's turn is admitted to slot 0 (W's prefix, 1
+///    page). Its restore of R's 3 stored pages lacks pages (1 free at
+///    most), reclaims V (the one idle slot holding pages), whose spill has
+///    room now (Q's last page goes) and copies V's first page: the armed
+///    fault fails that copy.
+///
+/// The tier is off; the admission goes on as with `--cache-ram 0`: each
+/// reply, its cached tokens included, == that run's.
+#[test]
+fn serve_cuda_cache_ram_off_in_reclaim() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    use super::tier::Op;
+    const PAGE: usize = super::PAGE_TOKENS;
+    let path = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(path).unwrap());
+    let len = |s: &str| tok.encode_prompt(s).len();
+    let words = |w: &str, n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let (r, q, v, w) = (
+        words("Lamp", 21),
+        words("Stone", 15),
+        words("Reed", 15),
+        words("Lamp", 4),
+    );
+    // R: 3 whole pages of prompt (its next turn shares them), 4 pages with
+    // its reply. Q, V: 2 whole pages, 3 with the reply. W: under a page.
+    let n = len(&r);
+    assert!(n > 3 * PAGE && n + 16 <= 4 * PAGE, "R: {n} tokens");
+    for x in [&q, &v] {
+        let n = len(x);
+        assert!(n > 2 * PAGE && n + 16 <= 3 * PAGE, "{n} tokens: {x}");
+    }
+    assert!(len(&w) + 8 < PAGE, "W");
+    // D: counting (no end in sight), its prompt over 4 pages (its rows
+    // keep 5 pages at the hand-over, whenever it comes), its prompt and
+    // reply 6 pages (what `lend_solo` reserves: all the free ones).
+    let mut d = String::from("Count on: 1,");
+    for i in 2.. {
+        if len(&d) > 4 * PAGE + 2 {
+            break;
+        }
+        d += &format!(" {i},");
+    }
+    let d_gen = 6 * PAGE - len(&d);
+    assert!(d_gen >= 64, "D: {} tokens", len(&d));
+    // A page's image (the test model, f16): 24 layers x K, V x 2 KV heads
+    // x 64 dims x 2 bytes, 64 positions.
+    const PAGE_BYTES: u64 = 24 * 2 * 2 * 64 * 2 * 64;
+    type Usage = (Value, u64, u64, u64);
+    let run = |ram: u64| {
+        let s = server_with(path, Device::Cuda, |o| {
+            o.parallel = 3;
+            o.parallel_set = true;
+            o.kv_pages = Some(10);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        let tier = ram > 0;
+        if tier {
+            wait_tier_pinned(addr);
+            let m = call(addr, "GET", "/metrics", "").body;
+            assert_eq!(metric(&m, "axon_kv_ram_capacity_bytes"), Some(ram));
+        }
+        // The engine finishes a request (`end_solo`: its spill, the pool's
+        // pages) after its reply: wait for `want`, then check it.
+        let settled = |url: &str, want: &dyn Fn(&str) -> bool| -> String {
+            let t = Instant::now();
+            loop {
+                let b = call(addr, "GET", url, "").body;
+                if want(&b) || t.elapsed() > Duration::from_secs(10) {
+                    return b;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // The tier's counters (written, restored, hits) are `c`, and it
+        // holds `pages` pages.
+        let tier_is = |c: super::tier::Counters, pages: u64| {
+            if tier {
+                let ok = |m: &str| {
+                    tier_counters(m) == c && metric(m, "axon_kv_ram_pages") == Some(pages)
+                };
+                let m = settled("/metrics", &ok);
+                assert!(ok(&m), "the tier: want {c:?}, {pages} pages: {m}");
+            }
+        };
+        let text = |r: &Usage| r.0.as_str().unwrap().to_string();
+        let r1 = completion_usage(addr, &r, 16);
+        tier_is([3, 0, 0], 3);
+        let q1 = completion_usage(addr, &q, 16);
+        tier_is([5, 0, 0], 5);
+        let v1 = completion_usage(addr, &v, 16);
+        let w1 = completion_usage(addr, &w, 8);
+        tier_is([5, 0, 0], 5);
+        // /slots: each slot's held tokens and pages, and the whole.
+        let pool = |b: &str| -> (Vec<u64>, Vec<u64>, Value) {
+            let j: Value = serde_json::from_str(b).unwrap();
+            let f = |k: &str| -> Vec<u64> {
+                (j["slots"].as_array().unwrap().iter())
+                    .map(|s| s[k].as_u64().unwrap_or(u64::MAX))
+                    .collect()
+            };
+            let (held, used) = (f("held_tokens"), f("pages_used"));
+            (held, used, j)
+        };
+        let b = settled("/slots", &|b| pool(b).1 == [1, 3, 3]);
+        let (held, used, j) = pool(&b);
+        assert_eq!(used, [1, 3, 3], "{j}");
+        assert_eq!(
+            (&j["ctx"], &j["pages_total"], &j["pages_free"]),
+            (&json!(10 * PAGE), &json!(10), &json!(3)),
+            "{j}"
+        );
+        assert!(held[0] < PAGE as u64, "{j}");
+        for h in &held[1..] {
+            assert!((2 * PAGE as u64..3 * PAGE as u64).contains(h), "{j}");
+        }
+        let r2p = format!("{r}{} And then", text(&r1));
+        // R's turn: 4 pages for its prompt and reply.
+        assert!(
+            len(&r2p) - 1 + 16 <= 4 * PAGE,
+            "R's turn: {} tokens",
+            len(&r2p)
+        );
+        let (r2, dr, running) = std::thread::scope(|sc| {
+            let g0 = g.load(Ordering::Relaxed);
+            let dh = sc.spawn(|| completion_usage(addr, &d, d_gen));
+            wait_for("D decoding", || g.load(Ordering::Relaxed) > g0);
+            // D took slot 1 copying nothing to the tier.
+            tier_is([5, 0, 0], 5);
+            if tier {
+                s.tier_faults().fail(Op::Spill, 1);
+            }
+            let r2 = completion_usage(addr, &r2p, 16);
+            // R's turn was admitted to the batch (D still decodes: it
+            // hands over as soon as R's turn waits).
+            let running = !dh.is_finished();
+            (r2, dh.join().unwrap(), running)
+        });
+        assert!(running, "D ended before R's turn: R's turn ran alone");
+        // Later requests: the server answers on.
+        let later = completion_usage(addr, &q, 16);
+        let m = call(addr, "GET", "/metrics", "").body;
+        let f = s.tier_faults();
+        (
+            vec![r1, q1, v1, w1, r2, dr, later],
+            m,
+            f.off_lines(),
+            f.hit(),
+        )
+    };
+    let (off, m0, said0, hit0) = run(0);
+    assert!(!m0.contains("axon_kv_ram"), "off: {m0}");
+    assert!(said0.is_empty() && hit0.is_none(), "off: {said0:?}");
+    let (on, m, said, hit) = run(5 * PAGE_BYTES);
+    // Each reply, its cached tokens too: R's turn's restore copied nothing.
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x, y, "request {i}");
+    }
+    let w = "a spill in a restore's reclaim";
+    // The copy that failed: V's (slot 2: idle, not R's turn's slot 0), so
+    // a reclaim's spill; before anything was written or restored since V.
+    assert_eq!(hit, Some((Op::Spill, 2)), "{w}");
+    assert_tier_off(w, Op::Spill, &said, &m);
+    assert_eq!(said[0].1, [5, 0, 0], "{w}");
 }

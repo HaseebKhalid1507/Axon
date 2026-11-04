@@ -129,6 +129,15 @@ __device__ __forceinline__ Act act_view(const u8* a, int n) {
     return v;
 }
 
+#ifdef AXON_F8
+// An FP8 module's act rows (fp8.cu): the f32 values quant_f8_tok reads, at
+// this offset past the views above (qwen2.rs act_f8_off).
+__device__ __forceinline__ u64 f8_off(int n) {
+    u64 np = (u64)act_np(n);
+    return (2 * np + np / 64 + np / 8 + np / 8 + 255) & ~255ull;
+}
+#endif
+
 // One warp quantizes 256-block `blk` of a vector of n values: lane l holds
 // values blk*256 + 8l .. +8 in v (garbage past n). want_k: the Q8_K view
 // (only called with it when n % 256 == 0); the Q8_0 view always.
@@ -155,6 +164,11 @@ __device__ void quant_warp(const float v[8], int n, int blk, u8* act, bool want_
         }
         *(uint2*)(q0 + e0) = make_uint2(w[0], w[1]);
         if ((lane & 3) == 0) d0[e0 / 32] = d;
+#ifdef AXON_F8
+        float4* xf = (float4*)(act + f8_off(n)) + e0 / 4;
+        xf[0] = make_float4(v[0], v[1], v[2], v[3]);
+        xf[1] = make_float4(v[4], v[5], v[6], v[7]);
+#endif
     }
     if (!want_k) return;
     // Q8_K: the whole warp's 256 values.
