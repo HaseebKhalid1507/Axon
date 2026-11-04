@@ -725,21 +725,19 @@ impl<'a, 't> Batch<'a, 't> {
         };
         match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
             Ok(_) => t.t.truncate(s, keep / PAGE),
-            Err(e) => self.tier_failed(&e),
+            Err(e) => self.tier_failed("spill", &e),
         }
     }
 
-    /// The tier failed (`e`): it is off from here, as the no-pool path's;
+    /// The tier failed (`e`, in `what`): it is off from here, as the no-pool path's;
     /// the slots' rows are untouched (what it copied in is only trusted
     /// once a restore succeeded), so serving goes on as with
     /// `--cache-ram 0`.
-    fn tier_failed(&mut self, e: &str) {
-        eprintln!("axon serve: --cache-ram: {e}; the KV RAM tier is off from here");
-        // Dropped first: its arena is freed, then /metrics says so.
+    fn tier_failed(&mut self, what: &str, e: &str) {
+        // Dropped first: its arena is freed, then stderr and /metrics say
+        // so.
         self.tier = None;
-        if let Some(m) = &self.metrics {
-            m.kv_ram_off();
-        }
+        super::tier::off(what, e, self.metrics.as_deref());
     }
 
     /// The tier's write-behind: `bytes` of copies of the slots' unstored
@@ -749,7 +747,7 @@ impl<'a, 't> Batch<'a, 't> {
             return;
         };
         if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
-            self.tier_failed(&e);
+            self.tier_failed("write-behind", &e);
         }
     }
 
@@ -796,7 +794,7 @@ impl<'a, 't> Batch<'a, 't> {
         let t = self.tier.as_mut().expect("on");
         if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
             // The slot keeps `have` (its rows past it are fed again).
-            self.tier_failed(&e);
+            self.tier_failed("restore", &e);
             return Ok(have);
         }
         if to * PAGE <= have {

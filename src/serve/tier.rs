@@ -102,6 +102,88 @@ pub fn gib(n: u64) -> String {
     format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
 }
 
+/// A tier error (`e`, in its `what`: a spill, the write-behind or a
+/// restore) turned the KV RAM tier off (its owner has dropped it): one
+/// line on stderr, the same on every path, and /metrics' tier gauges go
+/// to 0 (its counters stay).
+pub(super) fn off(what: &str, e: &str, metrics: Option<&Metrics>) {
+    let line = format!("axon serve: --cache-ram: {what}: {e}; the KV RAM tier is off from here");
+    eprintln!("{line}");
+    if let Some(m) = metrics {
+        m.kv_ram_off();
+        #[cfg(test)]
+        m.tier_faults.said(line, m);
+    }
+}
+
+/// What an injected fault's error says (`Faults`).
+#[cfg(test)]
+pub const FAULT: &str = "an injected KV RAM tier fault (a test's)";
+
+/// Tests (#172): faults injected into the KV RAM tier's copies, and the
+/// lines `off` said, per server (`Metrics::tier_faults`: the one handle a
+/// test's `Server` and the engine's tier both hold). None of it is built
+/// outside tests. A copy is a pool's `page_out` / `page_in` (a page), or
+/// the one cache's `kv_save` / `kv_load` (all the pages a write or a
+/// restore moves). The copy an armed fault hits fails instead of running:
+/// a failed copy in leaves the rows it was to fill as they were (another
+/// conversation's), so a reply that used them anyway would differ.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Faults {
+    /// Copies out until one fails, it counted (0: none armed).
+    out: std::sync::atomic::AtomicUsize,
+    /// Copies in, as `out`.
+    inn: std::sync::atomic::AtomicUsize,
+    /// The lines `off` said on stderr, each with the tier's counters then
+    /// (`Counters`).
+    said: Mutex<Vec<(String, Counters)>>,
+}
+
+/// Tests: the KV RAM tier's /metrics counters (pages written, tokens
+/// restored, hits).
+#[cfg(test)]
+pub type Counters = [u64; 3];
+
+#[cfg(test)]
+impl Faults {
+    /// The `n`-th copy out from now fails (1: the next).
+    pub fn fail_out(&self, n: usize) {
+        self.out.store(n, Relaxed);
+    }
+
+    /// The `n`-th copy in from now fails (1: the next).
+    pub fn fail_in(&self, n: usize) {
+        self.inn.store(n, Relaxed);
+    }
+
+    /// What `off` said so far, each line with the counters then.
+    pub fn off_lines(&self) -> Vec<(String, Counters)> {
+        self.said.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// `off` said `line`; `m`: the counters now.
+    fn said(&self, line: String, m: &Metrics) {
+        let c = [&m.kv_ram_written, &m.kv_ram_restored, &m.kv_ram_hits].map(|c| c.load(Relaxed));
+        self.said
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((line, c));
+    }
+
+    /// A copy out (`out`) or in is to be made: Err if it is the one armed.
+    fn fault(&self, out: bool) -> Result<(), String> {
+        let (n, way) = match out {
+            true => (&self.out, "out"),
+            false => (&self.inn, "in"),
+        };
+        match n.fetch_update(Relaxed, Relaxed, |n| n.checked_sub(1)) {
+            Ok(1) => Err(format!("{FAULT}: a copy {way}")),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The page store and, per sequence (a pool slot, or the one cache), the
 /// keys of the whole pages of what it holds that are stored, in order. A
 /// sequence's last stored page is held in the store (so a chain a slot is
@@ -173,6 +255,15 @@ impl<P> Tier<P> {
         if n > self.keys[s].len() {
             self.set_keys(s, ks[..n].to_vec());
         }
+    }
+
+    /// Tests: a copy out (`out`) or in is to be made; Err instead if a
+    /// fault was armed for it (`Faults`).
+    #[cfg(test)]
+    fn fault(&self, out: bool) -> Result<(), String> {
+        self.metrics
+            .as_ref()
+            .map_or(Ok(()), |m| m.tier_faults.fault(out))
     }
 
     fn publish(&self, written: usize, restored: usize) {
@@ -501,7 +592,14 @@ impl PoolTier {
                 break;
             };
             let (buf, at) = self.arena.at(a);
-            if let Err(e) = net.page_out(pool, s, i, buf, at) {
+            #[cfg(test)]
+            let r = self
+                .t
+                .fault(true)
+                .and_then(|()| net.page_out(pool, s, i, buf, at));
+            #[cfg(not(test))]
+            let r = net.page_out(pool, s, i, buf, at);
+            if let Err(e) = r {
                 self.arena.free.push(a);
                 return Err(e);
             }
@@ -551,7 +649,14 @@ impl PoolTier {
             return Ok(false);
         };
         let (buf, at) = self.arena.at(a);
-        if let Err(e) = net.page_out_id(pool, page, buf, at) {
+        #[cfg(test)]
+        let r = self
+            .t
+            .fault(true)
+            .and_then(|()| net.page_out_id(pool, page, buf, at));
+        #[cfg(not(test))]
+        let r = net.page_out_id(pool, page, buf, at);
+        if let Err(e) = r {
             self.arena.free.push(a);
             return Err(e);
         }
@@ -622,7 +727,14 @@ impl PoolTier {
             // The whole page goes back, rows below `have` too (the same
             // bytes): #164's copy-on-write precondition, page `i` must be
             // this slot's alone (a shared partial page is copied first).
-            res = net.page_in(pool, s, i, buf, at);
+            #[cfg(test)]
+            let r = self
+                .t
+                .fault(false)
+                .and_then(|()| net.page_in(pool, s, i, buf, at));
+            #[cfg(not(test))]
+            let r = net.page_in(pool, s, i, buf, at);
+            res = r;
             if res.is_err() {
                 break;
             }
@@ -668,6 +780,8 @@ impl CacheTier {
             return Ok(());
         }
         let mut img = Vec::with_capacity((to - from) * self.t.page);
+        #[cfg(test)]
+        self.t.fault(true).map_err(io::Error::other)?;
         net.kv_save(cache, from * PAGE, to * PAGE, &mut img)?;
         let mut copied = 0;
         for (i, b) in (from..to).zip(img.chunks_exact(self.t.page)) {
@@ -715,6 +829,8 @@ impl CacheTier {
                 .collect(),
             at: 0,
         };
+        #[cfg(test)]
+        self.t.fault(false).map_err(io::Error::other)?;
         net.kv_load(cache, from * PAGE, ks.len() * PAGE, &mut src)?;
         self.t.adopt_held(0, &ks, ks.len() * PAGE);
         self.t.publish(0, ks.len() * PAGE - have);

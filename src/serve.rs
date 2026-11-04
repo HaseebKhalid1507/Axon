@@ -813,9 +813,8 @@ impl<'a> Engine<'a> {
                 t.write(self.net, &self.cache, &self.hist)
             })
         {
-            eprintln!("axon serve: --cache-ram: {e}; off from here");
             self.tier = None;
-            self.metrics.kv_ram_off();
+            tier::off("write-behind", &e.to_string(), Some(&*self.metrics));
         }
         self.publish_free();
         r
@@ -868,9 +867,8 @@ impl<'a> Engine<'a> {
                 }
                 Err(e) => {
                     // The cache's rows past `reuse` are unknown now: forget them.
-                    eprintln!("axon serve: --cache-ram: {e}; off from here");
                     self.tier = None;
-                    self.metrics.kv_ram_off();
+                    tier::off("restore", &e.to_string(), Some(&*self.metrics));
                 }
             }
         }
@@ -2145,6 +2143,11 @@ impl Server {
     /// a response (`Hold`), until it is turned off.
     pub fn hold(&self, on: bool) {
         self.sh.hold.set(on);
+    }
+
+    /// The KV RAM tier's fault hook (`tier::Faults`).
+    pub fn tier_faults(&self) -> &tier::Faults {
+        &self.sh.metrics.tier_faults
     }
 }
 

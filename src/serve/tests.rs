@@ -6275,3 +6275,355 @@ fn serve_cache_ram_refused_past_ram() {
         "{e}"
     );
 }
+
+/// A /metrics body's value of `name`.
+fn metric(body: &str, name: &str) -> Option<u64> {
+    body.lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+}
+
+/// The KV RAM tier's counters in a /metrics body (`tier::Counters`).
+fn tier_counters(body: &str) -> super::tier::Counters {
+    [
+        "axon_kv_ram_written_pages_total",
+        "axon_kv_ram_restored_tokens_total",
+        "axon_kv_ram_hits_total",
+    ]
+    .map(|n| metric(body, n).unwrap_or_else(|| panic!("no {n} in {body}")))
+}
+
+/// Wait until a pool's KV RAM tier has pinned all of it (`cache_ram_case`).
+fn wait_tier_pinned(addr: SocketAddr) {
+    wait_for("the KV RAM tier pinned", || {
+        let m = call(addr, "GET", "/metrics", "").body;
+        let cap = metric(&m, "axon_kv_ram_capacity_bytes");
+        cap.is_some() && metric(&m, "axon_kv_ram_pinned_bytes") == cap
+    });
+}
+
+/// The tier is off (#172): it said so on stderr once, naming `what` failed
+/// (the injected fault), and /metrics (`m`) shows its gauges at 0 and its
+/// counters as they were when it failed (kept, and still since).
+fn assert_tier_off(w: &str, what: &str, said: &[(String, super::tier::Counters)], m: &str) {
+    assert_eq!(said.len(), 1, "{w}: the off lines: {said:?}");
+    let (line, at) = &said[0];
+    let want = format!("axon serve: --cache-ram: {what}: {}", super::tier::FAULT);
+    assert!(
+        line.starts_with(&want) && line.ends_with("; the KV RAM tier is off from here"),
+        "{w}: {line}"
+    );
+    for g in [
+        "axon_kv_ram_capacity_bytes",
+        "axon_kv_ram_pinned_bytes",
+        "axon_kv_ram_bytes",
+        "axon_kv_ram_pages",
+    ] {
+        assert_eq!(metric(m, g), Some(0), "{w}: {g}");
+    }
+    assert_eq!(tier_counters(m), *at, "{w}: the counters since it is off");
+    assert!(at[0] > 0, "{w}: no page written before it failed: {at:?}");
+}
+
+/// A KV RAM tier fault (`tier::Faults`): before turn `turn` of
+/// `cache_ram_off_case`, the `n`-th copy out (`out`) or in from then on
+/// fails, in the tier's `what` (the off line's).
+struct TierFault {
+    what: &'static str,
+    turn: usize,
+    out: bool,
+    n: usize,
+}
+
+/// `--cache-ram`'s off path (#172) on `device` (`f`: the server's
+/// settings): `cache_ram_case`'s conversations (A, B, C; A again, alone;
+/// B, C; A again, with another request decoding on a pool), then B and A
+/// again. With each of `faults` the tier fails once, mid-conversation:
+/// each reply (D's too) == the server's without the tier (`--cache-ram 0`)
+/// and the server goes on answering; the tier is off (`assert_tier_off`).
+/// A failed copy in leaves the rows it was to fill as they were (another
+/// conversation's), so a reply that used them would differ.
+fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl Fn(&mut Opts)) {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let words = |w: &str| -> String {
+        (0..30)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let (a, b, c) = (words("Lamp"), words("Stone"), words("Reed"));
+    type Usage = (Value, u64, u64, u64);
+    let run = |ram: u64, fault: Option<&TierFault>| {
+        let pool = std::cell::Cell::new(false);
+        let s = server_with(p.to_str().unwrap(), device, |o| {
+            f(o);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+            pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        if ram > 0 && pool.get() {
+            wait_tier_pinned(addr);
+        }
+        let arm = |turn: usize| match fault {
+            Some(x) if x.turn == turn && x.out => s.tier_faults().fail_out(x.n),
+            Some(x) if x.turn == turn => s.tier_faults().fail_in(x.n),
+            _ => {}
+        };
+        let text = |r: &Usage| r.0.as_str().unwrap().to_string();
+        let mut r: Vec<Usage> = Vec::new();
+        let mut ask = |turn: usize, prompt: &str| -> Usage {
+            arm(turn);
+            let u = completion_usage(addr, prompt, 16);
+            r.push(u.clone());
+            u
+        };
+        let a1 = ask(0, &a);
+        ask(1, &b);
+        ask(2, &c);
+        let a2p = format!("{a}{} And then", text(&a1));
+        let a2 = ask(3, &a2p);
+        ask(4, &b);
+        ask(5, &c);
+        let a3p = format!("{a2p}{} Next", text(&a2));
+        // On a pool, A's turn 3 is a batched admission (D decoding), and
+        // the batch's steps run the write-behind.
+        let (d, a3) = match pool.get() {
+            true => std::thread::scope(|sc| {
+                let g0 = g.load(Ordering::Relaxed);
+                let d = sc.spawn(|| completion_usage(addr, "The history of the Roman Empire", 200));
+                wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
+                arm(6);
+                let a3 = completion_usage(addr, &a3p, 16);
+                (Some(d.join().unwrap().0), a3)
+            }),
+            false => {
+                arm(6);
+                (None, completion_usage(addr, &a3p, 16))
+            }
+        };
+        r.push(a3.clone());
+        // Later requests: the server answers on.
+        r.push(completion_usage(addr, &b, 16));
+        let a4p = format!("{a3p}{} Last", text(&a3));
+        r.push(completion_usage(addr, &a4p, 16));
+        let m = call(addr, "GET", "/metrics", "").body;
+        (r, d, m, s.tier_faults().off_lines())
+    };
+    let (off, d0, m0, said0) = run(0, None);
+    assert!(!m0.contains("axon_kv_ram"), "{what}: off: {m0}");
+    assert!(said0.is_empty(), "{what}: off: {said0:?}");
+    for x in faults {
+        let w = format!("{what}, {} fails before turn {}", x.what, x.turn);
+        let (on, d1, m1, said) = run(64 << 20, Some(x));
+        assert_eq!(off.len(), on.len());
+        for (i, (u, v)) in off.iter().zip(&on).enumerate() {
+            assert_eq!(u.0, v.0, "{w}: turn {i}: the reply");
+            assert_eq!(u.2, v.2, "{w}: turn {i}: prompt tokens");
+            assert_eq!(u.3, v.3, "{w}: turn {i}: completion tokens");
+        }
+        assert_eq!(d0, d1, "{w}: D's reply");
+        assert_tier_off(&w, x.what, &said, &m1);
+        // A fault after A's turn 2 came back from RAM: the tier was on.
+        if x.turn > 3 {
+            assert!(said[0].1[2] > 0, "{w}: no hit before: {said:?}");
+        }
+    }
+}
+
+/// The one cache's tier (the CPU's; `Engine::run` / `Engine::job`) off.
+#[test]
+fn serve_cpu_cache_ram_off() {
+    cache_ram_off_case(Device::Cpu, "cpu", &single_cache_faults(), |_| {});
+}
+
+/// The one cache's faults: its write after A's turn 3 (A's earlier turns
+/// came back from RAM: there is something to lose), and A's turn 2's
+/// restore (the cache holds C's rows: they must not be used).
+fn single_cache_faults() -> [TierFault; 2] {
+    [
+        TierFault {
+            what: "write-behind",
+            turn: 6,
+            out: true,
+            n: 1,
+        },
+        TierFault {
+            what: "restore",
+            turn: 3,
+            out: false,
+            n: 1,
+        },
+    ]
+}
+
+/// A pool's tier (`Batch::tier_failed`) off: B's spill after it ran alone
+/// (A's pages stored), A's turn 2's restore after its first page came back
+/// (a restore is trusted whole or not at all), and the write-behind of the
+/// batch's steps (A's turn 3 admitted while D decodes); and the one cache
+/// on the GPU (`--parallel 1`).
+#[test]
+fn serve_cuda_cache_ram_off() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let pool = [
+        TierFault {
+            what: "spill",
+            turn: 1,
+            out: true,
+            n: 1,
+        },
+        TierFault {
+            what: "restore",
+            turn: 3,
+            out: false,
+            n: 2,
+        },
+        TierFault {
+            what: "write-behind",
+            turn: 6,
+            out: true,
+            n: 1,
+        },
+    ];
+    cache_ram_off_case(Device::Cuda, "cuda paged f16", &pool, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(12);
+    });
+    cache_ram_off_case(Device::Cuda, "cuda plain f16", &pool, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.paged = Some(false);
+    });
+    cache_ram_off_case(
+        Device::Cuda,
+        "cuda one at a time",
+        &single_cache_faults(),
+        |o| {
+            o.parallel = 1;
+        },
+    );
+}
+
+/// #172: the tier fails in a spill that a batched admission's restore
+/// (`Batch::restore`) makes room with: it reclaims an idle slot (V) whose
+/// pages the tier hadn't stored (it was full then), and the spill fails.
+/// The admission must go on as with `--cache-ram 0`. The steps (the
+/// tier: 4 pages; 9 KV pages, 3 slots):
+/// 1. R (slot 0) and Q (slot 1) store 2 pages each: the tier is full, and
+///    each one's last page is held by its slot.
+/// 2. V (slot 2): no room, none of its 2 whole pages is stored.
+/// 3. W, a prefix of R, takes slot 0 (R's rows leave the GPU; R's pages in
+///    RAM are no longer held).
+/// 4. D (long) runs alone in slot 1 (Q's pages no longer held).
+/// 5. R's next turn arrives: D hands over, R's turn is admitted to slot 0
+///    (W's prefix), its restore lacks a page, reclaims V, whose spill has
+///    room now (Q's last page goes) and fails.
+#[test]
+fn serve_cuda_cache_ram_off_in_reclaim() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(p.to_str().unwrap()).unwrap());
+    let words = |w: &str, n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let (r, q, v, w) = (
+        words("Lamp", 15),
+        words("Stone", 15),
+        words("Reed", 15),
+        words("Lamp", 4),
+    );
+    // Each of R, Q, V holds 2 whole pages (and part of a third) after 16
+    // tokens; W less than a page.
+    for x in [&r, &q, &v] {
+        let n = tok.encode_prompt(x).len();
+        assert!((128..=176).contains(&n), "{n} tokens: {x}");
+    }
+    assert!(tok.encode_prompt(&w).len() + 8 < 64);
+    // A page's image (the test model, f16): 24 layers x K, V x 2 KV heads
+    // x 64 dims x 2 bytes, 64 positions.
+    const PAGE_BYTES: u64 = 24 * 2 * 2 * 64 * 2 * 64;
+    type Usage = (Value, u64, u64, u64);
+    let run = |ram: u64| {
+        let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+            o.parallel = 3;
+            o.parallel_set = true;
+            o.kv_pages = Some(9);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+        });
+        let addr = s.addr;
+        let g = &s.generated;
+        let tier = ram > 0;
+        if tier {
+            wait_tier_pinned(addr);
+            let m = call(addr, "GET", "/metrics", "").body;
+            assert_eq!(
+                metric(&m, "axon_kv_ram_capacity_bytes"),
+                Some(4 * PAGE_BYTES)
+            );
+        }
+        let held = || -> Vec<u64> {
+            let sl = call(addr, "GET", "/slots", "").json();
+            (sl["slots"].as_array().unwrap().iter())
+                .map(|s| s["held_tokens"].as_u64().unwrap())
+                .collect()
+        };
+        let text = |r: &Usage| r.0.as_str().unwrap().to_string();
+        let r1 = completion_usage(addr, &r, 16);
+        let q1 = completion_usage(addr, &q, 16);
+        let v1 = completion_usage(addr, &v, 16);
+        if tier {
+            let m = call(addr, "GET", "/metrics", "").body;
+            assert_eq!(metric(&m, "axon_kv_ram_pages"), Some(4), "{m}");
+            assert_eq!(tier_counters(&m)[0], 4, "{m}");
+        }
+        let w1 = completion_usage(addr, &w, 8);
+        let h = held();
+        assert!(h[0] < 64 && h[1] >= 128 && h[2] >= 128, "slots: {h:?}");
+        let r2p = format!("{r}{} And then", text(&r1));
+        let (d, r2) = std::thread::scope(|sc| {
+            let g0 = g.load(Ordering::Relaxed);
+            let d = sc.spawn(|| completion_usage(addr, "The history of the Roman Empire", 264));
+            wait_for("D decoding", || g.load(Ordering::Relaxed) >= g0 + 20);
+            if tier {
+                s.tier_faults().fail_out(1);
+            }
+            let r2 = completion_usage(addr, &r2p, 16);
+            // R's turn was admitted to the batch: D still decodes.
+            assert!(!d.is_finished(), "D ended before R's turn");
+            (d.join().unwrap(), r2)
+        });
+        let later = completion_usage(addr, &q, 16);
+        let m = call(addr, "GET", "/metrics", "").body;
+        (
+            vec![r1, q1, v1, w1, d, r2, later],
+            m,
+            s.tier_faults().off_lines(),
+        )
+    };
+    let (off, _, _) = run(0);
+    let (on, m, said) = run(4 * PAGE_BYTES);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "request {i}: the reply");
+        assert_eq!(x.2, y.2, "request {i}: prompt tokens");
+    }
+    assert_tier_off("a spill in a restore's reclaim", "spill", &said, &m);
+}
