@@ -1,0 +1,29 @@
+{
+ "label": "splitram-03e6a8c-dbg-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1104-142638-daac",
+   "name": "splitram-03e6a8c-dbg-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "03e6a8c",
+   "binary": "axon-test-dbg-03e6a8c",
+   "started": 1793820470.8933651,
+   "ended": 1793821751.3222651,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "3c334f8e0ab442bec76e2b3c1b27ae671fd6fc09d179d09718c38854a63087e1",
+   "log_bytes": 10424
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-04 14:49:11 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
