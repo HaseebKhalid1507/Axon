@@ -21,6 +21,11 @@ measurements behind them.
   real pressure): 6,592 of 26,496 tokens restored, TTFT-resume 7.05 s vs main 8.68 s, short of the 0.3 s bar. Hence
   opt-in (rule B's else branch). Next: an exclusive tier (C3), then the bella cell again
   ([docs/log/2026-10-27-kv-ram-tier.md](docs/log/2026-10-27-kv-ram-tier.md)).
+- **A tier error no longer exits the server when it hits a spill that makes room for a restore** (#181). It turns the
+  tier off, as every other tier error does, and serving goes on as with `--cache-ram 0`. The off line now names what
+  failed on every path: `axon serve: --cache-ram: spill|write-behind|restore: ...; the KV RAM tier is off from here`.
+  Tests now cover the off path on the CPU, a paged pool, a plain pool and `--parallel 1`
+  ([docs/log/2026-11-04-kvtier-off-path.md](docs/log/2026-11-04-kvtier-off-path.md)).
 
 ### FP8 checkpoints (#177)
 - **FP8 checkpoints load, as Q8_0 by default.** compressed-tensors per-channel e4m3 checkpoints with dynamic per-token
