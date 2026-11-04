@@ -888,6 +888,7 @@ fn stream_prefill_bits(rel: &str, name: &str) {
         true,
         false,
         0,
+        &crate::gguf::mem::avail,
     )
     .unwrap();
     h.stream.as_mut().expect("streaming set up").min = 1;
@@ -1497,4 +1498,295 @@ fn real_model_sampling_split(g: &crate::cuda::Gpu, rel: &str) {
         crate::sample::tests::real_model_sampling_on(&h, &m);
         assert!(h.streamed_chunks() > 0, "{kv:?}: prefills streamed");
     }
+}
+
+// ---------------------------------------------------------------------------
+// RAM (#143): the CPU half's refusal, and a streamed cache's page-locked KV.
+
+fn host(bytes: u64) -> Option<Avail> {
+    Some(Avail {
+        bytes,
+        bound: crate::gguf::mem::Bound::Host,
+    })
+}
+
+/// The KV element bytes of the CPU half's cache (kv::use_f32).
+fn kv_elem() -> u64 {
+    if crate::kv::use_f32() { 4 } else { 2 }
+}
+
+/// What `model::check_ram_split` weighs for a k-layer CPU half at ctx:
+/// what its build commits and the KV floor.
+fn half_need(m: &Model, k: usize, ctx: usize) -> u64 {
+    let need = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
+    crate::model::dense_load_bytes(need, !m.file_backed())
+        + need.kv_per_pos * ctx.min(crate::DEFAULT_CHAT_CTX) as u64
+}
+
+/// `build` with the RAM available `ram` (repacked, no streaming).
+fn build_at<'m, 'g>(
+    dev: Option<(&'g Gpu, &'g Module<'g>)>,
+    m: &'m Model,
+    ctx: usize,
+    gpu_layers: usize,
+    ram: u64,
+) -> Result<HybridQwen2<'m, 'g>, String> {
+    HybridQwen2::build(
+        dev,
+        m,
+        ctx,
+        gpu_layers,
+        CacheKv::F16,
+        false,
+        true,
+        0,
+        &|| host(ram),
+    )
+}
+
+/// The CPU half's arena and its cache's KV bytes a position are
+/// `dense_ram_need_keep`'s for its k layers.
+fn assert_half_is_the_estimate(h: &HybridQwen2, m: &Model, ctx: usize, what: &str) {
+    let k = h.n_layers - h.gpu_layers;
+    let est = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
+    let built = (h.cpu.as_ref())
+        .and_then(|c| c.r8_arena())
+        .map_or(0, |a| a.len() as u64);
+    assert_eq!(
+        est.arena,
+        built.next_multiple_of(2 << 20),
+        "{what} k={k}: arena"
+    );
+    let c = h.new_cache(ctx);
+    let kv = c
+        .cpu
+        .as_ref()
+        .map_or(0, |c| c.bits().len() as u64 * kv_elem());
+    assert_eq!(est.kv_per_pos * ctx as u64, kv, "{what} k={k}: KV");
+    assert_eq!(h.cpu.is_none(), k == 0, "{what} k={k}");
+}
+
+/// Every layer on the CPU (no GPU opened; the CLI's --gpu-layers 0): the
+/// split's check is the whole CPU model's, refused one byte under the
+/// tolerance (--gpu-layers 0 named), built at the tolerance under its
+/// need (the edge), and the built half is the estimate.
+#[test]
+fn hybrid_ram_check_every_layer_on_the_cpu() {
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let n = block_count(&m).unwrap();
+    let ctx = 256;
+    let need = half_need(&m, n, ctx);
+    let tol = crate::model::ram_tolerance();
+    let short = need.checked_sub(tol + 1).unwrap_or_else(|| {
+        panic!(
+            "the whole 0.5B ({} MiB) within the tolerance ({} MiB)",
+            need >> 20,
+            tol >> 20
+        )
+    });
+    match build_at(None, &m, ctx, 0, short) {
+        Ok(_) => panic!("built {n} CPU layers with {} bytes too few", tol + 1),
+        Err(e) => assert!(
+            e.contains(&format!(
+                "qwen2: the CPU model (--gpu-layers 0: all {n} layers on the CPU) needs about"
+            )) && e.contains("(bound by host MemAvailable"),
+            "{e}"
+        ),
+    }
+    let h = build_at(None, &m, ctx, 0, need - tol).expect("at the edge");
+    assert_half_is_the_estimate(&h, &m, ctx, "0.5b");
+}
+
+/// #143 on real splits (GPU): for 1, n/2, n-1 and n GPU layers, the CPU
+/// half's arena and KV are the estimate's (`assert_half_is_the_estimate`).
+/// A half that needs more than the tolerance is refused one byte under it
+/// (after the GPU half: the refusal names the split) and goes ahead at the
+/// edge, the tolerance under its need. One that needs less (the 0.5B's
+/// last layer, 12 MiB against 34 MiB on 8 CPUs) is refused by no RAM
+/// figure, so it's built with 0 bytes available: the check doesn't refuse
+/// it. The largest half (one GPU layer) must be past the tolerance on every
+/// model, so the refusal is shown on each, whatever the CPU count. All of
+/// it on the GPU (no CPU half) never reads the RAM.
+#[test]
+fn hybrid_ram_check_on_real_splits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    for rel in [M05, Q3, L1] {
+        let Some(m) = mapped(rel) else {
+            continue;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let n = block_count(&m).unwrap();
+        let ctx = 512;
+        let tol = crate::model::ram_tolerance();
+        let mut refused = Vec::new();
+        for gl in [1, n / 2, n - 1, n] {
+            let k = n - gl;
+            let need = half_need(&m, k, ctx);
+            // The RAM it's built at, and what was shown before.
+            let (ram, shown) = match need.checked_sub(tol + 1) {
+                Some(short) if k > 0 => {
+                    match build_at(Some((&g, &km)), &m, ctx, gl, short) {
+                        Ok(_) => panic!("{rel} k={k}: built {} bytes short", tol + 1),
+                        Err(e) => assert!(
+                            e.contains(&format!("the CPU half of the split ({k} of {n} layers)")),
+                            "{rel}: {e}"
+                        ),
+                    }
+                    refused.push(k);
+                    (
+                        need - tol,
+                        "refused 1 byte under the tolerance, built at it",
+                    )
+                }
+                // Within the tolerance (or no CPU half): no RAM figure
+                // refuses it, not even none at all.
+                _ if k > 0 => (0, "within the tolerance: built with 0 bytes available"),
+                _ => (0, "no CPU half"),
+            };
+            let h = build_at(Some((&g, &km)), &m, ctx, gl, ram)
+                .unwrap_or_else(|e| panic!("{rel} k={k}: {e}"));
+            assert_half_is_the_estimate(&h, &m, ctx, rel);
+            eprintln!(
+                "{rel}: {gl}/{n} GPU layers: CPU half needs {} MiB (arena + KV of {ctx}), \
+                 tolerance {} MiB: {shown}",
+                need >> 20,
+                tol >> 20
+            );
+        }
+        assert!(
+            refused.contains(&(n - 1)),
+            "{rel}: the largest CPU half ({} of {n} layers) is within the tolerance ({} MiB): \
+             the refusal wasn't shown",
+            n - 1,
+            tol >> 20
+        );
+        // No CPU half: nothing to check, whatever the RAM.
+        let h = HybridQwen2::build(
+            Some((&g, &km)),
+            &m,
+            ctx,
+            n,
+            CacheKv::F16,
+            false,
+            true,
+            0,
+            &|| -> Option<Avail> { panic!("read the RAM with no CPU half") },
+        )
+        .unwrap();
+        assert!(h.cpu.is_none());
+    }
+}
+
+/// The pin check's decision (pure): the tolerance kept free, the bound
+/// named; an unknown RAM figure doesn't stop streaming.
+#[test]
+fn pin_verdict_keeps_the_tolerance_free() {
+    const MIB: u64 = 1 << 20;
+    let tol = 38 * MIB;
+    assert_eq!(
+        pin_verdict_tol(512 * MIB, 4096, tol, host(550 * MIB)),
+        Ok(())
+    );
+    assert_eq!(pin_verdict_tol(512 * MIB, 4096, tol, None), Ok(()));
+    let e = pin_verdict_tol(512 * MIB, 4096, tol, host(550 * MIB - 1)).unwrap_err();
+    assert!(
+        e.starts_with(
+            "page-locking the CPU layers' KV cache of 4096 tokens takes 0.50 GiB of RAM and \
+             only 0.54 GiB is available (bound by host MemAvailable"
+        ),
+        "{e}"
+    );
+}
+
+/// Pages of `b` (page-aligned: each `kv::KvBuf` is its own mapping) that
+/// are resident, and its page count (mincore).
+#[cfg(target_os = "linux")]
+fn resident_pages(b: &[F16]) -> (usize, usize) {
+    unsafe extern "C" {
+        fn mincore(addr: *mut std::ffi::c_void, len: usize, vec: *mut u8) -> i32;
+    }
+    let len = std::mem::size_of_val(b);
+    let pages = len.div_ceil(4096);
+    let addr = b.as_ptr() as usize;
+    assert!(addr.is_multiple_of(4096), "a KV buffer starts a mapping");
+    let mut v = vec![0u8; pages];
+    // SAFETY: [addr, addr + len) is the live buffer's mapping; v has a
+    // byte per page of it.
+    let r = unsafe { mincore(addr as *mut _, len, v.as_mut_ptr()) };
+    assert_eq!(r, 0, "mincore: {}", std::io::Error::last_os_error());
+    (v.iter().filter(|&&p| p & 1 != 0).count(), pages)
+}
+
+/// The CPU layers' cache pages resident, of all of them.
+#[cfg(target_os = "linux")]
+fn cpu_kv_resident(c: &mut HybridCache) -> (usize, usize) {
+    let layers = c.cpu.as_mut().unwrap().f16_layers().expect("f16");
+    (layers.iter())
+        .flat_map(|(k, v)| [resident_pages(k), resident_pages(v)])
+        .fold((0, 0), |(r, n), (a, b)| (r + a, n + b))
+}
+
+/// Why the pin check (#143's streaming gap): an ordinary split cache is a
+/// lazy mapping (no page taken until written), but a streamed one has its
+/// CPU layers' K and V page-locked whole the moment it's made: every
+/// position of max_ctx, the `dense_ram_need_keep` KV a position times
+/// max_ctx. Short of RAM for that (the tolerance kept free) the cache is an
+/// ordinary one, and a prompt through it runs without streaming.
+#[cfg(target_os = "linux")]
+#[test]
+fn streamed_cache_pins_its_cpu_kv_whole() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    if crate::kv::use_f32() {
+        return; // streaming needs the f16 CPU cache
+    }
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let ctx = 2048;
+    let h = streamed(&g, &km, &m, ctx, n / 2, 1);
+    let k = n - n / 2;
+    let pinned = crate::model::dense_ram_need_keep(&m, true, 2, k).kv_per_pos * ctx as u64;
+    let tol = crate::model::ram_tolerance();
+    let mut lazy = h.cache_with(ctx, &|| host(pinned + tol - 1));
+    assert!(lazy.skv.is_none(), "streamed without the RAM to pin");
+    {
+        let layers = lazy.cpu.as_mut().unwrap().f16_layers().unwrap();
+        let host_kv: Vec<(&[F16], &[F16])> = layers.iter().map(|(k, v)| (&**k, &**v)).collect();
+        assert_eq!(
+            pinned_bytes(&host_kv),
+            pinned,
+            "the estimate's KV is what's pinned"
+        );
+    }
+    let (r, pages) = cpu_kv_resident(&mut lazy);
+    assert_eq!(
+        r, 0,
+        "an ordinary cache takes its pages as it fills ({pages})"
+    );
+    let mut c = h.cache_with(ctx, &|| host(pinned + tol));
+    assert!(c.skv.is_some(), "didn't stream with the RAM to pin");
+    let (r, pages) = cpu_kv_resident(&mut c);
+    assert_eq!(r, pages, "a streamed cache's CPU KV is resident whole");
+    // Both run; only the streamed cache streams.
+    let ids = long_ids(&m, 48);
+    let before = h.streamed_chunks();
+    h.feed_batch(&ids, 0, &mut lazy);
+    assert_eq!(h.streamed_chunks(), before, "the refused cache streamed");
+    h.feed_batch(&ids, 0, &mut c);
+    assert!(
+        h.streamed_chunks() > before,
+        "the pinned cache didn't stream"
+    );
+    eprintln!(
+        "0.5b k={k} ctx={ctx}: {pages} pages ({} MiB) pinned at the cache's creation",
+        pinned >> 20
+    );
 }
