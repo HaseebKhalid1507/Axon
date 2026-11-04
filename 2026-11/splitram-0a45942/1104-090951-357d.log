@@ -1,0 +1,106 @@
+[axon-run 09:09:51] submitted 1104-090951-357d by /home/haseeb/.cache/axon-splitram: /usr/bin/bash md5.sh ./axon-base-e04b808 ./axon-0a45942 md5out-0a45942
+[axon-run 09:34:37] scope axon-job-1104-090951-357d-1793802877.scope in app-axonjobs.slice: MemoryMax 13024 MB, MemoryHigh 11721 MB, no swap, oomd pressure kill 80% (claim 8000 MB): an OOM here kills only this job
+[axon-run 09:34:37] job 1104-090951-357d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-090951-357d-1793802877 --slice=app-axonjobs.slice -p MemoryMax=13024M -p MemoryHigh=11721M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash md5.sh ./axon-base-e04b808 ./axon-0a45942 md5out-0a45942
+axon-q 09:34:37 waiting: stagger
+axon-q 09:34:47 start slot 16-23: /usr/bin/bash md5.sh ./axon-base-e04b808 ./axon-0a45942 md5out-0a45942
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+base	qwen2.5-0.5b-q4_k_m-split12-p1	22703eeab624	rc=0	316
+cand	qwen2.5-0.5b-q4_k_m-split12-p1	22703eeab624	rc=0	316
+base	qwen2.5-0.5b-q4_k_m-split12-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-split12-p2	fee813f30667	rc=0	2169
+base	qwen2.5-0.5b-q4_k_m-split12-nostream-p1	22703eeab624	rc=0	316
+cand	qwen2.5-0.5b-q4_k_m-split12-nostream-p1	22703eeab624	rc=0	316
+base	qwen2.5-0.5b-q4_k_m-split12-nostream-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-split12-nostream-p2	fee813f30667	rc=0	2169
+base	qwen2.5-0.5b-q4_k_m-split12-q8-p1	db30b07ac3d3	rc=0	316
+cand	qwen2.5-0.5b-q4_k_m-split12-q8-p1	db30b07ac3d3	rc=0	316
+base	qwen2.5-0.5b-q4_k_m-split12-q8-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-split12-q8-p2	fee813f30667	rc=0	2169
+base	qwen2.5-0.5b-q4_k_m-split23-p1	22703eeab624	rc=0	316
+cand	qwen2.5-0.5b-q4_k_m-split23-p1	22703eeab624	rc=0	316
+base	qwen2.5-0.5b-q4_k_m-split23-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-split23-p2	fee813f30667	rc=0	2169
+base	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	306
+cand	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	306
+base	qwen2.5-0.5b-q4_k_m-cpu-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-cpu-p2	fee813f30667	rc=0	2169
+base	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	299
+cand	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	299
+base	qwen2.5-0.5b-q4_k_m-cuda-p2	fee813f30667	rc=0	2169
+cand	qwen2.5-0.5b-q4_k_m-cuda-p2	fee813f30667	rc=0	2169
+base	Qwen3-0.6B-Q8_0-split14-p1	02ca6ee60a0f	rc=0	313
+cand	Qwen3-0.6B-Q8_0-split14-p1	02ca6ee60a0f	rc=0	313
+base	Qwen3-0.6B-Q8_0-split14-p2	cd675a1dd601	rc=0	2167
+cand	Qwen3-0.6B-Q8_0-split14-p2	cd675a1dd601	rc=0	2167
+base	Qwen3-0.6B-Q8_0-split14-nostream-p1	02ca6ee60a0f	rc=0	313
+cand	Qwen3-0.6B-Q8_0-split14-nostream-p1	02ca6ee60a0f	rc=0	313
+base	Qwen3-0.6B-Q8_0-split14-nostream-p2	cd675a1dd601	rc=0	2167
+cand	Qwen3-0.6B-Q8_0-split14-nostream-p2	cd675a1dd601	rc=0	2167
+base	Qwen3-0.6B-Q8_0-split14-q8-p1	02ca6ee60a0f	rc=0	313
+cand	Qwen3-0.6B-Q8_0-split14-q8-p1	02ca6ee60a0f	rc=0	313
+base	Qwen3-0.6B-Q8_0-split14-q8-p2	cd675a1dd601	rc=0	2167
+cand	Qwen3-0.6B-Q8_0-split14-q8-p2	cd675a1dd601	rc=0	2167
+base	Qwen3-0.6B-Q8_0-split27-p1	cda98f758dae	rc=0	308
+cand	Qwen3-0.6B-Q8_0-split27-p1	cda98f758dae	rc=0	308
+base	Qwen3-0.6B-Q8_0-split27-p2	cd675a1dd601	rc=0	2167
+cand	Qwen3-0.6B-Q8_0-split27-p2	cd675a1dd601	rc=0	2167
+base	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	309
+cand	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	309
+base	Qwen3-0.6B-Q8_0-cpu-p2	cd675a1dd601	rc=0	2167
+cand	Qwen3-0.6B-Q8_0-cpu-p2	cd675a1dd601	rc=0	2167
+base	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	340
+cand	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	340
+base	Qwen3-0.6B-Q8_0-cuda-p2	4d5438a1c62f	rc=0	2159
+cand	Qwen3-0.6B-Q8_0-cuda-p2	4d5438a1c62f	rc=0	2159
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-p1	cc9424ad2c9b	rc=0	317
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-p1	cc9424ad2c9b	rc=0	317
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-p2	107013175ddd	rc=0	2181
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-nostream-p1	cc9424ad2c9b	rc=0	317
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-nostream-p1	cc9424ad2c9b	rc=0	317
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-nostream-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-nostream-p2	107013175ddd	rc=0	2181
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-q8-p1	cc9424ad2c9b	rc=0	317
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-q8-p1	cc9424ad2c9b	rc=0	317
+base	Llama-3.2-1B-Instruct-Q4_K_M-split8-q8-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split8-q8-p2	107013175ddd	rc=0	2181
+base	Llama-3.2-1B-Instruct-Q4_K_M-split15-p1	897464655057	rc=0	320
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split15-p1	897464655057	rc=0	320
+base	Llama-3.2-1B-Instruct-Q4_K_M-split15-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-split15-p2	107013175ddd	rc=0	2181
+base	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	320
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	320
+base	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	107013175ddd	rc=0	2181
+base	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	317
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	317
+base	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	107013175ddd	rc=0	2181
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	107013175ddd	rc=0	2181
+base	qwen2.5-3b-instruct-q4_k_m-split18-p1	8d9c079ccbeb	rc=0	339
+cand	qwen2.5-3b-instruct-q4_k_m-split18-p1	8d9c079ccbeb	rc=0	339
+base	qwen2.5-3b-instruct-q4_k_m-split18-p2	c1931ca3389e	rc=0	2246
+cand	qwen2.5-3b-instruct-q4_k_m-split18-p2	c1931ca3389e	rc=0	2246
+base	qwen2.5-3b-instruct-q4_k_m-split18-nostream-p1	8d9c079ccbeb	rc=0	339
+cand	qwen2.5-3b-instruct-q4_k_m-split18-nostream-p1	8d9c079ccbeb	rc=0	339
+base	qwen2.5-3b-instruct-q4_k_m-split18-nostream-p2	27d54f0a1bf3	rc=0	2235
+cand	qwen2.5-3b-instruct-q4_k_m-split18-nostream-p2	27d54f0a1bf3	rc=0	2235
+base	qwen2.5-3b-instruct-q4_k_m-split18-q8-p1	8d9c079ccbeb	rc=0	339
+cand	qwen2.5-3b-instruct-q4_k_m-split18-q8-p1	8d9c079ccbeb	rc=0	339
+base	qwen2.5-3b-instruct-q4_k_m-split18-q8-p2	1af7d844631d	rc=0	2211
+cand	qwen2.5-3b-instruct-q4_k_m-split18-q8-p2	1af7d844631d	rc=0	2211
+base	qwen2.5-3b-instruct-q4_k_m-split35-p1	8d9c079ccbeb	rc=0	339
+cand	qwen2.5-3b-instruct-q4_k_m-split35-p1	8d9c079ccbeb	rc=0	339
+base	qwen2.5-3b-instruct-q4_k_m-split35-p2	c1931ca3389e	rc=0	2246
+cand	qwen2.5-3b-instruct-q4_k_m-split35-p2	c1931ca3389e	rc=0	2246
+base	qwen2.5-3b-instruct-q4_k_m-cpu-p1	8d9c079ccbeb	rc=0	339
+cand	qwen2.5-3b-instruct-q4_k_m-cpu-p1	8d9c079ccbeb	rc=0	339
+base	qwen2.5-3b-instruct-q4_k_m-cpu-p2	27d54f0a1bf3	rc=0	2235
+cand	qwen2.5-3b-instruct-q4_k_m-cpu-p2	27d54f0a1bf3	rc=0	2235
+base	qwen2.5-3b-instruct-q4_k_m-cuda-p1	7345951a60f0	rc=0	317
+cand	qwen2.5-3b-instruct-q4_k_m-cuda-p1	7345951a60f0	rc=0	317
+base	qwen2.5-3b-instruct-q4_k_m-cuda-p2	589d45dd1f50	rc=0	2246
+cand	qwen2.5-3b-instruct-q4_k_m-cuda-p2	589d45dd1f50	rc=0	2246
+== md5
+MD5: 48 of 48 cells identical, main vs branch
+MD5 GATE PASS
+[axon-run 09:36:44] exit 0 after 126.4s (host bella)

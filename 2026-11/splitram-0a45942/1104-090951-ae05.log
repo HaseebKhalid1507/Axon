@@ -1,0 +1,35 @@
+[axon-run 09:09:51] submitted 1104-090951-ae05 by /home/haseeb/.cache/axon-splitram: /home/haseeb/.cache/axon-splitram/bin/axon-test-0a45942 split_need_matches hybrid_ram_check streamed_cache_pins --nocapture --test-threads 1
+[axon-run 09:34:27] scope axon-job-1104-090951-ae05-1793802867.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18006 MB): an OOM here kills only this job
+[axon-run 09:34:27] job 1104-090951-ae05 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-090951-ae05-1793802867 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-splitram/bin/axon-test-0a45942 split_need_matches hybrid_ram_check streamed_cache_pins --nocapture --test-threads 1
+axon-q 09:34:27 start slot 16-23: /home/haseeb/.cache/axon-splitram/bin/axon-test-0a45942 split_need_matches hybrid_ram_check streamed_cache_pins --nocapture --test-threads 1
+
+running 4 tests
+test hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu ... ok
+test hybrid::tests::hybrid_ram_check_on_real_splits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+models/qwen2.5-0.5b-q4_k_m.gguf: 1/24 GPU layers: CPU half needs 233 MiB (arena + KV of 512)
+models/qwen2.5-0.5b-q4_k_m.gguf: 12/24 GPU layers: CPU half needs 125 MiB (arena + KV of 512)
+models/qwen2.5-0.5b-q4_k_m.gguf: 23/24 GPU layers: CPU half needs 12 MiB (arena + KV of 512)
+models/qwen2.5-0.5b-q4_k_m.gguf: 24/24 GPU layers: CPU half needs 0 MiB (arena + KV of 512)
+models/Qwen3-0.6B-Q8_0.gguf: 1/28 GPU layers: CPU half needs 486 MiB (arena + KV of 512)
+models/Qwen3-0.6B-Q8_0.gguf: 14/28 GPU layers: CPU half needs 252 MiB (arena + KV of 512)
+models/Qwen3-0.6B-Q8_0.gguf: 27/28 GPU layers: CPU half needs 18 MiB (arena + KV of 512)
+models/Qwen3-0.6B-Q8_0.gguf: 28/28 GPU layers: CPU half needs 0 MiB (arena + KV of 512)
+models/Llama-3.2-1B-Instruct-Q4_K_M.gguf: 1/16 GPU layers: CPU half needs 547 MiB (arena + KV of 512)
+models/Llama-3.2-1B-Instruct-Q4_K_M.gguf: 8/16 GPU layers: CPU half needs 294 MiB (arena + KV of 512)
+models/Llama-3.2-1B-Instruct-Q4_K_M.gguf: 15/16 GPU layers: CPU half needs 39 MiB (arena + KV of 512)
+models/Llama-3.2-1B-Instruct-Q4_K_M.gguf: 16/16 GPU layers: CPU half needs 0 MiB (arena + KV of 512)
+ok
+test hybrid::tests::streamed_cache_pins_its_cpu_kv_whole ... note: this cache won't stream: page-locking the CPU layers' KV cache of 2048 tokens takes 0.01 GiB of RAM and only 0.04 GiB is available (bound by host MemAvailable)
+0.5b k=12 ctx=2048: 3072 pages (12 MiB) pinned at the cache's creation
+ok
+test model::ram_dense_tests::split_need_matches_the_built_cpu_half ... qwen3: 2 layers, half (k=1) arena 2 MiB of 2 MiB, KV 512 of 1024 B a position
+llama: 2 layers, half (k=1) arena 2 MiB of 2 MiB, KV 512 of 1024 B a position
+qwen2.5-0.5b: 24 layers, half (k=12) arena 122 MiB of 376 MiB, KV 6144 of 12288 B a position
+qwen3-0.6b: 28 layers, half (k=14) arena 224 MiB of 604 MiB, KV 57344 of 114688 B a position
+llama-3.2-1b: 16 layers, half (k=8) arena 286 MiB of 776 MiB, KV 16384 of 32768 B a position
+gemma3-1b: 26 layers, half (k=13) arena 354 MiB of 1014 MiB, KV 13312 of 26624 B a position
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 819 filtered out; finished in 5.64s
+
+[axon-run 09:34:32] exit 0 after 5.8s (host bella)
