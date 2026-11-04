@@ -3,7 +3,8 @@
 # this PR ran at 060c555 and after (11-04). ENGINES: axon (default) or axon,ollama (covers the board's own ollama
 # store, ollama_check and ollama's raw path). 1.5B Q4_K_M, one short cell (speed 4, a 120-s trace window = 30 s of
 # replay, scale 0.05), GPU. NOT a board, NOT timing evidence. Then the --sessions ladder on Axon alone: the same
-# cell with S/2 sessions and with 2S (every session plus one fresh copy). Also the harness's own checks: CI's
+# cell with S/2 sessions and with 2S (every session plus one fresh copy), 2 rounds: every cell on its own engine
+# process (start and stop timed), the cell order rotated in round 1. Also the harness's own checks: CI's
 # --check-committed and agent_replay_selftest.py, and --synthetic must reproduce the committed example byte for
 # byte. The trace is extracted fresh from the Synaps logs (AXON_SMOKE_FROM..AXON_SMOKE_TO, 3 complete days) into
 # the out dir, never into this repo.
@@ -70,27 +71,38 @@ EOF
 S=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['cells']['4.0']['n_sessions'])" "$OUT/meta.json") \
   || fail "cell sessions"
 N1=$(( S / 2 > 0 ? S / 2 : 1 )); N2=$(( 2 * S ))
-python3 -u "$W/scripts/agent_replay.py" board --engines axon --kv f16 --rounds 1 --speeds 4 --sessions $N1,$N2 \
+python3 -u "$W/scripts/agent_replay.py" board --engines axon --kv f16 --rounds 2 --speeds 4 --sessions $N1,$N2 \
   --model "$M/qwen2.5-1.5b-instruct-q4_k_m.gguf" --axon "$AX" --kv-tokens 65536 \
   --trace "$OUT/trace-anon.json" --window-s 120 --scale 0.05 --out "$OUT/ladder" | tee "$OUT/ladder.log"
 grep -q '^BOARD END ok' "$OUT/ladder.log" || fail "ladder board did not end ok"
 grep -q '^- speed 4, axon f16: N_warm = ' "$OUT/ladder.log" || fail "no N_warm line"
+grep -q '^ENGINE RESTARTS (one per cell per engine): axon 4 x start ' "$OUT/ladder.log" || fail "no ENGINE RESTARTS line"
 python3 - "$OUT" $S $N1 $N2 <<'EOF' || fail "ladder assertions"
 import json, sys
 d, S, N1, N2 = sys.argv[1], *map(int, sys.argv[2:])
 base = json.load(open(f'{d}/run-axon-f16-s4-r0.json'))
 m = json.load(open(f'{d}/ladder/meta.json'))
-for n in (N1, N2):
-    r = json.load(open(f'{d}/ladder/run-axon-f16-s4-n{n}-r0.json'))
-    c = m['cells'][f'4.0/n{n}']
-    assert r['sessions'] == n and c['n_sessions'] == n and c['sessions'] == n, (n, c)
-    assert r['errors'] == 0 and not r['prompt_mismatch'] and r['prompt_checked'] == r['requests'], (n, r['first_error'])
-    assert len({x['chain'] for x in r['per_request']}) == n, n
-    print(f"CHECK ladder n={n}: {r['requests']} requests in {n} sessions ({c['n_primes']} primed), "
-          f"{r['prompt_checked']} prompt counts checked, 0 mismatches, 0 errors; turn p50 {r['ttft_turn_p50']} s, "
-          f"re-prefill {r['reprefill_share']}")
-    if n == N2:
-        assert r['requests'] == 2 * base['requests'], (r['requests'], base['requests'])
+pids = {}
+for rnd in (0, 1):
+    for n in (N1, N2):
+        r = json.load(open(f'{d}/ladder/run-axon-f16-s4-n{n}-r{rnd}.json'))
+        c = m['cells'][f'4.0/n{n}']
+        assert r['sessions'] == n and c['n_sessions'] == n and c['sessions'] == n, (n, c)
+        assert r['errors'] == 0 and not r['prompt_mismatch'] and r['prompt_checked'] == r['requests'], (n, r['first_error'])
+        assert len({x['chain'] for x in r['per_request']}) == n, n
+        pids[rnd, n] = r['engine_pid']
+        print(f"CHECK ladder n={n} round {rnd}: {r['requests']} requests in {n} sessions ({c['n_primes']} primed), "
+              f"{r['prompt_checked']} prompt counts checked, 0 mismatches, 0 errors; turn p50 {r['ttft_turn_p50']} s, "
+              f"re-prefill {r['reprefill_share']}; engine pid {r['engine_pid']}, started in {r['engine_start_s']} s")
+        if n == N2:
+            assert r['requests'] == 2 * base['requests'], (r['requests'], base['requests'])
+# a fresh engine per cell (#186 review): 4 cells, 4 processes, each started and stopped, the order rotated in round 1
+st = m['starts']
+assert len(set(pids.values())) == 4 and sorted(x['pid'] for x in st) == sorted(pids.values()), (pids, st)
+assert all(x['start_s'] > 0 and x['stop_s'] >= 0 for x in st), st
+assert [(x['round'], x['sessions']) for x in st] == [(0, N1), (0, N2), (1, N2), (1, N1)], st
+print(f"CHECK ladder: 4 cells on 4 engine processes (pids {sorted(pids.values())}), order r0 n{N1}, n{N2}; r1 n{N2}, "
+      f"n{N1}; start to ready {[x['start_s'] for x in st]} s, stop {[x['stop_s'] for x in st]} s")
 EOF
 
 # 3. report

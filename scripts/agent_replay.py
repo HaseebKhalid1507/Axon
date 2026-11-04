@@ -7,6 +7,11 @@
                           [--sessions 8,16,24,32]   (the N_warm ladder: one cell per speed x N)
                           (bella, 7B, 3 rounds x speeds 1,4 x 3 engines: ~220-240 min MEASURED; --max-min >= 270;
                           scripts/agent_board.sh wraps it)
+                          Every cell runs on a fresh process of each engine (--engines order, back to back): cells
+                          share text, so an engine that ran one would start the next with its prompts cached. The
+                          cell order rotates by round. MEASURED start to ready on bella, 7B (q8 board 1027-122343's
+                          engines.jsonl): 2.1-3.2 s (axon, llama-server), 6.0-6.9 s (ollama). Those logs have no stop
+                          time; the board measures both and prints them (ENGINE RESTARTS).
     agent_replay.py fanout --url URL --model GGUF [--busy 4] --out FILE.json   (row C's fan-out cell)
     agent_replay.py table DIR...       (markdown board from board result dirs)
 
@@ -26,8 +31,10 @@ Cell options (defaults = the canonical agent-32k cell, docs/log/2026-10-27-agent
                       own fresh filler: it shares with the original only what two real sessions share (the
                       system/tool pool; a forked session's copy j forks from copy j of its parent). Copy 0 is the
                       session itself, so N = S is the canonical cell byte for byte. N_warm (plan section 4) = the
-                      largest N whose median TTFT-turn p50 <= 0.5 s and re-prefill (clamped) <= 10 %; `table` prints
-                      it. ESTIMATED cost: each N at speed 1 is the 600-s window per engine per round plus its primes.
+                      largest N whose median TTFT-turn p50 <= 0.5 s and re-prefill (clamped) <= 10 %, over clean
+                      rounds; `table` prints it. The cells are nested (N = 8's sessions are N = 16's first 8, same
+                      text): that is why a board starts a fresh engine per cell. ESTIMATED cost: each N at speed 1
+                      is the 600-s window per engine per round plus its primes and one engine restart.
 
 Text: every token span is synthetic filler, words that are single tokens in the target model's vocabulary (read
 from the GGUF), one token each, so the replay is in the target model's tokens. Spans shared in the trace are
@@ -753,6 +760,19 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     if 'error' in r:
         stop_engine(proc)
         raise RuntimeError(f'{kind}: warm-up request failed: {r["error"]}; log {log}')
+    if kind == 'ollama' and getattr(a, 'ollama_expect', None):
+        # ollama 0.40.13 migrates its store on first use (manifests -> manifests-v2), after the board's check: check
+        # again what it can load now. Blobs that didn't change aren't hashed again (file_sha256).
+        try:
+            again = ollama_check(a.ollama_models, a.ollama_model, a.model_sha256)
+        except SystemExit as e:
+            raise RuntimeError(f'ollama: check after start failed: {e}; log {log}')
+        same = lambda x: (x['weights'], x['config'], x['layers'], x['params'])
+        if same(again) != same(a.ollama_expect):
+            raise RuntimeError(f'ollama: after start {a.ollama_model} resolves to other blobs ({again["manifest"]}) '
+                               f'than the board checked ({a.ollama_expect["manifest"]}); log {log}')
+        cfg += (f'; ollama_check after start: {again["manifest"]} + {len(again["others"])} other manifest(s), '
+                f'same blobs')
     # Tokenization check: a fresh (never sent) prompt of N filler words must be exactly N tokens to the engine.
     n = 512
     probe = Texts(len(a.words), a.seed).get(('tokcheck', kind, port, time.time()), n)
@@ -823,17 +843,20 @@ def ollama_manifest_paths(store, model):
 
 
 def ollama_check(store, model, model_sha):
-    """Refuse to start the board unless ollama provably runs --model (11-04, shady's review of 060c555; #182): the
-    manifest ollama would load (ollama_manifest_paths) must exist; its weights layer must be sha256(--model) (axon and
-    llama-server get --model itself); a second manifest for the same name (a v1 entry next to a v2 one) must name the
-    same weights; it may have no layer outside OLLAMA_LAYERS; and every blob it names (config and layers) must be in
-    store/blobs with the manifest's size and must hash to its own digest (a file under the right name is not enough;
-    ~5 s for the 7B's weights). Returns what meta.json records: the manifest, every layer (type, digest, size) and
-    the params layer's contents (sampling settings ollama applies on top of the request)."""
+    """Refuse to start the board unless ollama provably runs --model (11-04, shady's review of 060c555; #182; every
+    manifest after shady's #186 review). EVERY manifest ollama could resolve for the name (ollama_manifest_paths: a v2
+    entry and a v1 one can both be present, and ollama migrates v1 to v2 on first use) must pass, not just the first:
+    one weights layer, the same in all of them, = sha256(--model) (axon and llama-server get --model itself); no layer
+    outside OLLAMA_LAYERS; every blob it names (config and layers) a sha256 digest, present in store/blobs with the
+    manifest's size and hashing to its own digest (a file under the right name is not enough; ~3 s for the 7B's
+    weights, each blob hashed once). The board runs it again once its ollama is up (_start_engine). Returns what
+    meta.json records: the manifest ollama loads first, the others, the config blob and every layer (type, digest,
+    size), and the params layer's contents (sampling settings ollama applies on top of the request)."""
     cands = [p for p, present in ollama_manifest_paths(store, model) if present(p)]
     if not cands:
         raise SystemExit(f'ollama model {model}: no manifest under {store} (tried: '
                          f'{", ".join(os.path.relpath(p, store) for p, _ in ollama_manifest_paths(store, model))})')
+    rel = lambda p: os.path.relpath(p, store)
 
     def weights(path):
         try:
@@ -844,31 +867,39 @@ def ollama_check(store, model, model_sha):
         if len(w) != 1:
             raise SystemExit(f'ollama model {model}: {len(w)} weights layers in {path}')
         return j, w[0]
-    j, w = weights(cands[0])
-    for other in cands[1:]:
-        if weights(other)[1] != w:
-            raise SystemExit(f'ollama model {model}: {os.path.relpath(cands[0], store)} (the one ollama loads) names '
-                             f'{w}, {os.path.relpath(other, store)} names {weights(other)[1]}')
+    mans = [weights(p) for p in cands]
+    w = mans[0][1]
+    for p, (_, wo) in zip(cands[1:], mans[1:]):
+        if wo != w:
+            raise SystemExit(f'ollama model {model}: {rel(cands[0])} (the one ollama loads) names {w}, {rel(p)} '
+                             f'names {wo}')
     if w != f'sha256:{model_sha}':
         raise SystemExit(f'ollama model {model} runs {w}, not --model (sha256:{model_sha}): the engines would not '
                          f'run the same file')
+    out = [_ollama_manifest(store, model, rel(p), j) for p, (j, _) in zip(cands, mans)]
+    return dict(out[0], name=model, manifest=rel(cands[0]), manifests_found=len(cands), weights=w,
+                others=[rel(p) for p in cands[1:]])
+
+
+def _ollama_manifest(store, model, where, j):
+    """ollama_check for one parsed manifest `j` (at `where`): layer types, digests, presence, sizes, hashes."""
     layers = j.get('layers') or []
     other = [x.get('mediaType') for x in layers if x.get('mediaType') not in OLLAMA_LAYERS]
     if other:
-        raise SystemExit(f'ollama model {model}: layers {other} in {os.path.relpath(cands[0], store)}: ollama would '
-                         f'not run --model alone (allowed: {", ".join(OLLAMA_LAYERS.values())})')
+        raise SystemExit(f'ollama model {model}: layers {other} in {where}: ollama would not run --model alone '
+                         f'(allowed: {", ".join(OLLAMA_LAYERS.values())})')
     blobs = [('config', j.get('config') or {})] + [(OLLAMA_LAYERS[x['mediaType']], x) for x in layers]
     bad = [t for t, x in blobs if not re.fullmatch(r'sha256:[0-9a-f]{64}', str(x.get('digest')))]
     if bad:
-        raise SystemExit(f'ollama model {model}: no sha256 digest on its {bad} blob(s)')
+        raise SystemExit(f'ollama model {model}: no sha256 digest on its {bad} blob(s) in {where}')
     path = lambda x: os.path.join(store, 'blobs', x['digest'].replace(':', '-'))
     missing = [x['digest'] for _, x in blobs if not os.path.exists(path(x))]
     if missing:
-        raise SystemExit(f'ollama model {model}: blobs missing from {store}/blobs: {missing}')
+        raise SystemExit(f'ollama model {model}: blobs missing from {store}/blobs: {missing} ({where})')
     for t, x in blobs:   # sizes first (free), then the bytes
         if x.get('size') is not None and os.path.getsize(path(x)) != x['size']:
             raise SystemExit(f'ollama model {model}: {t} blob {x["digest"]} is {os.path.getsize(path(x))} bytes, '
-                             f'its manifest says {x["size"]}')
+                             f'its manifest says {x["size"]} ({where})')
     for t, x in blobs:
         got = 'sha256:' + file_sha256(path(x))
         if got != x['digest']:
@@ -880,35 +911,70 @@ def ollama_check(store, model, model_sha):
                 params = json.load(open(path(x)))
             except ValueError as e:
                 raise SystemExit(f'ollama model {model}: params blob {x["digest"]} is not JSON ({e})')
-    return dict(name=model, manifest=os.path.relpath(cands[0], store), manifests_found=len(cands), weights=w,
-                blobs=len(blobs), layers=[dict(type=t, digest=x['digest'], size=x.get('size')) for t, x in blobs[1:]],
-                params=params)
+    return dict(blobs=len(blobs), config=dict(digest=blobs[0][1]['digest'], size=blobs[0][1].get('size')),
+                layers=[dict(type=t, digest=x['digest'], size=x.get('size')) for t, x in blobs[1:]], params=params)
+
+
+_SHA = {}   # (dev, inode, size, mtime, ctime) -> sha256: a file is hashed again if any of them moved. ctime too:
+#             a write that keeps size and mtime (utime) still moves it, and nothing short of the clock sets it back
 
 
 def file_sha256(path):
-    with open(path, 'rb') as f:
-        return hashlib.file_digest(f, 'sha256').hexdigest()
+    st = os.stat(path)
+    key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    if key not in _SHA:
+        with open(path, 'rb') as f:
+            _SHA[key] = hashlib.file_digest(f, 'sha256').hexdigest()
+    return _SHA[key]
 
 
-def harness_provenance():
-    """This script's provenance for meta.json and `run` results (#182): the commit of the tree it runs from, the
-    tracked files that differ from that commit (staged or not; untracked files aren't listed) and this file's own
-    sha256, which also identifies a copy outside git (commit and dirty are then None)."""
-    here = os.path.abspath(__file__)
+def harness_provenance(here=None):
+    """This script's provenance for meta.json and `run` results (#182; hardened after shady's #186 review): the commit
+    of the git tree it runs from, the tracked files that differ from that commit, and this file's own sha256.
+    - commit and dirty are None unless this file is tracked at HEAD in that tree: an untracked copy, or a copy
+      dropped into some other repo, has no commit to name.
+    - dirty: what `git status` lists (staged or not; untracked files aren't listed); plus the files git is told not
+      to look at (assume-unchanged / skip-worktree, `git ls-files -v`) whose bytes differ from HEAD's; plus this file
+      itself whenever its bytes differ from HEAD's blob, whatever git's index says."""
+    here = os.path.realpath(here or __file__)
+    sha = file_sha256(here)
     commit = dirty = None
     try:
-        git = lambda *x: subprocess.run(['git', '-C', os.path.dirname(here), *x], capture_output=True, text=True,
-                                        timeout=30)
-        r = git('rev-parse', 'HEAD')
-        if r.returncode == 0:
-            commit = r.stdout.strip()
-            st = git('status', '--porcelain', '--untracked-files=no')
-            if st.returncode == 0:
-                dirty = sorted(ln[3:] for ln in st.stdout.splitlines() if ln.strip())
+        def git(*x, cwd=os.path.dirname(here)):
+            return subprocess.run(['git', '-c', 'core.fsmonitor=false', '-C', cwd, *x], capture_output=True,
+                                  timeout=60)
+        top, head = git('rev-parse', '--show-toplevel'), git('rev-parse', '--verify', '-q', 'HEAD')
+        if top.returncode == 0 and head.returncode == 0:
+            top = top.stdout.decode().strip()
+            mine = os.path.relpath(here, os.path.realpath(top))
+            at_head = lambda f: git('cat-file', 'blob', f'HEAD:{f}', cwd=top)
+            blob = at_head(mine)
+            if blob.returncode == 0:
+                commit, dirty = head.stdout.decode().strip(), set()
+                st = git('status', '--porcelain', '-z', '--untracked-files=no', cwd=top)
+                ent = st.stdout.decode(errors='replace').split('\0')
+                i = 0
+                while i < len(ent):
+                    e = ent[i]
+                    if len(e) > 3:
+                        dirty.add(e[3:])
+                        i += 2 if set(e[:2]) & {'R', 'C'} else 1   # a rename / copy: then its source path
+                    else:
+                        i += 1
+                lv = git('ls-files', '-v', '-z', cwd=top).stdout.decode(errors='replace').split('\0')
+                for e in lv:
+                    if len(e) > 2 and (e[0].islower() or e[0] == 'S'):
+                        f, p = e[2:], os.path.join(top, e[2:])
+                        if os.path.isfile(p):
+                            b = at_head(f)
+                            if b.returncode != 0 or hashlib.sha256(b.stdout).hexdigest() != file_sha256(p):
+                                dirty.add(f)
+                if hashlib.sha256(blob.stdout).hexdigest() != sha:
+                    dirty.add(mine)
+                dirty = sorted(dirty)
     except (OSError, subprocess.SubprocessError):
-        pass
-    return dict(commit=commit, dirty=dirty, sha256=file_sha256(here), path=here)
-
+        commit = dirty = None
+    return dict(commit=commit, dirty=dirty, sha256=sha, path=here)
 
 def ollama_offload(logdir, port):
     """ollama's own layer placement from its log (a partial offload makes it slow, and says so)."""
@@ -1222,6 +1288,7 @@ def brief(s):
 
 def cmd_board(a):
     install_guards()
+    t_board = time.time()
     trace = json.load(open(a.trace))
     words = a.words = word_list(a.model)
     a.nwords = len(words)
@@ -1267,64 +1334,86 @@ def cmd_board(a):
         meta['ollama_model'] = ollama_check(a.ollama_models, a.ollama_model, meta['model_sha256'])
         om = meta['ollama_model']
         print(f'ollama store: {meta["ollama_models"]}; {a.ollama_model} -> {om["manifest"]}, weights {om["weights"]} '
-              f'= sha256(--model); layers {", ".join(x["type"] for x in om["layers"])}, all {len(om["layers"]) + 1} '
-              f'blobs hashed = their digests; params {json.dumps(om["params"])}', flush=True)
+              f'= sha256(--model); layers {", ".join(x["type"] for x in om["layers"])}, all {om["blobs"]} '
+              f'blobs hashed = their digests; {om["manifests_found"]} manifest(s) checked '
+              f'({", ".join([om["manifest"]] + om["others"])}); params {json.dumps(om["params"])}', flush=True)
     meta['state'] = 'running'
     save_meta()
+    a.model_sha256 = meta['model_sha256']
+    a.ollama_expect = meta.get('ollama_model')
     axon_tokens = a.kv_tokens
     port = a.port
+    shrink = {}    # kind -> budget cuts a start needed (llama-server): later starts begin there
+    starts = meta['starts'] = []
+    order = list(cells)
     for rnd in range(a.round_offset, a.round_offset + a.rounds):
-        for kind in engines:
-            port += 1
-            proc = None
-            try:
-                budget = axon_tokens
-                for attempt in range(3):
-                    try:
-                        proc, eng, tokens, cfg = start_engine(kind, a, a.kv, port, a.out, budget)
-                        break
-                    except RuntimeError as e:
-                        # llama-server's own buffers may not fit next to Axon's KV budget: shrink it, say so
-                        if kind != 'llama' or attempt == 2:
-                            raise
+        # A fresh engine process per cell (shady, #186 review): the cells share text (the ladder's N are nested; the
+        # speeds replay one window), so a process that ran one cell would start the next with its prompts cached.
+        # MEASURED on #160's q8 board, where speed 4 ran on speed 1's process: llama-server served 9 of 13 new
+        # sessions' first prompts at speed 4 from speed 1's leftovers (138,239 tokens, 69 % of the cell's ideal
+        # prefill). The order rotates by round (the absolute round: a --round-offset rerun repeats it).
+        k = rnd % len(order)
+        for sp, n in order[k:] + order[:k]:
+            cell = cells[sp, n]
+            ns = '' if n is None else f' sessions {n}'
+            for kind in engines:
+                port += 1
+                proc = None
+                st = dict(kind=kind, round=rnd, speed=sp, sessions=n)
+                try:
+                    budget = axon_tokens
+                    for _ in range(shrink.get(kind, 0)):
                         budget = int(budget * 0.85) // 256 * 256
-                        port += 1
-                        print(f'{kind}: start failed ({e}); retrying with {budget} KV tokens', flush=True)
-                if kind == 'ollama':
-                    cfg += ollama_offload(a.out, port)
-                    meta.setdefault('engine_versions', {})['ollama'] = a.ollama_version
-                if kind == 'axon' and not a.kv_tokens:
-                    axon_tokens = tokens
-                meta.setdefault('config', {})[kind] = cfg
-                kv_gb = tokens * bpt * KV_BYTES[a.kv] / 1e9
-                save_meta()
-                for (sp, n), cell in cells.items():
+                    for attempt in range(3):
+                        try:
+                            t0 = time.time()
+                            proc, eng, tokens, cfg = start_engine(kind, a, a.kv, port, a.out, budget)
+                            st.update(pid=proc.pid, start_s=round(time.time() - t0, 2))
+                            break
+                        except RuntimeError as e:
+                            # llama-server's own buffers may not fit next to Axon's KV budget: shrink it, say so
+                            if kind != 'llama' or attempt == 2:
+                                raise
+                            budget = int(budget * 0.85) // 256 * 256
+                            shrink[kind] = shrink.get(kind, 0) + 1
+                            port += 1
+                            print(f'{kind}: start failed ({e}); retrying with {budget} KV tokens', flush=True)
+                    if kind == 'ollama':
+                        cfg += ollama_offload(a.out, port)
+                        meta.setdefault('engine_versions', {})['ollama'] = a.ollama_version
+                    if kind == 'axon' and not a.kv_tokens:
+                        axon_tokens = tokens
+                    meta.setdefault('config', {})[kind] = cfg
+                    kv_gb = tokens * bpt * KV_BYTES[a.kv] / 1e9
+                    save_meta()
                     a.speed = sp
                     t = time.time()
                     s = run_cell(eng, words, cell, a, kv_gb)
-                    s.update(engine=kind, kv=a.kv, round=rnd, speed=sp, config=cfg, kv_tokens=tokens)
-                    ns = ''
+                    s.update(engine=kind, kv=a.kv, round=rnd, speed=sp, config=cfg, kv_tokens=tokens,
+                             engine_pid=proc.pid, engine_start_s=st['start_s'])
                     if n is not None:
                         s['sessions'] = n
-                        ns = f' sessions {n}'
                     if s.get('prompt_mismatch'):
                         meta.setdefault('failures', []).append(
                             f'{kind} speed {sp:g}{ns} round {rnd}: {s["prompt_mismatch"]} prompts the engine counted differently')
                     f = os.path.join(a.out, f'run-{kind}-{a.kv}-s{sp:g}' + (f'-n{n}' if n else '') + f'-r{rnd}.json')
                     json.dump(s, open(f, 'w'), indent=1)
-                    print(f'RUN {kind} kv {a.kv} speed {sp:g}{ns} round {rnd}: {brief(s)} ({time.time() - t:.0f} s)',
-                          flush=True)
+                    print(f'RUN {kind} kv {a.kv} speed {sp:g}{ns} round {rnd}: {brief(s)} ({time.time() - t:.0f} s; '
+                          f'engine pid {proc.pid}, started in {st["start_s"]:.1f} s)', flush=True)
                     meta.setdefault('runs', []).append(os.path.basename(f))
+                except Exception as e:  # one engine failing must not lose the others
+                    print(f'RUN {kind} kv {a.kv} speed {sp:g}{ns} round {rnd}: FAILED {e}', flush=True)
+                    meta.setdefault('failures', []).append(f'{kind} speed {sp:g}{ns} round {rnd}: {e}')
+                finally:
+                    if proc:
+                        t0 = time.time()
+                        stop_engine(proc)
+                        st['stop_s'] = round(time.time() - t0, 2)
+                        starts.append(st)
                     save_meta()
-            except Exception as e:  # one engine failing must not lose the others
-                print(f'RUN {kind} kv {a.kv} round {rnd}: FAILED {e}', flush=True)
-                meta.setdefault('failures', []).append(f'{kind} round {rnd}: {e}')
-                save_meta()
-            finally:
-                if proc:
-                    stop_engine(proc)
-            if kind == 'axon' and not axon_tokens:
-                print('axon failed and no --kv-tokens: the baselines need the KV budget', flush=True)
+                if kind == 'axon' and not axon_tokens:
+                    print('axon failed and no --kv-tokens: the baselines need the KV budget', flush=True)
+    print(restart_cost(starts, time.time() - t_board), flush=True)
     meta['ended'] = time.strftime('%Y-%m-%d %H:%M:%S')
     meta['state'] = 'ended'
     save_meta()
@@ -1334,6 +1423,21 @@ def cmd_board(a):
         print(f'BOARD END WITH FAILURES: {meta["failures"]}')
     else:
         print(f'BOARD END ok ({errs} request errors)')
+
+
+def restart_cost(starts, wall):
+    """What a fresh engine per cell costs: per engine, its starts (launch to ready: load, warm-up request and
+    tokenization check) and stops, and their sum against the board's wall time."""
+    if not starts:
+        return 'ENGINE RESTARTS: none'
+    rng = lambda v: f'{statistics.median(v):.1f} s [{min(v):.1f}-{max(v):.1f}]'
+    out, tot = [], 0.0
+    for kind in dict.fromkeys(x['kind'] for x in starts):
+        xs = [x for x in starts if x['kind'] == kind]
+        tot += sum(x['start_s'] + x['stop_s'] for x in xs)
+        out.append(f'{kind} {len(xs)} x start {rng([x["start_s"] for x in xs])} + stop {rng([x["stop_s"] for x in xs])}')
+    return (f'ENGINE RESTARTS (one per cell per engine): {"; ".join(out)}; total {tot:.0f} s of {wall:.0f} s board wall '
+            f'({tot / max(wall, 1e-9):.1%})')
 
 
 def gpu_name():
@@ -1417,27 +1521,52 @@ def table(dirs, clean_only=False):
 
 def n_warm(groups):
     """The N_warm ladder's reading (plan section 4), per speed / KV / engine over its --sessions cells: N_warm = the
-    largest N whose median TTFT-turn p50 <= 0.5 s and median re-prefill share (clamped) <= 10 %. An engine without a
-    re-prefill number (ollama) gets none."""
+    largest N whose median TTFT-turn p50 <= 0.5 s and median re-prefill share (clamped) <= 10 %, over CLEAN rounds
+    only (the plan's taint rule: a tainted run is a missing round), whatever the table above includes. n/a for an
+    engine that reports no re-prefill (ollama). Flags: NON-MONOTONE (a smaller N misses), and a cell with no clean
+    round (N_warm then only reads the cells that have one)."""
     ladder = {}
     for (sp, n, kv, eng), rs in groups.items():
         if n is not None:
             ladder.setdefault((sp, kv, eng), {})[n] = rs
     lines = []
     for (sp, kv, eng), cells in sorted(ladder.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-        marks, best = [], None
+        marks, verdict, dropped = [], {}, 0
         for n in sorted(cells):
+            clean = [r for r in cells[n] if not r.get('tainted')]
+            dropped += len(cells[n]) - len(clean)
+
             def med(key):
-                v = [r[key] for r in cells[n] if r.get(key) is not None]
+                v = [r[key] for r in clean if r.get(key) is not None]
                 return statistics.median(v) if v else None
             turn, rp = med('ttft_turn_p50'), med('reprefill_share')
-            ok = turn is not None and rp is not None and turn <= 0.5 and rp <= 0.10
-            best = n if ok else best
-            marks.append(f'{n}: turn {turn if turn is None else f"{turn:.3g}"} s, re-prefill '
-                         f'{"n/a" if rp is None else f"{rp:.1%}"} {"ok" if ok else "MISS"}')
+            if not clean:
+                verdict[n] = None
+                marks.append(f'{n}: no clean round')
+                continue
+            verdict[n] = None if turn is None or rp is None else turn <= 0.5 and rp <= 0.10
+            marks.append(f'{n}: turn {"n/a" if turn is None else f"{turn:.3g} s"}, re-prefill '
+                         f'{"n/a" if rp is None else f"{rp:.1%}"}'
+                         + ('' if verdict[n] is None else ' ok' if verdict[n] else ' MISS') + f' (n={len(clean)})')
+        judged = [n for n, v in verdict.items() if v is not None]
+        if not judged:
+            nw = 'n/a (no clean round)' if all(not [r for r in cells[n] if not r.get('tainted')] for n in cells) \
+                else 'n/a (no re-prefill number)'
+        else:
+            ok = [n for n in judged if verdict[n]]
+            best = max(ok) if ok else None
+            nw = f'{best}' if best is not None else f'< {min(judged)} (every N misses)'
+            below = [n for n in judged if best is not None and n < best and not verdict[n]]
+            if below:
+                nw += f' NON-MONOTONE ({", ".join(map(str, below))} miss)'
+            gaps = [n for n, v in verdict.items() if v is None]
+            if gaps:
+                nw += f' INCOMPLETE (no reading at {", ".join(map(str, gaps))})'
         if not lines:
-            lines.append('\n**N_warm** (largest N with median TTFT-turn p50 <= 0.5 s and re-prefill <= 10 %)\n')
-        lines.append(f'- speed {sp:g}, {eng} {kv}: N_warm = {best if best is not None else "none"} ({"; ".join(marks)})')
+            lines.append('\n**N_warm** (largest N with median TTFT-turn p50 <= 0.5 s and re-prefill <= 10 %, clean '
+                         'rounds only)\n')
+        lines.append(f'- speed {sp:g}, {eng} {kv}: N_warm = {nw} ({"; ".join(marks)})'
+                     + (f' [{dropped} tainted run(s) left out]' if dropped else ''))
     return lines
 
 
