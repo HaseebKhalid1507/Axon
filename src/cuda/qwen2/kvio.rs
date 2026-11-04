@@ -294,6 +294,220 @@ mod tests {
         t[n / 2]
     }
 
+    /// Median seconds of `f` over `n` runs (after one warm-up): (to enqueue
+    /// its copies, until they are done).
+    fn time_enq(gpu: &Gpu, n: usize, mut f: impl FnMut()) -> (f64, f64) {
+        f();
+        gpu.sync().unwrap();
+        let (mut e, mut t): (Vec<f64>, Vec<f64>) = (0..n)
+            .map(|_| {
+                let t0 = Instant::now();
+                f();
+                let e = t0.elapsed().as_secs_f64();
+                gpu.sync().unwrap();
+                (e, t0.elapsed().as_secs_f64())
+            })
+            .unzip();
+        e.sort_by(f64::total_cmp);
+        t.sort_by(f64::total_cmp);
+        (e[n / 2], t[n / 2])
+    }
+
+    /// One 1D copy of `n` bytes between `host` + `at` and `dev` + `off`
+    /// (`to_dev`: host to device), enqueued on the stream.
+    fn copy_1d(host: &HostBuf, to_dev: bool, at: usize, dev: &DevBuf, off: usize, n: usize) {
+        assert!(
+            at + n <= host.len && off + n <= dev.len,
+            "1D copy out of bounds"
+        );
+        let g = host.gpu;
+        g.bind().unwrap();
+        host.pending.set(true);
+        let (h, d) = (host.p as usize + at, dev.ptr + off as u64);
+        // SAFETY: in bounds of both (asserted); pinned and device memory
+        // outlive the copy (the caller syncs before either is dropped).
+        let r = unsafe {
+            if to_dev {
+                (g.d.cuMemcpyHtoDAsync_v2)(d, h as *const _, n, g.stream)
+            } else {
+                (g.d.cuMemcpyDtoHAsync_v2)(h as *mut _, d, n, g.stream)
+            }
+        };
+        crate::cuda::ffi::check(g.d, r, "1D copy").unwrap();
+    }
+
+    /// One 2D device-to-device copy of `height` rows of `width` bytes, row i
+    /// from `src` + `off` + i * `pitch` to `dst` + `at` + i * `dpitch`.
+    fn copy_2d_dd(
+        src: &DevBuf,
+        (off, pitch): (usize, usize),
+        dst: &DevBuf,
+        (at, dpitch): (usize, usize),
+        (width, height): (usize, usize),
+    ) {
+        let end = |o: usize, p: usize| o + (height - 1) * p + width;
+        assert!(
+            end(off, pitch) <= src.len && end(at, dpitch) <= dst.len,
+            "2D D2D out of bounds"
+        );
+        let g = src.gpu;
+        g.bind().unwrap();
+        use crate::cuda::ffi;
+        let c = ffi::Memcpy2D {
+            src_type: ffi::CU_MEMORYTYPE_DEVICE,
+            src_dev: src.ptr + off as u64,
+            src_pitch: pitch,
+            dst_type: ffi::CU_MEMORYTYPE_DEVICE,
+            dst_dev: dst.ptr + at as u64,
+            dst_pitch: dpitch,
+            width,
+            height,
+            ..Default::default()
+        };
+        // SAFETY: every row in bounds of both (asserted); both outlive it.
+        let r = unsafe { (g.d.cuMemcpy2DAsync_v2)(&c, g.stream) };
+        ffi::check(g.d, r, "2D D2D copy").unwrap();
+    }
+
+    /// WP2 checkpoint 1 (docs/design/kv-ram-tier-exclusive.md §5.1): other
+    /// shapes for a 64-position page's copy than `Rows::page`'s one 2D copy
+    /// (`arrays` rows of 64 * `row` bytes, `ctx * row` apart on the device).
+    /// `host` gets the image layout (a page's arrays back to back). Per row:
+    /// the time to enqueue the copies, and until they are done.
+    /// - 56 x 1D: one 1D copy per array row (a loop in `Rows::page`).
+    /// - 1D per page, scattered: one 3.5 MiB copy per page between a
+    ///   contiguous device buffer and host slots in a stride permutation
+    ///   (the RAM tier's arena slots: a session's pages aren't contiguous).
+    /// - D2D: a page's rows gathered into (scattered from) a 64 MiB device
+    ///   staging buffer, by one 2D copy or 56 1D copies per page, no kernel.
+    /// - gather / scatter path: D2D per page and 1D per page through the
+    ///   staging buffer, 18 pages a fill (everything on the one stream).
+    fn copy_paths(g: &Gpu, dev: &DevBuf, host: &HostBuf, ctx: usize, arrays: usize, row: usize) {
+        let w = 64 * row;
+        let pb = w * arrays;
+        let np = ctx / 64;
+        let bytes = np * pb;
+        let report = |what: &str, (e, s): (f64, f64), b: usize| {
+            eprintln!(
+                "BW {what:<34} {:8.2} ms {:7.2} GB/s  (enqueue {:7.2} ms)",
+                s * 1e3,
+                b as f64 / s / 1e9,
+                e * 1e3
+            )
+        };
+        let n = 7;
+        // A page's array a: `a * ctx * row + p * w` on the device.
+        let arr = |p: usize, a: usize| a * ctx * row + p * w;
+        for to_dev in [false, true] {
+            let d = if to_dev { "H2D" } else { "D2H" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    for a in 0..arrays {
+                        copy_1d(host, to_dev, p * pb + a * w, dev, arr(p, a), w);
+                    }
+                }
+            });
+            report(&format!("{d} 56 x 1D per 64-pos page"), s, bytes);
+            let s = time_enq(g, 31, || {
+                for a in 0..arrays {
+                    copy_1d(host, to_dev, a * w, dev, arr(0, a), w);
+                }
+            });
+            report(&format!("{d} 56 x 1D, one page"), s, pb);
+        }
+        // Host slot of page p: a stride permutation of 0..np.
+        let k = (np / 3 + 1..).find(|&k| gcd(k, np) == 1).unwrap();
+        let slot = |p: usize| (p * k) % np * pb;
+        for to_dev in [false, true] {
+            let d = if to_dev { "H2D" } else { "D2H" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    copy_1d(host, to_dev, slot(p), dev, p * pb, pb);
+                }
+            });
+            report(&format!("{d} 1D per page, scattered host"), s, bytes);
+        }
+        let stage = g.alloc(64 << 20).unwrap();
+        let fill = (64 << 20) / pb;
+        let st = |p: usize| p % fill * pb;
+        for gather in [true, false] {
+            let d = if gather { "gather" } else { "scatter" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    if gather {
+                        copy_2d_dd(dev, (arr(p, 0), ctx * row), &stage, (st(p), w), (w, arrays));
+                    } else {
+                        copy_2d_dd(&stage, (st(p), w), dev, (arr(p, 0), ctx * row), (w, arrays));
+                    }
+                }
+            });
+            report(&format!("D2D 2D per page ({d})"), s, bytes);
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    for a in 0..arrays {
+                        if gather {
+                            dev.copy_into(arr(p, a), &stage, st(p) + a * w, w).unwrap();
+                        } else {
+                            stage.copy_into(st(p) + a * w, dev, arr(p, a), w).unwrap();
+                        }
+                    }
+                }
+            });
+            report(&format!("D2D 56 x 1D per page ({d})"), s, bytes);
+        }
+        // The whole path, a fill at a time: out = gather then D2H per page
+        // to its host slot; in = H2D per page from its slot, then scatter.
+        for out in [true, false] {
+            let path = |pages: usize| {
+                for f0 in (0..pages).step_by(fill) {
+                    let ps = f0..(f0 + fill).min(pages);
+                    for p in ps.clone() {
+                        if out {
+                            copy_2d_dd(
+                                dev,
+                                (arr(p, 0), ctx * row),
+                                &stage,
+                                (st(p), w),
+                                (w, arrays),
+                            );
+                        } else {
+                            copy_1d(host, true, slot(p), &stage, st(p), pb);
+                        }
+                    }
+                    for p in ps {
+                        if out {
+                            copy_1d(host, false, slot(p), &stage, st(p), pb);
+                        } else {
+                            copy_2d_dd(
+                                &stage,
+                                (st(p), w),
+                                dev,
+                                (arr(p, 0), ctx * row),
+                                (w, arrays),
+                            );
+                        }
+                    }
+                }
+            };
+            let d = if out {
+                "D2H gather path"
+            } else {
+                "H2D scatter path"
+            };
+            report(
+                &format!("{d} (2D D2D + 1D)"),
+                time_enq(g, n, || path(np)),
+                bytes,
+            );
+            report(&format!("{d}, one page"), time_enq(g, 31, || path(1)), pb);
+        }
+        g.sync().unwrap();
+    }
+
+    fn gcd(a: usize, b: usize) -> usize {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+
     /// `Rows`: unaligned lo..hi at a nonzero base, two regions (q8's
     /// shape), an image over STAGE (several staging rounds): the image is
     /// kvsave's layout, and a load puts back exactly those rows, nothing
@@ -361,7 +575,8 @@ mod tests {
     /// D2H and H2D bandwidth for a 7B-shaped slot (28 layers, kv_dim 512,
     /// f16: 1 KiB rows, 56 arrays) of `AXON_BW_CTX` (default 32768)
     /// positions: contiguous, one 2D copy for the slot, one per 64-position
-    /// page. `cargo test kvio::tests::bandwidth -- --ignored --nocapture`.
+    /// page, and the other page copy shapes of `copy_paths`.
+    /// `cargo test kvio::tests::bandwidth -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn bandwidth() {
@@ -442,6 +657,7 @@ mod tests {
             });
             report(&format!("H2D 2D per {page}-pos page"), s);
         }
+        copy_paths(&g, &dev, &host, ctx, arrays, row);
         // The RAM tier's costs (serve --cache-ram): a pinned slab's
         // allocation (cuMemHostAlloc + zeroing), and one page's D2H / H2D
         // alone (the write-behind's unit), each a median of n.
