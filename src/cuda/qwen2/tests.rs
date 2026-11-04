@@ -3,6 +3,8 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use std::path::PathBuf;
 
+mod fp8;
+mod numerics;
 mod twin;
 
 fn model_at(rel: &str) -> Option<Model> {
@@ -42,8 +44,14 @@ pub(crate) struct Agree {
     last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
+    /// `max_abs` over the reference's 20 largest logits only (the FP8
+    /// gate's bound, `Top1::Binomial`).
+    max_abs_top: f32,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
+    /// Positions where the logits under test have a NaN or an infinity
+    /// (`max_abs` can't show one: `f32::max` drops NaN).
+    pub(crate) nonfinite: usize,
 }
 
 /// Reference `r` vs `o` logits after the prompt `ids` and after each of
@@ -147,6 +155,7 @@ impl Agree {
         let (ar, ao) = (crate::argmax(lr), crate::argmax(lo));
         self.positions += 1;
         self.top1 += (ar == ao) as usize;
+        self.nonfinite += lo.iter().any(|x| !x.is_finite()) as usize;
         let k = kl(lr, lo);
         self.max_kl = self.max_kl.max(k);
         if k > 0.5 {
@@ -158,12 +167,28 @@ impl Agree {
         for (x, y) in lr.iter().zip(lo) {
             self.max_abs = self.max_abs.max((x - y).abs());
         }
+        for i in top_k(lr, 20) {
+            self.max_abs_top = self.max_abs_top.max((lr[i] - lo[i]).abs());
+        }
         if ar != ao {
             // How close a call it was, in the reference's logits.
             self.flips.push(lr[ar as usize] - lr[ao as usize]);
             self.flip_at.push(self.positions);
         }
     }
+}
+
+/// The indexes of the `k` largest values of `l` (any order).
+fn top_k(l: &[f32], k: usize) -> Vec<usize> {
+    let mut t: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, &x) in l.iter().enumerate() {
+        if t.len() < k || x > l[t[t.len() - 1]] {
+            let at = t.partition_point(|&j| l[j] >= x);
+            t.insert(at, i);
+            t.truncate(k);
+        }
+    }
+    t
 }
 
 /// The gap between the two largest logits.
@@ -210,7 +235,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
 pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
         "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {:?}), max |dlogit| \
-         {:.3}, flip margins {:?}",
+         {:.3} (top-20 {:.3}), flip margins {:?}",
         a.top1,
         a.positions,
         100.0 * a.top1 as f64 / a.positions as f64,
@@ -218,6 +243,7 @@ pub(crate) fn report(name: &str, a: &Agree) {
         a.max_kl,
         a.over_half,
         a.max_abs,
+        a.max_abs_top,
         a.flips
     );
 }
@@ -300,15 +326,55 @@ fn ref_spread_zero_fails_by_name() {
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
 pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
+    assert_graded_with(ag, ac, Top1::Points(floor));
+}
+
+/// `assert_graded_with`'s top-1 rule.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Top1 {
+    /// At most 2 points behind the reference's self-agreement, and at
+    /// least `.0` % (every gate before the FP8 one).
+    Points(usize),
+    /// At least the floor's count minus 2 binomial standard errors,
+    /// `2 sqrt(n p (1 - p))` with p the floor's rate, and at least 90 %:
+    /// the FP8 gate's (docs/design/fp8-weights.md §6 B), whose floor
+    /// changes precision (e4m3 activations), not only order, on arms of at
+    /// least 1000 positions. Its relaxed outlier and max |dlogit| bounds
+    /// are the FP8 gate's only (each set on FP8's own measurements): a
+    /// future fast kernel's gate doesn't take this variant to inherit them.
+    /// Set after the 0.5B's first run (decode arm 274/294 vs the floor's
+    /// 276/294: inside 2 SE, 2.04 points behind).
+    /// The FP8 gate's outlier bound too (below): positions with KL above
+    /// 0.5 at most max(1, 2x the floor's count over the same positions),
+    /// the KL mean's 2x principle (lead ruling after the first 1014-position
+    /// decode arm: 5 above 0.5, max 0.885, the floor 5, max 0.634).
+    Binomial,
+}
+
+/// `assert_graded_floor` with the top-1 rule `top1`; the other bounds the
+/// same.
+pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     assert_ref_spread(ac);
     let n = ag.positions;
-    // Top-1: at most 2% of positions behind the CPU's self-agreement.
-    assert!(
-        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
-        "top-1 agreement {}/{n} (cpu vs itself {})",
-        ag.top1,
-        ac.top1
-    );
+    match top1 {
+        // Top-1: at most 2% of positions behind the CPU's self-agreement.
+        Top1::Points(floor) => assert!(
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
+            "top-1 agreement {}/{n} (cpu vs itself {})",
+            ag.top1,
+            ac.top1
+        ),
+        Top1::Binomial => {
+            let p = ac.top1 as f64 / n.max(1) as f64;
+            let two_se = 2.0 * (n as f64 * p * (1.0 - p)).sqrt();
+            assert!(
+                ag.top1 as f64 >= ac.top1 as f64 - two_se && ag.top1 * 100 >= 90 * n,
+                "top-1 agreement {}/{n} (floor {}, 2 SE {two_se:.1})",
+                ag.top1,
+                ac.top1
+            );
+        }
+    }
     // Only near-ties flip. Flipping a margin m takes the top two logits
     // moving m apart, which the reference's own spread (`ac.max_abs`, the
     // CPU's two kernel sets: 1.26 on 1.5B natural text, 1.9-2.3 on chat
@@ -340,19 +406,180 @@ pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
     // reference itself doesn't resolve stably. So: at most one position
     // above 0.5, none above 2, and that one only where `ac` (the CPU vs
     // its other kernel set) also flips.
-    assert!(
-        ag.over_half.len() <= 1 && ag.max_kl < 2.0,
-        "max KL {} (above 0.5 (index, KL, reference margin, previous KL): {:?})",
-        ag.max_kl,
-        ag.over_half
-    );
-    for &(i, k, mg, _) in &ag.over_half {
+    // The FP8 gate (`Top1::Binomial`): the floor changes precision too,
+    // so its own outliers set the count, 2x as for the mean; the single
+    // outlier's "where the floor flips" rule is for order-only floors.
+    if let Top1::Binomial = top1 {
+        let (got, floor) = (ag.over_half.len(), ac.over_half.len());
         assert!(
-            ac.flip_at.contains(&i),
-            "KL {k} at position {i} (reference margin {mg}), where the CPU's kernel sets agree"
+            got <= (2 * floor).max(1) && ag.max_kl < 2.0,
+            "max KL {}, {got} positions above 0.5 vs the floor's {floor} (allowed {}): \
+             (index, KL, reference margin, previous KL): {:?}; the floor's: {:?}",
+            ag.max_kl,
+            (2 * floor).max(1),
+            ag.over_half,
+            ac.over_half
         );
+    } else {
+        assert!(
+            ag.over_half.len() <= 1 && ag.max_kl < 2.0,
+            "max KL {} (above 0.5 (index, KL, reference margin, previous KL): {:?})",
+            ag.max_kl,
+            ag.over_half
+        );
+        for &(i, k, mg, _) in &ag.over_half {
+            assert!(
+                ac.flip_at.contains(&i),
+                "KL {k} at position {i} (reference margin {mg}), where the CPU's kernel sets agree"
+            );
+        }
     }
-    assert!(ag.max_abs < 6.0, "max logit difference");
+    // Max |dlogit|. The FP8 gate (`Top1::Binomial`): over the reference's
+    // top-20 logits, plus a whole-vocabulary backstop at twice the bound.
+    // FP8-gate-only: it was justified by the FP8 load arm's diagnosis
+    // below, not in general. No future fast kernel inherits it by taking
+    // `Top1::Binomial`: its gate starts at the strict bound (< 6 over every
+    // logit) and relaxes only on a diagnosis of its own, disclosed.
+    // Why (gpu_fp8_load_diag, job 1029-205633-ac74, the load arm's 1000
+    // rows): its 8.515 (and 7.018, the only other >= 6) are one sequence's
+    // tail logits, rank 151829 / 151924 of 151936, p_ref 5.7e-12 / 1.4e-13,
+    // p_fast 3.4e-8 / 2.5e-10; the same sequence alone through the decode
+    // path reaches 8.212, and the pool equals itself reversed and halved
+    // bit for bit (max 0.000; pool vs alone 2.678), so no row mixing: FP8's
+    // precision on near-zero-probability logits, not the pool. Over the
+    // top-20: pool 4.087, alone 4.096, floor 2.100.
+    if let Top1::Binomial = top1 {
+        assert!(
+            ag.max_abs_top < 6.0 && ag.max_abs < 12.0,
+            "max logit difference: top-20 {} (< 6), all {} (< 12)",
+            ag.max_abs_top,
+            ag.max_abs
+        );
+    } else {
+        assert!(ag.max_abs < 6.0, "max logit difference");
+    }
+}
+
+/// The sanity backstops a debug build's FP8 gate keeps
+/// (`numerics::assert_sane_vs_exact`), with no statistics: something was
+/// graded, every logit finite, and the whole-vocabulary max |dlogit| below
+/// 12 (`assert_graded_with`'s `Top1::Binomial` backstop).
+pub(crate) fn assert_sane(ag: &Agree) {
+    assert!(ag.positions > 0, "nothing graded");
+    assert!(
+        ag.nonfinite == 0,
+        "{} of {} positions with a non-finite logit",
+        ag.nonfinite,
+        ag.positions
+    );
+    assert!(
+        ag.max_abs < 12.0,
+        "max logit difference: all {} (< 12)",
+        ag.max_abs
+    );
+}
+
+/// `assert_sane`: a NaN or infinite logit fails though `max_abs` misses
+/// it, a max |dlogit| of 12 fails, and top-1, KL and outliers aren't
+/// looked at (137/147, the first debug run's batched arm, passes).
+#[test]
+fn sane_backstops() {
+    let ok = |a: Agree| std::panic::catch_unwind(|| assert_sane(&a)).is_ok();
+    let lr = [1.0f32, 2.0, 3.0];
+    let tallied = |lo: [f32; 3]| {
+        let mut a = Agree::default();
+        a.tally(&lr, &lo);
+        a
+    };
+    assert!(ok(tallied([1.0, 2.0, 3.5])));
+    let nan = tallied([1.0, f32::NAN, 3.0]);
+    assert_eq!((nan.nonfinite, nan.max_abs), (1, 0.0), "max_abs drops NaN");
+    assert!(!ok(nan));
+    assert!(!ok(tallied([1.0, 2.0, f32::INFINITY])));
+    assert!(!ok(Agree::default()), "nothing graded");
+    let a = |max_abs| Agree {
+        positions: 147,
+        top1: 137,
+        max_abs,
+        sum_kl: 147.0,
+        max_kl: 5.0,
+        ..Agree::default()
+    };
+    assert!(ok(a(11.9)));
+    assert!(!ok(a(12.0)));
+}
+
+/// `top_k` against a full sort.
+#[test]
+fn top_k_is_the_largest() {
+    let l: Vec<f32> = (0..1000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761) >> 7) % 997) as f32 - 400.0)
+        .collect();
+    let mut want: Vec<usize> = (0..l.len()).collect();
+    want.sort_by(|&a, &b| l[b].total_cmp(&l[a]));
+    let mut got: Vec<f32> = top_k(&l, 20).iter().map(|&i| l[i]).collect();
+    got.sort_by(|a, b| b.total_cmp(a));
+    let w: Vec<f32> = want[..20].iter().map(|&i| l[i]).collect();
+    assert_eq!(got, w);
+}
+
+/// `Top1::Binomial` at the 0.5B FP8 decode arm's first numbers: floor
+/// 276/294, so 2 SE = 2 sqrt(294 p (1 - p)) = 8.2: 268 passes, 267 fails
+/// (and 274, which failed `Points`, passes); never below 90 %.
+#[test]
+fn top1_binomial_rule() {
+    let ag = |n, t| Agree {
+        positions: n,
+        top1: t,
+        ..Agree::default()
+    };
+    let ac = |n, t| Agree {
+        max_abs: 0.1,
+        ..ag(n, t)
+    };
+    let ok = |a: Agree, c: Agree, r: Top1| {
+        std::panic::catch_unwind(|| assert_graded_with(&a, &c, r)).is_ok()
+    };
+    assert!(ok(ag(294, 274), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 274), ac(294, 276), Top1::Points(94)));
+    assert!(ok(ag(294, 268), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 267), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(1000, 899), ac(1000, 900), Top1::Binomial), "90 %");
+    assert!(ok(ag(1000, 1000), ac(1000, 1000), Top1::Binomial));
+    // Max |dlogit| under Binomial: the top-20's < 6, all < 12 (the load
+    // diagnostic's 8.515 in the tail, 4.087 in the top-20, passes).
+    let d = |all, top| Agree {
+        max_abs: all,
+        max_abs_top: top,
+        ..ag(1000, 1000)
+    };
+    assert!(ok(d(8.515, 4.087), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(8.515, 4.087), ac(1000, 1000), Top1::Points(90)));
+    assert!(!ok(d(8.515, 6.0), ac(1000, 1000), Top1::Binomial));
+    assert!(!ok(d(12.0, 4.0), ac(1000, 1000), Top1::Binomial));
+    // The outlier bound: KL > 0.5 at most max(1, 2x the floor's) under
+    // Binomial (5 vs 5, the first decode arm's, passes; 3 vs 1 fails), one
+    // only where the floor flips under Points.
+    let over = |n: usize| (0..n).map(|i| (i, 0.6, 1.0, 0.0)).collect::<Vec<_>>();
+    let with = |mut a: Agree, n| {
+        a.over_half = over(n);
+        a.max_kl = if n > 0 { 0.6 } else { 0.0 };
+        a
+    };
+    let b = |g, f| {
+        ok(
+            with(ag(1000, 950), g),
+            with(ac(1000, 950), f),
+            Top1::Binomial,
+        )
+    };
+    assert!(b(5, 5) && b(10, 5) && b(1, 0) && b(2, 1));
+    assert!(!b(11, 5) && !b(2, 0) && !b(3, 1));
+    assert!(!ok(
+        with(ag(1000, 1000), 2),
+        with(ac(1000, 1000), 2),
+        Top1::Points(94)
+    ));
 }
 
 /// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256
@@ -2934,7 +3161,10 @@ fn gpu_batched_products_match_gemv_bits() {
             (qt, cols, rows, &m.tensor_data(t)[..rows * rb])
         };
         let w = g.upload(wd).unwrap();
-        for nb in [1usize, 6, 7, 8, 13, 31, 33, 64, 66, 77, 129] {
+        // (17..128: the decode pool's steps past gemvm16, WP-A4.)
+        for nb in [
+            1usize, 6, 7, 8, 13, 17, 24, 31, 32, 33, 48, 64, 65, 66, 77, 96, 128, 129,
+        ] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
@@ -2999,6 +3229,94 @@ fn gpu_batched_products_match_gemv_bits() {
     ] {
         assert!(seen.contains(&qt), "type {qt} not covered");
     }
+}
+
+/// WP-A4: a layer's Q4_K `down` with gemm2s kept only up to DOWN_T_MIN_NB
+/// tokens (or SMALL, AXON_DOWN_TILE_T_MIN_NB's least; `bgemm_at`, gemm2t
+/// past it where `tile_t_from`'s waves pick it) == the routing before it
+/// (`bgemm`: gemm2s up to TILE_T_MIN_NB), byte for byte: the 7B's down (3584
+/// x 18944) and a shape whose gemm2s grid is one block past a wave on this
+/// GPU (gemm2t picked on any SM count), epilogue mode 0 with a bias and
+/// mode 1 (the residual add, as down into x), every decode batch size the
+/// floor moves.
+/// (Per kernel, gemm2t == gemm2s == the decode GEMV at these sizes:
+/// `gpu_batched_products_match_gemv_bits`.)
+#[test]
+fn gpu_down_tile_t_matches_bgemm() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    // (gemmh2 takes Hopper's Q4_K products ahead of the tiles.)
+    let gemmh = km.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0");
+    if net.bf.gemm_t.is_none() || gemmh {
+        return;
+    }
+    let sms = net.bf.sms;
+    let mut rng = Rng(0x0a4d_0e7e_2026_1031);
+    let mut moved = 0;
+    for (cols, rows) in [(18944usize, 3584usize), (4864, 64 * (sms + 1))] {
+        let wd = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wd).unwrap();
+        let mt = Mat {
+            qt: Q4_K,
+            off: 0,
+            rb: quant::row_bytes(Q4_K, cols),
+            rows,
+            cols,
+            c8: None,
+            ws: None,
+        };
+        let bias = g.upload(&rng.vec(rows, 3.0)).unwrap();
+        for nb in [17usize, 24, 31, 32, 33, 48, 63, 64] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let ast = act_stride_t(cols);
+            let init = rng.vec(rows * nb, 5.0);
+            if !net.takes_gemvm(rows, nb)
+                && batch::tile_t_from(rows, G2_BM, nb, sms, batch::DOWN_T_MIN_NB)
+                && !batch::tile_t(rows, G2_BM, nb, sms)
+            {
+                moved += 1;
+            }
+            for mode in [0i32, 1] {
+                let run = |t_min: usize| -> Vec<u32> {
+                    let out = g.upload(&init).unwrap();
+                    let b = if mode == 0 { bias.arg() } else { Arg::Ptr(0) };
+                    // SAFETY: w holds the matrix, act nb tokens of cols
+                    // inputs, out nb rows of `rows` floats, bias rows floats.
+                    unsafe {
+                        net.bgemm_at(&w, &mt, act.arg(), ast, nb, b, mode, out.arg(), rows, t_min)
+                    }
+                    .unwrap();
+                    g.sync().unwrap();
+                    bits(&out.read().unwrap())
+                };
+                let want = run(batch::TILE_T_MIN_NB);
+                for t_min in [batch::SMALL, batch::DOWN_T_MIN_NB] {
+                    assert!(
+                        run(t_min) == want,
+                        "down {rows} x {cols} nb {nb} mode {mode} t_min {t_min}: != main's routing"
+                    );
+                }
+            }
+        }
+    }
+    // Not vacuous: the second shape takes gemm2t past 31 tokens on any SM
+    // count.
+    assert!(moved > 0, "no batch size took the moved route");
+    eprintln!(
+        "down: gemm2t from 17 / 32 tokens == the 64 floor's routing, bit for bit ({moved} sizes moved)"
+    );
 }
 
 /// Every product kernel against gemv_ref, the canonical order written out
@@ -3345,16 +3663,24 @@ fn cuda_gemm_tile_bench() {
             )
         })
         .collect();
-    // Cases: (nb index, shape index or 4 = gu, kernel).
+    // Cases: (nb index, shape index or 4 = gu, kernel). AXON_BENCH_SHAPE:
+    // the shape names to run (comma-separated, default all).
+    let want: Option<Vec<String>> = std::env::var("AXON_BENCH_SHAPE")
+        .ok()
+        .map(|v| v.split(',').map(|x| x.to_string()).collect());
     let mut cases: Vec<(usize, usize, &str)> = Vec::new();
     for ni in 0..nbs.len() {
         for si in 0..5 {
-            let ks: [&str; 2] = if si == 4 {
-                ["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
+            let sname = shapes.get(si).map_or("gu", |x| x.0);
+            if want.as_ref().is_some_and(|w| !w.iter().any(|x| x == sname)) {
+                continue;
+            }
+            let ks: &[&str] = if si == 4 {
+                &["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
             } else {
-                ["gemm2s_q4_k", "gemm2t_q4_k"]
+                &["gemm2s_q4_k", "gemm2t_q4_k"]
             };
-            for k in ks {
+            for &k in ks {
                 cases.push((ni, si, k));
             }
         }
@@ -3475,7 +3801,8 @@ fn cuda_gemm_tile_bench() {
         let mut p = per.clone();
         p.sort_by(|a, b| a.partial_cmp(b).unwrap());
         eprintln!(
-            "TILE {name:<4} nb {nb:<5} {k:<15} median {tmac:6.2} TMAC/s (min {:.2} max {:.2}) clk {clk:.0} MHz -> {:.0} MAC/clk/SM",
+            "TILE {name:<4} nb {nb:<5} {k:<15} median {tmac:6.2} TMAC/s {:.1} us (min {:.2} max {:.2}) clk {clk:.0} MHz -> {:.0} MAC/clk/SM",
+            med(&ms[ci]) * 1e3,
             p[0],
             p[p.len() - 1],
             tmac * 1e12 / (info.sms as f64 * clk * 1e6)
@@ -4139,6 +4466,31 @@ fn tile_t_picks() {
         }
     }
     assert!(tile_t(18944, 64, batch::TILE_T_MIN_NB + 1, 20));
+}
+
+/// The down's floor (DOWN_T_MIN_NB, WP-A4), what it routes: on bella (46
+/// SMs, where it was measured) the 7B's 3584-row down takes gemm2t at nb 32
+/// to 64; on a 4090 (128 SMs), an H100 (132) and a 5090 (170) no down of a
+/// hidden size up to 8192 moves, so those keep the 64 floor's routing.
+#[test]
+fn down_tile_t_floor_routes() {
+    use batch::{DOWN_T_MIN_NB, tile_t, tile_t_from};
+    for nb in 1..=batch::TILE_T_MIN_NB {
+        assert_eq!(
+            tile_t_from(3584, 64, nb, 46, DOWN_T_MIN_NB),
+            nb > 31,
+            "bella nb {nb}"
+        );
+        for sms in [128, 132, 170] {
+            for rows in (128..=8192).step_by(128) {
+                assert_eq!(
+                    tile_t_from(rows, 64, nb, sms, DOWN_T_MIN_NB),
+                    tile_t(rows, 64, nb, sms),
+                    "{rows} rows nb {nb} {sms} SMs"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -9756,7 +10108,13 @@ fn lm_chunk_ranges() {
 /// by): `prompt_passes`, contiguous, none over the batch max; and serve's
 /// way of feeding (all but the last token by those chunks, then `forward`)
 /// and chat's (the last chunk by `prefill_logits`), from 0 and after a
-/// prefix, give the bits of the prompt's per-token decode.
+/// prefix, give the bits of the prompt's per-token decode. Whether the
+/// planner's cut differs from the old fixed prefill_batch cut depends on
+/// the GPU's SMs at 2099/2100 and 1799/1800 tokens (`planner_cut_differs`:
+/// a NOTE when it doesn't); at 1200/1201 (from 899) it differs on every
+/// GPU, asserted: max + a last pass under `wave_floor` (288 at max 1152) is
+/// no planner choice (`passes`: equal; `wave_passes`: last >= wave_floor;
+/// `fa_passes`: `passes`, or from FA_LONG on equal passes too).
 #[test]
 fn gpu_prompt_chunks_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -9775,16 +10133,24 @@ fn gpu_prompt_chunks_bits() {
         net.feed(&mut d, t, p).unwrap();
     }
     let dec = net.forward(ids[n - 1], n - 1, &mut d);
-    for from in [0, 300] {
+    let sms = g.info().unwrap().sms;
+    for from in [0, 300, n - 1 - 1200] {
         let mut c = net.new_cache(n + 1);
         if from > 0 {
             net.feed_batch(&ids[..from], 0, &mut c);
         }
         let rs = net.prompt_chunks(n - 1 - from, from, &c);
-        // Multi-pass and not the old fixed prefill_batch cut (equal or
-        // wave-sized passes: either differs from 1152 + the rest here).
+        // Multi-pass, and not the old fixed prefill_batch cut where no
+        // planner choice can be (n - 1 - from == 1200; elsewhere a NOTE).
         assert!(rs.len() >= 2);
-        assert_ne!(rs, crate::lm::chunk_ranges(n - 1 - from, max));
+        let k = n - 1 - from;
+        let old = crate::lm::chunk_ranges(k, max);
+        let what = format!("{k} tokens from {from}");
+        let differs = crate::testutil::planner_cut_differs(&rs, &old, sms, &what);
+        assert!(
+            differs || k - max >= max / 4,
+            "{what}: the old prefill_batch cut {rs:?}"
+        );
         assert_eq!((rs[0].start, rs.last().unwrap().end), (0, n - 1 - from));
         assert!(rs.windows(2).all(|w| w[0].end == w[1].start));
         assert!(rs.iter().all(|r| !r.is_empty() && r.len() <= max));
@@ -9802,6 +10168,14 @@ fn gpu_prompt_chunks_bits() {
             net.feed_batch(&ids[..from], 0, &mut c);
         }
         let rs = net.prompt_chunks(n - from, from, &c);
+        let k = n - from;
+        let what = format!("{k} tokens from {from}");
+        let old = crate::lm::chunk_ranges(k, max);
+        let differs = crate::testutil::planner_cut_differs(&rs, &old, sms, &what);
+        assert!(
+            differs || k - max >= max / 4,
+            "{what}: the old prefill_batch cut {rs:?}"
+        );
         let mut l = Vec::new();
         for (i, r) in rs.iter().enumerate() {
             let b = &ids[from + r.start..from + r.end];

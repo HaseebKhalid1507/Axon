@@ -271,6 +271,7 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 | Startup vs others (r4-startup scout) | GPU short-prompt TTFT axon 0.85 s (7B) vs llama-cli 1.33 s vs ollama cold 1.97 s | bella, 881d7b6, 10-15 (before #21/#41) |
 | Hybrid 32B, 28/64 layers (#16) | pp560 ~390 vs llama.cpp `-ngl 28` 211; decode 4.8–5.8 vs 3.5–3.7 | bella, 10-14 |
 | Multi-GPU PP (#34) | 2×4090: 7B prefill 1.46×, 32B 1.55× one GPU; decode 1.00× | 4090 pod, 10-16 |
+| Pool step, Q4_K `down` on gemm2t from nb 32 (#178) | 7B graphed pool step −2.5 % at nb 32 and 64 (paired, the floor alone vs the fusion arm), ±0.1 % at nb 16 and 128; same bits. q\|k\|v in one launch: −1.8 %, not beyond its noise term, dropped | bella, fde94b6 base, 10-31, pre-registered; **TAINTED** (one Xorg sample at 41 %, mean 1.2 %), accepted on its in-job A/A control. The shipped head (floor without the fusion) was not timed: the −2.5 % is T vs A, the fusion arm. 4090 / H100 / 5090: no route changes (wave model), not run |
 
 ## New models and types since the boards
 
@@ -285,6 +286,7 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 | deepseek2 (Moonlight-16B-A3B Q4_K_M), routed experts resident on the GPU (`--gpu-experts auto`: 25 of 26 layers, 8.50 GiB) | #127 | vs `--gpu-experts 0` (Axon, experts on the CPU): **tg ×2.06, pp ×3.40**; text identical in all 6 runs | bella, gen -n 128, ctx 4096, 3 interleaved rounds; **TAINTED** (foreign GPU max 31 %, mean 7.8 %), accepted with the label kept: quote the ratios, not the absolute tok/s. No llama.cpp in the run (PR D's bench of record vs `--n-cpu-moe` is next) |
 | gpt-oss-20b on the CPU | #78 | pp 130.0 (739-token prompt) vs 104.8 (pp512), 1.24×; tg128 23.5 vs 11.2, 2.10× | bella, exclusive, 24 threads both, neither pinned, llama.cpp's thread count not swept, prompt lengths differ |
 | Q2_K / Q3_K on the GPU | #72 | 7B Q3_K_M pp2100 3787 vs 3467 (+9 %), tg128 96.1 vs 98.9 (**−3 %**); 7B Q2_K pp560 2876 vs 3032 (**−5 %**), pp2100 +3 %, tg128 121.9 vs 111.2 (+10 %) | bella GPU vs `llama-bench -ngl 99`, 3 rounds |
+| FP8 checkpoints (RedHatAI Qwen2.5-7B-Instruct-FP8-dynamic) | #177 | vs the 7B Q4_K_M on the same GPU: `--numerics fast` (native e4m3) **tg128 0.32–0.38×** (32 vs 85–101 tok/s), pp512 0.88–0.97×, pp2048 0.82–0.90×; exact mode (Q8_0 at load) tg128 50–53, pp 0.64–0.77×. Accuracy vs the exact dequant: fast top-1 95.9 % (bar 97 %, **fail**), exact 98.1 % (the 0.5B's exact mode scores 96.7 % against HF F32, below the 97 % bar) | bella, 2 runs of 3 interleaved rounds, both **TAINTED** (foreign GPU mean 10.9 / 11.9 %): the tg gap is far outside it. No llama.cpp or vLLM in the run ([log](log/2026-10-30-fp8-weights.md)) |
 | Q2_K / Q3_K on the CPU | #72 | 7B Q2_K pp2100 57.2 vs 97.0 (**−41 %**), tg128 22.2 vs 10.4; 7B Q3_K_M pp2100 87.8 vs 112.2 (**−22 %**), tg128 18.8 vs 9.0 | bella CPU, 16 threads, 3 rounds, on a binary with the merged CPU kernels (0cb1e7a); a confirmation run on the final binary was queued, not a gate |
 
 ## Known losses and gaps (as of 39624db)
@@ -299,7 +301,9 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   (TAINTED), but hasn't been run against llama.cpp.
 - `serve` runs a MoE model one request at a time (no slot pool for MoE backends).
 - Shortest-first admission (`--admit-order sjf`, #131) missed its kill-rule clause on the laptop cells (short TTFT
-  p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed) and is opt-in; the H100 cells it was designed for are #139.
+  p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed). On the H100 cells it was designed for, `--admit-order sjf
+  --step-ms 80` passed #165's rule S (mix C=128 +7.6 % aggregate, +60.5 % goodput) and is the default since #167.
+  On small GPUs at low concurrency the 80 ms step is checked by a bella C=1/4 no-regression cell (#167 §5).
 - A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE). (An
   explicit `--parallel N` that doesn't fit in GPU memory is now refused at start: #137, #141.)
 
@@ -320,5 +324,10 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 - MoE prefill trails llama.cpp `--cpu-moe` 2.6× (4x0.6B) and 1.5× (Pruned-2B) at pp512 (#67): llama.cpp ships the
   big-batch expert products to the GPU (stage 3 here).
 - MoE was measured on dev models, gpt-oss-20b and Moonlight-16B-A3B only: no real Qwen3-30B-A3B run, nothing larger.
+- The KV RAM tier (`serve --cache-ram`, #166) is opt-in, default off: it missed rule B's TTFT-resume clause on bella
+  (7B f16, 6G, 1031-063509-f763: 6,592 of 26,496 tokens restored, 7.05 s vs 8.68 s, TAINTED). It is written as pages
+  fill, so it holds about its own size, the GPU pool's included; it helps only when the work written during the gap
+  fits between the pool's size and the tier's (≈ 11–185 pages on bella at 6G). An exclusive tier is next
+  ([design](design/agent-workload.md) §6, row B's result).
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

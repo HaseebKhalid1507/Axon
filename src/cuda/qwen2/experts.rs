@@ -187,7 +187,26 @@ impl<'g> CudaExperts<'g> {
         y: Arg,
     ) -> Result<(), String> {
         // SAFETY: the caller's.
-        unsafe { self.enqueue_path(rb, h, ids, w, nb, y, nb > 1) }
+        unsafe { self.enqueue_path(rb, h, ids, w, nb, y, nb > 1, None) }
+    }
+
+    /// The decode step's experts of one token, added into the residual:
+    /// `x[r] = x[r] + y[r]` with y `enqueue`'s (moe_sum_add: the weighted sum
+    /// then moe.cu moe_add's op, in that order, so the same bits as `enqueue`
+    /// then `moe_add`), one launch fewer.
+    ///
+    /// # Safety
+    /// As `enqueue` with nb = 1; x holds dim floats.
+    pub(crate) unsafe fn enqueue_add(
+        &self,
+        rb: &ResBufs,
+        h: Arg,
+        ids: Arg,
+        w: Arg,
+        x: Arg,
+    ) -> Result<(), String> {
+        // SAFETY: the caller's.
+        unsafe { self.enqueue_path(rb, h, ids, w, 1, Arg::Ptr(0), false, Some(x)) }
     }
 
     /// `enqueue`, the grouped GEMMs if `grouped` (any nb), else the decode
@@ -205,8 +224,10 @@ impl<'g> CudaExperts<'g> {
         nb: usize,
         y: Arg,
         grouped: bool,
+        add_to: Option<Arg>,
     ) -> Result<(), String> {
         assert!(grouped || nb == 1, "the decode GEMV takes one token");
+        assert!(add_to.is_none() || !grouped, "add_to: the decode path only");
         assert!(
             nb >= 1 && nb <= rb.max,
             "CudaExperts: nb {nb} of {}",
@@ -255,8 +276,40 @@ impl<'g> CudaExperts<'g> {
                         ],
                     )
                 };
-                gemv(&self.gate, rb.act.arg(), 0, rb.gb.arg())?;
-                gemv(&self.up, rb.act.arg(), 0, rb.ub.arg())?;
+                // T2b: gate and up in one launch, two rows of each per
+                // block (moe_gu_tw), down two rows per block (moe_gemv2_tw):
+                // each row's chain unchanged, so the same bits as one row per
+                // block (the CPU-equality tests check them at nb 1); the old
+                // launches stay for other shapes (gate / up types differ, odd
+                // rows).
+                let v2 = self.gate.qt == self.up.qt
+                    && self.gate.rows.is_multiple_of(2)
+                    && self.down.rows.is_multiple_of(2);
+                if v2 {
+                    let fgu = f("moe_gu_tw")?;
+                    g.launch(
+                        &fgu,
+                        ((self.gate.rows / 2) as u32, k as u32, 1),
+                        (128, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(self.gate.qt as i32),
+                            self.gate.buf.arg(),
+                            self.up.buf.arg(),
+                            Arg::U64(self.gate.estride as u64),
+                            Arg::U64(self.gate.rb as u64),
+                            Arg::I32(self.gate.rows as i32),
+                            Arg::I32(self.gate.cols as i32),
+                            ids,
+                            rb.act.arg(),
+                            rb.gb.arg(),
+                            rb.ub.arg(),
+                        ],
+                    )?;
+                } else {
+                    gemv(&self.gate, rb.act.arg(), 0, rb.gb.arg())?;
+                    gemv(&self.up, rb.act.arg(), 0, rb.ub.arg())?;
+                }
                 g.launch(
                     &f("swiglu_quant_tw")?,
                     (ffn.div_ceil(256) as u32, k as u32, 1),
@@ -272,9 +325,39 @@ impl<'g> CudaExperts<'g> {
                         Arg::U64(ast2 as u64),
                     ],
                 )?;
-                gemv(&self.down, rb.act2.arg(), ast2, rb.db.arg())?;
+                if v2 {
+                    let d = &self.down;
+                    g.launch(
+                        &f("moe_gemv2_tw")?,
+                        ((d.rows / 2) as u32, k as u32, 1),
+                        (128, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(d.qt as i32),
+                            d.buf.arg(),
+                            Arg::U64(d.estride as u64),
+                            Arg::U64(d.rb as u64),
+                            Arg::I32(d.rows as i32),
+                            Arg::I32(d.cols as i32),
+                            ids,
+                            rb.act2.arg(),
+                            Arg::U64(ast2 as u64),
+                            rb.db.arg(),
+                            Arg::U64(d.rows as u64),
+                        ],
+                    )?;
+                } else {
+                    gemv(&self.down, rb.act2.arg(), ast2, rb.db.arg())?;
+                }
+                // y = the weighted sum (moe_sum), or with `add_to` x += it
+                // in the same launch (moe_sum_add: moe_sum's then moe_add's
+                // ops, in order).
+                let (sum, out) = match add_to {
+                    Some(x) => ("moe_sum_add", x),
+                    None => ("moe_sum", y),
+                };
                 g.launch(
-                    &f("moe_sum")?,
+                    &f(sum)?,
                     (dim.div_ceil(128) as u32, 1, 1),
                     (128, 1, 1),
                     0,
@@ -284,7 +367,7 @@ impl<'g> CudaExperts<'g> {
                         w,
                         Arg::I32(k as i32),
                         Arg::I32(dim as i32),
-                        y,
+                        out,
                     ],
                 )?;
             }
@@ -462,13 +545,43 @@ impl<'g> CudaExperts<'g> {
         for _ in 0..reps {
             // SAFETY: the buffers above hold nb tokens; ids checked.
             unsafe {
-                self.enqueue_path(&rb, hb.arg(), idb.arg(), wb.arg(), nb, yb.arg(), grouped)?
+                self.enqueue_path(
+                    &rb,
+                    hb.arg(),
+                    idb.arg(),
+                    wb.arg(),
+                    nb,
+                    yb.arg(),
+                    grouped,
+                    None,
+                )?
             };
         }
         let t1 = g.record()?;
         g.sync()?;
         let ms = t0.ms_to(&t1)? / reps as f32;
         Ok((yb.read()?, ms))
+    }
+
+    /// The decode path's `enqueue_add` for one token: x + y in place, read
+    /// back (T2b: moe_sum_add).
+    #[cfg(test)]
+    pub(crate) fn layer_add(
+        &self,
+        h: &[f32],
+        ids: &[i32],
+        w: &[f32],
+        x: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        let nb = self.check(h, ids, w)?;
+        assert!(nb == 1 && x.len() == self.dim);
+        let g = self.g;
+        let rb = ResBufs::new(g, 1, self.dim, self.ffn, self.k)?;
+        let (hb, idb, wb, xb) = (g.upload(h)?, g.upload(ids)?, g.upload(w)?, g.upload(x)?);
+        // SAFETY: the buffers hold one token; ids checked; xb dim floats.
+        unsafe { self.enqueue_add(&rb, hb.arg(), idb.arg(), wb.arg(), xb.arg())? };
+        g.sync()?;
+        xb.read::<f32>()
     }
 
     /// `layer` of each token on its own by the decode GEMV, any arch: the

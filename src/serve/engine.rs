@@ -32,7 +32,9 @@
 //! rules), so a request's tokens are the same whatever else runs with it.
 
 use super::api::Usage;
+use super::tier::PoolTier;
 use super::{Event, Job, TextOut};
+use crate::kvsave::PAGE;
 use crate::lm::{Backend, BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
@@ -81,11 +83,13 @@ pub const PREFILL_CHUNK: usize = 256;
 /// A step's target wall time while requests decode, in ms (default,
 /// `--step-ms`, alias `--prefill-ms`; 0: no time budget, exactly
 /// `--prefill-chunk` tokens): the time between a running request's tokens
-/// the server aims at. 60, main's `--prefill-ms`: at 50 the bella 7B C=16
-/// mix step ran at 60.0 ms p50 (+20 %, outside the spec's ±15 %: the 256
-/// floor binds) and the avante 1.5B ITL p99 rose 17 % over main (jobs
-/// 1025-174838-bb0d, 1025-174837-1554); 50 is `--step-ms 50`.
-pub const STEP_MS: usize = 60;
+/// the server aims at. 80, with shortest-first admission (`Sched`'s
+/// default): issue #165's rule S, pre-registered, passed on the H100 SXM
+/// mix cells (job 1027-084258-1ce4; sjf80 vs fifo60 at C=128: aggregate
+/// +7.6 %, goodput +60.5 %, ITL p99 99.9 ms <= 105, C=64 aggregate +4.6 %,
+/// bits identical). The scheduling of before is `--admit-order fifo
+/// --step-ms 60`. 50 failed its own clause (#131: the 256 floor binds).
+pub const STEP_MS: usize = 80;
 /// The first chunk with a time budget, before a chunk's cost is known.
 const SEED_CHUNK: usize = 512;
 /// The prefill cost model: a token at depth d costs cost * (d + DEPTH_K)
@@ -130,9 +134,9 @@ pub struct ChunkPolicy {
     pub step_tokens: usize,
     /// AXON_STEP_COST=legacy: the budget before `StepCost` (`step_ms`
     /// less the last decode step, at a cost per token with the pass's
-    /// fixed part in it). With the default fifo admission (2 lanes at any
-    /// slot count) main's scheduling exactly: the rollback, AXON_STEP_COST=
-    /// legacy alone (without AXON_ADMIT=sjf).
+    /// fixed part in it). With fifo admission (2 lanes at any slot count,
+    /// AXON_ADMIT=fifo) and `--step-ms 60`, the scheduling before #131
+    /// exactly: the rollback.
     pub legacy: bool,
 }
 
@@ -169,39 +173,51 @@ pub struct Sched {
 pub const ADMIT_AGE_MS: u64 = 3000;
 
 impl Default for Sched {
-    /// FIFO unless AXON_ADMIT=sjf (shortest-first missed its kill-rule
-    /// clause on the bella cells: short TTFT p50 0.56x fifo's at 1.5B C=32,
-    /// 0.79x on the showdown client, against <= 0.5x; it stays opt-in until
-    /// the H100 cells decide it); the cost model unless AXON_STEP_COST=legacy.
+    /// `Sched::from_env` on AXON_ADMIT and AXON_STEP_COST. An AXON_ADMIT
+    /// that is neither fifo nor sjf refuses to start (it is a rollback
+    /// switch: a typo must not silently mean the new default).
     fn default() -> Sched {
         let admit = std::env::var("AXON_ADMIT").ok();
         let cost = std::env::var("AXON_STEP_COST").ok();
-        Sched::from_env(admit.as_deref(), cost.as_deref())
+        Sched::from_env(admit.as_deref(), cost.as_deref()).unwrap_or_else(|e| crate::fail(&e))
+    }
+}
+
+/// AXON_ADMIT's admission order: `fifo` or `sjf`, any case, spaces around
+/// ignored; unset or empty: shortest-first (the default since issue #165's
+/// rule S; #131 had kept it opt-in after the laptop cells). Anything else
+/// is an error naming the valid values.
+pub fn admit_order_env(v: Option<&str>) -> Result<AdmitOrder, String> {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("sjf") => Ok(AdmitOrder::Sjf),
+        Some("fifo") => Ok(AdmitOrder::Fifo),
+        Some(_) => Err(format!(
+            "AXON_ADMIT={:?}: expected fifo or sjf (or unset: sjf)",
+            v.unwrap_or_default()
+        )),
     }
 }
 
 impl Sched {
     /// The defaults for AXON_ADMIT = `admit` and AXON_STEP_COST = `cost`
-    /// (`Default` reads them; tests pass them). Note: "AXON_STEP_COST=legacy
-    /// alone is main's scheduling" holds only without AXON_ADMIT=sjf.
-    pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Sched {
-        Sched {
-            order: match admit == Some("sjf") {
-                true => AdmitOrder::Sjf,
-                false => AdmitOrder::Fifo,
-            },
+    /// (`Default` reads them; tests pass them). AXON_ADMIT=fifo is the
+    /// admission of before (with `--step-ms 60` and AXON_STEP_COST=legacy:
+    /// the scheduling before #131); see `admit_order_env`.
+    pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Result<Sched, String> {
+        Ok(Sched {
+            order: admit_order_env(admit)?,
             age_ms: ADMIT_AGE_MS,
             lanes: 0,
             step_tokens: 0,
             legacy: cost == Some("legacy"),
-        }
+        })
     }
 }
 
 /// Prompts prefilling at once at most for `sched` with `slots` slots
 /// (`Batch::lanes`): `sched.lanes`, else sjf `slots / 16` within 2..=8 (2
-/// at up to 32 slots, 8 at 128), fifo 2 (main's `MAX_PREFILLING`: the
-/// lane scaling is part of shortest-first, opt-in with it).
+/// at up to 32 slots, 8 at 128), fifo 2 (the `MAX_PREFILLING` of before:
+/// the lane scaling is part of shortest-first).
 pub(super) fn lanes_for(sched: &Sched, slots: usize) -> usize {
     match (sched.lanes, sched.order) {
         (0, AdmitOrder::Sjf) => (slots / 16).clamp(2, 8),
@@ -510,6 +526,9 @@ pub(super) struct Batch<'a, 't> {
     /// AXON_SERVE_TRACE's per-step log (`StepTrace`; None: off, the
     /// default, and then nothing below is measured).
     trace: Option<StepTrace>,
+    /// The KV RAM tier (`--cache-ram`, tier.rs; None: off, the default,
+    /// and then nothing of it runs).
+    tier: Option<PoolTier>,
 }
 
 /// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
@@ -669,7 +688,122 @@ impl<'a, 't> Batch<'a, 't> {
             grow_tokens: GROW_TOKENS,
             metrics: None,
             trace: StepTrace::from_env(),
+            tier: None,
         }
+    }
+
+    /// Turn the KV RAM tier on with `cap` bytes (`--cache-ram`), its
+    /// page-locked memory taken as `how` says: its size and how it was
+    /// taken, or None if it stays off (no page image on this backend, or
+    /// less than a page); Err: the memory couldn't be had.
+    pub fn set_cache_ram(
+        &mut self,
+        cap: u64,
+        how: super::tier::Alloc,
+    ) -> Result<Option<(usize, String)>, String> {
+        let t = PoolTier::new(
+            self.net,
+            &self.pool,
+            self.slots,
+            cap,
+            how,
+            self.log,
+            self.metrics.clone(),
+        )?;
+        self.tier = t;
+        Ok(self.tier.as_ref().map(|t| (t.t.store.cap(), t.how())))
+    }
+
+    /// Slot `s` is about to give up its rows past `keep`: the tier stores
+    /// its whole pages first (all of them: those below `keep` stay, the
+    /// rest are its conversation's, and go to RAM instead of away), and
+    /// forgets the stored pages past `keep`. A tier error turns the tier
+    /// off (`tier_failed`), never the server.
+    fn spill(&mut self, s: usize, keep: usize) {
+        let Some(t) = self.tier.as_mut() else {
+            return;
+        };
+        match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
+            Ok(_) => t.t.truncate(s, keep / PAGE),
+            Err(e) => self.tier_failed(&e),
+        }
+    }
+
+    /// The tier failed (`e`): it is off from here, as the no-pool path's;
+    /// the slots' rows are untouched (what it copied in is only trusted
+    /// once a restore succeeded), so serving goes on as with
+    /// `--cache-ram 0`.
+    fn tier_failed(&mut self, e: &str) {
+        eprintln!("axon serve: --cache-ram: {e}; the KV RAM tier is off from here");
+        // Dropped first: its arena is freed, then /metrics says so.
+        self.tier = None;
+        if let Some(m) = &self.metrics {
+            m.kv_ram_off();
+        }
+    }
+
+    /// The tier's write-behind: `bytes` of copies of the slots' unstored
+    /// pages (usize::MAX: all of them).
+    pub fn write_behind(&mut self, bytes: usize) {
+        let Some(t) = self.tier.as_mut() else {
+            return;
+        };
+        if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
+            self.tier_failed(&e);
+        }
+    }
+
+    /// The engine loop's tick: the tier adopts the slabs its allocator
+    /// thread has pinned (and shows them in /metrics).
+    pub fn poll_tier(&mut self) {
+        if let Some(t) = self.tier.as_mut() {
+            t.poll(self.net);
+        }
+    }
+
+    /// Positions of `prompt` (but its last token) that admission counts as
+    /// cached: the free slot's `common`, or the tier's stored prefix if
+    /// longer.
+    fn cached_len(&self, prompt: &[u32], common: usize) -> usize {
+        let last = prompt.len() - 1;
+        let stored = match &self.tier {
+            Some(t) if last > common => t.t.peek(&prompt[..last]),
+            _ => 0,
+        };
+        common.max(stored).min(last)
+    }
+
+    /// Slot `slot` holds the first `have` positions of `prompt` (below its
+    /// last token): copy in the rest of the longest prefix of it the tier
+    /// stores (as far as the slot gets pages for it; idle prefixes give
+    /// theirs up, as for a feed). The positions it holds after; `held`
+    /// says so.
+    fn restore(&mut self, slot: usize, prompt: &[u32], have: usize) -> Result<usize, String> {
+        let Some(t) = self.tier.as_mut() else {
+            return Ok(have);
+        };
+        let last = prompt.len() - 1;
+        let pages = t.lookup(&prompt[..last]);
+        let mut to = pages.len();
+        if to * PAGE > have {
+            // Pages for them (the looked-up pages are held: a slot spilled
+            // to make room can't evict them).
+            let short = self.make_room(slot, to * PAGE)?;
+            if short > 0 {
+                to = self.pages().map_or(0, |p| p.held[slot]).min(to);
+            }
+        }
+        let t = self.tier.as_mut().expect("on");
+        if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
+            // The slot keeps `have` (its rows past it are fed again).
+            self.tier_failed(&e);
+            return Ok(have);
+        }
+        if to * PAGE <= have {
+            return Ok(have);
+        }
+        self.held[slot] = prompt[..to * PAGE].to_vec();
+        Ok(to * PAGE)
     }
 
     /// Show the slots' state in `metrics`: every engine step, and before a
@@ -750,7 +884,7 @@ impl<'a, 't> Batch<'a, 't> {
             short,
             passes,
             &rem,
-            last - common.min(last),
+            last - self.cached_len(prompt, common),
         ) {
             return Admit::Lane;
         }
@@ -815,7 +949,8 @@ impl<'a, 't> Batch<'a, 't> {
     /// the free slot it would get holds), None without a free slot.
     pub fn uncached(&self, prompt: &[u32]) -> Option<usize> {
         let last = prompt.len().checked_sub(1)?;
-        self.free_slot(prompt).map(|(_, c)| last - c.min(last))
+        self.free_slot(prompt)
+            .map(|(_, c)| last - self.cached_len(prompt, c))
     }
 
     /// The pool's pages (None: plain).
@@ -856,6 +991,15 @@ impl<'a, 't> Batch<'a, 't> {
         let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
         let reuse = common.min(last);
+        self.busy[slot] = true;
+        self.touch(slot);
+        // The tier keeps the slot's pages past the prefix (its last
+        // conversation's).
+        self.spill(slot, reuse);
+        self.held[slot].truncate(reuse);
+        // The rest of the slot's pages are free (a paged pool).
+        self.net.release(&mut self.pool, slot, reuse)?;
+        let reuse = self.restore(slot, p, reuse)?;
         if super::debug() {
             eprintln!(
                 "axon serve: #{} prefill: chunked, slot {slot}, {} tok ({reuse} cached), {} decoding",
@@ -864,11 +1008,6 @@ impl<'a, 't> Batch<'a, 't> {
                 self.seqs.len()
             );
         }
-        self.busy[slot] = true;
-        self.touch(slot);
-        self.held[slot].truncate(reuse);
-        // The rest of the slot's pages are free (a paged pool).
-        self.net.release(&mut self.pool, slot, reuse)?;
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
         self.pre.push(Prefill {
@@ -1023,15 +1162,25 @@ impl<'a, 't> Batch<'a, 't> {
         cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<Vec<u32>, String> {
         assert!(self.idle(), "lend_solo: the batch is running");
-        let (slot, _) = self.free_slot(prompt).expect("lend_solo: a free slot");
+        let (slot, common) = self.free_slot(prompt).expect("lend_solo: a free slot");
         self.net.move_slot_cache(&self.pool, cache, slot)?;
         self.solo = slot;
         self.touch(slot);
+        // The request writes over the slot's rows past the prefix it
+        // shares: the tier keeps them first.
+        let have = common.min(prompt.len() - 1);
+        if self.tier.is_some() {
+            self.spill(slot, have);
+            self.held[slot].truncate(have);
+        }
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
         let short = self.make_room(slot, want)?;
         if short > 0 {
             return Err(format!("{short} KV pages short for a request alone"));
         }
+        // Its pages are there: the stored prefix of its prompt is copied
+        // in, the view prefills the rest.
+        self.restore(slot, prompt, have)?;
         // Its batched passes run on the pool's scratch (a paged pool's view
         // has none of its own), back at `end_solo` / `adopt`.
         self.net.lend_scratch(&mut self.pool, cache)?;
@@ -1061,6 +1210,8 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(s) = victim else {
             return Ok(false);
         };
+        // Its prefix goes to RAM (the tier on), not away.
+        self.spill(s, 0);
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         Ok(true)
@@ -1082,6 +1233,8 @@ impl<'a, 't> Batch<'a, 't> {
         // Pages past its rows (reserved for what it didn't generate) free.
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
+        // The batch is idle: the tier takes the request's pages now.
+        self.spill(self.solo, usize::MAX);
         Ok(())
     }
 
@@ -1133,6 +1286,18 @@ impl<'a, 't> Batch<'a, 't> {
     /// running request and each one's next token. With a `StepTrace`, a
     /// line about it once it did any work.
     pub fn step(&mut self) -> Result<(), String> {
+        self.step_traced()?;
+        // The tier's write-behind: a budget while requests run, the rest
+        // once none do.
+        let bytes = match self.idle() {
+            true => usize::MAX,
+            false => super::tier::STEP_BYTES,
+        };
+        self.write_behind(bytes);
+        Ok(())
+    }
+
+    fn step_traced(&mut self) -> Result<(), String> {
         if self.trace.is_none() {
             return self.step_inner();
         }
@@ -1300,8 +1465,9 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Prefill `j` gives its rows up: fed from 0 again later.
     fn unfeed(&mut self, j: usize) -> Result<(), String> {
+        let s = self.pre[j].seq.slot;
+        self.spill(s, 0);
         let f = &mut self.pre[j];
-        let s = f.seq.slot;
         f.fed = 0;
         f.seq.cached = 0;
         self.held[s].clear();
@@ -1326,6 +1492,7 @@ impl<'a, 't> Batch<'a, 't> {
                 seq.ids.len()
             );
         }
+        self.spill(s, 0);
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         let at = self.pre.partition_point(|f| f.seq.job.id < seq.job.id);
@@ -2101,20 +2268,32 @@ mod sched_tests {
     /// AXON_ADMIT=sjf breaks the "alone" (sjf's lanes scale with slots).
     #[test]
     fn legacy_alone_is_main_admission() {
-        for admit in [None, Some("fifo"), Some("anything")] {
-            let s = Sched::from_env(admit, Some("legacy"));
+        // AXON_ADMIT=fifo (any case) + AXON_STEP_COST=legacy: fifo, 2 lanes at
+        // any slot count (with `--step-ms 60`: the scheduling before #131).
+        for admit in ["fifo", "FIFO", " Fifo "] {
+            let s = Sched::from_env(Some(admit), Some("legacy")).unwrap();
             assert!(s.legacy && s.order == AdmitOrder::Fifo, "{admit:?}");
             for slots in [1, 8, 16, 32, 64, 128, 256] {
-                assert_eq!(lanes_for(&s, slots), 2, "{admit:?} {slots}");
+                assert_eq!(lanes_for(&s, slots), 2, "{slots}");
             }
         }
-        let sjf = Sched::from_env(Some("sjf"), Some("legacy"));
-        assert_eq!(sjf.order, AdmitOrder::Sjf);
-        let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
-        assert_eq!(l, [2, 2, 4, 8, 8]);
-        // No env at all: the model's budgets, fifo, 2 lanes.
-        let d = Sched::from_env(None, None);
-        assert!(!d.legacy && d.order == AdmitOrder::Fifo && lanes_for(&d, 128) == 2);
+        // sjf (any case), unset or empty: shortest-first (the default since
+        // #165's rule S), its lanes scaled with the slots.
+        for admit in [None, Some(""), Some("sjf"), Some("SJF")] {
+            let sjf = Sched::from_env(admit, Some("legacy")).unwrap();
+            assert_eq!(sjf.order, AdmitOrder::Sjf, "{admit:?}");
+            let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
+            assert_eq!(l, [2, 2, 4, 8, 8]);
+        }
+        // Anything else is an error naming the valid values (shady on #167:
+        // a rollback switch must not turn a typo into the new default).
+        for admit in ["anything", "off", "0", "fifo60", "first"] {
+            let e = Sched::from_env(Some(admit), None).unwrap_err();
+            assert!(e.contains("fifo or sjf") && e.contains(admit), "{e}");
+        }
+        // No env at all: the model's budgets, shortest-first.
+        let d = Sched::from_env(None, None).unwrap();
+        assert!(!d.legacy && d.order == AdmitOrder::Sjf && lanes_for(&d, 128) == 8);
     }
 
     const PASS: usize = 1152;
@@ -2553,8 +2732,8 @@ mod sched_tests {
         }
     }
 
-    /// The rollback: with AXON_STEP_COST=legacy (and the default fifo
-    /// admission, `admit_gate`'s fifo arm with 2 lanes at any slot count:
+    /// The rollback: with AXON_STEP_COST=legacy (and fifo admission,
+    /// AXON_ADMIT=fifo, `admit_gate`'s fifo arm with 2 lanes at any slot count:
     /// `legacy_alone_is_main_admission`) every scheduling decision is
     /// main's (d6b7051, unchanged at fcde887), bit for bit,
     /// over 20,000 random states: the budget (the same timings fed through

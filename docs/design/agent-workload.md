@@ -288,6 +288,24 @@ per admission. Additions, all policy in `engine.rs`, no kernel:
 | **E** | disk tier proper (`--cache-dir`, index rebuild, restore pipelined with prefill) | 2 builder-days | 25k from disk ≤ 0.6 s on bella; else RAM-only stays the product |
 | **F** | stage 2: tenants, salts, quotas, keyring; H100 agent board (agent-128k) vs vLLM/SGLang | 5–7 builder-days + ~$10 H100 | Isolation: in a 10k-request adversarial replay (tenant B replays tenant A's prefixes), **0 cross-tenant cache hits** (the hard gate: per-tenant cached-token counters, and a debug assert that a page's salt matches the reader's), and B's TTFT median on A's prefixes within the round-to-round spread of B's TTFT median on fresh prefixes of the same lengths (n = 1,000 each, 3 rounds). Quotas: a breach never evicts another tenant's pages. Overhead: tenancy on vs off, C=1 decode and agent-32k aggregate within 2 %. H100 agent board (agent-128k vs vLLM APC and SGLang RadixAttention): published either way; the README claims the agent tier only if Axon's warm/GB and TTFT-resume p50 are at least as good as the best other's, else it lists them as losses |
 
+**Row B's result (10-31, #166): the TTFT-resume clause is not met on bella at 6G; the else branch applies.**
+`--cache-ram` ships opt-in, default 0 (off: main's behaviour). The cause is the design as built, not a bug: the tier
+is written as pages fill (write-behind), not when the GPU drops them (`spill_page`, the evict-to-RAM hook, is
+unwired until PR C3), so it is inclusive: it holds about its own size, the GPU pool's pages included, and drops the
+oldest session's tail first (LRU over unheld leaves). A 7B f16 page is 3,670,016 B, so 6 GiB = 1,755 pages, against
+bella's pool of 1,570–1,744 (sized from free VRAM at each start). In the bella cell of record, **1031-063509-f763**
+(the session evicted in every round, pool 1,744, md5 same), the server wrote 4 shorts × 4 + the calibration probe's
+47 + the session's 414 + 413 + 412 + 413 + one extra session's 414 = **2,129 pages**: 374 over, so LRU dropped the
+shorts (16), the probe (47) and 311 of the session's 414 pages from its tail, leaving **103 pages = 6,592 tokens**.
+That is the restored count measured in all three rounds. TTFT-resume was 7.05 s vs main 8.68 s (TAINTED by one
+Xorg sample at job start, so the timings aren't of record; the count is). The earlier passes (4090 a975 / fbcb,
+bella 7f15 / ef2b: 1,715 pages written ≤ 1,755) sat inside the only window where an inclusive tier helps: **the
+work written during the gap must fit between the pool's size and the tier's**, ≈ 11–185 pages on bella at 6G
+(under half of one 25k session). Sizing rule, until then: useful capacity ≈ `--cache-ram` − the GPU pool's KV bytes
+(bella's 7B f16 pool ≈ 5.4–6.0 GiB at 56 KiB a position: 6G buys almost nothing; about 20G is where it works, as in
+the 4090 replay 1027-155046-1ed0, 20G over a 5.25 GiB pool). Next: an exclusive tier (spill at GPU eviction, or drop the tier's copies of
+GPU-resident pages first, PR C3), so GPU + RAM ≈ pool + tier as §3 assumes; then re-run the bella cell.
+
 Order: A → B → C → D → E → F; B and C are independent in code (B wires kvstore, C changes PageMap) and can run
 as two tracks after A. Total stage 1 (A–E): ~13–17 builder-days, < $10. Stage 2 (F): one more week and ~$10.
 
@@ -309,7 +327,7 @@ Rows for the "Agent-harness workloads" table (replacing "later: not scheduled"):
 |---|---|---|---|
 | 1 | **Agent trace + replay harness; baseline board** (PR A) | the ruler for the track; no engine change; defines TTFT-new, TTFT-resume, goodput, ITL p99, warm/GB | **scheduled first** |
 | 2 | **Shared-prefix pages** (PR C: refcounts, chain index, COW tail, prefill-once-join-many) | fan-out bursts and the swarm's memory; exact by construction (§2.1) | after A |
-| 3 | **Tiered KV** (PR B/E: `--cache-ram`, `--cache-dir`, evict to a tier, restore on admit, restart survival) | TTFT-resume ≈ 10 s → ≤ 0.3 s (ESTIMATED from #48's MEASURED 67 ms / 0.45 s restores) | after A, parallel with 2 |
+| 3 | **Tiered KV** (PR B/E: `--cache-ram`, `--cache-dir`, evict to a tier, restore on admit, restart survival) | TTFT-resume ≈ 10 s → ≤ 0.3 s (ESTIMATED from #48's MEASURED 67 ms / 0.45 s restores) | after A, parallel with 2. **10-31:** B ships opt-in (`--cache-ram`, default off): its tier is inclusive, so the bella clause failed (§6, row B's result); exclusive tier next (PR C3), then the bella cell again |
 | 4 | **Agent scheduling** (PR D: priority classes, fairness, prefix-aware admission) | the main session stays interactive under a background swarm | after 2 |
 | 5 | **Multi-tenant** (PR F: per-tenant salts, quotas, keyring; H100 agent board) | stage 2; composes with FP8 / TP as separate key spaces | after 4 |
 | 6 | Fast first turn for MoE models | unchanged (MoE stage 3) | tracked under MoE |

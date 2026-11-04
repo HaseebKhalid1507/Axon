@@ -728,8 +728,9 @@ round, the engine order alternates (odd rounds Axon first). Every run is precede
 
 ## Serve scheduler A/B: laptop GPUs (2026-10-25, #131)
 
-Axon against itself, no other engine: main's scheduling vs the measured step budget (`--step-ms 60`, now the
-default) and shortest-first admission (`--admit-order sjf`, opt-in). The full tables (every arm, sjf50 included,
+Axon against itself, no other engine: main's scheduling vs the measured step budget (`--step-ms 60`, the
+default from #131 until #165's rule S made `--admit-order sjf --step-ms 80` the default) and shortest-first admission
+(`--admit-order sjf`, opt-in at the time). The full tables (every arm, sjf50 included,
 and the earlier a18ff8d run) are in [PR #131](https://github.com/HaseebKhalid1507/Axon/pull/131) §5; the verdict
 and diagnosis in [the log](log/2026-10-25-sched-budget-main.md). Raw logs:
 [gist](https://gist.github.com/HaseebKhalid1507/b439d3907e42da8cbb110d762936ffe8).

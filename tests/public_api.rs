@@ -1,16 +1,16 @@
 //! The public API from outside the crate (#118): what examples/embed.rs and
 //! an embedder use, compiled against the library as another crate would.
 //! `Backend` and `BackendCache` are opaque, `Lm` is sealed, `Device`,
-//! `KvType` and `GenStats` are non-exhaustive (the `compile_fail` doc tests
-//! in src/lm.rs and src/lib.rs check the other side: what no longer
-//! compiles).
+//! `KvType`, `Numerics` and `GenStats` are non-exhaustive (the
+//! `compile_fail` doc tests in src/lm.rs and src/lib.rs check the other
+//! side: what no longer compiles).
 //!
 //! The model tests use models/qwen2.5-0.5b-q4_k_m.gguf (CONTRIBUTING.md);
 //! `AXON_SKIP_MODEL_TESTS=1` skips them, `AXON_SKIP_GPU_TESTS=1` the CUDA one.
 
 use axon::{
-    Backend, BackendCache, BackendOptions, Device, GenOpts, GenStats, KvType, Lm, Model, Tokenizer,
-    Utf8Stream,
+    Backend, BackendCache, BackendOptions, Device, GenOpts, GenStats, KvType, Lm, Model, Numerics,
+    Tokenizer, Utf8Stream,
 };
 
 const MODEL: &str = "models/qwen2.5-0.5b-q4_k_m.gguf";
@@ -45,8 +45,10 @@ fn surface(m: &Model, net: &Backend, cache: &mut BackendCache, tok: &Tokenizer) 
         .gpu_layers(None)
         .gpu_layers(Some(3))
         .kv(KvType::Q8)
-        .fit(true);
+        .fit(true)
+        .numerics(Numerics::Fast);
     let _: Result<Backend, String> = Backend::new(m, o);
+    let _: Numerics = net.numerics();
     let _: usize = net.ctx(64);
     let _: usize = net.vocab();
     let _: usize = net.prefill_batch();
@@ -93,6 +95,16 @@ fn device_and_kv_parse() {
         _ => 0,
     };
     assert_eq!(bytes(KvType::F32), 4);
+    assert_eq!(Numerics::parse("exact"), Ok(Numerics::Exact));
+    assert_eq!(Numerics::parse("fast"), Ok(Numerics::Fast));
+    assert!(Numerics::parse("approx").is_err());
+    assert_eq!(Numerics::default(), Numerics::Exact);
+    let mode = |n: Numerics| match n {
+        Numerics::Exact => "exact",
+        Numerics::Fast => "fast",
+        _ => "other",
+    };
+    assert_eq!(mode(Numerics::Fast), "fast");
 }
 
 /// examples/embed.rs's path (load, tokenize, prefill, `generate`) of the

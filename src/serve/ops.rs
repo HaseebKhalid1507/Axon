@@ -246,6 +246,33 @@ pub struct Metrics {
     pub step_prompt_tokens: AtomicUsize,
     pub slots: Mutex<SlotsView>,
     pub sched: Mutex<SchedView>,
+    /// The KV RAM tier (`--cache-ram`; 0: off, and none of these shown):
+    /// its size, bytes and pages stored, pages written (D2H), prompt tokens
+    /// restored instead of prefilled, and the requests that had some.
+    pub kv_ram_cap: AtomicU64,
+    pub kv_ram_bytes: AtomicU64,
+    pub kv_ram_pages: AtomicU64,
+    pub kv_ram_written: AtomicU64,
+    pub kv_ram_restored: AtomicU64,
+    pub kv_ram_hits: AtomicU64,
+    /// Page-locked host memory the tier has taken (a pool's; the CPU's
+    /// pages are ordinary memory: 0).
+    pub kv_ram_pinned: AtomicU64,
+}
+
+impl Metrics {
+    /// The KV RAM tier turned off (an error): its gauges go to 0 (nothing
+    /// is stored or pinned any more), its counters stay.
+    pub fn kv_ram_off(&self) {
+        for g in [
+            &self.kv_ram_cap,
+            &self.kv_ram_bytes,
+            &self.kv_ram_pages,
+            &self.kv_ram_pinned,
+        ] {
+            g.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for Metrics {
@@ -264,6 +291,13 @@ impl Default for Metrics {
             step16: Histogram::new(STEP_BOUNDS),
             step_prompt_tokens: AtomicUsize::new(0),
             slots: Mutex::default(),
+            kv_ram_cap: AtomicU64::new(0),
+            kv_ram_bytes: AtomicU64::new(0),
+            kv_ram_pages: AtomicU64::new(0),
+            kv_ram_written: AtomicU64::new(0),
+            kv_ram_restored: AtomicU64::new(0),
+            kv_ram_hits: AtomicU64::new(0),
+            kv_ram_pinned: AtomicU64::new(0),
             sched: Mutex::default(),
         }
     }
@@ -417,6 +451,61 @@ impl Metrics {
             "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
             self.tool_calls_dropped.load(Ordering::Relaxed),
         );
+        // The tier's lines: while it's on, and after it turned off (its
+        // gauges 0, its counters kept).
+        if self.kv_ram_cap.load(Ordering::Relaxed) > 0
+            || self.kv_ram_written.load(Ordering::Relaxed) > 0
+        {
+            let g = |o: &mut String, name: &str, help: &str, v: &AtomicU64| {
+                let v = v.load(Ordering::Relaxed);
+                let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
+            };
+            g(
+                &mut o,
+                "axon_kv_ram_capacity_bytes",
+                "The KV RAM tier's size (--cache-ram).",
+                &self.kv_ram_cap,
+            );
+            g(
+                &mut o,
+                "axon_kv_ram_bytes",
+                "KV page bytes stored in the RAM tier.",
+                &self.kv_ram_bytes,
+            );
+            g(
+                &mut o,
+                "axon_kv_ram_pinned_bytes",
+                "Page-locked host memory the RAM tier has taken (it grows as pages are stored).",
+                &self.kv_ram_pinned,
+            );
+            g(
+                &mut o,
+                "axon_kv_ram_pages",
+                "KV pages stored in the RAM tier.",
+                &self.kv_ram_pages,
+            );
+            let c = |o: &mut String, name: &str, help: &str, v: &AtomicU64| {
+                counter(o, name, help, v.load(Ordering::Relaxed))
+            };
+            c(
+                &mut o,
+                "axon_kv_ram_written_pages_total",
+                "KV pages copied into the RAM tier.",
+                &self.kv_ram_written,
+            );
+            c(
+                &mut o,
+                "axon_kv_ram_restored_tokens_total",
+                "Prompt tokens whose KV rows were copied back from the RAM tier instead of prefilled.",
+                &self.kv_ram_restored,
+            );
+            c(
+                &mut o,
+                "axon_kv_ram_hits_total",
+                "Requests that had KV rows copied back from the RAM tier.",
+                &self.kv_ram_hits,
+            );
+        }
         let (total, busy) = lock(&self.slots).counts();
         gauge(
             &mut o,
