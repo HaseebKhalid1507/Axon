@@ -407,7 +407,10 @@ first 8192 tokens (or `--ctx`, if shorter) are checked against the RAM available
 or the room under the tightest cgroup memory limit (a container, a systemd scope). A model that can't fit is
 refused with a message naming the binding limit, instead of being OOM-killed. A longer `--ctx` whose full KV
 cache wouldn't fit only prints a note: that cache is taken as the context fills. Mixture-of-experts models
-have the same check for their experts. The CPU half of a `--gpu-layers` split isn't checked yet.
+have the same check for their experts. The CPU half of a `--gpu-layers` split has it too, for its layers and
+their KV cache, checked after the GPU half has loaded. A split that streams prefill through the GPU page-locks
+the CPU layers' whole KV cache when the cache is made; if the RAM available can't hold that, the cache doesn't
+stream (a note says so) and the run goes on at CPU prefill speed.
 
 ### Serving: `axon serve`
 
@@ -760,7 +763,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_P2P=1` | `--gpus` pipeline: try direct peer-to-peer copies between the GPUs. UNTESTED (no P2P-capable box has run it); default: copies staged through host memory by the driver (tested) |
 | `AXON_KV=f16\|f32\|q8` | KV cache type (default f16; `f32` CPU only, for A/B; `q8` cuda only, as `--kv q8`) |
 | `AXON_STREAM=0` | split model: don't stream the CPU layers' weights through the GPU for prefill batches (default on: they are copied over once per prompt chunk, and those layers then get the GPU's numerics) |
-| `AXON_STREAM_MIN=N` | split model: smallest prefill batch streamed (default 32). Streaming pins the CPU layers' KV cache in RAM |
+| `AXON_STREAM_MIN=N` | split model: smallest prefill batch streamed (default 32). Streaming pins the CPU layers' KV cache in RAM (all of it, when the cache is made; not if the RAM available can't hold it) |
 | `AXON_STREAM_DECODE=1` | split model, experiment: stream one-token decode steps too (slower; refused with `--draft`) |
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
 | `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
