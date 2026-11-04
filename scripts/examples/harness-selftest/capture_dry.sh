@@ -8,7 +8,8 @@
 #   - every request through the recording proxy;
 #   - the capture converted, with agent_trace.py --check inside.
 # Pass per harness: it finishes the task (rc 0), and its capture reaches the proxy and converts. A harness that
-# isn't installed is SKIPPED and named. The dry run reads and writes no real harness config and
+# isn't installed is SKIPPED and named; the dry run FAILS if no harness was driven at all (#186 review: it passed
+# with 0). The dry run reads and writes no real harness config and
 # runs no model. The fake model never fixes the bug, so "tests FAIL" on the TASK line is expected.
 #   axon-run --detach --cpu --ram 3000 --max-min 30 --on bella --expect "CAPTURE DRY PASS" \
 #     -- scripts/examples/harness-selftest/capture_dry.sh
@@ -35,5 +36,6 @@ for hn in ${*:-pi opencode codex crush}; do
     echo "CAPTURE DRY $hn: FAIL rc $rc (${ver:-version unknown}, $b); output tail:"; echo "$out" | tail -15; fail=1
   fi
 done
+[ $ran -ge 1 ] || { echo "CAPTURE DRY: no harness driven (none of: ${*:-pi opencode codex crush} installed)"; fail=1; }
 if [ $fail = 0 ]; then echo "CAPTURE DRY PASS ($ran harnesses driven)"; else echo "CAPTURE DRY FAIL"; fi
 exit $fail

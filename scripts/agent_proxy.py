@@ -6,7 +6,10 @@
 Put it between a harness (opencode, pi, codex, crush) and `axon serve` (or any OpenAI / Ollama-compatible server).
 It forwards every request and response byte for byte, streaming included. The one exception: an OpenAI chat request
 with `stream: true` that lacks `stream_options.include_usage` gets it added, because the token counts come from the
-response's `usage`. The record says so (`inj`).
+response's `usage`. The record says so (`inj`), and the harness doesn't see the result: on such a response the proxy
+drops the usage-only chunk (`choices: []`) and the `usage` key of any other chunk before forwarding, so the harness
+gets the stream it asked for (#186 review: a usage chunk it didn't ask for could feed its compaction logic). The
+injection fired on 0 requests in the 10-27 captures (`injected_usage` 0 in all four).
 
 Per request it appends ONE JSON line to FILE (docs/log/2026-11-04-agent-harness-traces.md):
   t_ms, route (enum), stream, status, ttft_ms, total_ms, prompt_tokens, completion_tokens, cached_tokens,
@@ -78,6 +81,25 @@ class Capture:
         with self.lock:
             self.f.write(json.dumps(rec, separators=(",", ":")) + "\n")
             self.f.flush()
+
+
+def strip_usage(ln):
+    """One SSE line of a response whose include_usage the proxy injected, as the harness gets it: the usage-only chunk
+    (choices []) -> None (dropped), any other chunk without its `usage` key, every other line as is."""
+    cr = b"\r" if ln.endswith(b"\r") else b""
+    s = ln[:-1] if cr else ln
+    if not s.startswith(b"data:"):
+        return ln
+    try:
+        j = json.loads(s[5:].strip())
+    except ValueError:
+        return ln
+    if not isinstance(j, dict) or "usage" not in j:
+        return ln
+    if not j.get("choices"):
+        return None
+    j.pop("usage")
+    return b"data: " + json.dumps(j).encode() + cr
 
 
 def canon(o):
@@ -275,14 +297,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         t_first = None
         buf = b""
+        held = b""      # inj: bytes not forwarded yet (an incomplete line)
+        dropped = [False]
+
+        def forward(data):
+            if data:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+                self.wfile.flush()
+
+        def stripped(lines):
+            out = []
+            for ln in lines:
+                if dropped[0] and ln.strip() == b"":
+                    dropped[0] = False   # the dropped event's blank line goes too
+                    continue
+                x = strip_usage(ln)
+                dropped[0] = x is None
+                if x is not None:
+                    out.append(x + b"\n")
+            return b"".join(out)
         while True:
             chunk = r.read1(65536) if hasattr(r, "read1") else r.read(65536)
             if not chunk:
                 break
             if t_first is None:
                 t_first = time.time()
-            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-            self.wfile.flush()
+            if inj:
+                held += chunk
+                *lines, held = held.split(b"\n")
+                forward(stripped(lines))
+            else:
+                forward(chunk)
             if rec is not None:
                 buf += chunk
                 # Parse complete lines as they come (SSE `data: {...}` or NDJSON), keep only the tail.
@@ -296,6 +341,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             usage_of(route, json.loads(ln), rec)
                         except ValueError:
                             pass
+        if inj and held:
+            x = strip_usage(held)
+            forward(b"" if x is None or dropped[0] and held.strip() == b"" else x)
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
         c.close()

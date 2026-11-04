@@ -4,12 +4,16 @@ def post(port, body):
     return r.read()
 def mark(port, task, rnd):
     urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/_mark?task={task}&round={rnd}", b"", {}))
-P = int(sys.argv[1]); mark(P, "bugfix", 1); sysm = {"role": "system", "content": "You are a SECRET coding agent with tools " * 20}
+P, U = int(sys.argv[1]), int(sys.argv[2])   # the proxy; the fake upstream behind it
+mark(P, "bugfix", 1); sysm = {"role": "system", "content": "You are a SECRET coding agent with tools " * 20}
 tools = [{"type": "function", "function": {"name": "bash"}}]
 m = [sysm, {"role": "user", "content": "fix the SECRET bug"}]
 for turn in range(3):                       # one conversation, growing
     out = post(P, {"messages": m, "tools": tools, "stream": turn != 1})
     assert b"secret" in out, out[:100]
+    # The proxy injected include_usage into the streamed turns. The client must get the stream it asked for, byte for
+    # byte what the upstream sends for the request as sent (no usage chunk, no usage key, no stray blank line).
+    assert turn == 1 or out == post(U, {"messages": m, "tools": tools, "stream": True}), out
     err = ["SECRET output " * 30, "Error: unknown tool frobnicate", "never sent"][turn]
     m = m + [{"role": "assistant", "content": f"step {turn}"}, {"role": "tool", "content": err}]
 mark(P, "explain", 1)

@@ -1,5 +1,5 @@
-# A fake OpenAI-compatible server for the self-tests: /v1/models; /v1/chat/completions (JSON or SSE with usage when
-# asked; prompt_tokens = 10 x messages); /v1/responses (SSE: created, a text delta, completed with usage). Synthetic.
+# A fake OpenAI-compatible server for the self-tests: /v1/models; /v1/chat/completions (JSON or SSE; with
+# include_usage, "usage": null on every chunk and a usage-only last chunk, as OpenAI does; prompt_tokens = 10 x messages); /v1/responses (SSE: created, a text delta, completed with usage). Synthetic.
 #   fake_upstream.py PORT [--text-only]
 # --text-only: a streamed reply never calls a tool, so a real harness pointed at it (capture_dry.sh) gets a plain
 # answer and finishes its task instead of looping on tool calls.
@@ -58,7 +58,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 parts = parts[:1]
             parts.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
             if (b.get("stream_options") or {}).get("include_usage"):
-                parts.append({"choices": [], "usage": u})
+                # as OpenAI does: every chunk carries "usage": null, then one usage-only chunk
+                parts = [dict(x, usage=None) for x in parts] + [{"choices": [], "usage": u}]
             body = b"".join(b"data: " + json.dumps(p).encode() + b"\n\n" for p in parts) + b"data: [DONE]\n\n"
             return self._send(200, body, "text/event-stream")
         o = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "secret answer"}, "finish_reason": "stop"}],
