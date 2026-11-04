@@ -433,3 +433,9 @@ ollama speed-1 column is the rerun; ollama speed 4 is the board's.
 - **f16, deferred:** the ollama column is non-comparable (chat template) and llama s4 is n = 1 clean. A targeted
   rerun (ollama s1 + s4 ×3 on the raw path, llama s4 ×2; ≈ 2 h) is needed only if a B/C gate compares against a
   baseline. Rule A doesn't.
+
+- **Update 2026-11-04 (#186):** each round ran speed 1 and then speed 4 on one process per engine, and both speeds
+  replay one window's text, so speed 4 started with speed 1's prompts cached. Speed 1 (what rule A reads) is clean
+  of it. llama-server q8 speed 4 is optimistic: 138,239 tokens per round (69 % of the cell's ideal prefill) came from
+  speed 1's leftovers. Axon f16 / q8 and llama-server f16 show none; ollama can't be measured. Details and the fix (a
+  fresh engine per cell): [2026-11-04-agent-harness-traces.md](2026-11-04-agent-harness-traces.md), round 2.
