@@ -5,6 +5,18 @@
   `PrefixIndex`; the `BatchLm` share calls; the immutability rule, checked in debug builds). Nothing maps, pins or
   indexes pages yet. **C3** (the engine: claim, index, evict) and **C4** (in-flight dedupe) are follow-up PRs. The
   sections below are the checkpoint-0 design as written, read on main `0c23a87`; file:line references are from then.
+- **What C3 inherits from C1 + C2 as landed** (where it differs from the design below):
+  - `warm` and `excl` are `PageMap` methods, not `PoolPages` fields (§3.2 had them there): `BatchLm::pages` runs
+    several times per engine step and nothing reads them yet. C3 adds them where admission reads them (§3.6) and
+    prices that in its timing gate.
+  - Debug builds check the immutability rule (E3) on `feed_slot`, the step, `adopt` and the RAM tier's page copies
+    (`page_in`, `page_out_id`). **Not** on a single request's writes through a slot view (`lend_solo` → `generate`):
+    C3 adds E3's `lend_solo` range check.
+  - `BatchLm::page_state(pool, page) -> (refs, pinned)` (tests and debug builds) is the per-page view the §3.6 leak
+    check needs.
+  - Eviction order, by the RAM tier's live-page rule (#166's `page_out_id`): `pop_lru_leaf` → `PoolTier::spill_page`
+    → `Tier::drop_resident(key)` (WP2's, feat/kvtier-exclusive, not on main yet; r10 msg-7cc38c7d) → `unpin_page`
+    (§3.6 step 2, §4).
 - Spec: [agent-workload.md](agent-workload.md) §0, §2.1, §2.2, §6 row C (#158).
 - Branch `feat/shared-prefix-pages`, worktree `~/.cache/axon-wt-sharekv`, scratch `~/.cache/axon-sharekv/`.
 - Labels: **CODE** = read on main at file:line; **MEASURED** = someone's run with a log; **ESTIMATED** = arithmetic shown.
@@ -157,7 +169,8 @@ fn pin_page / unpin_page(&self, pool, page: u32) -> Result<(), String>;
 fn slot_pages(&self, pool, slot) -> Vec<u32>;                            // page ids (B needs this too: D2H)
 fn copy_page(&self, pool, src: u32, slot, rows: usize) -> Result<(), String>;  // COW: ensure 1 fresh page, D2D rows
 ```
-`PoolPages` gains `warm` (pinned, refs 0) and `excl: Vec<usize>` (per slot, pages with refs == 1). For COW,
+`PoolPages` gains `warm` (pinned, refs 0) and `excl: Vec<usize>` (per slot, pages with refs == 1) in C3; C2 keeps them
+on `PageMap`, unread. For COW,
 `cuda/mod.rs` needs a **device-to-device 2D copy**: `copy_2d` there is host↔device only (mod.rs:1127). A page is
 `2·n_layers` strided pieces per region (the layer arrays are contiguous with stride `rows·row_bytes`; see the
 `adopt_cache` loop), so `cuMemcpy2DAsync` does it in one call for f16 and two for q8. The spec's "one D2D ≈ 10 µs" holds
@@ -223,8 +236,10 @@ piece (C2b) behind the same gates and is dropped if the cell passes without it.
 
 `make_room(slot, hi)` loops:
 1. `reserve`; if short:
-2. evict `index.pop_lru_leaf()` (warm, refs 0) → `unpin_page` → retire/free. **B's spill hook goes here**
-   (`Evicted{key,parent,tokens,page}` → D2H into PageStore before the page is reused).
+2. evict `index.pop_lru_leaf()` (warm, refs 0) → **spill** (B's hook, `PoolTier::spill_page`: `Evicted{key,parent,
+   tokens,page}` → `page_out_id` D2H into PageStore while the page is still pinned, so live) → `Tier::drop_resident(key)`
+   (WP2) → `unpin_page` → retire/free. Unpinning first would retire the page, and `page_out_id` refuses a retired page
+   (debug builds assert it).
 3. else `reclaim` the LRU idle slot: `release(s, 0)`. Its pinned pages become warm, its unpinned tail frees. Go to 2.
 4. else short (the caller's `victim` path).
 

@@ -27,7 +27,10 @@ use crate::kvstore::{Key, ROOT, chain};
 use std::collections::{BTreeSet, HashMap};
 
 /// An indexed page given up (`pop_lru_leaf`, `unindex_subtree`): the caller
-/// unpins `page` (a RAM tier may first copy it out under `key`).
+/// unpins `page`, after a RAM tier copies it out under `key` if it keeps
+/// one (`page_out_id` wants it live). `unindex_subtree`'s list includes
+/// the caller's own page, still held, which doesn't retire on the unpin;
+/// the warm descendants (no slot) do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evicted {
     pub key: Key,
@@ -255,10 +258,12 @@ impl PrefixIndex {
 
     /// Unindex `key` and every block extending it, deepest first (the
     /// caller unpins their pages): a slot that alone holds `key`'s page
-    /// writes into it next (in-place continuation), and the blocks after
-    /// it would name bytes that change. Err (nothing removed) if a slot
-    /// other than `key`'s own holder holds one of them: only an unshared
-    /// page may be written.
+    /// writes into it next (in-place continuation), so `key` leaves the
+    /// index, and the blocks after it, whose bytes don't change, are
+    /// orphaned with it (no walk reaches them without their parent). Err
+    /// (nothing removed) if another slot holds `key`'s page, or any slot
+    /// one after it (the caller releases its own tail first): only an
+    /// unshared page may be written.
     pub fn unindex_subtree(&mut self, key: Key) -> Result<Vec<Evicted>, String> {
         let n = self.map.get(&key).ok_or("unindex: not indexed")?;
         if n.holds > 1 {
@@ -479,6 +484,38 @@ mod tests {
         assert!(x.unindex_subtree(k[0]).is_err());
         assert_eq!(x.len(), 2);
         x.check(|p| if p == 0 { 2 } else { 0 });
+    }
+
+    /// A block after `key` still held (the caller didn't release its tail
+    /// first): refused, nothing removed; released, it goes.
+    #[test]
+    fn unindex_subtree_refuses_a_held_descendant() {
+        let mut x = PrefixIndex::default();
+        let a = toks(2, 3 * PAGE);
+        let k: Vec<Key> = put(&mut x, &a, 0)
+            .iter()
+            .map(|r| match r {
+                Ins::New(k) => *k,
+                _ => unreachable!(),
+            })
+            .collect();
+        for &b in &k {
+            x.hold(b);
+        }
+        let e = x.unindex_subtree(k[1]).unwrap_err();
+        assert!(e.contains("after it is held"), "{e}");
+        assert_eq!(x.len(), 3);
+        x.check(|_| 1);
+        x.release(k[2]);
+        let gone: Vec<u32> = x
+            .unindex_subtree(k[1])
+            .unwrap()
+            .iter()
+            .map(|e| e.page)
+            .collect();
+        assert_eq!(gone, [2, 1], "deepest first");
+        assert_eq!(x.len(), 1);
+        x.check(|p| u32::from(p == 0));
     }
 
     /// The engine's use, modelled on the host (specs §3.3–3.6): slots admit

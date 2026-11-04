@@ -306,6 +306,14 @@ pub trait BatchLm: Lm {
     #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn same_page_bytes(&self, pool: &Self::Pool, a: u32, b: u32) -> Result<bool, String>;
 
+    /// Tests and debug builds: page `page`'s holders, (slots holding it,
+    /// whether the prefix index pins it); None for a plain pool or a page
+    /// past it. The leak check C3 runs after each step (the index's holds
+    /// of a page == its refs, docs/design/shared-prefix-pages.md §3.6).
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
+    fn page_state(&self, pool: &Self::Pool, page: u32) -> Option<(u32, bool)>;
+
     /// Lend the pool's batch scratch to `cache` (its `slot_cache`, which
     /// may have none of its own) for the `Lm` calls on it; the pool's
     /// `feed_slot` / `step` wait for `return_scratch`.
@@ -393,10 +401,6 @@ pub struct PoolPages {
     pub total: usize,
     /// Pages each slot holds (its own and shared ones).
     pub held: Vec<usize>,
-    /// Pages only the prefix index holds (no slot): cached, evictable.
-    pub warm: usize,
-    /// Pages each slot alone holds (releasing it gives them up).
-    pub excl: Vec<usize>,
 }
 
 impl Sealed for Qwen2<'_> {}
@@ -1370,6 +1374,11 @@ impl BatchLm for Backend<'_> {
             Inner::Cuda(n) => n.same_page_bytes(pool, a, b),
             _ => unreachable!("a pool is the GPU model's"),
         }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn page_state(&self, pool: &Self::Pool, page: u32) -> Option<(u32, bool)> {
+        pool.page_state(page)
     }
 
     fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {

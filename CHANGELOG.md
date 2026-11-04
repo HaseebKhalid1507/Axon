@@ -11,8 +11,9 @@ measurements behind them.
   design, [docs/design/shared-prefix-pages.md](docs/design/shared-prefix-pages.md)). Nothing maps, pins or indexes
   pages yet, so every page has one holder and the pool allocates, releases and copies exactly as before: the same
   bits (the md5 and serve identity gates against main). The rule sharing rests on, "a page shared or indexed is never
-  written again", is checked in debug builds on every write into the pool, the RAM tier's page copies (#166)
-  included. The engine work (C3: claim, index, evict) and in-flight dedupe (C4) are later PRs.
+  written again", is checked in debug builds on the pool's batched writes (feeds, steps, `adopt`) and the RAM
+  tier's page copies (#166). A single request's writes through a slot view aren't checked yet: that is C3's, with
+  the engine work (claim, index, evict). In-flight dedupe (C4) is a later PR too.
 
 ### KV RAM tier, opt-in (#166)
 - **`axon serve --cache-ram BYTES|auto`: keep conversations' KV pages in host RAM, off by default.** When a slot goes to

@@ -36,9 +36,14 @@ Nothing in the engine calls `map_pages`, `pin_page` or `unpin_page` (they are `#
 every live page has refs 1 and no pin. Then `ensure` hands out the same pages as main (it only sets refs = 1), and
 `release` retires the same pages in the same order (each drops to refs 0, unpinned, and is pushed to `retire` as
 main's `retire.extend(drain(keep..).rev())` did). The new checks are debug-only. What release builds add is
-bookkeeping: a refs store per page `ensure` takes, a decrement and compare per page `release` gives back, and the
-`warm` / `excl` counts every `BatchLm::pages` call now computes (a pass over the page map, on admission and
-planning, not per token). The timing A/B below measures it.
+allocator bookkeeping: a refs store per page `ensure` takes, and a decrement and compare per page `release` gives
+back. `BatchLm::pages` computes exactly main's fields again. The engine calls it at least 3 times per step: twice
+in `publish` (directly and through `slot_states`), once in `grow`, and twice more per prefill chunk in `feedable`.
+- **Corrected after review (shady, round 1).** At `0b22e9c` `BatchLm::pages` also counted `warm` and `excl`: an
+  O(total pages) scan and a second Vec on every call. This entry and the PR said that ran "on admission and
+  planning, not per token", which was wrong: it ran on every engine step. Nothing in release read the counts, so they
+  are `PageMap` methods now (tests read them) and C3 adds them where admission needs them. The timing A/B runs on
+  the head without them.
 
 ## How it was verified
 All on bella (RTX 5070 Ti Laptop, sm_120), at `0b22e9c` (code identical to `5564c69`; `0b22e9c` is docs only), main

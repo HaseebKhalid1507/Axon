@@ -220,7 +220,10 @@ impl PageMap {
         }
     }
 
-    /// Pinned pages no slot holds (warm: the index's to evict).
+    /// Pinned pages no slot holds (warm: the index's to evict). Not in
+    /// `BatchLm::pages` until C3's admission accounting reads it (an O(total)
+    /// scan the engine would pay on every step for nothing).
+    #[cfg_attr(not(test), allow(dead_code))] // C3's accounting (design §3.6)
     pub fn warm(&self) -> usize {
         (0..self.total)
             .filter(|&i| self.pinned[i] && self.refs[i] == 0)
@@ -228,7 +231,8 @@ impl PageMap {
     }
 
     /// Pages slot `slot` alone holds (what releasing it gives up, to the
-    /// free list or, pinned, to the warm set).
+    /// free list or, pinned, to the warm set). As `warm`, C3's to read.
+    #[cfg_attr(not(test), allow(dead_code))] // C3's accounting (design §3.6)
     pub fn excl(&self, slot: usize) -> usize {
         self.pages[slot]
             .iter()

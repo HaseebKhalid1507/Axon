@@ -1028,6 +1028,11 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     fn same_page_bytes(&self, pool: &CudaPool<'g>, a: u32, b: u32) -> Result<bool, String> {
         CudaQwen2::same_page_bytes(self, pool, a, b)
     }
+
+    #[cfg(any(test, debug_assertions))]
+    fn page_state(&self, pool: &CudaPool<'g>, page: u32) -> Option<(u32, bool)> {
+        pool.page_state(page)
+    }
 }
 
 // A pool page (`pages::PAGE`, the attention block) and the RAM tier's /
@@ -1051,7 +1056,9 @@ impl<'g> CudaQwen2<'g> {
     /// `release`'s table write and the reuse of its pages after it). Nothing
     /// numeric runs: the bytes are the slot's (`Rows::page`). Into the slot
     /// only a page it may write (`PageMap::writable`: a shared or indexed
-    /// page is read only; debug builds check it, as every write's).
+    /// page is read only; debug builds check it, as they do the pool's
+    /// feeds and steps; a single request's writes through a slot view
+    /// aren't checked yet, C3's `lend_solo` range check).
     pub(crate) fn pool_page_io(
         &self,
         p: &CudaPool<'g>,
@@ -1176,9 +1183,14 @@ impl CudaPool<'_> {
             free: m.free(),
             total: m.total(),
             held: (0..self.slots).map(|s| m.pages(s).len()).collect(),
-            warm: m.warm(),
-            excl: (0..self.slots).map(|s| m.excl(s)).collect(),
         })
+    }
+
+    /// `BatchLm::page_state`: page `page`'s (refs, pinned).
+    #[cfg(any(test, debug_assertions))]
+    pub fn page_state(&self, page: u32) -> Option<(u32, bool)> {
+        let m = self.pm.as_ref().filter(|m| (page as usize) < m.total())?;
+        Some((m.refs(page), m.pinned(page)))
     }
 
     /// `BatchLm::slot_pages`: slot `slot`'s page ids in position order
@@ -2029,12 +2041,18 @@ mod tests {
                     .map(|&pg| net.page_image(&p, pg).unwrap())
                     .collect();
                 net.map_pages(&mut p, 1, &shared).unwrap();
-                let pg = p.page_info().unwrap();
+                let (pg, m) = (p.page_info().unwrap(), p.pm.as_ref().unwrap());
                 assert_eq!(
-                    (pg.held[1], pg.excl[1], pg.excl[0]),
+                    (pg.held[1], m.excl(1), m.excl(0)),
                     (k, 0, a.len().div_ceil(PAGE) - k),
                     "{what}"
                 );
+                for &s in &shared {
+                    assert_eq!(net.page_state(&p, s), Some((2, true)), "{what}");
+                }
+                let own = p.pm.as_ref().unwrap().pages(0)[k];
+                assert_eq!(net.page_state(&p, own), Some((1, false)), "{what}");
+                assert_eq!(net.page_state(&p, total as u32), None, "{what}");
                 feed_chunks(&net, &mut p, 1, &b[k * PAGE..b.len() - 1], k * PAGE, 50);
                 let mut reqs = [(0usize, a.clone()), (1, b.clone())];
                 steps_vs_solo(&net, &mut p, &mut reqs, &[&ref_a, &ref_b], steps, &what);
@@ -2055,8 +2073,9 @@ mod tests {
                 // Both gone: the pinned pages stay, warm; C maps them.
                 net.release(&mut p, 0, 0).unwrap();
                 net.release(&mut p, 1, 0).unwrap();
-                let pg = p.page_info().unwrap();
-                assert_eq!((pg.warm, pg.free), (k, total - k), "{what}");
+                let (pg, m) = (p.page_info().unwrap(), p.pm.as_ref().unwrap());
+                assert_eq!((m.warm(), pg.free), (k, total - k), "{what}");
+                assert_eq!(net.page_state(&p, shared[0]), Some((0, true)), "{what}");
                 net.map_pages(&mut p, 2, &shared).unwrap();
                 feed_chunks(&net, &mut p, 2, &c[k * PAGE..c.len() - 1], k * PAGE, 64);
                 let mut reqs = [(2usize, c.clone())];
@@ -2069,15 +2088,16 @@ mod tests {
                     net.unpin_page(&mut p, pg).unwrap();
                 }
                 net.release(&mut p, 2, 0).unwrap();
-                let pg = p.page_info().unwrap();
-                assert_eq!((pg.free, pg.warm), (total, 0), "{what}: every page back");
+                let (pg, m) = (p.page_info().unwrap(), p.pm.as_ref().unwrap());
+                assert_eq!((pg.free, m.warm()), (total, 0), "{what}: every page back");
+                assert_eq!(net.page_state(&p, shared[0]), Some((0, false)), "{what}");
                 p.pm.as_ref().unwrap().check();
             }
         }
     }
 
     /// Two writers of one prefix write the same bytes (the property sharing
-    /// rests on, as the engine checks it at run time in debug builds): one
+    /// rests on; C3's engine is to check it at run time in debug builds): one
     /// prompt fed into two slots of a shuffled pool in different chunks,
     /// every whole page byte-identical to its twin; a page of another
     /// prompt differs (the comparison isn't vacuous). f16 and q8.
@@ -2242,7 +2262,7 @@ mod tests {
         // by id; unpinned, it retires and can't be.
         net.release(&mut p, 0, 0).unwrap();
         net.release(&mut p, 1, 0).unwrap();
-        assert_eq!(p.page_info().unwrap().warm, 1);
+        assert_eq!(p.pm.as_ref().unwrap().warm(), 1);
         net.pool_page_id_io(&p, a[0], &mut host, 0, false).unwrap();
         net.unpin_page(&mut p, a[0]).unwrap();
         refused(
