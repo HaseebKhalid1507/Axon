@@ -592,14 +592,13 @@ impl PoolTier {
                 break;
             };
             let (buf, at) = self.arena.at(a);
+            // Tests: an injected fault fails the copy instead (`Faults`).
             #[cfg(test)]
-            let r = self
-                .t
-                .fault(true)
-                .and_then(|()| net.page_out(pool, s, i, buf, at));
-            #[cfg(not(test))]
-            let r = net.page_out(pool, s, i, buf, at);
-            if let Err(e) = r {
+            if let Err(e) = self.t.fault(true) {
+                self.arena.free.push(a);
+                return Err(e);
+            }
+            if let Err(e) = net.page_out(pool, s, i, buf, at) {
                 self.arena.free.push(a);
                 return Err(e);
             }
@@ -650,13 +649,11 @@ impl PoolTier {
         };
         let (buf, at) = self.arena.at(a);
         #[cfg(test)]
-        let r = self
-            .t
-            .fault(true)
-            .and_then(|()| net.page_out_id(pool, page, buf, at));
-        #[cfg(not(test))]
-        let r = net.page_out_id(pool, page, buf, at);
-        if let Err(e) = r {
+        if let Err(e) = self.t.fault(true) {
+            self.arena.free.push(a);
+            return Err(e);
+        }
+        if let Err(e) = net.page_out_id(pool, page, buf, at) {
             self.arena.free.push(a);
             return Err(e);
         }
@@ -728,13 +725,11 @@ impl PoolTier {
             // bytes): #164's copy-on-write precondition, page `i` must be
             // this slot's alone (a shared partial page is copied first).
             #[cfg(test)]
-            let r = self
-                .t
-                .fault(false)
-                .and_then(|()| net.page_in(pool, s, i, buf, at));
-            #[cfg(not(test))]
-            let r = net.page_in(pool, s, i, buf, at);
-            res = r;
+            if let Err(e) = self.t.fault(false) {
+                res = Err(e);
+                break;
+            }
+            res = net.page_in(pool, s, i, buf, at);
             if res.is_err() {
                 break;
             }
