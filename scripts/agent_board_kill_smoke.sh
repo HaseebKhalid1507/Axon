@@ -51,6 +51,11 @@ case_run() {  # name signal target engines wait_kind
   else
     echo "KILL SMOKE $name: ok ($before tagged processes before SIG$sig to the $target, none after 20 s)"
   fi
+  # #182: meta.json is written at start, so the killed board still has its hashes and harness provenance
+  if python3 -c "import json, sys; m = json.load(open(sys.argv[1])); h = m['harness']
+assert m['state'] == 'running' and len(m['model_sha256']) == 64 and h['sha256'], m
+print(f'KILL SMOKE $name: meta.json kept (state running, model sha256 {m[\"model_sha256\"][:16]}, harness {h[\"commit\"]})')" \
+    "$out/meta.json"; then :; else echo "KILL SMOKE $name: FAIL (no meta.json with state running after the kill)"; fail=1; fi
 }
 case_run term-llama TERM pid llama,ollama,axon llama
 case_run term-ollama TERM pid ollama,llama,axon ollama

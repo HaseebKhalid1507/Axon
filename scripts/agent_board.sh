@@ -11,15 +11,20 @@
 #
 # Inputs (env): AXON_AGENT_DIR (default ~/.cache/axon-agent: bin/axon-<sha>, traces/), AXON_AGENT_AXON (the axon
 # binary), AXON_AGENT_TRACE (an --anonymize-time trace; never a file in this repo), LLAMA_SERVER, AXON_MODELS.
+# The N_warm ladder (plan section 4): AXON_AGENT_SESSIONS=8,16,24,32 AXON_AGENT_SPEEDS=1 runs one cell per N at
+# speed 1 instead (NOT MEASURED yet; ESTIMATED >= 4 x ~11 min per engine per round, ~6.5 h for 3 engines x 3
+# rounds: split it by engine or round, e.g. --engines via AXON_AGENT_ENGINES, and use --max-min accordingly).
 set -u
 KV=${1:?usage: agent_board.sh f16|q8}
 D=${AXON_AGENT_DIR:-$HOME/.cache/axon-agent}
 W=$(cd "$(dirname "$0")/.." && pwd)
 M=${AXON_MODELS:-$W/models}
-OUT=$D/board-$KV-$(date +%m%d-%H%M%S); mkdir -p "$OUT"
+SESS=${AXON_AGENT_SESSIONS:-}
+OUT=$D/board-$KV${SESS:+-ladder}-$(date +%m%d-%H%M%S); mkdir -p "$OUT"
 echo "harness $(git -C "$W" rev-parse HEAD)$(git -C "$W" diff --quiet HEAD -- scripts || echo ' + uncommitted scripts/ changes')"
 nvidia-smi --query-gpu=name,driver_version,clocks.max.sm,power.limit --format=csv,noheader > "$OUT/gpu.txt"
-python3 -u "$W/scripts/agent_replay.py" board --engines axon,llama,ollama --kv "$KV" --rounds 3 --speeds 1,4 \
+python3 -u "$W/scripts/agent_replay.py" board --engines "${AXON_AGENT_ENGINES:-axon,llama,ollama}" --kv "$KV" \
+  --rounds "${AXON_AGENT_ROUNDS:-3}" --speeds "${AXON_AGENT_SPEEDS:-1,4}" ${SESS:+--sessions "$SESS"} \
   --model "$M/Qwen2.5-7B-Instruct-Q4_K_M.gguf" --ollama-model axon-q7 \
   --axon "${AXON_AGENT_AXON:?set AXON_AGENT_AXON to the axon binary under test}" \
   --llama-server "${LLAMA_SERVER:-$HOME/Projects/llama.cpp/build-cuda/bin/llama-server}" \
