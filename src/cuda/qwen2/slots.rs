@@ -513,7 +513,7 @@ impl<'g> CudaQwen2<'g> {
         Ok(())
     }
 
-    /// Shared prefixes (specs/shared-prefix-pages.md): append `pages`
+    /// Shared prefixes (docs/design/shared-prefix-pages.md): append `pages`
     /// (live: another slot's, or warm in the prefix index) to slot `slot`'s
     /// pages, its positions from its held pages' end on; read only to it
     /// (`PageMap::writable`). Their table entries are written now (one
@@ -582,7 +582,7 @@ impl<'g> CudaQwen2<'g> {
 
     /// Whether pages `a` and `b` hold the same bytes, every layer, K, V
     /// and q8 scales (tests and debug builds: two writers of one prefix
-    /// block wrote the same bytes, specs/shared-prefix-pages.md §2).
+    /// block wrote the same bytes, docs/design/shared-prefix-pages.md §2).
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn same_page_bytes(&self, p: &CudaPool<'g>, a: u32, b: u32) -> Result<bool, String> {
         let Some(m) = &p.pm else {
@@ -1099,7 +1099,7 @@ impl<'g> CudaQwen2<'g> {
     /// `id` is live: held by a slot, or warm in the prefix index (so an
     /// evicted page is copied out before `unpin_page`, which may retire it
     /// and its bytes); written (`to_dev`) only while private. Debug builds
-    /// check both (specs/shared-prefix-pages.md, the immutability rule).
+    /// check both (docs/design/shared-prefix-pages.md, the immutability rule).
     pub(crate) fn pool_page_id_io(
         &self,
         p: &CudaPool<'g>,
@@ -1970,7 +1970,7 @@ mod tests {
         }
     }
 
-    /// Shared prefix pages (specs/shared-prefix-pages.md §5.2), four model
+    /// Shared prefix pages (docs/design/shared-prefix-pages.md §5.2), four model
     /// families (gemma3: the shared prefix is longer than its 512-position
     /// window, so the window spans shared and private pages), f16 and q8,
     /// over shuffled pages: A is fed in uneven chunks and its whole pages

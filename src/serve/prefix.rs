@@ -1,4 +1,4 @@
-//! The prefix index of a paged pool's KV pages (specs/shared-prefix-pages.md
+//! The prefix index of a paged pool's KV pages (docs/design/shared-prefix-pages.md
 //! §3.1): which page holds the K/V of each 64-token block after a given
 //! prefix, so a prompt that starts the same way maps those pages instead of
 //! prefilling them. Host only; the pool counts each page's holders and pins

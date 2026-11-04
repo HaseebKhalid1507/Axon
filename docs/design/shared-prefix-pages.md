@@ -1,9 +1,12 @@
-# PR C: shared-prefix KV pages: design note (checkpoint 0)
+# PR C: shared-prefix KV pages: design note
 
-- Author: gojo (sharekv track), for Jawz (foreman). Date: 2026-10-27. Status: **design only, no engine code, no gate spend.**
-- Base read: origin/main `0c23a87` (#155). Spec: [docs/design/agent-workload.md](../docs/design/agent-workload.md) §0, §2.1, §2.2, §6 row C (#158).
+- Author: gojo (sharekv track), for Jawz (foreman). Date: 2026-10-27 (checkpoint 0, design); 2026-11-04 moved here.
+- Status: **C1 + C2 landed in #164, with no behaviour change** (the refcounted, pinnable `PageMap`; the host
+  `PrefixIndex`; the `BatchLm` share calls; the immutability rule, checked in debug builds). Nothing maps, pins or
+  indexes pages yet. **C3** (the engine: claim, index, evict) and **C4** (in-flight dedupe) are follow-up PRs. The
+  sections below are the checkpoint-0 design as written, read on main `0c23a87`; file:line references are from then.
+- Spec: [agent-workload.md](agent-workload.md) §0, §2.1, §2.2, §6 row C (#158).
 - Branch `feat/shared-prefix-pages`, worktree `~/.cache/axon-wt-sharekv`, scratch `~/.cache/axon-sharekv/`.
-  (The repo keeps designs in `docs/design/`; this file moves there when the PR opens.)
 - Labels: **CODE** = read on main at file:line; **MEASURED** = someone's run with a log; **ESTIMATED** = arithmetic shown.
   Nothing in this note was run.
 
@@ -280,6 +283,18 @@ tier lives as long as the process too. The disk tier (E) needs `ROOT = H(identit
 
 **A.** The replay md5 of every reply is the gate of record (§5.3). `axon gen` md5 is necessary but doesn't exercise
 the pool at all.
+
+**B landed first (#166, 2026-11-04 merge into #164).** B's tier copies whole pages through
+`CudaQwen2::pool_page_io` (a slot's page, `BatchLm::page_out` / `page_in`) and `pool_page_id_io` (a page by id,
+`page_out_id`: the seam above, which `PoolTier::spill_page` already calls). Both are writes into or reads of pool
+pages that C's rule governs, so since the merge they say it and check it in debug builds, as every other write:
+- `page_in` (the device direction) writes only a page its slot may write (`PageMap::writable`): never a page mapped
+  from another slot nor one the index pins. C3's restore lands in private pages, or rounds to the page boundary
+  (§3.4), as for a prefill.
+- `page_out_id` reads only a live page (held, or warm in the index). C3's eviction therefore copies a page out
+  before `unpin_page` (which may retire it and hand its bytes to the next `ensure`), not after.
+`slots.rs` `page_copies_respect_sharing` pins both down (debug builds panic before a copy is enqueued; release builds
+don't check, as for `assert_writable`).
 
 ---
 

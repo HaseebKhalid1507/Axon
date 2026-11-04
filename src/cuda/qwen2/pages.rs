@@ -8,7 +8,7 @@
 //! its end (`ensure`, `map`) and shrinks from its end (`release`), so the
 //! pages under positions a kernel reads never change while it runs.
 //!
-//! Shared prefixes (specs/shared-prefix-pages.md): a page may be in more
+//! Shared prefixes (docs/design/shared-prefix-pages.md): a page may be in more
 //! than one slot's list (`map`: another slot's page of the same prefix
 //! tokens, whose bytes are the ones this slot would write) and may be
 //! pinned by the prefix index (serve/prefix.rs). Every page is in exactly
@@ -359,7 +359,7 @@ mod tests {
         }
     }
 
-    /// Shared pages (specs/shared-prefix-pages.md): random ensure / map
+    /// Shared pages (docs/design/shared-prefix-pages.md): random ensure / map
     /// (another slot's live pages, or warm ones) / release / pin / unpin /
     /// flush against `check` (refs == occurrences, one state per page),
     /// LIFO and shuffled; a page is writable exactly when one slot holds it
