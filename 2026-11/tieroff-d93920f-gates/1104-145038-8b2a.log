@@ -1,0 +1,16 @@
+[axon-run 14:50:38] submitted 1104-145038-8b2a by /home/haseeb/.cache/axon-tieroff: /home/haseeb/.cache/axon-tieroff/t-d93920f-rel --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+[axon-run 15:03:30] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 15:03:30] scope axon-job-1104-145038-8b2a-1793822610.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17980 MB): an OOM here kills only this job
+[axon-run 15:03:30] job 1104-145038-8b2a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-145038-8b2a-1793822610 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-tieroff/t-d93920f-rel --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+axon-q 15:03:30 start slot 16-23: /home/haseeb/.cache/axon-tieroff/t-d93920f-rel --exact serve::tests::serve_cuda_cache_ram_off_in_reclaim --test-threads 1 --nocapture
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 820 filtered out; finished in 1.84s
+
+[axon-run 15:03:32] exit 0 after 2.0s (host bella)
