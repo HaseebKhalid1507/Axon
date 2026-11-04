@@ -719,7 +719,7 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     return proc, eng, tokens, cfg
 
 
-def ollama_mirror(src, dst, model):
+def ollama_mirror(src, dst):
     """A user-owned OLLAMA_MODELS for the board's own `ollama serve`, built inside the board's out dir (11-04).
     The system store `src` (owned by the ollama user, mode 755) is read-only to us, and ollama 0.40.13 (bella,
     upgraded from 0.40.6 on 10-31) migrates a store on first use by creating `manifests-v2` in it; against
@@ -738,17 +738,76 @@ def ollama_mirror(src, dst, model):
         raise SystemExit(f'ollama store {src}: no manifests dir')
     for d in copied:
         shutil.copytree(os.path.join(src, d), os.path.join(dst, d), symlinks=True)
-    # The model must resolve before an engine starts: its manifest, and every blob it names.
-    name, _, tag = model.partition(':')
-    m = os.path.join(dst, 'manifests', 'registry.ollama.ai', 'library', name, tag or 'latest')
-    if not os.path.exists(m):
-        return f'{dst} ({len(os.listdir(sb))} blobs linked, {"+".join(copied)} copied; {model}: not under manifests/)'
-    j = json.load(open(m))
-    digests = [x['digest'] for x in [j.get('config') or {}] + j.get('layers', []) if x.get('digest')]
-    missing = [d for d in digests if not os.path.exists(os.path.join(dst, 'blobs', d.replace(':', '-')))]
+    return f'{dst} ({len(os.listdir(sb))} blobs linked from {src}, {"+".join(copied)} copied)'
+
+
+OLLAMA_PUBLIC_HOSTS = ('registry.ollama.ai', 'ollama.com')
+OLLAMA_WEIGHTS = 'application/vnd.ollama.image.model'
+
+
+def ollama_manifest_paths(store, model):
+    """The manifest paths ollama tries for `model` under OLLAMA_MODELS=store, in its order (11-04: ollama
+    manifest/paths.go resolveManifestPath, identical at tag v0.40.13 and on main): manifests-v2/<host>/<ns>/<model>/
+    <tag> with the public host spelled ollama.com (must exist), then manifests/<host>/... for the host as given and
+    then the other public spelling (the first that is present, even as a dangling link, wins). Default host
+    registry.ollama.ai, namespace library, tag latest. Returns [(path, picked_by_existence_test)]."""
+    name, tag = model, 'latest'
+    if ':' in model.rsplit('/', 1)[-1]:
+        name, tag = model.rsplit(':', 1)
+    parts = name.split('/')
+    if not tag or not all(parts) or len(parts) > 3:
+        raise SystemExit(f'ollama model {model!r}: not a model name this check can resolve')
+    if len(parts) == 1:
+        host, ns, mdl = OLLAMA_PUBLIC_HOSTS[0], 'library', parts[0]
+    elif len(parts) == 2:
+        host, ns, mdl = OLLAMA_PUBLIC_HOSTS[0], parts[0], parts[1]
+    else:
+        host, ns, mdl = parts
+    public = host.lower() in OLLAMA_PUBLIC_HOSTS
+    v2 = os.path.join(store, 'manifests-v2', ('ollama.com' if public else host).replace(':', '%3A'), ns, mdl, tag)
+    hosts = [host] + ([OLLAMA_PUBLIC_HOSTS[1] if host.lower() == OLLAMA_PUBLIC_HOSTS[0] else OLLAMA_PUBLIC_HOSTS[0]]
+                      if public else [])
+    return [(v2, os.path.exists)] + [(os.path.join(store, 'manifests', h, ns, mdl, tag), os.path.lexists) for h in hosts]
+
+
+def ollama_check(store, model, model_sha):
+    """Refuse to start the board unless ollama provably runs --model (11-04, shady's review of 060c555): the manifest
+    ollama would load (ollama_manifest_paths) must exist, every blob it names must be in store/blobs, its weights
+    layer must be sha256(--model) (axon and llama-server get --model itself), and a second manifest for the same
+    name (a v1 entry next to a v2 one) must name the same weights. Returns what meta.json records."""
+    cands = [p for p, present in ollama_manifest_paths(store, model) if present(p)]
+    if not cands:
+        raise SystemExit(f'ollama model {model}: no manifest under {store} (tried: '
+                         f'{", ".join(os.path.relpath(p, store) for p, _ in ollama_manifest_paths(store, model))})')
+
+    def weights(path):
+        try:
+            j = json.load(open(path))
+        except (OSError, ValueError) as e:
+            raise SystemExit(f'ollama model {model}: manifest {path} unreadable ({e})')
+        w = [x.get('digest') for x in j.get('layers') or [] if x.get('mediaType') == OLLAMA_WEIGHTS]
+        if len(w) != 1:
+            raise SystemExit(f'ollama model {model}: {len(w)} weights layers in {path}')
+        return j, w[0]
+    j, w = weights(cands[0])
+    for other in cands[1:]:
+        if weights(other)[1] != w:
+            raise SystemExit(f'ollama model {model}: {os.path.relpath(cands[0], store)} (the one ollama loads) names '
+                             f'{w}, {os.path.relpath(other, store)} names {weights(other)[1]}')
+    if w != f'sha256:{model_sha}':
+        raise SystemExit(f'ollama model {model} runs {w}, not --model (sha256:{model_sha}): the engines would not '
+                         f'run the same file')
+    digests = [x['digest'] for x in [j.get('config') or {}] + (j.get('layers') or []) if x.get('digest')]
+    missing = [d for d in digests if not os.path.exists(os.path.join(store, 'blobs', d.replace(':', '-')))]
     if missing:
-        raise SystemExit(f'ollama model {model}: blobs missing from {src}: {missing}')
-    return f'{dst} ({len(os.listdir(sb))} blobs linked, {"+".join(copied)} copied; {model}: {len(digests)} blobs ok)'
+        raise SystemExit(f'ollama model {model}: blobs missing from {store}/blobs: {missing}')
+    return dict(name=model, manifest=os.path.relpath(cands[0], store), manifests_found=len(cands), weights=w,
+                blobs=len(digests))
+
+
+def file_sha256(path):
+    with open(path, 'rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
 
 
 def ollama_offload(logdir, port):
@@ -1075,10 +1134,23 @@ def cmd_board(a):
     meta = dict(model=os.path.basename(a.model), kv=a.kv, engines=engines, rounds=a.rounds, speeds=speeds,
                 trace=os.path.basename(a.trace), kv_elems_per_token=bpt, cells={str(k): cell_desc(a, v) for k, v in cells.items()},
                 started=time.strftime('%Y-%m-%d %H:%M:%S'), gpu=gpu_name())
-    if 'ollama' in engines and not a.ollama_models:
-        a.ollama_models = os.path.join(a.out, 'ollama-models')
-        meta['ollama_models'] = ollama_mirror(a.ollama_source, a.ollama_models, a.ollama_model)
-        print(f'ollama store: {meta["ollama_models"]}', flush=True)
+    # Every engine must run the same file: axon and llama-server get --model, ollama the blob its manifest names.
+    meta['model_sha256'] = file_sha256(a.model)
+    print(f'model {a.model} sha256 {meta["model_sha256"]}', flush=True)
+    for kind, b in (('axon', a.axon), ('llama', a.llama_server)):
+        if kind in engines and b:
+            meta.setdefault('binaries', {})[kind] = dict(path=os.path.abspath(b), sha256=file_sha256(b))
+    if 'ollama' in engines:
+        if a.ollama_models:
+            a.ollama_models = os.path.abspath(a.ollama_models)
+            meta['ollama_models'] = f'{a.ollama_models} (as given)'
+        else:
+            a.ollama_models = os.path.join(os.path.abspath(a.out), 'ollama-models')
+            meta['ollama_models'] = ollama_mirror(os.path.abspath(a.ollama_source), a.ollama_models)
+        meta['ollama_model'] = ollama_check(a.ollama_models, a.ollama_model, meta['model_sha256'])
+        print(f'ollama store: {meta["ollama_models"]}; {a.ollama_model} -> {meta["ollama_model"]["manifest"]}, '
+              f'weights {meta["ollama_model"]["weights"]} = sha256(--model), {meta["ollama_model"]["blobs"]} blobs ok',
+              flush=True)
     axon_tokens = a.kv_tokens
     port = a.port
     for rnd in range(a.round_offset, a.round_offset + a.rounds):
@@ -1155,7 +1227,7 @@ METRICS = [('TTFT-new p50 s', 'ttft_new_p50'), ('TTFT-new p99 s (max when n < 10
            ('warm/GB (GPU KV budget)', 'warm_per_gb'), ('re-prefill share (clamped)', 'reprefill_share'),
            ('re-prefill share (net)', 'reprefill_net_share'), ('preempted (axon /slots)', 'preempted'),
            ('output tok/s', 'output_tok_s'), ('replies short of max_tokens', 'out_tokens_short'),
-           ('prompt-count mismatches', 'prompt_mismatch'),
+           ('prompt counts checked (engine-reported)', 'prompt_checked'), ('prompt-count mismatches', 'prompt_mismatch'),
            ('wall s', 'wall_s'), ('errors (all kinds)', 'errors'),
            ('  engine aborts mid-stream (latency counted, no goodput)', 'aborted'),
            ('tainted runs', 'tainted')]
@@ -1244,7 +1316,8 @@ def main():
             p.add_argument('--ollama', default='ollama')
             p.add_argument('--ollama-model', default='axon-q7')
             p.add_argument('--ollama-models', help='OLLAMA_MODELS for the board\'s ollama, used as is (default: a '
-                           'user-owned mirror of --ollama-source in OUT/ollama-models; see ollama_mirror)')
+                           'user-owned mirror of --ollama-source in OUT/ollama-models; see ollama_mirror). Either '
+                           'way ollama_check must pass')
             p.add_argument('--ollama-source', default='/var/lib/ollama', help='the system store the mirror links '
                            'to (only read)')
             p.add_argument('--kv-tokens', type=int, help='KV budget for the baselines (default: Axon\'s pool)')

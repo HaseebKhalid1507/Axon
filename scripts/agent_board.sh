@@ -17,6 +17,7 @@ D=${AXON_AGENT_DIR:-$HOME/.cache/axon-agent}
 W=$(cd "$(dirname "$0")/.." && pwd)
 M=${AXON_MODELS:-$W/models}
 OUT=$D/board-$KV-$(date +%m%d-%H%M%S); mkdir -p "$OUT"
+echo "harness $(git -C "$W" rev-parse HEAD)$(git -C "$W" diff --quiet HEAD -- scripts || echo ' + uncommitted scripts/ changes')"
 nvidia-smi --query-gpu=name,driver_version,clocks.max.sm,power.limit --format=csv,noheader > "$OUT/gpu.txt"
 python3 -u "$W/scripts/agent_replay.py" board --engines axon,llama,ollama --kv "$KV" --rounds 3 --speeds 1,4 \
   --model "$M/Qwen2.5-7B-Instruct-Q4_K_M.gguf" --ollama-model axon-q7 \
