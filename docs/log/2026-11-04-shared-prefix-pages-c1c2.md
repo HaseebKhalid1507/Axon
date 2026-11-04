@@ -63,12 +63,32 @@ All on bella (RTX 5070 Ti Laptop, sm_120), at `0b22e9c` (code identical to `5564
 | same, debug assertions + overflow checks | 1104-171647-9b0d | PASS 184 / 0 failed / 9 ignored |
 | md5 `gen` vs main | 1104-170831-4345 | PASS 33 / 33 identical, 0 nonzero rc |
 | serve identity vs main | 1104-170831-522e | PASS 16 / 16 runs print main's C=1 digest (1.5B `5e320d8f66a1cca5`, 7B `393d877192f2e4d7`) |
-| serve timing A/B, `--timing bella` | 1104-170832-990d | PENDING (waiting on desktop GPU load) |
+| serve timing A/B, `--timing bella` | 1104-170832-990d | dropped before it started (round 1 changed the code) |
 | CI (`check`) | GitHub Actions run 41921677516 | PASS |
 
 The first release / debug test jobs (1104-170829-af78, 1104-170830-b3e9) were killed by the foreman, not failed: the
 scratch submit script claimed no RAM, the scheduler's default (4000 MB) throttled the release run at MemoryHigh (PSI
 73 %), and both were resubmitted with 10093 / 18000 MB as the -r2 jobs above. The script now claims 10500 / 18000.
+
+Round 2, at `64f7660` (shady's review, round 1: `BatchLm::pages` back to main's fields, `page_state`, the claims
+corrected). The serve identity gate gained a second turn per conversation (`turns.py`: 16 conversations over 8
+slots, so a second turn's prefix comes back from the RAM tier when it is on) and prints the tier's restore
+counters on the `--cache-ram` runs, failing at 0 restored (round 1's `texts` prompts are under a page: it can't
+have restored any).
+
+| gate | job | result |
+|---|---|---|
+| touched modules' tests (194), release | 1104-175445-a26e | pending |
+| same, debug assertions + overflow checks | 1104-175446-5782 | pending |
+| md5 `gen` vs main | 1104-175446-fe6f | pending |
+| serve identity vs main, two turns, restore counts | 1104-175447-f4e7 | pending |
+| serve timing A/B, `--timing bella` | 1104-175448-a7de | pending |
+| host tests `pages::` + `prefix::` | local | 14 / 0 / 0 |
+| clippy (debug and release cfgs), rustfmt | local | clean |
+
+Not covered by the serve gate: an undersized pool (reclaim, a short `make_room`, victim, preempt). Its pool is
+512 pages = 8 × 4096, a full fit, and the CLI has no pool-size knob (`Opts::kv_pages` is test-only); the suites'
+`serve_paged_pressure` (40 pages) covers those paths. Listed for C3 (#187).
 
 ## What didn't work
 - CI on 89f977f failed on the release build's dead-code lint. The local clippy ran at opt-level 0 only, where
