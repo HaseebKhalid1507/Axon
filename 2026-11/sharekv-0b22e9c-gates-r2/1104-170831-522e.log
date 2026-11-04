@@ -1,0 +1,33 @@
+[axon-run 17:08:31] submitted 1104-170831-522e by /home/haseeb/.cache/axon-sharekv: /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-0b22e9c ./serve_load.py
+[axon-run 17:17:56] scope axon-job-1104-170831-522e-1793830676.scope in app-axonjobs.slice: MemoryMax 16024 MB, MemoryHigh 14421 MB, no swap, oomd pressure kill 80% (claim 10000 MB): an OOM here kills only this job
+[axon-run 17:17:56] job 1104-170831-522e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-170831-522e-1793830676 --slice=app-axonjobs.slice -p MemoryMax=16024M -p MemoryHigh=14421M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-0b22e9c ./serve_load.py
+axon-q 17:17:56 start slot 16-23: /usr/bin/bash serveid.sh ./axon-base-af281d9 ./axon-0b22e9c ./serve_load.py
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 1296 MiB
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main C=1: "digest": "5e320d8f66a1cca5" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main C=8: "digest": "5e320d8f66a1cca5" [same]
+  main KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m main-cr C=8: "digest": "5e320d8f66a1cca5" [same]
+  main-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand C=1: "digest": "5e320d8f66a1cca5" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand C=8: "digest": "5e320d8f66a1cca5" [same]
+  cand KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-shuffle C=8: "digest": "5e320d8f66a1cca5" [same]
+  cand-shuffle KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-plain C=8: "digest": "5e320d8f66a1cca5" [same]
+SERVEID qwen2.5-1.5b-instruct-q4_k_m cand-cr C=8: "digest": "5e320d8f66a1cca5" [same]
+  cand-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main C=1: "digest": "393d877192f2e4d7" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main C=8: "digest": "393d877192f2e4d7" [same]
+  main KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M main-cr C=8: "digest": "393d877192f2e4d7" [same]
+  main-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand C=1: "digest": "393d877192f2e4d7" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand C=8: "digest": "393d877192f2e4d7" [same]
+  cand KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-shuffle C=8: "digest": "393d877192f2e4d7" [same]
+  cand-shuffle KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)) on http://127.0.0.1:18673/v1
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-plain C=8: "digest": "393d877192f2e4d7" [same]
+SERVEID Qwen2.5-7B-Instruct-Q4_K_M cand-cr C=8: "digest": "393d877192f2e4d7" [same]
+  cand-cr KV: 512 pages x 64 = 32768 tokens (8 sequences of the full 4096 at once) over up to 8 slots (cap 4096)
+SERVEID PASS
+[axon-run 17:20:44] exit 0 after 167.9s (host bella)
