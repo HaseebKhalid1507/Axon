@@ -119,11 +119,11 @@ gemv_f8(const u8* __restrict__ w, int rows, int K, const u8* __restrict__ qa,
 // k 4q..), b1 (col g, k 16 + 4q..); c0, c1 (row g, cols 2q, 2q + 1), c2, c3
 // (row g + 8, same cols).
 // sm_120 and later: one mma.sync.m16n8k32 e4m3 x e4m3 -> f32 (it met the
-// f64 anchor, §3, with 8x to spare on bella). On sm_89 that instruction
+// f64 anchor, §3, with 12.8x to spare on bella). On sm_89 that instruction
 // keeps only about 14 bits of the sum: terms are cut about 13 bits below the
 // largest of them and the accumulator (that rule gives #190's failing output
 // exactly, though not every output of the diagnostic). A 4090 missed the
-// anchor by up to 173x at the §3 shapes, and by 67x even with the
+// anchor by up to 173x at the §3 shapes, and by 67.6x even with the
 // accumulator moved into f32 after every mma (gpu_fp8_mma_diag,
 // 1104-195209-4f1e): the cut is inside the instruction. So below sm_120 the
 // codes become f16 (exact: e4m3 is a subset) and the step is two m16n8k16
