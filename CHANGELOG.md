@@ -6,6 +6,20 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### KV RAM tier: exclusive, and an idle server's backlog in pieces (#201, follows #166; #170)
+- **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
+  free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least
+  recently used. `--cache-ram`'s useful capacity is now about its size, where #166's inclusive tier held the GPU
+  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Still opt-in, default off, until bella's gate
+  (docs/design/kv-ram-tier-exclusive.md §6) says otherwise.
+- **#170: no unbounded flush.** An idle server writes its backlog in 64 MiB pieces and takes a new request between
+  two, instead of one flush of every slot's backlog after a request that ran alone.
+- A slot's next turn in its own slot no longer copies its unstored pages before its first token (it gives nothing up).
+- `/metrics`: `axon_kv_ram_gpu_pages`, `axon_kv_ram_spilled_pages_total`. `AXON_SERVE_TRACE`'s step lines carry the
+  tier's copies (`spilled`/`spill_ms`, `restored`/`restore_ms`, `wb`/`wb_ms`).
+- Default flags reach none of it: md5 vs main at default flags is unchanged (gen and serve), and the tier's own
+  replies are main's bits.
+
 ### Identity: an FP8 checkpoint's `act` is the net's, and a split names its CPU layers' emulation (#200, part of #196)
 - The reply fingerprint's `act` for an FP8 checkpoint on the CPU now comes from the net (the type its matrices were
   built as), as the KV identity's does since #199, not from `AXON_FP8_CPU_ACT` read again when the fingerprint is
