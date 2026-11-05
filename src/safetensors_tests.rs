@@ -1536,9 +1536,11 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
     use crate::quant::fp8::{F8S, F8S_G128, F8S_TOK};
     let d = Dir::new("fp8-act");
     write_tiny_fp8(&d, |_| {});
-    let m = load_dir(&d.0).unwrap();
     let ids = [256u32, 10, 72, 101, 108, 108, 111, 263];
+    // A load per net: building one repacks the matrices and releases the
+    // mapped tensors it copied (strict under test).
     let run = |qt| {
+        let m = load_dir(&d.0).unwrap();
         crate::model::with_fp8_cpu_qt(qt, || {
             let net = crate::model::Qwen2::new(&m);
             assert_eq!(net.fp8_qt(), Some(qt));
