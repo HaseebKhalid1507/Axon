@@ -551,7 +551,7 @@ fn nvrtc_kernels_compile_for_sm90a() {
 
 /// fp8.cu's e4m3 product step by compile target (#190), NVRTC only, no
 /// GPU: the FP8 module (`KERNELS_F8`, fast, `F8_DEFINE`) as PTX for
-/// compute_89, 90, 100 and 120 (those this NVRTC has; 89 always). The
+/// compute_89, 90, 100 and 120 (those this NVRTC has; 89 and 90 always). The
 /// e4m3 mma (m16n8k32) is in it from 120 on and nowhere below; below, the
 /// codes become f16 (`cvt.rn.f16x2.e4m3x2`, only `mma_f8`'s f16 path has
 /// it) for f16 mmas. So sm_90 (H100) and sm_100 take the f16 path, and the
@@ -570,7 +570,15 @@ fn nvrtc_fp8_product_step_by_target() {
         .into_iter()
         .filter(|a| archs.contains(a))
         .collect();
-    assert!(want.contains(&89), "NVRTC archs {archs:?}");
+    // compute_89 (the 4090s of #190) and compute_90 (H100, the routing this
+    // test is for) must be among them: the targets a run covered are only in
+    // its stderr, which libtest captures when it passes.
+    for a in [89, 90] {
+        assert!(
+            want.contains(&a),
+            "NVRTC lacks compute_{a}: archs {archs:?}"
+        );
+    }
     let mut base = super::mode_opts(&KERNEL_OPTS, crate::numerics::Numerics::Fast);
     base.push(super::F8_DEFINE);
     for a in want {
