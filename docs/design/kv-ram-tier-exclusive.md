@@ -196,8 +196,8 @@ price of a tree store, and the plan's fallback has it too. A gauge exposes it (�
   `spill` copies the slot's whole unstored chain whatever `keep` is. Under the inclusive tier that was nearly free,
   because the write-behind had already stored those pages. Under this design, on a full tier, the write-behind
   copies nothing, so a next turn's admission would copy its conversation's whole chain (steady state: ≈ 269 pages,
-  ≈ 0.13 s at 28 GB/s) before its first token, evicting class 0 and then class 1 to hold duplicates of rows the GPU
-  keeps. A partial give-up still copies the kept parents, because a stored page needs its stored parent.
+  987 MB: ≈ 35 ms at 28 GB/s, ≈ 0.14 s in the slow mode's 7.1 GB/s) before its first token, evicting class 0 and
+  then class 1 to hold duplicates of rows the GPU keeps. A partial give-up still copies the kept parents, because a stored page needs its stored parent.
   (DECISION, the lead, 11-05: yes, in scope; fixed in a41d028, not stopped for.)
 - **Steady state (Fable's H1, shady's M4).** These are the facts the design has to live with:
   1. **The tier fills early.** The working set (5,164 pages) is ≫ the tier (1,755). A page is copied the first time
