@@ -174,7 +174,11 @@ fn f8_gpu() -> Option<Gpu> {
 /// variables). It used to skip them as "no e4m3 tensor cores" (`f8_gpu`
 /// read it), so a gate run that inherited it reported them `ok` without
 /// grading anything: #193's shape. A test can't unset it (the engine reads
-/// it, and `remove_var` races the other test threads).
+/// it, and `remove_var` races the other test threads). The callers check
+/// this before the checkpoint (`fp8_model_path`), on purpose: with a skip
+/// variable set, no checkpoint and `AXON_FP8_NATIVE=0`, they fail (unset
+/// it) rather than skip, since the variable turns off what they test
+/// whether the checkpoint is there or not.
 fn f8_engine_gpu() -> Option<Gpu> {
     let g = f8_gpu()?;
     assert!(

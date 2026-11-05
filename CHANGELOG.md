@@ -11,6 +11,8 @@ measurements behind them.
   (missing, with `AXON_SKIP_FP8_MODEL_TESTS` or `AXON_SKIP_MODEL_TESTS` set) and the FP8 tests' skip on a GPU below
   sm_89 go straight to stderr (`testutil::skip_note`) and name the test. libtest captures `eprintln!` in a passing
   test, so those skips read as a bare `ok` in a gate log, the blind spot #193 was about (shady's review of #195).
+  Only a test that skips prints the line: the checkpoint rule's own unit tests print none, so a `skipping:` line in a
+  suite's log means a test skipped (axon-run reads one near a log's end as a run whose test skipped itself).
 - **`AXON_FP8_NATIVE=0` fails `gpu_fp8_graded_vs_fp8_ref`** (and the ignored `gpu_fp8_load_diag`) with a message
   naming it. It turns the engine's native FP8 off, so the test has nothing to grade. It used to skip every FP8 test
   quietly, as "no e4m3 tensor cores". The FP8 kernel tests no longer read it: they run on any sm_89+ GPU. README
