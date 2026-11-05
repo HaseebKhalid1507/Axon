@@ -351,6 +351,24 @@ pub(crate) enum Top1 {
     Binomial,
 }
 
+/// `assert_graded_with`'s top-1 flips at a reference margin of 0.5 or
+/// more: (`ag`'s count, the order-only allowance max(2, n / 100), the
+/// allowance under `top1`, the floor `ac`'s count), n = `ag.positions`.
+fn wide_flips(ag: &Agree, ac: &Agree, top1: Top1) -> (usize, usize, usize, usize) {
+    let count = |a: &Agree| a.flips.iter().filter(|&&d| d >= 0.5).count();
+    let (n, wf) = (ag.positions, count(ac));
+    let fixed = (n / 100).max(2);
+    let allowed = match top1 {
+        Top1::Points(_) => fixed,
+        Top1::Binomial => {
+            let p = wf as f64 / n.max(1) as f64;
+            let bound = wf as f64 + 2.0 * (n as f64 * p * (1.0 - p)).sqrt();
+            fixed.max(bound as usize)
+        }
+    };
+    (count(ag), fixed, allowed, wf)
+}
+
 /// `assert_graded_floor` with the top-1 rule `top1`; the other bounds the
 /// same.
 pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
@@ -383,14 +401,33 @@ pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     // sums f32 in another order than sm_120's) flips 0.73 (1.5B natural)
     // and 0.92 / 0.82 (0.5B streamed chat) with |dlogit| statistics no
     // worse than sm_120's. So: every flip below max(0.5, ac.max_abs), and
-    // at most max(2, 1% of positions) of them at 0.5 or more.
+    // at most max(2, 1% of positions) of them at 0.5 or more (`Points`).
+    // The FP8 gate (`Top1::Binomial`): its floor changes precision, and on
+    // the 0.5B's 1014-position decode arm it alone flips 10 margins >= 0.5,
+    // all of max(2, n / 100); bella 8, a 4090 12 (#192, with top-1, KL,
+    // outliers and the largest margin all at the floor). So the count is
+    // the floor's plus 2 binomial SE, as for top-1: at most
+    // max(2, n / 100, w_f + 2 sqrt(n p (1 - p))), w_f the floor's count,
+    // p = w_f / n (16 there). Lead ruling:
+    // https://github.com/HaseebKhalid1507/Axon/issues/192#issuecomment-6648003748
     let tie = ac.max_abs.max(0.5);
-    let wide = ag.flips.iter().filter(|&&d| d >= 0.5).count();
+    let (wide, fixed, allowed, wf) = wide_flips(ag, ac, top1);
+    let floor_part = match top1 {
+        Top1::Binomial => format!(", from the floor's {wf}"),
+        Top1::Points(_) => String::new(),
+    };
     assert!(
-        ag.flips.iter().all(|&d| d < tie) && wide <= (n / 100).max(2),
-        "a top-1 flip with margin >= {tie} or {wide} >= 0.5: {:?}",
+        ag.flips.iter().all(|&d| d < tie) && wide <= allowed,
+        "a top-1 flip with margin >= {tie} or {wide} >= 0.5 (allowed {allowed}{floor_part}; \
+         max(2, n/100) {fixed}): {:?}",
         ag.flips
     );
+    if wide > fixed {
+        eprintln!(
+            "note: {wide} top-1 flips at margin >= 0.5 over {n} positions, above max(2, n/100) \
+             {fixed}, within the FP8 bound {allowed} (the floor's {wf}; #192)"
+        );
+    }
     assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");
     // Extremes, per position. A wrong kernel moves many positions: a mask
     // off by one position (deliberately injected into the tensor-core
@@ -580,6 +617,51 @@ fn top1_binomial_rule() {
         with(ac(1000, 1000), 2),
         Top1::Points(94)
     ));
+}
+
+/// The flips at margin >= 0.5 (#192): the 0.5B FP8 decode arm's numbers,
+/// n 1014, the floor's 10 (its margins). `Binomial` allows
+/// 10 + 2 sqrt(1014 p (1 - p)) = 16.3: the 4090's 12 and 16 pass, 17 fails
+/// and names both counts; `Points` stays at max(2, n / 100) = 10. A floor
+/// with none still allows max(2, n / 100).
+#[test]
+fn wide_flips_rule() {
+    let floor = [
+        0.53f32, 0.654, 0.686, 0.765, 1.191, 1.768, 1.768, 1.768, 2.917, 2.917,
+    ];
+    let arm = |wide: usize, max_abs: f32, fl: &[f32]| {
+        let mut flips: Vec<f32> = fl.iter().copied().cycle().take(wide).collect();
+        flips.extend([0.1f32; 70]);
+        Agree {
+            positions: 1014,
+            top1: 1014 - flips.len(),
+            max_abs,
+            flips,
+            ..Agree::default()
+        }
+    };
+    let run = |g: usize, f: usize, r: Top1| {
+        let (ag, ac) = (arm(g, 1.0, &floor), arm(f, 5.28, &floor));
+        std::panic::catch_unwind(|| assert_graded_with(&ag, &ac, r))
+    };
+    assert_eq!(
+        wide_flips(
+            &arm(12, 1.0, &floor),
+            &arm(10, 5.28, &floor),
+            Top1::Binomial
+        ),
+        (12, 10, 16, 10)
+    );
+    assert!(run(12, 10, Top1::Binomial).is_ok() && run(8, 10, Top1::Binomial).is_ok());
+    assert!(run(16, 10, Top1::Binomial).is_ok());
+    let p = run(17, 10, Top1::Binomial).expect_err("17 > 16");
+    let msg = p.downcast_ref::<String>().map(String::as_str).unwrap_or("");
+    assert!(
+        msg.contains("17 >= 0.5 (allowed 16, from the floor's 10; max(2, n/100) 10)"),
+        "{msg}"
+    );
+    assert!(run(10, 10, Top1::Points(90)).is_ok() && run(11, 10, Top1::Points(90)).is_err());
+    assert!(run(10, 0, Top1::Binomial).is_ok() && run(11, 0, Top1::Binomial).is_err());
 }
 
 /// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256
