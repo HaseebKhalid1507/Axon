@@ -382,12 +382,19 @@ mod tests {
     ///   staging buffer, by one 2D copy or 56 1D copies per page, no kernel.
     /// - gather / scatter path: D2D per page and 1D per page through the
     ///   staging buffer, 18 pages a fill (everything on the one stream).
-    fn copy_paths(g: &Gpu, dev: &DevBuf, host: &HostBuf, ctx: usize, arrays: usize, row: usize) {
+    fn copy_paths(
+        g: &Gpu,
+        dev: &DevBuf,
+        host: &HostBuf,
+        (ctx, arrays, row): (usize, usize, usize),
+        tag: &str,
+    ) {
         let w = 64 * row;
         let pb = w * arrays;
         let np = ctx / 64;
         let bytes = np * pb;
         let report = |what: &str, (e, s): (f64, f64), b: usize| {
+            let what = format!("{what}{tag}");
             eprintln!(
                 "BW {what:<34} {:8.2} ms {:7.2} GB/s  (enqueue {:7.2} ms)",
                 s * 1e3,
@@ -504,6 +511,76 @@ mod tests {
         g.sync().unwrap();
     }
 
+    /// The GPU's performance state, clocks and display (nvidia-smi), for
+    /// the log: bella's 2D copies ran at 7.1 GB/s in some runs and at 28 in
+    /// others, the same binary (docs/design/kv-ram-tier-exclusive.md §5.1).
+    fn gpu_state(when: &str) {
+        let q = "--query-gpu=pstate,clocks.gr,clocks.mem,clocks.video,display_active,\
+                 clocks_event_reasons.active";
+        match std::process::Command::new("nvidia-smi")
+            .args([q, "--format=csv,noheader"])
+            .output()
+        {
+            Ok(o) => eprintln!(
+                "GPU state ({when}): {}",
+                String::from_utf8_lossy(if o.status.success() {
+                    &o.stdout
+                } else {
+                    &o.stderr
+                })
+                .trim()
+            ),
+            Err(e) => eprintln!("GPU state ({when}): nvidia-smi: {e}"),
+        }
+    }
+
+    /// A one-block kernel spinning on a stream of its own until `stop` is
+    /// set (or `most_ns` pass): the GPU busy, as it is while serving, for
+    /// copies timed on the main stream meanwhile (`Spin`).
+    const SPIN: &str = r#"
+extern "C" __global__ void bw_spin(const volatile unsigned int* stop, unsigned long long most_ns) {
+    unsigned long long t0, t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+    do {
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+    } while (*stop == 0 && t - t0 < most_ns);
+}
+"#;
+
+    /// `SPIN` running (`Spin::start`) until `stop`.
+    struct Spin<'g> {
+        s: crate::cuda::Stream<'g>,
+        flag: DevBuf<'g>,
+        _m: crate::cuda::Module<'g>,
+    }
+
+    impl<'g> Spin<'g> {
+        fn start(gpu: &'g Gpu) -> Spin<'g> {
+            let m = crate::cuda::Module::load(gpu, SPIN, &crate::cuda::KERNEL_OPTS)
+                .unwrap()
+                .0;
+            let flag = gpu.alloc(4).unwrap();
+            flag.write(&[0u32]).unwrap();
+            let s = gpu.new_stream().unwrap();
+            let k = m.function("bw_spin").unwrap();
+            // SAFETY: bw_spin's two parameters; it reads flag's 4 bytes,
+            // which live until `stop` has waited for it.
+            let args = [flag.arg(), crate::cuda::Arg::U64(60_000_000_000)];
+            unsafe { gpu.launch_on(&s, &k, (1, 1, 1), (32, 1, 1), 0, &args) }.unwrap();
+            drop(k);
+            // Clocks follow load with a lag.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Spin { s, flag, _m: m }
+        }
+
+        /// Stop it, and wait until it has.
+        fn stop(self) {
+            // The main stream's copy runs beside the kernel on `s`.
+            self.flag.write(&[1u32]).unwrap();
+            self.s.sync().unwrap();
+        }
+    }
+
     fn gcd(a: usize, b: usize) -> usize {
         if b == 0 { a } else { gcd(b, a % b) }
     }
@@ -596,6 +673,7 @@ mod tests {
             info.arch(),
             bytes as f64 / (1u64 << 30) as f64
         );
+        gpu_state("start");
         let dev = g.alloc(bytes).unwrap();
         let mut host = g.host_alloc(bytes).unwrap();
         let gbs = |s: f64| bytes as f64 / s / 1e9;
@@ -657,7 +735,30 @@ mod tests {
             });
             report(&format!("H2D 2D per {page}-pos page"), s);
         }
-        copy_paths(&g, &dev, &host, ctx, arrays, row);
+        copy_paths(&g, &dev, &host, (ctx, arrays, row), "");
+        gpu_state("after the copies, idle");
+        // Again with the GPU busy (`Spin`): today's 2D page copy and the
+        // other shapes.
+        let spin = Spin::start(&g);
+        gpu_state("busy");
+        for to_dev in [false, true] {
+            let s = time(&g, n, || {
+                for p in 0..ctx / 64 {
+                    let (at, off, w) = (p * 64 * row * arrays, p * 64 * row, 64 * row);
+                    if to_dev {
+                        host.copy_2d_to(at, w, &dev, off, ctx * row, (w, arrays))
+                    } else {
+                        host.copy_2d_from(at, w, &dev, off, ctx * row, (w, arrays))
+                    }
+                    .unwrap();
+                }
+            });
+            let d = if to_dev { "H2D" } else { "D2H" };
+            report(&format!("{d} 2D per 64-pos page (busy)"), s);
+        }
+        copy_paths(&g, &dev, &host, (ctx, arrays, row), " (busy)");
+        gpu_state("busy, at the end");
+        spin.stop();
         // The RAM tier's costs (serve --cache-ram): a pinned slab's
         // allocation (cuMemHostAlloc + zeroing), and one page's D2H / H2D
         // alone (the write-behind's unit), each a median of n.
