@@ -118,16 +118,22 @@ gemv_f8(const u8* __restrict__ w, int rows, int K, const u8* __restrict__ qa,
 // k 4q..), a2 (row g, k 16 + 4q..), a3 (row g + 8, k 16 + 4q..); b0 (col g,
 // k 4q..), b1 (col g, k 16 + 4q..); c0, c1 (row g, cols 2q, 2q + 1), c2, c3
 // (row g + 8, same cols).
-// sm_120 and later: one mma.sync.m16n8k32 e4m3 x e4m3 -> f32. Before sm_120
-// (sm_89 Ada, sm_90 Hopper) that instruction keeps about 14 bits of the sum:
-// its terms, the accumulator among them, are cut to 13 bits below the
-// largest (#190: a 4090 misses the f64 anchor by up to 173x, every 128 K
-// promoted into f32 still 67x). There the codes become f16 (exact: e4m3 is
-// a subset) and the step is two m16n8k16 f16 x f16 -> f32 mmas (an f32
-// accumulation: within 0.18x of the anchor's tolerance at every §3 shape),
-// on k 0..15 then 16..31: a0's bytes 0, 1 are its k 2q, 2q + 1 there and
-// bytes 2, 3 its k 2q + 8, 2q + 9, the same map for b. -DAXON_F8_E4M3_ACC
-// forces the e4m3 mma (tests: the old path's speed).
+// sm_120 and later: one mma.sync.m16n8k32 e4m3 x e4m3 -> f32 (it met the
+// f64 anchor, §3, with 8x to spare on bella). On sm_89 that instruction
+// keeps only about 14 bits of the sum: terms are cut about 13 bits below the
+// largest of them and the accumulator (that rule gives #190's failing output
+// exactly, though not every output of the diagnostic). A 4090 missed the
+// anchor by up to 173x at the §3 shapes, and by 67x even with the
+// accumulator moved into f32 after every mma (gpu_fp8_mma_diag,
+// 1104-195209-4f1e): the cut is inside the instruction. So below sm_120 the
+// codes become f16 (exact: e4m3 is a subset) and the step is two m16n8k16
+// f16 x f16 -> f32 mmas, k 0..15 then 16..31, on the same fragments (a0's
+// bytes 0, 1 are its k 2q, 2q + 1 there and bytes 2, 3 its k 2q + 8, 2q + 9;
+// the same map for b): within 0.18x of the anchor's tolerance at every §3
+// shape on the 4090, at 1.3-1.55x gemm_f8's e4m3 time (gpu_fp8_gemm_speed).
+// sm_90 and sm_100 aren't measured; they take the f16 path too (Hopper's
+// e4m3 accumulation is reported at about 14 bits as well).
+// -DAXON_F8_E4M3_ACC forces the e4m3 mma (tests: its speed).
 #if __CUDA_ARCH__ >= 1200 || defined(AXON_F8_E4M3_ACC)
 __device__ __forceinline__ void mma_f8(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
     asm volatile(
