@@ -6,6 +6,14 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Tests: a missing FP8 checkpoint fails the FP8 checkpoint tests (#193)
+- **`gpu_fp8_exact_is_q8_and_bit_identical` and `gpu_fp8_graded_vs_fp8_ref` now fail on an sm_89+ GPU when the FP8
+  0.5B checkpoint is missing** (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`, or `AXON_TEST_FP8_MODEL`), as the GGUF
+  test models already do. They used to return early, which libtest reports as `ok`. Three 4090 gate runs showed the
+  FP8 graded gate passing that way without running it (#193). `AXON_SKIP_MODEL_TESTS=1` (CI) or the new
+  `AXON_SKIP_FP8_MODEL_TESTS=1` skips them instead. The download and its sha256 are in CONTRIBUTING.md. A host
+  without an sm_89+ GPU never reaches the check.
+
 ### FP8 on sm_89: the fast-mode GEMM runs f16 mmas below sm_120 (#190, #192)
 - **Correction to #177: below sm_120, `--numerics fast` no longer runs FP8 prefill on e4m3 tensor cores.** On sm_89
   the e4m3 `mma.sync` keeps only about 14 bits of each k32 step's sum, and the FP8 GEMM missed its f64 accuracy anchor

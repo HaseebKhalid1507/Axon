@@ -148,7 +148,9 @@ cargo fmt && cargo clippy && cargo test
 
 - Model tests need `models/qwen2.5-0.5b-q4_k_m.gguf`, `models/Qwen3-0.6B-Q8_0.gguf` and
   `models/Llama-3.2-1B-Instruct-Q4_K_M.gguf`. Download commands and sha256 sums are in CONTRIBUTING.
-  A missing model fails its tests on purpose. Set `AXON_SKIP_MODEL_TESTS=1` to skip them.
+  On an sm_89+ GPU the FP8 tests also need `models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`.
+  A missing model fails its tests on purpose. Set `AXON_SKIP_MODEL_TESTS=1` to skip them
+  (`AXON_SKIP_FP8_MODEL_TESTS=1`: only the FP8 checkpoint's).
 - GPU tests need a driver and NVRTC. Set `AXON_SKIP_GPU_TESTS=1` to skip them. CI sets both skip
   variables and also runs the suite on the scalar path and under a qemu Nehalem CPU, so no AVX
   instruction can slip into the baseline build.

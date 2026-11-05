@@ -779,6 +779,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_ADMIT=fifo\|sjf` | `serve`: same as `--admit-order` (any case; default sjf); any other value refuses to start |
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
+| `AXON_SKIP_FP8_MODEL_TESTS=1` | tests: skip the ones that need the FP8 checkpoint (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`); without it, or `AXON_SKIP_MODEL_TESTS`, a missing checkpoint fails them on an sm_89+ GPU |
 
 ## Numbers
 
