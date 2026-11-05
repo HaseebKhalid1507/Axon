@@ -1,0 +1,29 @@
+{
+ "label": "fp8fp-bc5edde-fpdiff-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1105-093232-2e95",
+   "name": "fp8fp-bc5edde-fpdiff-r2",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bc5edde",
+   "binary": "bash",
+   "started": null,
+   "ended": 1793889183.1325655,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "1789c7716907e8a4c00bee86ffb488fa569ef4384d6777ba25525a288423ec54",
+   "log_bytes": 184
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 09:33:03 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
