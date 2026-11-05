@@ -23,6 +23,10 @@ measurements behind them.
   shapes). Decode (`gemv_f8`, CUDA cores) and the activation quantizer are unchanged. Exact mode (the default, Q8_0)
   and every GGUF model never run this code
   ([docs/log/2026-11-04-fp8-sm89.md](docs/log/2026-11-04-fp8-sm89.md)).
+- **End to end, MEASURED on the FP8 0.5B only:** on a 4090 in `--numerics fast`, prefill is 17–22 % slower (586- and
+  2260-token prompts) and decode is unchanged. The 7B is not measured. At its shapes the GEMM alone is 1.32–1.42×,
+  24–30 % less throughput, and more of its prefill is GEMM than the 0.5B's, so its prefill cost is likely nearer
+  that (ESTIMATED).
 - **sm_120 is unchanged.** Its cubin keeps the e4m3 mma: the code is the same, and the md5 gate against main is
   identical, FP8 `--numerics fast` included.
 - **H100 (sm_90) and sm_100 change too, unmeasured.** They are below sm_120, so FP8 fast-mode prefill takes the f16
@@ -30,7 +34,8 @@ measurements behind them.
 - **Every fast-mode fingerprint changes once.** `NUMERICS_VERSION_FAST` 2 → 3, so `numerics=fast/1.2` becomes
   `fast/1.3` in every fast-mode identity, on every GPU (sm_120 too) and for GGUF models; their bits don't change.
   Exact-mode fingerprints don't change. A `chat --session` saved in fast mode carries `fast/1.2`, so it restores once
-  as tokens (prefilled again) instead of as KV bytes the old e4m3 path made.
+  as tokens (prefilled again) instead of as KV bytes the old e4m3 path made. On sm_120 that happens although its bits
+  are the same: the [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843) is the bump with no waiver, and accepts that.
 - **The FP8 graded gate's wide-flip count is set relative to its CPU floor** (#192, test-only). On the 0.5B's
   1014-position decode arm, the floor alone has 10 top-1 flips at margin ≥ 0.5, which is all of the old
   `max(2, n/100)` = 10. A 4090 had 12. The bound is now the floor's count plus 2 binomial SE (16 there), for the FP8
