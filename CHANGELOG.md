@@ -9,7 +9,9 @@ measurements behind them.
 ### Sessions hash the GPU module the net runs; one session counter; `axon info` predicts FP8 fingerprints (#196)
 - **A saved session's GPU identity now hashes the source and options of the kernel module the net actually runs**
   (`cuda::numerics_tag`), not the plain kernels' whatever ran. A change to fp8.cu, oss.cu, or the extra types'
-  options can no longer restore stale KV bytes if the version bump is forgotten. A dense GGUF without an extra type
+  options can no longer restore stale KV bytes if the version bump is forgotten. GPU choices made in Rust (launch
+  parameters such as `max_split`, which kernel a shape takes) aren't in the hash: they still need the
+  `NUMERICS_VERSION_EXACT` bump, which a session's `host N` carries. A dense GGUF without an extra type
   runs the plain module, whose tag is unchanged in both modes, so its saved sessions still restore as bytes.
   **One-time cost:** sessions saved on the GPU by a gpt-oss model, a model with an extra quant type (any of Q2_K,
   Q3_K, Q4_0, Q4_1, Q5_1, Q5_K, IQ4_NL: e.g. a Q5_K_M or Q3_K_M file) or an FP8 checkpoint in fast mode on sm ≥ 89

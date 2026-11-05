@@ -320,9 +320,14 @@ Rules:
     batched request: it is not bit-equal to a fresh prefill and the fingerprint already says so.
     - *As built (#196):* the file's GPU identity hashes the source and options of the kernel module the net runs
       (`Module::src_hash`, `cuda::numerics_tag`), whichever it is: the plain kernels', the extra types'
-      (`KERNEL_OPTS_EXT`), fp8.cu's or oss.cu's. A kernel change that forgets the version bump still never restores
-      stale bytes. The plain module's tag is what it was before, so those sessions still restore as bytes. Its CPU
-      and host part (`host N`, `cpu N`) is `NUMERICS_VERSION_EXACT` itself (`kvsave::NUMERICS`), not a second counter.
+      (`KERNEL_OPTS_EXT`), fp8.cu's or oss.cu's. A .cu source or NVRTC option change that forgets the version bump
+      still never restores stale bytes. The plain module's tag is what it was before, so those sessions still restore
+      as bytes. Its CPU and host part (`host N`, `cpu N`) is `NUMERICS_VERSION_EXACT` itself (`kvsave::NUMERICS`),
+      not a second counter.
+    - *Not in the hash:* GPU choices made in Rust. A launch parameter (`max_split`'s formula, `MAX_SPLIT`) or the
+      kernel a shape routes to changes GPU cache bits without touching a .cu byte or an option, so it still needs the
+      `NUMERICS_VERSION_EXACT` bump, which `host N` carries. Two per-device facts in the fingerprint's `gpu` field
+      that change bits, the split-attention count and the code target, aren't in the identity either (#203).
     - *Fast kernels whose rows depend on the batching* (a token restore then gives a fresh prefill's rows, equal to
       the uninterrupted cache's only within tolerance; a byte restore continues exactly): fp8.cu's FP8 matrices,
       `gemv_f8` up to 16 tokens a pass and `gemm_f8` (wgmma on Hopper) above (#177). A fast kernel that joins this
