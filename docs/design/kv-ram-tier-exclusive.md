@@ -1,7 +1,8 @@
-# An exclusive KV RAM tier (WP2, with #170): design note, checkpoint 0, revision 2
+# An exclusive KV RAM tier (WP2, with #170): design note, checkpoint 0, revision 3
 
-- Status: **revision 2 (2026-11-05): checkpoint 1's first bandwidth run, read PROVISIONALLY (§2.8.1), no product code
-  yet.** Branch `feat/kvtier-exclusive`, main c54a730 merged in (84861fc). Author: joestar. Foreman: axon. Reviews of
+- Status: **revision 3 (2026-11-05): the copy path is FINAL, `Rows::page` as it is (§2.8.2, outcome (a) of the
+  `-r2` rows); checkpoints 1–2 built (a41d028), the trace fields of §2.7 added (checkpoint 3); §7's cells next.**
+  Revision 2 read checkpoint 1's first run provisionally (§2.8.1). Branch `feat/kvtier-exclusive`, main c54a730 merged in (84861fc). Author: joestar. Foreman: axon. Reviews of
   revision 0 (ac29b61): shady 7/10 REVISE (commit comment 208187552), Fable BUILD-WITH-CHANGES
   (`specs/kvexcl-cp0-review.md`). Every point either review raised is answered in place; §11 lists where, §12 what
   revision 2 changed. The foreman's decisions are final and recorded in §10.
@@ -36,10 +37,10 @@ The change. Items 1–5 are the store's eviction order and the tier's bookkeepin
 5. **#170: the idle flush is budgeted** (64 MiB a piece), checks the queue between pieces, and blocks when a piece
    makes no progress (§2.5). `end_solo` no longer flushes.
 6. **The copy path** (§2.8, DECISION Q1). A page moved at bella's contiguous rate instead of its 2D rate. Its own
-   gated commit, in its own PR that lands first, chosen by checkpoint 1's measurements. **Revision 2, PROVISIONAL
-   (§2.8.1):** checkpoint 1's first run (TAINTED) rejects the loop and puts today's 2D copy at the contiguous rate
-   (28.1 GB/s). Bella's 2D copy is bimodal, 28 or 7.1 GB/s depending on machine state, the same binary. No copy-path
-   PR until the rerun measures the slow mode, idle and busy.
+   gated commit, in its own PR that lands first, chosen by checkpoint 1's measurements. **Revision 3, FINAL
+   (§2.8.2):** the `-r2` rows put today's 2D copy at 28.1–28.4 GB/s cold and busy (outcome (a)), so the copy path is
+   `Rows::page` as it is and there is no copy-path PR; the loop is out. Bella's slow 2D mode (7.1 GB/s in three of
+   ten earlier runs, §2.8.1) stayed unmeasured: the resume cell reports the rate its restore got (§2.7's trace).
 
 **Steady state (§2.3, Fable's H1).** The agent replay's working set is 5,164 distinct pages against a 1,755-page tier,
 so the tier is full within about the first third of a run and stays full. From then on, the write-behind and the idle
@@ -197,6 +198,7 @@ price of a tree store, and the plan's fallback has it too. A gauge exposes it (�
   copies nothing, so a next turn's admission would copy its conversation's whole chain (steady state: ≈ 269 pages,
   ≈ 0.13 s at 28 GB/s) before its first token, evicting class 0 and then class 1 to hold duplicates of rows the GPU
   keeps. A partial give-up still copies the kept parents, because a stored page needs its stored parent.
+  (DECISION, the lead, 11-05: yes, in scope; fixed in a41d028, not stopped for.)
 - **Steady state (Fable's H1, shady's M4).** These are the facts the design has to live with:
   1. **The tier fills early.** The working set (5,164 pages) is ≫ the tier (1,755). A page is copied the first time
      the GPU holds it, so the tier fills once ≈ 1,755 / 5,164 = 34 % of the distinct pages have been computed, about
@@ -299,7 +301,12 @@ The field is named for that: `gpu` = holders on the device, not "slots". Posted 
   separate from `axon_kv_ram_written_pages_total` (all copies out).
 - `AXON_SERVE_TRACE`'s admission line gains `spilled N restored M` (pages): the spill burst and the restore of that
   admission's step. That attributes a step over 171 ms to the copies or to something else (§5.3, §6), and answers
-  Q2's "spread bursts" question per reclaim.
+  Q2's "spread bursts" question per reclaim. **As built (checkpoint 3):** every step line carries
+  `spilled`/`spill_ms`, `restored`/`restore_ms` and `wb`/`wb_ms` (pages, ms): the tier's copies since the line
+  before. An admission runs between two steps, so its copies land on the next step's line and their ms explain the
+  gap between the two lines' `t_ms + ms` and the next `t_ms`. A spill inside a step (preempt, unfeed) is inside that
+  step's `ms`. `restored × 3.5 MiB / restore_ms` is the rate a restore got (§2.8.2). The clock is read only while
+  a trace is open.
 - `Metrics::kv_ram_off` zeroes the new gauge with the others and keeps the counters (#181's rule). #181's tests
   assert the gauges and counters they know; the new ones are added to the same assertions.
 
@@ -401,7 +408,47 @@ Nothing has measured any other shape in the slow mode, or any shape with the GPU
 
 Jobs (8c7cf14, `--timing bella`): **1105-112352-139c** (`kvexcl-8c7cf14-bw25600-r2`, the rerun of record) and
 1105-112353-0d10 (`kvexcl-8c7cf14-bw32768`, #48's slot; it replaces 1104-164605-53d3, which never ran). This section
-turns PROVISIONAL → FINAL, or not, on 139c's rows, and the PR body quotes it.
+turns PROVISIONAL → FINAL, or not, on 139c's rows, and the PR body quotes it. (DECISION, the lead, 11-05: yes to the
+provisional reading; 139c makes it FINAL or not under (a)–(c), a merge requirement for this PR. §2.8.2 reads it.)
+
+### 2.8.2 The `-r2` rows (1105-112352-139c): FINAL, outcome (a)
+
+MEASURED, bella, 8c7cf14, `AXON_BW_CTX=25600`, 2026-11-05 12:33. axon-run: rc 0, **TAINTED**: FOREIGN_GPU max 99 %
+(one Xorg sample), mean 8.3 % over 13 samples, so the other 12 sum to ≈ 9 % and the desktop was close to idle for
+most of the run. GPU state (the new lines): **P8** (180 / 405 / 600 MHz) at the start, P0 (1,515 / 14,001 /
+1,807 MHz) after the cold rows and through the busy pass. GB/s, D2H / H2D, medians as in §2.8.1:
+
+| row | 7732 (foreign mean 53.5 %) | 139c cold (8.3 %) | 139c busy |
+|---|---|---|---|
+| contiguous, one 1.37 GiB copy | 28.63 / 28.68 | 28.64 / 28.66 | |
+| **2D per 64-pos page (`Rows::page`)** | 28.07 / 28.27 | **28.11 / 28.26** | **28.31 / 28.39** |
+| 56 × 1D per page | 16.72 / 17.45 | 16.76 / 17.30 | 18.15 / 18.52 |
+| 56 × 1D, one page | 16.52 / 17.04 | 16.72 / 16.77 | 18.38 / 18.05 |
+| 1D per page, scattered host | 28.02 / 28.29 | 28.01 / 28.30 | 28.20 / 28.39 |
+| D2D 2D per page, gather / scatter | 299.1 / 298.4 | 298.7 / 298.7 | 298.8 / 298.6 |
+| gather path / scatter path | 25.54 / 25.57 | 25.45 / 25.58 | 25.75 / 25.86 |
+
+**The reading, by the outcomes written before the run (§2.8.1):**
+- **(a) holds:** the 2D page copy is ≥ 20 GB/s cold (28.11 / 28.26) and busy (28.31 / 28.39). **The copy path is
+  `Rows::page` as it is. FINAL.** There is no copy-path PR. The loop stays out: busy it runs 18.2 / 18.5 GB/s, still
+  under 20 and still enqueue-bound (77 of 81 ms).
+- **Why a TAINTED run is read here** (the lead's call, 11-05, on this evidence; the taint rule is otherwise
+  unchanged, and §7's A/B cells rerun a tainted run as before). The rule exists because foreign load can move a
+  timing. Two runs at very different foreign loads, 53.5 % mean (7732) and 8.3 % mean with 12 of 13 samples near
+  idle (139c), agree across the copy shapes the decision compares: the 2D page rows it reads within 0.14 %, every
+  whole-slot row within 0.4 % but 56 × 1D H2D (0.9 %), the one-page rows (one 3.5 MiB copy each) within 1.6 %. The decision is also far from its bar: 28.1 GB/s against 20, the 2D rows at 98 % of the contiguous rate
+  in both runs. A third, quieter window would measure the same rows to decide the same thing.
+- **The fast-mode clause applies:** the rerun landed in the fast mode again, so **the slow mode (7.1 GB/s, §2.8.1's
+  three runs) stays unmeasured**. The hypothesis is weakened: 139c started in P8 with the desktop near idle and still
+  ran fast from its first row, so "idle desktop → low clocks → slow 2D copies" is not enough to explain the three
+  slow runs. Their cause is unknown. As written, the resume cell reads its own restore rate: the trace's `restored ×
+  3.5 MiB / restore_ms` per admission (§2.7). The PR reports it; the rule is not re-read. If ≤ 0.3 s fails with a
+  slow restore, §8 says what goes in the PR.
+- **0d10** (32768 positions, #48's slot, Q4) is INFO. It is still queued; its rows go in the PR when it runs and do
+  not gate.
+- Observation, not used above: the same pattern, one Xorg sample at 89–99 % and a mean near 8 %, also tainted
+  #166's bella cell 1030-115644-7f15. Per-sample times aren't logged, so the spike can't be placed against rows. For
+  §7's cells it means one sample can taint a 10-minute run; such a run is rerun (`-rN`), at the cost of bella time.
 
 ## 3. Bit-exactness
 
@@ -743,9 +790,10 @@ tier ≈ 170, engine/serve ≈ 80, ops ≈ 20. The tests are most of it (≈ 600
 
 1. **Q1, the copy path: in scope**, as its own gated commit and PR that lands first. Checkpoint 1 measures first,
    including the 56 × 1D per page row and the scattered 3.5 MiB page shape. If 1D per page is ≥ 20 GB/s, the fix is a
-   loop in `Rows::page` and there is no gather kernel (§2.8's rule). *Revision 2 proposes (PROVISIONAL, wants the
-   foreman's yes): the loop is out; no copy-path PR until the `-r2` rerun measures bella's slow 2D mode, idle and
-   busy; the policy is built meanwhile (§2.8.1).*
+   loop in `Rows::page` and there is no gather kernel (§2.8's rule). *Revision 2 proposed (PROVISIONAL): the loop is
+   out; no copy-path PR until the `-r2` rerun; the policy is built meanwhile (§2.8.1). The lead, 11-05: yes,
+   provisionally, the `-r2` rows to make it FINAL or not under the pre-written outcomes, a merge requirement.
+   Revision 3: FINAL by outcome (a), `Rows::page` as it is (§2.8.2).*
 2. **Q2, class-0 order: newest first** (§2.1).
 3. **Q3, pinned size:** the gates run at 6 GiB. `auto` (≤ 8 GiB) waits for Haseeb's answer to the plan's Q2.
 4. **Q4, #48 vs f763:** answered by arithmetic (§5.1); both hold. Checkpoint 1 measures the 32k slot too.
@@ -780,3 +828,12 @@ tier ≈ 170, engine/serve ≈ 80, ops ≈ 20. The tests are most of it (≈ 600
 | The bench's GPU-state lines and busy pass (8c7cf14, test only) | §2.8.1 |
 | The 32k slot: 1104-164605-53d3 (28da662, never ran) replaced by 1105-112353-0d10 (8c7cf14) | §2.8.1 |
 | main c54a730 merged (84861fc): only `mod prefix;` in src/serve; #164 C1 + C2's `Evicted` matches §2.6 | header, §2.6 |
+
+## 13. Revision 3 (2026-11-05): the copy path FINAL, the lead's rulings, the trace fields
+
+| what | where |
+|---|---|
+| 139c's `-r2` rows (TAINTED, one Xorg sample): outcome (a), `Rows::page` as it is, FINAL; why a tainted run is read here; the slow mode unmeasured, the P8 start weakens the hypothesis | §2.8.2, §0 item 6, §10.1 |
+| The lead's rulings (11-05): §10.1 yes provisionally (then FINAL by (a)); the a41d028 spill fix yes | §2.3, §2.8.1, §10.1 |
+| CP2's gates at a41d028: smoke 1105-115704-823c 6/0, release 1105-115704-aeee and debug 1105-115846-69b9 192/0 (9 ignored, the `#[ignore]` benches), md5 1105-115953-59cd (pod1, RTX 4090): gen 0/30 differ, serve 42/42 × 5 cells, the third arm (`--cache-ram 1G`, 13.6–13.9k tokens restored per cell) included | PR body |
+| §2.7's trace fields, as built: pages and ms per copy kind on every step line | §2.7 |
