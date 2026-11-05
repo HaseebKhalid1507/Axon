@@ -1,0 +1,32 @@
+[axon-run 19:37:17] submitted 1104-193717-bce3 by /home/haseeb/.cache/axon-main: /home/haseeb/.cache/axon-main/axon-test-af281d9 cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor --exact --nocapture
+[axon-run 19:37:17] job 1104-193717-bce3 -> pod1 [RTX 4090 sm_89 secure] (pod mbr157bmyd6ytk): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-main/wt /home/haseeb/.cache/axon-main/axon-test-af281d9 cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor --exact --nocapture
+axon-remote: uploading axon-test-af281d9 (7aefa2e5609739d805685cc8) + source of /home/haseeb/.cache/axon-main/wt (delta vs 6 earlier upload(s) there)
+
+sent 14,047 bytes  received 56 bytes  5,641.20 bytes/sec
+total size is 8,055,535  speedup is 571.19
+
+sent 6,695,142 bytes  received 30,450 bytes  274,513.96 bytes/sec
+total size is 24,247,960  speedup is 3.61
+axon-remote: job 20261105-003750-axon-test-af281d9-38225 on pod1 (GPU, 5000 MB)
+[axon-node 00:37:51] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 31.125)
+[axon-node 00:37:51] run axon-test-af281d9 (7aefa2e5609739d805685cc8) as /home/haseeb/.cache/axon-main/wt on f04c4da4aca4, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor' (38240) panicked at src/cuda/qwen2/tests/fp8.rs:148:9:
+gemm_ref_f8 k 128 rows 64 nb 17: output 0: -0.31081602 vs exact -0.3107885997747955: error 2.7419998687772118e-5 > 1 x tolerance 2.8005818735574893e-6
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 826 filtered out; finished in 0.34s
+
+[axon-node 00:37:51] exit 101 after 0.4s
+[axon-node 00:37:51] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-node 00:37:51] failures not retried (not all shared-GPU sensitive / OOM): cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor
+[axon-run 19:37:53] exit 101 after 36.1s (host pod1)

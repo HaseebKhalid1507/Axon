@@ -1,0 +1,49 @@
+{
+ "label": "sm89-fp8anchor",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1104-193717-bce3",
+   "name": "sm89-fp8anchor-axon-test-af281d9",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "pod1",
+   "hw": "hw-pod1-11-04_19:37.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "af281d9",
+   "binary": "axon-test-af281d9",
+   "started": 1793839037.4482243,
+   "ended": 1793839074.5322518,
+   "attempts": 1,
+   "remote_job": "20261105-003750-axon-test-af281d9-38225",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "5326573153142437104f35753cf24641d0af1fcb74aef339d3ddcb0fe537136f",
+   "log_bytes": 2354
+  },
+  {
+   "job": "1104-193717-89a8",
+   "name": "sm89-fp8anchor-axon-test-dbg-af281d9",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "pod1",
+   "hw": "hw-pod1-11-04_19:37.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "af281d9",
+   "binary": "axon-test-dbg-af281d9",
+   "started": 1793839074.5322518,
+   "ended": 1793839084.573392,
+   "attempts": 1,
+   "remote_job": "20261105-003759-axon-test-dbg-af281d9-38307",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a08611d3c3a53064d24a9209e0df953481cc9d22aaa489d9c72e9fa5eb19dbe1",
+   "log_bytes": 2009
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-04 19:38:04 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
