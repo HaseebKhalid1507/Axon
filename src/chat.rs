@@ -2541,6 +2541,157 @@ mod tests {
         }
     }
 
+    /// #203: a GPU session's identity names the split attention's count
+    /// (`gpu`, as the fingerprint does), which the SM count sets: Gemma 3
+    /// runs that attention on every GPU. Two nets of the model on this GPU,
+    /// one told another GPU's count (`set_max_split`; a count can't be faked
+    /// otherwise), make other rows for the same conversation once it splits
+    /// differently (`att_split`: min(count, ceil(positions / 32)) splits;
+    /// 2 here against this GPU's, for a conversation past 64 positions), so
+    /// bytes loaded across would be wrong. A session saved under one count
+    /// restores under the other as tokens, prefilled again, naming `gpu`
+    /// alone as why, and the conversation goes on as a fresh one would; on
+    /// its own count it loads as bytes. A dense Qwen2.5 net's identity has
+    /// `gpu` only if it takes the split attention too (below sm_80, or told
+    /// to: `set_tc_attn`), so its sessions on sm_80+ restore as before.
+    #[test]
+    fn gpu_session_split_count() {
+        use crate::cuda::qwen2::max_split;
+        use crate::kvsave::{KvIo, Session, gpu_extra};
+        use crate::lm::{Backend, BackendOptions, Device, Inner, Lm};
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(gp) = crate::testutil::gemma3_model_path() else {
+            return;
+        };
+        let (info, code) = (g.info().unwrap(), crate::cuda::code_target(&g).unwrap().0);
+        let arch = info.arch();
+        let o = || BackendOptions::default().device(Device::Cuda).max_ctx(2048);
+        let m = crate::gguf::load_with(gp.to_str().unwrap(), Some(false)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let k = max_split(info.sms as usize, m.n_kv_heads() as usize);
+        let k2 = 2;
+        assert!(k > 4, "this GPU's split count {k}");
+        let here = Backend::new(&m, o()).unwrap();
+        let mut there = Backend::new(&m, o()).unwrap();
+        let Inner::Cuda(t) = &mut there.0 else {
+            panic!("not on the GPU")
+        };
+        assert_eq!(t.split_attention(), Some(k));
+        t.set_max_split(k2);
+        let ident = crate::kvsave::model_ident(&m, &gp, KvIo::kv_shape(&here).2).unwrap();
+        // Past 64 positions: here splits 3 or more ways, there 2.
+        let first = format!("Summarize this in one line: {}", [MSGS[0]; 12].join(" "));
+        let turn = |net: &Backend, f: &std::path::Path, what: &str| {
+            let mut x = Chat::new(net, &tok, None, 2048).unwrap();
+            x.max_reply = 16;
+            x.reply(&first, &|| false, &mut |_| Ok(())).unwrap();
+            assert!(x.fed > 64, "{what}: {} positions", x.fed);
+            x.save_session(&mut Session::new(f.to_path_buf(), ident.clone()))
+                .unwrap();
+            let image = cache_image(&x);
+            let mut same = Chat::new(net, &tok, None, 2048).unwrap();
+            let r = (same.load_session(&mut Session::new(f.to_path_buf(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(r.from_file, "{what} -> {what}: {r:?}");
+            assert_eq!(cache_image(&same), image, "{what} -> {what}");
+            (net.kv_ident(&x.cache).unwrap(), x.hist[..x.fed].to_vec())
+        };
+        let (fh, ft) = (session_path("split-here"), session_path("split-there"));
+        let (id_h, toks_h) = turn(&here, &fh, "here");
+        let (id_t, toks_t) = turn(&there, &ft, "there");
+        for (id, k) in [(&id_h, k), (&id_t, k2)] {
+            let want = gpu_extra(&arch, &code, Some(k)).unwrap();
+            assert_eq!(id["gpu"], want, "{id}");
+        }
+        let strip = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            let o = v.as_object_mut().unwrap();
+            o.remove("info");
+            o.remove("gpu");
+            v
+        };
+        assert_eq!(strip(&id_h), strip(&id_t));
+        // Other rows for the same tokens under the two counts.
+        for toks in [&toks_h, &toks_t] {
+            assert!(
+                prefill_image(&here, toks) != prefill_image(&there, toks),
+                "{k} and {k2} splits: the same rows"
+            );
+        }
+        // Across counts: tokens, prefilled again.
+        for (net, f, (file_id, now_id), toks, what) in [
+            (&here, &ft, (&id_t, &id_h), &toks_t, "there -> here"),
+            (&there, &fh, (&id_h, &id_t), &toks_h, "here -> there"),
+        ] {
+            let mut y = Chat::new(net, &tok, None, 2048).unwrap();
+            y.max_reply = 16;
+            let r = (y.load_session(&mut Session::new(f.clone(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(!r.from_file, "{what}: {r:?}");
+            let why = format!(
+                "it was made under gpu {} (now {})",
+                file_id["gpu"], now_id["gpu"]
+            );
+            assert_eq!(r.why.as_deref(), Some(why.as_str()), "{what}");
+            assert_eq!(y.hist[..y.fed], toks[..], "{what}");
+            assert!(
+                cache_image(&y) == prefill_image(net, &y.hist[..y.fed]),
+                "{what}: not a fresh prefill"
+            );
+            let mut prompt = y.hist.clone();
+            prompt.extend(y.frame_user(MSGS[1], y.turns.is_empty()));
+            let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+            assert_eq!(got, fresh(y.net, &prompt, 16, &y.fr.stop), "{what}");
+            eprintln!(
+                "split counts {k} / {k2}, {} positions, {what}: prefilled again ({why})",
+                y.fed
+            );
+        }
+        for f in [fh, ft] {
+            let _ = std::fs::remove_file(f);
+        }
+        // A dense Qwen2.5: `gpu` with the split attention only.
+        let Some(mq) = crate::testutil::model() else {
+            return;
+        };
+        for tc in [true, false] {
+            let mut q = Backend::new(&mq, o()).unwrap();
+            let Inner::Cuda(n) = &mut q.0 else {
+                panic!("not on the GPU")
+            };
+            if !tc {
+                n.set_tc_attn(false);
+            }
+            let split = n.split_attention();
+            assert_eq!(split.is_none(), tc && info.cc.0 >= 8, "tc {tc}");
+            let id = q.kv_ident(&q.new_cache(64)).unwrap();
+            let want = gpu_extra(&arch, &code, split);
+            assert_eq!(
+                id.get("gpu").and_then(|g| g.as_str()),
+                want.as_deref(),
+                "tc {tc}: {id}"
+            );
+            if want.is_none() {
+                // #196's identity, nothing added: its sessions load as bytes.
+                let mut keys: Vec<&str> =
+                    id.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                keys.sort();
+                let before = [
+                    "backend", "class", "head_dim", "info", "kv", "kv_dim", "layers",
+                ];
+                assert_eq!(
+                    keys,
+                    [&before[..], &["numerics", "row_bytes"]].concat(),
+                    "{id}"
+                );
+            }
+        }
+    }
+
     /// The numerics mode is in a session file's identity (ADR M5): a file
     /// saved by an exact-mode chat is restored into a fast-mode one as
     /// tokens (prefilled again; `numerics_mode` is named as why), and the

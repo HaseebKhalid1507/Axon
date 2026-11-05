@@ -326,8 +326,9 @@ Rules:
       not a second counter.
     - *Not in the hash:* GPU choices made in Rust. A launch parameter (`max_split`'s formula, `MAX_SPLIT`) or the
       kernel a shape routes to changes GPU cache bits without touching a .cu byte or an option, so it still needs the
-      `NUMERICS_VERSION_EXACT` bump, which `host N` carries. Two per-device facts in the fingerprint's `gpu` field
-      that change bits, the split-attention count and the code target, aren't in the identity either (#203).
+      `NUMERICS_VERSION_EXACT` bump, which `host N` carries. The two per-device facts in the fingerprint's `gpu`
+      field that change bits on one architecture, the split-attention count and the code target, are in the
+      identity as `gpu` where the fingerprint names them (`kvsave::gpu_extra`, #203).
     - *Fast kernels whose rows depend on the batching* (a token restore then gives a fresh prefill's rows, equal to
       the uninterrupted cache's only within tolerance; a byte restore continues exactly): fp8.cu's FP8 matrices,
       `gemv_f8` up to 16 tokens a pass and `gemm_f8` (wgmma on Hopper) above (#177). A fast kernel that joins this
