@@ -149,20 +149,50 @@ fn check_sample(what: &str, got: &[f32], sample: &[(usize, (f64, f64))], slack: 
     }
 }
 
-/// The quantizer's GPU half (fp8.cu f8x2 and quant_f8_tok) against the Rust
-/// twin, bit for bit: every e4m3 code's value, the midpoints between codes
-/// and their neighbours, 10^6 random floats; then whole rows (K 896, half a
-/// 256-block at the end; 4864; a zero row; a row of subnormal codes).
-/// The test GPU if it has e4m3 tensor cores (sm_89 and later).
-fn f8_gpu() -> Option<crate::cuda::Gpu> {
+/// The test GPU if it has e4m3 tensor cores (sm_89 and later), else None
+/// (said by `testutil::skip_note`). The hardware only, not
+/// `AXON_FP8_NATIVE`: that is the engine's switch (`f8_native_cc`), and the
+/// kernel tests load fp8.cu themselves. The tests through the engine take
+/// `f8_engine_gpu`.
+fn f8_gpu() -> Option<Gpu> {
     let g = crate::testutil::gpu()?;
-    if !crate::cuda::f8_native_cc(&g).unwrap() {
-        eprintln!("skipping: no e4m3 tensor cores (sm_89 and later) on this GPU");
+    let (major, minor) = g.info().unwrap().cc;
+    if major * 10 + minor < 89 {
+        crate::testutil::skip_note(format_args!(
+            "no e4m3 tensor cores on this GPU (sm_{major}{minor}; they are sm_89 and later)"
+        ));
         return None;
     }
     Some(g)
 }
 
+/// `f8_gpu` for the tests that run the checkpoint natively through the
+/// engine (fast mode), which fail if `AXON_FP8_NATIVE=0` is set. That
+/// variable turns the engine's native path off (fast mode then runs the
+/// Q8_0 form, as exact mode does), so these tests would have nothing to
+/// grade, and it isn't a test opt-out (those are the `AXON_SKIP_*`
+/// variables). It used to skip them as "no e4m3 tensor cores" (`f8_gpu`
+/// read it), so a gate run that inherited it reported them `ok` without
+/// grading anything: #193's shape. A test can't unset it (the engine reads
+/// it, and `remove_var` races the other test threads). The callers check
+/// this before the checkpoint (`fp8_model_path`), on purpose: with a skip
+/// variable set, no checkpoint and `AXON_FP8_NATIVE=0`, they fail (unset
+/// it) rather than skip, since the variable turns off what they test
+/// whether the checkpoint is there or not.
+fn f8_engine_gpu() -> Option<Gpu> {
+    let g = f8_gpu()?;
+    assert!(
+        std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"),
+        "AXON_FP8_NATIVE=0 is set: fast mode runs the FP8 checkpoint as Q8_0, so this test has \
+         no native FP8 to grade. Unset it to run the test (the FP8 kernel tests don't read it)."
+    );
+    Some(g)
+}
+
+/// The quantizer's GPU half (fp8.cu f8x2 and quant_f8_tok) against the Rust
+/// twin, bit for bit: every e4m3 code's value, the midpoints between codes
+/// and their neighbours, 10^6 random floats; then whole rows (K 896, half a
+/// 256-block at the end; 4864; a zero row; a row of subnormal codes).
 #[test]
 fn gpu_fp8_quantizer_matches_twin() {
     let Some(g) = f8_gpu() else {
@@ -414,7 +444,7 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 /// (`assert_sane_vs_exact`: lead ruling, 10-31, after 1031-115732-b712).
 #[test]
 fn gpu_fp8_graded_vs_fp8_ref() {
-    if f8_gpu().is_none() {
+    if f8_engine_gpu().is_none() {
         return;
     }
     let Some(p) = crate::testutil::fp8_model_path() else {
@@ -473,7 +503,7 @@ fn gpu_fp8_graded_vs_fp8_ref() {
 #[test]
 #[ignore]
 fn gpu_fp8_load_diag() {
-    if f8_gpu().is_none() {
+    if f8_engine_gpu().is_none() {
         return;
     }
     let Some(p) = crate::testutil::fp8_model_path() else {

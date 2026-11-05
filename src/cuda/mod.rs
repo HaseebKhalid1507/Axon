@@ -2187,7 +2187,7 @@ fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
     v
 }
 
-/// Whether `gpu` has e4m3 tensor cores (sm_89 and later, `mma.sync` e4m3).
+/// Whether fast mode runs FP8 natively on `gpu`: sm_89+ (e4m3) and AXON_FP8_NATIVE isn't 0.
 pub(crate) fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
     let cc = gpu.info()?.cc;
     Ok(cc.0 * 10 + cc.1 >= 89 && std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"))

@@ -6,6 +6,19 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Tests: FP8 test skips show in a captured log; `AXON_FP8_NATIVE=0` fails the FP8 engine tests (#197)
+- **A skipped FP8 test now says so in a normal test log, not only under `--nocapture`.** The FP8 checkpoint's skip
+  (missing, with `AXON_SKIP_FP8_MODEL_TESTS` or `AXON_SKIP_MODEL_TESTS` set) and the FP8 tests' skip on a GPU below
+  sm_89 go straight to stderr (`testutil::skip_note`) and name the test. libtest captures `eprintln!` in a passing
+  test, so those skips read as a bare `ok` in a gate log, the blind spot #193 was about (shady's review of #195).
+  Only a test that skips prints the line: the checkpoint rule's own unit tests print none, so a `skipping:` line in a
+  suite's log means a test skipped (axon-run reads one near a log's end as a run whose test skipped itself).
+- **`AXON_FP8_NATIVE=0` fails `gpu_fp8_graded_vs_fp8_ref`** (and the ignored `gpu_fp8_load_diag`) with a message
+  naming it. It turns the engine's native FP8 off, so the test has nothing to grade. It used to skip every FP8 test
+  quietly, as "no e4m3 tensor cores". The FP8 kernel tests no longer read it: they run on any sm_89+ GPU. README
+  documents the variable.
+- CONTRIBUTING's FP8 checkpoint download uses `curl -fL` and checks all 9 files' sha256 (`sha256sum -c`).
+
 ### Tests: a missing FP8 checkpoint fails the FP8 checkpoint tests (#193)
 - **`gpu_fp8_exact_is_q8_and_bit_identical` and `gpu_fp8_graded_vs_fp8_ref` now fail when the FP8 0.5B checkpoint
   is missing** (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`, or `AXON_TEST_FP8_MODEL`), as the GGUF
@@ -35,7 +48,9 @@ measurements behind them.
   `fast/1.3` in every fast-mode identity, on every GPU (sm_120 too) and for GGUF models; their bits don't change.
   Exact-mode fingerprints don't change. A `chat --session` saved in fast mode carries `fast/1.2`, so it restores once
   as tokens (prefilled again) instead of as KV bytes the old e4m3 path made. On sm_120 that happens although its bits
-  are the same: the [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843) is the bump with no waiver, and accepts that.
+  are the same: the
+  [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843)
+  is the bump with no waiver, and accepts that.
 - **The FP8 graded gate's wide-flip count is set relative to its CPU floor** (#192, test-only). On the 0.5B's
   1014-position decode arm, the floor alone has 10 top-1 flips at margin ≥ 0.5, which is all of the old
   `max(2, n/100)` = 10. A 4090 had 12. The bound is now the floor's count plus 2 binomial SE (16 there), for the FP8
