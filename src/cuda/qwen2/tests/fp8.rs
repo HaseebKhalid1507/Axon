@@ -374,7 +374,8 @@ fn gpu_fp8_gemm_bits_and_anchor() {
     }
 }
 
-/// The FP8 0.5B checkpoint, loaded (None: skipped).
+/// The FP8 0.5B checkpoint, loaded (None: skipped as `fp8_model_path` says;
+/// missing without a skip variable, the test fails).
 fn fp8_model() -> Option<Model> {
     let p = crate::testutil::fp8_model_path()?;
     Some(crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap())

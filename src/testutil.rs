@@ -41,29 +41,87 @@ pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// The FP8 test checkpoint: RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic, a
+/// Hugging Face directory (`AXON_TEST_FP8_MODEL` overrides it).
+pub const FP8_MODEL: &str = "models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic";
+
+/// The variables that let a missing `FP8_MODEL` skip its tests:
+/// `AXON_SKIP_MODEL_TESTS` (every model test, CI) and
+/// `AXON_SKIP_FP8_MODEL_TESTS` (only this checkpoint's, for a host with the
+/// GGUFs but not it).
+const FP8_SKIP_VARS: [&str; 2] = ["AXON_SKIP_MODEL_TESTS", "AXON_SKIP_FP8_MODEL_TESTS"];
+
+/// Path of the FP8 checkpoint (`FP8_MODEL`), or None to skip.
+///
+/// A missing checkpoint is a test failure, as a missing GGUF is
+/// (`model_path`), unless one of `FP8_SKIP_VARS` is set. It used to skip
+/// quietly, and libtest reports a test that returns early as `ok`, so gate
+/// runs on GPUs without the checkpoint showed the FP8 gate passing when it
+/// had never run (#193). The callers check for a usable GPU first
+/// (`gpu_fp8_graded_vs_fp8_ref` for an sm_89+ one; the exact-mode test runs
+/// on any), so a host without one, CI included, never gets here.
+pub fn fp8_model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(FP8_MODEL),
+    };
+    let skip = FP8_SKIP_VARS
+        .into_iter()
+        .find(|v| std::env::var_os(v).is_some());
+    fp8_checkpoint_or_skip(path, skip)
+}
+
+/// `fp8_model_path`'s rule, given the skip variable that is set, if any:
+/// `path` if it holds a model.safetensors, else None (said on stderr) with a
+/// skip variable, else a panic.
+fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Option<PathBuf> {
+    if path.join("model.safetensors").exists() {
+        return Some(path);
+    }
+    if let Some(var) = skip {
+        eprintln!(
+            "skipping: the FP8 checkpoint {} is not present and {var} is set",
+            path.display()
+        );
+        return None;
+    }
+    panic!(
+        "the FP8 checkpoint {} is missing (no model.safetensors). Download \
+         RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set \
+         AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.",
+        path.display()
+    );
+}
+
+#[test]
+fn fp8_checkpoint_present_is_used() {
+    let dir = std::env::temp_dir().join(format!("axon-fp8-ckpt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("model.safetensors"), b"").unwrap();
+    let got = fp8_checkpoint_or_skip(dir.clone(), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(got, Some(dir));
+}
+
+#[test]
+fn fp8_checkpoint_missing_skips_only_when_asked() {
+    let missing = fixtures().join("no-fp8-checkpoint-here");
+    for var in FP8_SKIP_VARS {
+        assert_eq!(fp8_checkpoint_or_skip(missing.clone(), Some(var)), None);
+    }
+}
+
+#[test]
+#[should_panic(expected = "no-fp8-checkpoint-here is missing (no model.safetensors). Download")]
+fn fp8_checkpoint_missing_fails() {
+    fp8_checkpoint_or_skip(fixtures().join("no-fp8-checkpoint-here"), None);
+}
+
 /// Path of the test model (`AXON_TEST_MODEL` overrides MODEL; fixture-based
 /// tests like matches_ollama only make sense for MODEL), or None to skip.
 ///
 /// A missing model is a test failure, not a silent pass. CI doesn't have the
 /// 470 MB file, so it opts out explicitly with `AXON_SKIP_MODEL_TESTS=1`.
-/// The FP8 0.5B checkpoint (RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic in
-/// models/hf/, or AXON_TEST_FP8_MODEL), None (skipped, said so) when absent.
-pub fn fp8_model_path() -> Option<PathBuf> {
-    let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {
-        Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic"),
-    };
-    if !path.join("model.safetensors").exists() {
-        eprintln!(
-            "skipping: the FP8 checkpoint {} is not present",
-            path.display()
-        );
-        return None;
-    }
-    Some(path)
-}
-
 pub fn model_path() -> Option<PathBuf> {
     let path = match std::env::var_os("AXON_TEST_MODEL") {
         Some(p) => PathBuf::from(p),

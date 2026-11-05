@@ -254,4 +254,5 @@ ran them.
   too, CLAIMED: DeepSeek-V3's report, wgmma on H800) and sm_100 among them. Neither is measured; the NVRTC-only test
   `nvrtc_fp8_product_step_by_target` pins the routing (the e4m3 mma in the PTX at compute_120 only). On Hopper,
   WP-A3's wgmma with per-128 promotion is the fast path.
-- `NUMERICS_VERSION_FAST` 2 → 3: fast-mode bits change below sm_120 (identity.rs's rule; lead ruling: no waiver).
+- `NUMERICS_VERSION_FAST` 2 → 3: fast-mode bits change below sm_120 (identity.rs's rule; [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843): no
+  waiver).

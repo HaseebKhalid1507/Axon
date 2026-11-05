@@ -47,8 +47,24 @@ sha256sum models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 # 6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83
 ```
 
+With a GPU, the FP8 checkpoint tests also need RedHatAI's FP8 build of
+Qwen2.5-0.5B-Instruct (877 MB), a Hugging Face directory at
+`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic` (`AXON_TEST_FP8_MODEL` points them at
+another copy):
+
+```bash
+d=models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic; mkdir -p $d
+for f in added_tokens.json config.json generation_config.json merges.txt model.safetensors \
+         special_tokens_map.json tokenizer_config.json tokenizer.json vocab.json; do
+  curl -L -o $d/$f https://huggingface.co/RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic/resolve/main/$f
+done
+sha256sum $d/model.safetensors
+# 5c804f9499421e548f50f5db893035377b2c8b807ecdef1226710ab001f3b2b0
+```
+
 Without them those tests fail on purpose, so a missing model can't pass for a
-working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this.
+working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this. To skip
+only the FP8 checkpoint's tests, set `AXON_SKIP_FP8_MODEL_TESTS=1`.
 
 ## The GPU tests
 
