@@ -1,0 +1,48 @@
+[axon-run 16:46:04] submitted 1104-164604-7732 by /home/haseeb/.cache/axon-kvexcl: /home/haseeb/.cache/axon-kvexcl/t-28da662-rel cuda::qwen2::kvio::tests::bandwidth --exact --ignored --nocapture --test-threads 1
+[axon-run 11:11:42] scope axon-job-1104-164604-7732-1793895102.scope in app-axonjobs.slice: MemoryMax 11524 MB, MemoryHigh 10371 MB, no swap, oomd pressure kill 80% (claim 7000 MB): an OOM here kills only this job
+[axon-run 11:11:42] job 1104-164604-7732 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-164604-7732-1793895102 --slice=app-axonjobs.slice -p MemoryMax=11524M -p MemoryHigh=10371M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-kvexcl/t-28da662-rel cuda::qwen2::kvio::tests::bandwidth --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::kvio::tests::bandwidth ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+device NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120), slot 25600 positions = 1.367 GiB
+BW D2H contiguous                        51.27 ms   28.63 GB/s
+BW H2D contiguous                        51.19 ms   28.68 GB/s
+BW D2H one 2D copy                       51.28 ms   28.62 GB/s
+BW H2D one 2D copy                       51.20 ms   28.67 GB/s
+BW D2H 2D per 16-pos page                55.16 ms   26.61 GB/s
+BW H2D 2D per 16-pos page                54.08 ms   27.15 GB/s
+BW D2H 2D per 64-pos page                52.29 ms   28.07 GB/s
+BW H2D 2D per 64-pos page                51.92 ms   28.27 GB/s
+BW D2H 2D per 256-pos page               51.46 ms   28.52 GB/s
+BW H2D 2D per 256-pos page               51.40 ms   28.56 GB/s
+BW D2H 56 x 1D per 64-pos page           87.82 ms   16.72 GB/s  (enqueue   83.82 ms)
+BW D2H 56 x 1D, one page                  0.22 ms   16.52 GB/s  (enqueue    0.05 ms)
+BW H2D 56 x 1D per 64-pos page           84.14 ms   17.45 GB/s  (enqueue   80.48 ms)
+BW H2D 56 x 1D, one page                  0.22 ms   17.04 GB/s  (enqueue    0.06 ms)
+BW D2H 1D per page, scattered host       52.40 ms   28.02 GB/s  (enqueue    0.37 ms)
+BW H2D 1D per page, scattered host       51.88 ms   28.29 GB/s  (enqueue    0.38 ms)
+BW D2D 2D per page (gather)               4.91 ms  299.08 GB/s  (enqueue    0.58 ms)
+BW D2D 56 x 1D per page (gather)         34.58 ms   42.45 GB/s  (enqueue   34.56 ms)
+BW D2D 2D per page (scatter)              4.92 ms  298.44 GB/s  (enqueue    0.57 ms)
+BW D2D 56 x 1D per page (scatter)        34.83 ms   42.15 GB/s  (enqueue   34.62 ms)
+BW D2H gather path (2D D2D + 1D)         57.48 ms   25.54 GB/s  (enqueue    0.88 ms)
+BW D2H gather path, one page              0.15 ms   25.24 GB/s  (enqueue    0.00 ms)
+BW H2D scatter path (2D D2D + 1D)        57.42 ms   25.57 GB/s  (enqueue    0.87 ms)
+BW H2D scatter path, one page             0.14 ms   25.99 GB/s  (enqueue    0.00 ms)
+BW host_alloc   64 MiB (+ free)             13.86 ms
+BW host_alloc_uninit   64 MiB (+ free)      13.04 ms
+BW HostAllocator   64 MiB (+ free)         13.13 ms
+BW host_alloc  256 MiB (+ free)             57.56 ms
+BW host_alloc_uninit  256 MiB (+ free)      53.80 ms
+BW HostAllocator  256 MiB (+ free)         54.65 ms
+BW D2H one 64-pos page (3.50 MiB)          0.137 ms   26.88 GB/s
+BW H2D one 64-pos page                     0.135 ms   27.20 GB/s
+BW save() to RAM (staged)               132.57 ms   11.07 GB/s
+BW load() from RAM (staged)             131.64 ms   11.15 GB/s
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 11.57s
+
+[axon-run 11:11:54] exit 0 after 11.7s (host bella)
+[axon-run 11:11:58] EXPECT ok: output matches /BW H2D scatter path, one page/
+[axon-run 11:11:58] FOREIGN_GPU max=99% mean=53.5% samples=2 top: Xorg 14129 66%, zen-bin 2259189 33%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
