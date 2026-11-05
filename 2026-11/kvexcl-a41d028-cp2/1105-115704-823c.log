@@ -1,0 +1,49 @@
+[axon-run 11:57:04] submitted 1105-115704-823c by /home/haseeb/.cache/axon-kvexcl: /home/haseeb/.cache/axon-kvexcl/t-a41d028-rel serve::tests::serve_cuda_cache_ram serve::tests::serve_cpu_cache_ram --test-threads 1 --nocapture
+[axon-run 12:19:03] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 12:19:03] scope axon-job-1105-115704-823c-1793899143.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 12:19:03] job 1105-115704-823c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-115704-823c-1793899143 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvexcl/t-a41d028-rel serve::tests::serve_cuda_cache_ram serve::tests::serve_cpu_cache_ram --test-threads 1 --nocapture
+axon-q 12:19:03 start slot 16-23: /home/haseeb/.cache/axon-kvexcl/t-a41d028-rel serve::tests::serve_cuda_cache_ram serve::tests::serve_cpu_cache_ram --test-threads 1 --nocapture
+
+running 6 tests
+test serve::tests::serve_cpu_cache_ram ... ok
+test serve::tests::serve_cpu_cache_ram_off ... axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+ok
+test serve::tests::serve_cuda_cache_ram ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048
+ok
+test serve::tests::serve_cuda_cache_ram_idle_flush ... axon serve: context 1024 tokens: the KV pages that fit in GPU memory hold 1024 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 1024 tokens: the KV pages that fit in GPU memory hold 1024 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 1024 tokens: the KV pages that fit in GPU memory hold 1024 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: context 1024 tokens: the KV pages that fit in GPU memory hold 1024 tokens, of the model's 2048 (--kv q8 holds twice as many)
+ok
+test serve::tests::serve_cuda_cache_ram_off ... axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+ok
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 863 filtered out; finished in 52.76s
+
+[axon-run 12:19:56] exit 0 after 53.0s (host bella)
