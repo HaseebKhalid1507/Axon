@@ -64,7 +64,7 @@ impl Numerics {
 
     /// The mode's numerics version (identity.rs states when each counter
     /// bumps): exact's counter, `1`; fast's is exact's and its own,
-    /// `1.2` (FP8's kernels: `NUMERICS_VERSION_FAST` 2). Fast mode runs on
+    /// `1.3` (FP8's kernels: `NUMERICS_VERSION_FAST` 3). Fast mode runs on
     /// top of the exact kernels and the request-to-text code, so a change to
     /// those (an exact bump) moves fast's version too, with nobody having to
     /// remember a second bump.
@@ -75,7 +75,7 @@ impl Numerics {
         }
     }
 
-    /// The identity tuple's `numerics` value: `exact/1`, `fast/1.2`.
+    /// The identity tuple's `numerics` value: `exact/1`, `fast/1.3`.
     pub fn tag(self) -> String {
         format!("{}/{}", self.name(), self.version())
     }
@@ -132,7 +132,7 @@ mod tests {
             Numerics::Fast.tag(),
             format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
-        assert_eq!(Numerics::Fast.version(), "1.2");
+        assert_eq!(Numerics::Fast.version(), "1.3");
         assert_eq!(Numerics::Fast.to_string(), "fast");
     }
 

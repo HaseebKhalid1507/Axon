@@ -2309,7 +2309,8 @@ impl<'m> Kernels<'m> {
         n: Numerics,
     ) -> Result<Module<'g>, String> {
         let ext = needs_ext(m);
-        // FP8 natively only in fast mode on sm >= 89 (e4m3 mma.sync); else
+        // FP8 natively only in fast mode on sm >= 89 (fp8.cu's `mma_f8`:
+        // e4m3 mma.sync on sm_120+, f16 mmas below, #190); else
         // the plain module, which runs the Q8_0 form (D1, ruling 4).
         let f8 = crate::safetensors::is_fp8(m) && n == Numerics::Fast && f8_native_cc(gpu)?;
         let src = if m.arch == "gpt-oss" {

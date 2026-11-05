@@ -6,6 +6,29 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### FP8 on sm_89: the fast-mode GEMM runs f16 mmas below sm_120 (#190, #192)
+- **Correction to #177: below sm_120, `--numerics fast` no longer runs FP8 prefill on e4m3 tensor cores.** On sm_89
+  the e4m3 `mma.sync` keeps only about 14 bits of each k32 step's sum, and the FP8 GEMM missed its f64 accuracy anchor
+  by up to 173× on a 4090 (#190). For every compile target below sm_120, `gemm_f8` now converts the e4m3 codes to f16
+  (exact: e4m3 is a subset of f16) and runs each k32 step as two f16 mmas with f32 accumulate. That is within 0.18× of
+  the anchor's tolerance on the 4090. Cost: 1.30–1.55× the e4m3 GEMM time (4090, `gemm_f8` alone at the 0.5B and 7B
+  shapes). Decode (`gemv_f8`, CUDA cores) and the activation quantizer are unchanged. Exact mode (the default, Q8_0)
+  and every GGUF model never run this code
+  ([docs/log/2026-11-04-fp8-sm89.md](docs/log/2026-11-04-fp8-sm89.md)).
+- **sm_120 is unchanged.** Its cubin keeps the e4m3 mma: the code is the same, and the md5 gate against main is
+  identical, FP8 `--numerics fast` included.
+- **H100 (sm_90) and sm_100 change too, unmeasured.** They are below sm_120, so FP8 fast-mode prefill takes the f16
+  path there as well, with new bits. No anchor, graded or speed run exists on either until the #176 probe.
+- **Every fast-mode fingerprint changes once.** `NUMERICS_VERSION_FAST` 2 → 3, so `numerics=fast/1.2` becomes
+  `fast/1.3` in every fast-mode identity, on every GPU (sm_120 too) and for GGUF models; their bits don't change.
+  Exact-mode fingerprints don't change. A `chat --session` saved in fast mode carries `fast/1.2`, so it restores once
+  as tokens (prefilled again) instead of as KV bytes the old e4m3 path made.
+- **The FP8 graded gate's wide-flip count is set relative to its CPU floor** (#192, test-only). On the 0.5B's
+  1014-position decode arm, the floor alone has 10 top-1 flips at margin ≥ 0.5, which is all of the old
+  `max(2, n/100)` = 10. A 4090 had 12. The bound is now the floor's count plus 2 binomial SE (16 there), for the FP8
+  gate only; the order-only gates are unchanged. The difference starts in shared code: without any FP8 kernel, a 4090
+  and bella differ at 931 of 933 decode positions.
+
 ### Shared-prefix KV pages: groundwork, no behaviour change (#164)
 - **The paged KV pool counts who holds each page, and a prefix index can pin pages** (C1 + C2 of the shared-prefix
   design, [docs/design/shared-prefix-pages.md](docs/design/shared-prefix-pages.md)). Nothing maps, pins or indexes

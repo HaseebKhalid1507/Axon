@@ -82,7 +82,10 @@ pub const NUMERICS_VERSION_EXACT: u32 = 1;
 /// parts) bumps `NUMERICS_VERSION_EXACT`, which moves fast's tag as well,
 /// so it doesn't bump this one. The first fast kernel is a bump.
 /// 2: FP8 checkpoints' native kernels (fp8.cu, docs/design/fp8-weights.md).
-pub const NUMERICS_VERSION_FAST: u32 = 2;
+/// 3: their GEMM's e4m3 product step runs as two f16 mmas for any compile
+/// target below sm_120 (fp8.cu `mma_f8`, #190): new fast bits on sm_89, 90,
+/// 100; the sm_12x cubin is unchanged, but the counter is one for all.
+pub const NUMERICS_VERSION_FAST: u32 = 3;
 
 /// The tuple's format, the first line of `canonical`.
 const SCHEME: &str = "axon-identity/1";
@@ -819,18 +822,18 @@ mod tests {
         let f = base().with_numerics(Numerics::Fast);
         assert_eq!(
             f.canonical(),
-            "axon-identity/1\nnumerics=fast/1.2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=fast/1.3\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         assert_eq!(
             f.fingerprint(),
-            "fp_c9b871192100d614",
-            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767)"
+            "fp_1c52be76f68d4895",
+            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767, fast/1.2 fp_c9b871192100d614)"
         );
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
-        assert_eq!(f.json()["numerics"], "fast/1.2");
-        assert!(f.line().contains("numerics fast/1.2"), "{}", f.line());
+        assert_eq!(f.json()["numerics"], "fast/1.3");
+        assert!(f.line().contains("numerics fast/1.3"), "{}", f.line());
         // Back to exact: the same tuple as never fast.
         assert_eq!(f.with_numerics(Numerics::Exact), e);
         // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's

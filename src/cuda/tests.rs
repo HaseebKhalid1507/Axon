@@ -549,6 +549,47 @@ fn nvrtc_kernels_compile_for_sm90a() {
     }
 }
 
+/// fp8.cu's e4m3 product step by compile target (#190), NVRTC only, no
+/// GPU: the FP8 module (`KERNELS_F8`, fast, `F8_DEFINE`) as PTX for
+/// compute_89, 90, 100 and 120 (those this NVRTC has; 89 always). The
+/// e4m3 mma (m16n8k32) is in it from 120 on and nowhere below; below, the
+/// codes become f16 (`cvt.rn.f16x2.e4m3x2`, only `mma_f8`'s f16 path has
+/// it) for f16 mmas. So sm_90 (H100) and sm_100 take the f16 path, and the
+/// module compiles for each.
+#[test]
+fn nvrtc_fp8_product_step_by_target() {
+    let n = match ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let archs = ffi::nvrtc_archs(n).unwrap();
+    let want: Vec<i32> = [89, 90, 100, 120]
+        .into_iter()
+        .filter(|a| archs.contains(a))
+        .collect();
+    assert!(want.contains(&89), "NVRTC archs {archs:?}");
+    let mut base = super::mode_opts(&KERNEL_OPTS, crate::numerics::Numerics::Fast);
+    base.push(super::F8_DEFINE);
+    for a in want {
+        let t = Target::Ptx(a);
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(base.iter().map(|s| s.to_string()));
+        let ptx = compile(n, super::KERNELS_F8, &opts, t).unwrap_or_else(|e| panic!("{t}: {e}"));
+        let ptx = String::from_utf8_lossy(&ptx);
+        let e4m3 = ptx.contains("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32");
+        let to_f16 = ptx.contains("cvt.rn.f16x2.e4m3x2");
+        eprintln!(
+            "{t}: {} bytes of PTX, e4m3 mma {e4m3}, e4m3 -> f16 {to_f16}",
+            ptx.len()
+        );
+        assert_eq!(e4m3, a >= 120, "{t}: the e4m3 mma");
+        assert_eq!(to_f16, a < 120, "{t}: the f16 path");
+    }
+}
+
 #[test]
 fn gpu_target_choice() {
     let archs = [75, 80, 86, 87, 89, 90, 100, 103, 110, 120, 121];
