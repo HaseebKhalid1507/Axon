@@ -55,7 +55,9 @@ scale applied to each dot; weights read in place from the mmap. It is HF F32's t
 the graded gate's reference (§6 B), and exact on the CPU. Emulation (`model::fp8_cpu_qt`, types `F8S_TOK` /
 `F8S_G128`; `AXON_FP8_CPU_ACT=f32|e4m3-tok|e4m3-128`): activations round-trip through the Rust twin of D2's quantizer,
 the fast path's activation precision in the CPU's order. The fingerprint's `act` names it, and so does an emulating
-net's KV identity (`act`, #199), so a session isn't restored as bytes across the variable. The head stays F16: the
+net's KV identity (`act`, #199), so a session isn't restored as bytes across the variable. Both read it from the net
+(`Qwen2::fp8_qt`, the type its matrices were built as, #200), and a CPU/GPU split names its CPU layers' emulation too
+(§4). The head stays F16: the
 planned `AXON_FP8_CPU_HEAD=f16|q8` (the head through the Q8_0 converter, to split the KL into head vs GEMM, review
 SHOULD 3) was never built. Slow prefill (f32 FMA): not a product path.
 
@@ -82,6 +84,8 @@ Every FP8 launch calls `fast_launched()`; decode graphs count at capture (§6 B 
 |---|---|---|---|
 | `--numerics exact` (default) | Q8_0 at load, plain module: `weights=fp8-q8 act=q8 head=q8` | same | `weights=fp8-ref act=f32 head=f16` |
 | `--numerics fast` | native, F8 module: `weights=fp8-native act=e4m3-tok head=q8` | fp8-q8, plain module, FAST_NOTE | fp8-ref plus FAST_NOTE |
+A CPU/GPU split (`--gpu-layers`, either mode: it refuses the F8 module) is `weights=fp8-q8 (cpu layers fp8-ref)
+act=q8 head=q8`, and under D7's emulation `act=q8 (cpu layers e4m3-tok-emu)` (or `e4m3-128-emu`, #200).
 The `weights/act/head` fields appear **only for FP8 checkpoints**, so GGUF tuples gain nothing.
 `numerics::fast_kernels(net)` (CODE `numerics.rs:98`) is true only for fp8-native. `NUMERICS_VERSION_FAST` goes 1 → 2
 by the ADR's "a fast kernel bumps it": GGUF fast fingerprints change, their bits don't. (2 → 3 with §13's change
