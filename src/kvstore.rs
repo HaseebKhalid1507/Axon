@@ -169,6 +169,11 @@ impl<P> PageStore<P> {
         }
     }
 
+    /// The parent of the stored page `key` (None: not stored).
+    pub fn parent_of(&self, key: Key) -> Option<Key> {
+        self.map.get(&key).map(|e| e.parent)
+    }
+
     /// The device holders of `key` (0 if it isn't stored).
     pub fn gpu(&self, key: Key) -> u32 {
         self.map.get(&key).map_or(0, |e| e.gpu)

@@ -529,6 +529,10 @@ pub(super) struct Batch<'a, 't> {
     /// The KV RAM tier (`--cache-ram`, tier.rs; None: off, the default,
     /// and then nothing of it runs).
     tier: Option<PoolTier>,
+    /// The idle flush's last piece got nowhere (#170: no pinned page to
+    /// take, a key collision): it waits, as with no backlog, until the
+    /// batch steps, admits or the tier grows.
+    stalled: bool,
 }
 
 /// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
@@ -689,6 +693,7 @@ impl<'a, 't> Batch<'a, 't> {
             metrics: None,
             trace: StepTrace::from_env(),
             tier: None,
+            stalled: false,
         }
     }
 
@@ -723,8 +728,11 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(t) = self.tier.as_mut() else {
             return;
         };
-        match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
-            Ok(_) => t.t.truncate(s, keep / PAGE),
+        match t.write(self.net, &self.pool, s, &self.held[s]) {
+            Ok(_) => {
+                t.t.truncate(s, keep / PAGE);
+                t.check_slot(s, &self.held[s]);
+            }
             Err(e) => self.tier_failed("spill", &e),
         }
     }
@@ -743,22 +751,52 @@ impl<'a, 't> Batch<'a, 't> {
         super::tier::off(what, e, self.metrics.as_deref());
     }
 
-    /// The tier's write-behind: `bytes` of copies of the slots' unstored
-    /// pages (usize::MAX: all of them).
-    pub fn write_behind(&mut self, bytes: usize) {
+    /// The tier's write-behind: up to `bytes` of copies of the slots'
+    /// unstored pages into its free room, slots in reclaim order (idle ones
+    /// least recently used first, so the next to give its rows up first,
+    /// then busy ones). Its progress (`PoolTier::write_some`).
+    pub fn write_behind(&mut self, bytes: usize) -> usize {
         let Some(t) = self.tier.as_mut() else {
-            return;
+            return 0;
         };
-        if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
-            self.tier_failed("write-behind", &e);
+        let mut order: Vec<usize> = (0..self.slots).collect();
+        order.sort_by_key(|&s| (self.busy[s], self.used[s]));
+        match t.write_some(self.net, &self.pool, &self.held, &order, bytes) {
+            Ok(n) => {
+                for s in 0..self.slots {
+                    t.check_slot(s, &self.held[s]);
+                }
+                n
+            }
+            Err(e) => {
+                self.tier_failed("write-behind", &e);
+                0
+            }
+        }
+    }
+
+    /// Whether the idle flush has a piece to run (#170): the tier's backlog
+    /// (`PoolTier::backlog`), unless its last piece got nowhere.
+    pub fn backlog(&self) -> bool {
+        !self.stalled && self.tier.as_ref().is_some_and(|t| t.backlog(&self.held))
+    }
+
+    /// One piece of the idle flush (#170): up to `bytes` of the write-behind
+    /// (`IDLE_BYTES`). One that got nowhere stalls the flush (`backlog`).
+    pub fn flush_idle(&mut self, bytes: usize) {
+        if self.write_behind(bytes) == 0 {
+            self.stalled = true;
         }
     }
 
     /// The engine loop's tick: the tier adopts the slabs its allocator
-    /// thread has pinned (and shows them in /metrics).
+    /// thread has pinned (and shows them in /metrics); a stalled idle flush
+    /// tries again if it grew.
     pub fn poll_tier(&mut self) {
-        if let Some(t) = self.tier.as_mut() {
-            t.poll(self.net);
+        if let Some(t) = self.tier.as_mut()
+            && t.poll(self.net)
+        {
+            self.stalled = false;
         }
     }
 
@@ -809,6 +847,9 @@ impl<'a, 't> Batch<'a, 't> {
             return Ok(have);
         }
         self.held[slot] = prompt[..to * PAGE].to_vec();
+        if let Some(t) = &self.tier {
+            t.check_slot(slot, &self.held[slot]);
+        }
         Ok(to * PAGE)
     }
 
@@ -1239,8 +1280,10 @@ impl<'a, 't> Batch<'a, 't> {
         // Pages past its rows (reserved for what it didn't generate) free.
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
-        // The batch is idle: the tier takes the request's pages now.
-        self.spill(self.solo, usize::MAX);
+        // Its pages go to the tier as the batch's do: the idle flush copies
+        // them while there is room (#170), a spill when the slot gives its
+        // rows up.
+        self.stalled = false;
         Ok(())
     }
 
@@ -1293,13 +1336,11 @@ impl<'a, 't> Batch<'a, 't> {
     /// line about it once it did any work.
     pub fn step(&mut self) -> Result<(), String> {
         self.step_traced()?;
-        // The tier's write-behind: a budget while requests run, the rest
-        // once none do.
-        let bytes = match self.idle() {
-            true => usize::MAX,
-            false => super::tier::STEP_BYTES,
-        };
-        self.write_behind(bytes);
+        // The tier's write-behind: a budget a step (an idle batch's backlog
+        // goes in pieces, between which the engine loop looks for a new
+        // request: `flush_idle`, #170).
+        self.stalled = false;
+        self.write_behind(super::tier::STEP_BYTES);
         Ok(())
     }
 

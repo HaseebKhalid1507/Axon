@@ -461,11 +461,13 @@ turns PROVISIONAL → FINAL, or not, on 139c's rows, and the PR body quotes it.
   `end_solo`'s `spill(solo, usize::MAX)`, which §2.3 deletes. With the 64 MiB tier, the idle flush then copies B's
   pages as `Op::WriteBehind`, and no later spill in the test has an unstored page left to copy. Turn 1 gets no off
   line and `hit` is not `Spill`, so the test fails as written, for both the paged and the plain pool.
-- **Retarget (checkpoint 2):** the `Spill` case runs with a tier that one conversation fills. With no free room
-  there is no write-behind and no idle flush, so the next spill of a slot holding unstored whole pages copies
-  (evicting), and the fault is armed at that spill. It is the first `lend_solo` or `admit` that takes B's slot; the
-  checkpoint-2 commit names the turn from the debug line, and the doc comment changes with it. The other pool faults
-  (`Restore` turn 3, `WriteBehind` and `Restore` turn 6) don't depend on `end_solo` and stay.
+- **Retarget (checkpoint 2, as built):** the `Spill` case runs with a 2-page tier (`TierFault::pages`), which A's
+  first turn fills through the idle flush. With no free room there is no write-behind and no idle flush, so B's and
+  C's pages stay unstored. Turn 2 (C, alone) takes A's slot, the least recently used: its spill of A's third page
+  finds no room, because `room` holds the parent and A's first page isn't a leaf. Turn 3 (A's turn 2, alone) takes
+  B's slot. `lend_solo` spills before it looks anything up, so A's pages (class 1 since turn 2's truncate) aren't
+  held, and B's first page evicts A's leaf. The fault is armed for that copy: `Op::Spill`, turn 3, n 1. The other
+  pool faults (`Restore` turn 3, `WriteBehind` and `Restore` turn 6) don't depend on `end_solo` and stay.
 - `serve_cuda_cache_ram_off_in_reclaim` and the CPU case pass under the new rules (shady walked steps 1–5). V is
   unstored because the tier is full, not because leaves are held, and Q's leaf still goes. Their comments are
   updated to say why.
