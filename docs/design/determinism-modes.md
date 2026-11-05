@@ -412,7 +412,8 @@ above, and why:
   from reading `fast` as faster today.
 - **M1: the counters are tied, structurally.** §4.3's rule "a change to a shared kernel bumps both" leaned on whoever
   bumped `NUMERICS_VERSION_EXACT` remembering the second counter. Instead fast's tag carries exact's counter:
-  `numerics=fast/<exact>.<fast>`, `fast/1.1` today. Code both modes run (every kernel today, the request-to-text code)
+  `numerics=fast/<exact>.<fast>`, `fast/1.1` at the time (`fast/1.2` with #177's FP8 kernels, `fast/1.3` since
+  #190). Code both modes run (every kernel today, the request-to-text code)
   bumps `NUMERICS_VERSION_EXACT` alone and moves both modes' fingerprints; `NUMERICS_VERSION_FAST` counts fast-only
   changes (a fast kernel, its routing). Free now, since no client holds a fast fingerprint yet.
 - **M1: the mode is a `Backend`'s** (`BackendOptions::numerics`, public; `axon::Numerics`, non-exhaustive), and the

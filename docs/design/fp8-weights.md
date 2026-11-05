@@ -239,7 +239,7 @@ ran them.
   |---|---|---|
   | e4m3 chain (as of main) | 173× / 114× / 36× | 0.062× / 0.078× / 0.050× |
   | accumulator moved into f32 every 4 mmas (128 K: the planned `AXON_F8_PROMOTE`) | 173× / 32× / 4.0× | 0.062× / 0.018× / 0.005× |
-  | accumulator moved into f32 after every mma | 68× / 13× / 1.7× | 0.039× / 0.023× / 0.006× |
+  | accumulator moved into f32 after every mma | 67.6× / 13× / 1.7× | 0.039× / 0.023× / 0.006× |
   | the codes as f16 (exact: e4m3 ⊂ f16), two `m16n8k16` f16 → f32 mmas per k32 step | 0.124× / 0.176× / 0.131× | 0.089× / 0.120× / 0.095× |
 
   No promotion schedule can fix a cut that happens inside the instruction.
