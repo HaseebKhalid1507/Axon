@@ -443,7 +443,9 @@ above, and why:
   fast == exact to bits only while the backend has no fast kernel, then delegates them to these arms: fast mode's
   promise is tolerance on every path (determinism.md's table), not "a fixed reply on a fixed placement".
 - **M5: exact sessions are unchanged.** A fast-mode backend adds `numerics_mode` to its kvsave identity; exact adds
-  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact.
+  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact. A net
+  running an FP8 checkpoint on fp8.cu also adds `weights: fp8-native`: without it, its sessions and those of the
+  same checkpoint's Q8_0 form under `AXON_FP8_NATIVE=0` had one identity (#196, #198).
 
 ---
 

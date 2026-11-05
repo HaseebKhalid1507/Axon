@@ -6,6 +6,17 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Sessions: an FP8 checkpoint's fast-mode session records whether fp8.cu made it (#198, part of #196)
+- **Fix: a fast-mode `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
+  `AXON_FP8_NATIVE`.** With fp8.cu (fast mode, sm_89+) and with `AXON_FP8_NATIVE=0` (the Q8_0 form) the cache rows
+  differ, but the KV identity was the same, so a session saved one way loaded its bytes the other way and the
+  conversation went on from rows a fresh prefill wouldn't make. The identity of a net running fp8.cu now has
+  `weights: fp8-native`, and a session saved one way is prefilled again the other way.
+- **Fast-mode FP8 sessions saved with fp8.cu before this restore once as tokens** (prefilled again). Nothing else
+  changes: dense GGUF models, either mode, and FP8 checkpoints in exact mode or under `AXON_FP8_NATIVE=0` keep their
+  identities and their saved sessions. No output bit changes (the md5 set is unchanged).
+- #196 stays open for the full fix: the KV identity should hash the source and options of the module the net runs.
+
 ### Tests: FP8 test skips show in a captured log; `AXON_FP8_NATIVE=0` fails the FP8 engine tests (#197)
 - **A skipped FP8 test now says so in a normal test log, not only under `--nocapture`.** The FP8 checkpoint's skip
   (missing, with `AXON_SKIP_FP8_MODEL_TESTS` or `AXON_SKIP_MODEL_TESTS` set) and the FP8 tests' skip on a GPU below

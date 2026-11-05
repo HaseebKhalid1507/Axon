@@ -423,7 +423,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
         let num = crate::cuda::numerics_tag(self.gpu(), self.fast()).ok()?;
         let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
-        Some(json!({
+        let mut id = json!({
             "backend": "cuda",
             "class": class,
             "numerics": format!("{num} host {NUMERICS}"),
@@ -433,7 +433,17 @@ impl<'g> KvIo for CudaQwen2<'g> {
             "kv": self.cache_kv_name(c),
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
             "row_bytes": self.cache_row_bytes(c),
-        }))
+        });
+        // An FP8 checkpoint's matrices on fp8.cu (fast mode, sm_89+, unless
+        // AXON_FP8_NATIVE=0) make other rows than its Q8_0 form, and nothing
+        // above tells the two apart: `numerics_tag` hashes KERNELS whichever
+        // module loaded (#196). So a native net says so, and a session saved
+        // by one restores into the other as tokens. Only a native net: every
+        // other identity, and the sessions saved under it, stay as they were.
+        if self.f8_native() {
+            id["weights"] = json!("fp8-native");
+        }
+        Some(id)
     }
 
     fn kv_save(
