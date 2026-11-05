@@ -1,0 +1,131 @@
+[axon-run 18:24:31] submitted 1105-182431-7a79 by /home/haseeb/.cache/axon-kvgpu: /home/haseeb/.cache/axon-kvgpu/bin/axon-test-dbg-aa37903 kvsave:: chat::tests:: identity:: serve::tier cache_ram safetensors::tests::tiny_fp8 cuda::tests::numerics_tag --nocapture
+[axon-run 18:30:27] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 18:30:27] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 18:30:27] scope axon-job-1105-182431-7a79-1793921427.scope in app-axonjobs.slice: MemoryMax 21163 MB, MemoryHigh 19046 MB, no swap, oomd pressure kill 80% (claim 13426 MB): an OOM here kills only this job
+[axon-run 18:30:27] job 1105-182431-7a79 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-182431-7a79-1793921427 --slice=app-axonjobs.slice -p MemoryMax=21163M -p MemoryHigh=19046M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvgpu/bin/axon-test-dbg-aa37903 kvsave:: chat::tests:: identity:: serve::tier cache_ram safetensors::tests::tiny_fp8 cuda::tests::numerics_tag --nocapture --test-threads 4
+axon-q 18:30:27 start slot 16-23: /home/haseeb/.cache/axon-kvgpu/bin/axon-test-dbg-aa37903 kvsave:: chat::tests:: identity:: serve::tier cache_ram safetensors::tests::tiny_fp8 cuda::tests::numerics_tag --nocapture --test-threads 4
+
+running 71 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::fp8_session_cpu_act_child ... ignored, run by fp8_session_across_cpu_act
+test chat::tests::fp8_session_q8_child ... ignored, run by gpu_fp8_session_across_native
+test chat::tests::framing_matches_template ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::cancel_and_message_too_long ... ok
+full_context (ctx, forget_to, turns that forgot, prefilled): [(320, 0.0, 5, 1528), (320, 0.5, 2, 508)]
+test chat::tests::full_context_drops_oldest_cuda ... ok
+FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled again (it was made under numerics "kernels a25d57670454402fe19cef6e637008ab sm_120 hopper true host 1" (now "kernels 173bf0e309a6683e43e7dbc157cc99cc sm_120 hopper true host 1"), weights - (now "fp8-native")); each loads back as bytes; identities differ in numerics and weights only; rows of the same tokens, the file's vs the restore's: native -> Q8_0 aed614569e88f277 vs 9837be048e390780, Q8_0 -> native 9837be048e390780 vs d910f52f7baa00ff
+test chat::tests::gpu_fp8_session_across_native ... ok
+test chat::tests::gpu_session_module_hash ... ok
+split counts 256 / 2, 149 positions, there -> here: prefilled again (it was made under gpu "sm_120, split attention 2" (now "sm_120, split attention 256"))
+split counts 256 / 2, 149 positions, here -> there: prefilled again (it was made under gpu "sm_120, split attention 256" (now "sm_120, split attention 2"))
+test chat::tests::gpu_session_split_count ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+turn 0: 1228 tokens fed from 0 in [0..614, 614..1228] (46 SMs)
+turn 1: 16 tokens fed from 1243 in [0..16] (46 SMs)
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... ok
+test chat::tests::llama3_framing_and_replies ... ok
+FP8 CPU sessions across AXON_FP8_CPU_ACT: f32 -> e4m3-tok and e4m3-tok -> f32 prefilled again (it was made under act "e4m3-tok-emu" (now -)); each loads back as bytes; identities differ in act only; rows of the same tokens, the file's vs the restore's: f32 -> e4m3-tok 93821e51db64172f vs 0fa479354b67ba0c, e4m3-tok -> f32 0fa479354b67ba0c vs 93821e51db64172f
+test chat::tests::fp8_session_across_cpu_act ... ok
+test chat::tests::full_context_drops_oldest has been running for over 60 seconds
+test chat::tests::mistral_framing_and_replies has been running for over 60 seconds
+test chat::tests::moe_gpu_turns_match_fresh_prefill has been running for over 60 seconds
+test chat::tests::moe_turns_match_fresh_prefill has been running for over 60 seconds
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::session_across_numerics_modes ... ok
+test chat::tests::qwen3_thinking_turns has been running for over 60 seconds
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_hostile_state ... ok
+test chat::tests::session_continues_cpu ... ok
+test chat::tests::qwen3_thinking_turns ... ok
+test chat::tests::set_system_reuses_the_shared_prefix ... ok
+test chat::tests::turns_match_fresh_prefill_cuda ... ok
+test chat::tests::turns_match_fresh_prefill ... ok
+test chat::tests::user_text_cannot_forge_turns ... ok
+test cuda::tests::numerics_tag_hashes_the_module ... ok
+test identity::tests::fields ... ok
+test identity::tests::fingerprint_stable_and_sensitive ... ok
+test identity::tests::model_digest_golden ... ok
+test identity::tests::model_digest_sees_the_file ... ok
+test identity::tests::numerics_mode_in_the_fingerprint ... ok
+0.5B cpu rows vs cpu (chat histories): top-1 258/264 (97.7%), KL mean 3.60e-3 max 5.29e-2 (> 0.5: []), max |dlogit| 1.652 (top-20 1.304), flip margins [0.12405586, 0.09652138, 0.0053977966, 0.005027771, 0.06568527, 0.005552292]
+0.5B streamed chat cache vs fresh streamed prefill: top-1 260/264 (98.5%), KL mean 3.21e-3 max 6.01e-2 (> 0.5: []), max |dlogit| 1.680 (top-20 1.361), flip margins [0.20555687, 0.07590103, 0.053788185, 0.038232803]
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+split:       gpu layers 12/24, 0.28 GiB on GPU, prefill streams the CPU layers (batches >= 32)
+test identity::tests::of_split_and_pipeline ... ok
+test identity::tests::of_split_attention_gemma3 ... ok
+test identity::tests::predicted_is_of ... ok
+note: not streaming the CPU layers for prefill: layer 0 q: type F8S can't be streamed
+split:       gpu layers 12/24, 0.34 GiB on GPU
+note: not streaming the CPU layers for prefill: layer 0 q: type F8S_TOK can't be streamed
+split:       gpu layers 12/24, 0.34 GiB on GPU
+test identity::tests::rope_scaling_in_the_fingerprint ... ok
+test identity::tests::sha256_vectors ... ok
+test kvsave::tests::canonical_names_one_session ... ok
+test kvsave::tests::file_appends_rewrites_and_checks ... ok
+test kvsave::tests::gpu_extra_names_split_and_code ... ok
+test kvsave::tests::hasher_streams ... ok
+test kvsave::tests::hostile_headers ... ok
+test kvsave::tests::lock_refuses_a_second_holder ... ok
+test kvsave::tests::not_a_session_file ... ok
+test kvsave::tests::orphan_records_never_load ... ok
+test kvsave::tests::same_length_foreign_rewrite_never_restores_wrong_state ... ok
+test kvsave::tests::second_writer_then_save_rewrites ... ok
+test kvsave::tests::segments_split_at_pages ... ok
+test kvsave::tests::torn_tail_then_new_process_saves_on ... ok
+test identity::tests::of_fp8_split_act_is_the_nets ... ok
+test safetensors::tests::tiny_fp8_fingerprint_act_is_the_nets ... ok
+test safetensors::tests::tiny_fp8_kv_ident_names_cpu_act ... ok
+test safetensors::tests::tiny_fp8_checkpoint_is_its_exact_dequant ... ok
+test safetensors::tests::tiny_fp8_predicted_is_of ... ok
+test serve::tests::serve_cache_ram_refused_past_ram ... ok
+test chat::tests::turns_match_fresh_prefill_hybrid has been running for over 60 seconds
+test chat::tests::turns_match_fresh_prefill_hybrid ... ok
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048
+test serve::tests::serve_cpu_cache_ram ... ok
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+test serve::tests::serve_cuda_cache_ram ... ok
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 640 tokens: the KV pages that fit in GPU memory hold 640 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... ok
+test serve::tier::tests::cache_ram_parses ... ok
+test serve::tier::tests::cache_ram_sizes ... ok
+test serve::tier::tests::keys_hold_the_leaf ... ok
+test serve::tier::tests::pages_read_in_order ... ok
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+full_context (ctx, forget_to, turns that forgot, prefilled): [(160, 0.0, 10, 1194), (160, 0.5, 5, 484), (320, 0.0, 5, 1528), (320, 0.5, 2, 508), (320, 0.25, 2, 391)]
+test chat::tests::full_context_drops_oldest ... ok
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: context 768 tokens: the KV pages that fit in GPU memory hold 768 tokens, of the model's 2048 (--kv q8 holds twice as many)
+test serve::tests::serve_cpu_cache_ram_off ... ok
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: spill: an injected KV RAM tier fault (a test's): a copy for a spill; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+axon serve: --cache-ram: write-behind: an injected KV RAM tier fault (a test's): a copy for a write-behind; the KV RAM tier is off from here
+axon serve: --cache-ram: restore: an injected KV RAM tier fault (a test's): a copy for a restore; the KV RAM tier is off from here
+test serve::tests::serve_cuda_cache_ram_off ... ok
+
+test result: ok. 67 passed; 0 failed; 4 ignored; 0 measured; 792 filtered out; finished in 300.71s
+
+[axon-run 18:35:28] exit 0 after 300.9s (host bella)

@@ -1,0 +1,43 @@
+[axon-run 18:24:59] submitted 1105-182459-2643 by /home/haseeb/.cache/axon-kvgpu: /usr/bin/bash xgpu.sh ./axon-d1cc410 ./axon-aa37903 xgpuout-aa37903
+[axon-run 18:35:29] scope axon-job-1105-182459-2643-1793921729.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 18:35:29] job 1105-182459-2643 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-182459-2643-1793921729 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash xgpu.sh ./axon-d1cc410 ./axon-aa37903 xgpuout-aa37903
+axon-q 18:35:29 start slot 16-23: /usr/bin/bash xgpu.sh ./axon-d1cc410 ./axon-aa37903 xgpuout-aa37903
+ok	qwen2.5-0.5b-q4_k_m-cuda-bb	want bytes	got bytes	bb	reply ed762c059760	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cuda-bb.ses: 58 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cuda-cb	want bytes	got bytes	cb	reply ed762c059760	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cuda-cb.ses: 58 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cuda-cc	want bytes	got bytes	cc	reply 602a6eb75573	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cuda-cc.ses: 99 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cuda-bc	want bytes	got bytes	bc	reply 602a6eb75573	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cuda-bc.ses: 99 positions loaded from the file)
+SAME qwen2.5-0.5b-q4_k_m-cuda bb = cb
+SAME qwen2.5-0.5b-q4_k_m-cuda cc = bc
+ok	qwen2.5-0.5b-q4_k_m-cpu-bb	want bytes	got bytes	bb	reply 996d326d9fcd	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cpu-bb.ses: 58 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cpu-cb	want bytes	got bytes	cb	reply 996d326d9fcd	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cpu-cb.ses: 58 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cpu-cc	want bytes	got bytes	cc	reply 66533436dd8b	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cpu-cc.ses: 99 positions loaded from the file)
+ok	qwen2.5-0.5b-q4_k_m-cpu-bc	want bytes	got bytes	bc	reply 66533436dd8b	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/qwen2.5-0.5b-q4_k_m-cpu-bc.ses: 99 positions loaded from the file)
+SAME qwen2.5-0.5b-q4_k_m-cpu bb = cb
+SAME qwen2.5-0.5b-q4_k_m-cpu cc = bc
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cuda-bb	want bytes	got bytes	bb	reply 8e69d67823ff	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cuda-bb.ses: 64 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cuda-cb	want bytes	got bytes	cb	reply 8e69d67823ff	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cuda-cb.ses: 64 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cuda-cc	want bytes	got bytes	cc	reply 92b99e61360f	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cuda-cc.ses: 105 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cuda-bc	want bytes	got bytes	bc	reply 92b99e61360f	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cuda-bc.ses: 105 positions loaded from the file)
+SAME Llama-3.2-1B-Instruct-Q4_K_M-cuda bb = cb
+SAME Llama-3.2-1B-Instruct-Q4_K_M-cuda cc = bc
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cpu-bb	want bytes	got bytes	bb	reply 8e69d67823ff	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cpu-bb.ses: 64 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cpu-cb	want bytes	got bytes	cb	reply 8e69d67823ff	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cpu-cb.ses: 64 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cpu-cc	want bytes	got bytes	cc	reply 92b99e61360f	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cpu-cc.ses: 105 positions loaded from the file)
+ok	Llama-3.2-1B-Instruct-Q4_K_M-cpu-bc	want bytes	got bytes	bc	reply 92b99e61360f	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/Llama-3.2-1B-Instruct-Q4_K_M-cpu-bc.ses: 105 positions loaded from the file)
+SAME Llama-3.2-1B-Instruct-Q4_K_M-cpu bb = cb
+SAME Llama-3.2-1B-Instruct-Q4_K_M-cpu cc = bc
+ok	google_gemma-3-1b-it-Q4_K_M-cuda-bb	want bytes	got bytes	bb	reply 76471360f849	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cuda-bb.ses: 38 positions loaded from the file)
+ok	google_gemma-3-1b-it-Q4_K_M-cuda-cb	want tokens	got tokens	cb	reply 76471360f849	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cuda-cb.ses: 38 positions prefilled again (it was made under gpu - (now "sm_120, split attention 256")))
+ok	google_gemma-3-1b-it-Q4_K_M-cuda-cc	want bytes	got bytes	cc	reply 38f03842c9ca	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cuda-cc.ses: 79 positions loaded from the file)
+ok	google_gemma-3-1b-it-Q4_K_M-cuda-bc	want tokens	got tokens	bc	reply 38f03842c9ca	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cuda-bc.ses: 79 positions prefilled again (it was made under gpu "sm_120, split attention 256" (now -)))
+SAME google_gemma-3-1b-it-Q4_K_M-cuda bb = cb
+SAME google_gemma-3-1b-it-Q4_K_M-cuda cc = bc
+ok	google_gemma-3-1b-it-Q4_K_M-cpu-bb	want bytes	got bytes	bb	reply bace5a809014	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cpu-bb.ses: 38 positions loaded from the file)
+ok	google_gemma-3-1b-it-Q4_K_M-cpu-cb	want bytes	got bytes	cb	reply bace5a809014	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cpu-cb.ses: 38 positions loaded from the file)
+ok	google_gemma-3-1b-it-Q4_K_M-cpu-cc	want bytes	got bytes	cc	reply 85e26a3d1d70	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cpu-cc.ses: 79 positions loaded from the file)
+ok	google_gemma-3-1b-it-Q4_K_M-cpu-bc	want bytes	got bytes	bc	reply 85e26a3d1d70	(session /home/haseeb/.cache/axon-podjob/xgpu-30fbef6a1681/google_gemma-3-1b-it-Q4_K_M-cpu-bc.ses: 79 positions loaded from the file)
+SAME google_gemma-3-1b-it-Q4_K_M-cpu bb = cb
+SAME google_gemma-3-1b-it-Q4_K_M-cpu cc = bc
+--- cand's turn-2 reply, The Danube River is the longest river in Europe, stretching over 6, 000 kilometers (3, 
+XGPU: 0 problem(s)
+[axon-run 18:35:45] exit 0 after 16.4s (host bella)
