@@ -348,6 +348,8 @@ pub(crate) enum Top1 {
     /// 0.5 at most max(1, 2x the floor's count over the same positions),
     /// the KL mean's 2x principle (lead ruling after the first 1014-position
     /// decode arm: 5 above 0.5, max 0.885, the floor 5, max 0.634).
+    /// And its count of top-1 flips at margin >= 0.5 (`wide_flips`): at
+    /// most max(2, n / 100, the floor's count + 2 binomial SE), #192.
     Binomial,
 }
 
@@ -660,8 +662,27 @@ fn wide_flips_rule() {
         msg.contains("17 >= 0.5 (allowed 16, from the floor's 10; max(2, n/100) 10)"),
         "{msg}"
     );
-    assert!(run(10, 10, Top1::Points(90)).is_ok() && run(11, 10, Top1::Points(90)).is_err());
-    assert!(run(10, 0, Top1::Binomial).is_ok() && run(11, 0, Top1::Binomial).is_err());
+    // The failures below are the wide-flip bound's (its message), not
+    // another bound's.
+    let wide_err = |g: usize, f: usize, r: Top1, want: &str| {
+        let p = run(g, f, r).expect_err(want);
+        let msg = p.downcast_ref::<String>().map(String::as_str).unwrap_or("");
+        assert!(msg.contains(want), "{msg}");
+    };
+    assert!(run(10, 10, Top1::Points(90)).is_ok());
+    wide_err(
+        11,
+        10,
+        Top1::Points(90),
+        "11 >= 0.5 (allowed 10; max(2, n/100) 10)",
+    );
+    assert!(run(10, 0, Top1::Binomial).is_ok());
+    wide_err(
+        11,
+        0,
+        Top1::Binomial,
+        "11 >= 0.5 (allowed 10, from the floor's 0; max(2, n/100) 10)",
+    );
 }
 
 /// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256
