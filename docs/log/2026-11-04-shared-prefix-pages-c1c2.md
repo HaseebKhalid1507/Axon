@@ -78,13 +78,40 @@ have restored any).
 
 | gate | job | result |
 |---|---|---|
-| touched modules' tests (194), release | 1104-175445-a26e | pending |
-| same, debug assertions + overflow checks | 1104-175446-5782 | pending |
-| md5 `gen` vs main | 1104-175446-fe6f | pending |
-| serve identity vs main, two turns, restore counts | 1104-175447-f4e7 | pending |
-| serve timing A/B, `--timing bella` | 1104-175448-a7de | pending |
+| touched modules' tests (194), release | 1104-175445-a26e | PASS 185 / 0 failed / 9 ignored |
+| same, debug assertions + overflow checks | 1104-175446-5782 | PASS 185 / 0 failed / 9 ignored |
+| md5 `gen` vs main | 1104-175446-fe6f | PASS 33 / 33 identical, 0 nonzero rc |
+| serve identity vs main, two turns, restore counts | 1104-175447-f4e7 | PASS 16 / 16 runs print main's C=1 digest (1.5B `8dd1d2cae1681575`, 7B `9eb689790183d2ff`); every `--cache-ram` run restored (1.5B main 878 / cand 880 tokens, 7B 880 / 876; 14 hits, 33 pages written each) |
+| serve timing A/B, round 1 (3 rounds), RTX 4090 pod | 1104-175448-a7de | C=1, C=8 pass; C=16 misses on overlap (tok/s −0.36 %, ITL p50 +0.36 %, ranges disjoint): rerun |
+| serve timing A/B, rerun (10 rounds), same pod | 1104-183406-47bd | PASS, every cell (FOREIGN_GPU max 0 %). C=16 tok/s 1534.20 [1527.80–1539.60] vs main 1532.55 [1528.40–1543.30] (+0.11 %), ITL p50 8.27 vs 8.27, ranges overlapping; C=1 and C=8 tok/s and ITL p50 within 0.11 %; C=8 TTFT p50 +4.99 % (ranges overlap) |
+| A/A control (main vs main, 10 rounds), same pod | 1104-183510-8351 | main vs main, every cell within the rule. C=16 tok/s 1534.10 [1519.20–1537.00] vs 1534.95 [1532.80–1537.90], ITL p50 8.27 vs 8.25; C=1 TTFT p50 −3.03 % |
 | host tests `pages::` + `prefix::` | local | 14 / 0 / 0 |
 | clippy (debug and release cfgs), rustfmt | local | clean |
+| CI (`check`) at `64f7660` / `5a68e4a` | runs 41929354749 / 41929482616 | PASS / PASS |
+
+Logs: [sharekv-64f7660-gates](https://github.com/HaseebKhalid1507/Axon/pull/164#issuecomment-6644863023),
+[sharekv-64f7660-timing](https://github.com/HaseebKhalid1507/Axon/pull/164#issuecomment-6645130290),
+[sharekv-64f7660-timing-r2](https://github.com/HaseebKhalid1507/Axon/pull/164#issuecomment-6645842192) (47bd, 8351).
+
+- The digests differ from round 1's because the workload does (two turns). `RESTORE … restored_pages=` in the
+  serve gate's log is the script's restored tokens / 64, rounded down, not a counter. Restored tokens vary run to run
+  (876–880 for the same 14 hits: write-behind depends on timing), so the gate checks > 0, never equality with main.
+- **The timing A/B ran on a 4090, not on bella.** It was submitted `--timing bella`, waited 24 min behind desktop GPU
+  load, and the foreman rerouted it to a RunPod secure 4090 (`pod1`: driver 595.91.07, CUDA / NVRTC 13.2, EPYC 7763,
+  exclusive, FOREIGN_GPU max 0 %). The A/B is relative and interleaved on one card, so it stands; its absolute
+  numbers aren't bella's. Acceptance (shady's, stated before the run): per cell, cand/main of agg tok/s and ITL p50
+  in [0.98, 1.02] and the [min–max] ranges overlapping; ITL p99 and TTFT p50 overlapping or within ±5 %; a miss is
+  rerun once on the same pod. The rerun (`servetime-r2.sh`) runs 10 rounds, starts each binary once untimed first
+  (round 0: NVRTC compiles before any timed round; the pod's own kernel cache can't be pre-warmed for it, as the
+  script sets `XDG_CACHE_HOME` to its job directory) and prints every run. The A/A control is the same script with
+  main on both sides: the spread between server starts of one binary.
+- **Timing verdict: no measurable cost.** The rerun passes every cell. The A/A control puts round 1's C=16 miss
+  inside one binary's own spread between server starts: round 1's candidate range at C=16, tok/s 1520.60–1536.90 and
+  ITL p50 8.26–8.27, lies within main's A/A range alone (1519.20–1537.00, 8.25–8.28). It was round 1's main that ran
+  high (1539.40 median, against 1532.55 and 1534.10 / 1534.95 for main in the rerun and both A/A legs).
+- Review round 2 (shady, 8.5/10 SHIP-AFTER-FIXES at `5a68e4a`): its MUSTs were this timing gate (met by 47bd, with
+  the A/A 8351) and a body and log behind their results (this entry, and the PR body). No issue covers C1 + C2 on
+  their own; the foreman waived the one-issue-per-PR rule for this split.
 
 Not covered by the serve gate: an undersized pool (reclaim, a short `make_room`, victim, preempt). Its pool is
 512 pages = 8 × 4096, a full fit, and the CLI has no pool-size knob (`Opts::kv_pages` is test-only); the suites'
