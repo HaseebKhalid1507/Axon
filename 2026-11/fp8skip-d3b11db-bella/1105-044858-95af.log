@@ -1,0 +1,15 @@
+[axon-run 04:48:58] submitted 1105-044858-95af by /home/haseeb/.cache/axon-fp8ckpt: /usr/bin/bash zeroskip.sh ./axon-test-818cc91 ./axon-test-d3b11db ./axon-test-dbg-d3b11db
+[axon-run 06:03:00] scope axon-job-1105-044858-95af-1793876580.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 06:03:00] job 1105-044858-95af -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-044858-95af-1793876580 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash zeroskip.sh ./axon-test-818cc91 ./axon-test-d3b11db ./axon-test-dbg-d3b11db
+axon-q 06:03:00 waiting: stagger
+axon-q 06:03:17 start slot 16-23: /usr/bin/bash zeroskip.sh ./axon-test-818cc91 ./axon-test-d3b11db ./axon-test-dbg-d3b11db
+== ./axon-test-818cc91 testutil:: (captured): rc=0 skip-lines=2 | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 843 filtered out; finished in 0.66s
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8ckpt/tests/fixtures/no-fp8-checkpoint-here is not present and AXON_SKIP_MODEL_TESTS is set (testutil::fp8_checkpoint_missing_skips_only_when_asked)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8ckpt/tests/fixtures/no-fp8-checkpoint-here is not present and AXON_SKIP_FP8_MODEL_TESTS is set (testutil::fp8_checkpoint_missing_skips_only_when_asked)
+PROOF before: M1 reproduced, 2 fake skip lines from a test that skipped nothing
+== ./axon-test-d3b11db testutil:: (captured): rc=0 skip-lines=0 | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 843 filtered out; finished in 0.71s
+PROOF cand: testutil:: passes with zero skip lines
+== ./axon-test-dbg-d3b11db testutil:: (captured): rc=0 skip-lines=0 | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 843 filtered out; finished in 0.69s
+PROOF cand: testutil:: passes with zero skip lines
+ZERO SKIP LINES: AS INTENDED
+[axon-run 06:03:19] exit 0 after 18.4s (host bella)
