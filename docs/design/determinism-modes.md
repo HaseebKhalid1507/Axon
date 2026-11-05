@@ -445,7 +445,9 @@ above, and why:
 - **M5: exact sessions are unchanged.** A fast-mode backend adds `numerics_mode` to its kvsave identity; exact adds
   nothing, so session files saved before the modes still restore as bytes. Draft models always run exact. A net
   running an FP8 checkpoint on fp8.cu also adds `weights: fp8-native`: without it, its sessions and those of the
-  same checkpoint's Q8_0 form under `AXON_FP8_NATIVE=0` had one identity (#196, #198).
+  same checkpoint's Q8_0 form under `AXON_FP8_NATIVE=0` had one identity (#196, #198). On the CPU, a net running an
+  FP8 checkpoint under an `AXON_FP8_CPU_ACT` emulation adds `act` (`e4m3-tok-emu`, `e4m3-128-emu`) the same way
+  (#199): f32 activations, the default, add nothing.
 
 ---
 

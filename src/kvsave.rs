@@ -358,14 +358,25 @@ impl KvIo for Qwen2<'_> {
         }
         let (layers, kvd, hd) = self.kv_shape();
         let (name, size) = c.elem();
-        Some(json!({
+        let mut id = json!({
             "backend": "cpu",
             "class": cpu_class(),
             "numerics": format!("cpu {NUMERICS}"),
             "kv": name,
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
             "row_bytes": 2 * layers * kvd * size,
-        }))
+        });
+        // AXON_FP8_CPU_ACT's emulations round an FP8 checkpoint's
+        // activations through e4m3 before its matrices: other rows than the
+        // default f32 activations make, and nothing above tells the two
+        // apart (#196). So an emulating net names them as the fingerprint
+        // does (`act`), and a session saved by one restores into the other
+        // as tokens. Only an emulating net: every other identity, and the
+        // sessions saved under it, stay as they were.
+        if let Some(q) = self.fp8_qt().filter(|&q| q != crate::quant::fp8::F8S) {
+            id["act"] = json!(crate::model::fp8_cpu_act(q));
+        }
+        Some(id)
     }
 
     fn kv_save(&self, c: &KvCache, lo: usize, hi: usize, out: &mut dyn Write) -> io::Result<()> {

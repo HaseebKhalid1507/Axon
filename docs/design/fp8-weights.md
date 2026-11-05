@@ -52,10 +52,12 @@ D5, another order: the ADR's fast mode allows it, and decode is graded on its ow
 **D7. CPU reference `fp8-ref` = exact dequant, f32 activations, F16 head** (spec §3.6 numerics, not its AVX2
 kernel): F8_E4M3 joins the F32/F16 float fallback (CODE `quant.rs:2749`: its order, SIMD == scalar as F16's), the row
 scale applied to each dot; weights read in place from the mmap. It is HF F32's twin (validated at KL ≤ 1e-4, §6 A),
-the graded gate's reference (§6 B), and exact on the CPU. Emulation (`Fp8Cpu { act, head_q8 }`; CLI
-`AXON_FP8_CPU_ACT=f32|e4m3-tok|e4m3-128`, `AXON_FP8_CPU_HEAD=f16|q8`): activations round-trip through the Rust twin
-of D2's quantizer, the head through the Q8_0 converter: the fast path's precision in the CPU's order. Head on/off
-splits the KL into head vs GEMM (review SHOULD 3). Slow prefill (f32 FMA): not a product path.
+the graded gate's reference (§6 B), and exact on the CPU. Emulation (`model::fp8_cpu_qt`, types `F8S_TOK` /
+`F8S_G128`; `AXON_FP8_CPU_ACT=f32|e4m3-tok|e4m3-128`): activations round-trip through the Rust twin of D2's quantizer,
+the fast path's activation precision in the CPU's order. The fingerprint's `act` names it, and so does an emulating
+net's KV identity (`act`, #199), so a session isn't restored as bytes across the variable. The head stays F16: the
+planned `AXON_FP8_CPU_HEAD=f16|q8` (the head through the Q8_0 converter, to split the KL into head vs GEMM, review
+SHOULD 3) was never built. Slow prefill (f32 FMA): not a product path.
 
 ## 3. Kernels and their references (ruling 5)
 Every FP8 kernel has two checks: **bits** against a reference of its own order (tiling, staging, odd K, scale

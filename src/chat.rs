@@ -2521,6 +2521,65 @@ mod tests {
         v
     }
 
+    /// The `fp8_session_*` children: run this test binary's ignored test
+    /// `name` in a process of its own with `env` set, and return the JSON
+    /// report it writes to AXON_FP8_SESSION_REPORT (`rep`) once its checks
+    /// pass. A file, not stdout: libtest prints `test <name> ... ` with no
+    /// newline, so the child's first line of output would share that line.
+    /// A child that fails, or passes without a report (a filter matching
+    /// nothing, its variables unset), panics here with its output.
+    fn child_report(
+        name: &str,
+        env: &[(&str, &std::ffi::OsStr)],
+        rep: &std::path::Path,
+    ) -> serde_json::Value {
+        let _ = std::fs::remove_file(rep);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+            .arg(name)
+            .envs(env.iter().copied())
+            .env("AXON_FP8_SESSION_REPORT", rep)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && text.contains("test result: ok. 1 passed"),
+            "the child {name} failed:\n{text}"
+        );
+        let report = std::fs::read_to_string(rep)
+            .unwrap_or_else(|e| panic!("no report from the child {name} ({e}):\n{text}"));
+        serde_json::from_str(&report).unwrap()
+    }
+
+    /// What session file `f` holds: the tokens its cache records cover (its
+    /// last STATE's `kv`) and those records' rows, the bytes a restore under
+    /// the identity they were saved with (`kv`, the backend's `kv_ident`)
+    /// loads, read by kvsave's own reader (each record's check verified).
+    fn file_rows(
+        f: &std::path::Path,
+        model: &serde_json::Value,
+        kv: &serde_json::Value,
+    ) -> (Vec<u32>, Vec<u8>) {
+        let mut s = crate::kvsave::Session::new(f.to_path_buf(), model.clone());
+        let ident = crate::kvsave::identity(model, Some(kv.clone()));
+        let l = s.read(ident.as_ref()).unwrap().unwrap();
+        let n = l.state["kv"].as_u64().unwrap() as usize;
+        let toks: Vec<u32> = (l.state["hist"].as_array().unwrap()[..n].iter())
+            .map(|t| t.as_u64().unwrap() as u32)
+            .collect();
+        let mut rows = Vec::new();
+        s.load(&l, &toks, &mut |_, _, r| r.read_to_end(&mut rows).map(drop))
+            .unwrap();
+        (toks, rows)
+    }
+
+    /// `Hasher` of tokens (their u32s, little-endian).
+    fn tokens_hash(t: &[u32]) -> u64 {
+        let b: Vec<u8> = t.iter().flat_map(|x| x.to_le_bytes()).collect();
+        crate::kvsave::Hasher::of(&b)
+    }
+
     /// #196's FP8 case: a fast-mode session of an FP8 checkpoint saved with
     /// its matrices on fp8.cu restores under `AXON_FP8_NATIVE=0` (the
     /// checkpoint's Q8_0 form) as tokens, prefilled again, and the other way
@@ -2529,10 +2588,11 @@ mod tests {
     /// can't set it in its own process (the engine reads it, and `set_var`
     /// races the other test threads). Checked: the identities differ in the
     /// native net's `weights` only, and the restore names that as why; the
-    /// rows after a restore are a fresh prefill's (`prefill_image`); the
-    /// Q8_0 rows of the saved tokens differ from the native ones (the bytes
-    /// would have been wrong); the checkpoint's exact-mode identity and a
-    /// dense GGUF's (either mode) have no `weights`. Fast mode's replies
+    /// rows after a restore are a fresh prefill's (`prefill_image`); in each
+    /// direction the rows the file holds (`file_rows`: the bytes a restore
+    /// would load) differ from the restore's, for the same tokens, so only
+    /// the weights tell them apart; the checkpoint's exact-mode identity and
+    /// a dense GGUF's (either mode) have no `weights`. Fast mode's replies
     /// aren't compared with `fresh`: fp8.cu's rows depend on the batching
     /// (`gemm_f8` at 16 rows and more), and its promise is a tolerance.
     #[test]
@@ -2540,12 +2600,15 @@ mod tests {
         use crate::kvsave::{Hasher, KvIo, Session};
         use crate::lm::{Backend, BackendOptions, Device};
         use crate::numerics::Numerics;
+        use std::ffi::OsStr;
         let Some(g) = crate::testutil::gpu() else {
             return;
         };
         let cc = g.info().unwrap().cc;
         if cc.0 * 10 + cc.1 < 89 {
-            eprintln!("skipping: no e4m3 tensor cores (sm_89 and later) on this GPU");
+            crate::testutil::skip_note(format_args!(
+                "no e4m3 tensor cores (sm_89 and later) on this GPU"
+            ));
             return;
         }
         assert!(
@@ -2587,39 +2650,36 @@ mod tests {
         assert!(r.from_file, "native -> native: {r:?}");
         assert_eq!(cache_image(&same), cache_image(&x), "native -> native");
         drop(same);
-        let saved = x.hist[..x.fed].to_vec();
-        let nat_rows = Hasher::of(&prefill_image(&net, &saved));
+        let (nat_toks, nat_file) = file_rows(&fnat, &ident, &id_nat);
+        assert_eq!(nat_toks, x.hist[..x.fed]);
+        let nat_rows = Hasher::of(&nat_file);
         // The Q8_0 side, in a process with AXON_FP8_NATIVE=0: native -> Q8_0,
-        // then a session of its own, saved to fq8. Its results come back in
-        // a file, not on stdout: libtest prints `test <name> ... ` with no
-        // newline, so the child's first line of output shares that line.
-        let frep = fq8.with_extension("report.json");
-        let _ = std::fs::remove_file(&frep);
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
-            .arg("chat::tests::fp8_session_q8_child")
-            .env("AXON_FP8_NATIVE", "0")
-            .env("AXON_TEST_FP8_MODEL", &p)
-            .env("AXON_FP8_SESSION_IN", &fnat)
-            .env("AXON_FP8_SESSION_OUT", &fq8)
-            .env("AXON_FP8_SESSION_REPORT", &frep)
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success() && text.contains("test result: ok. 1 passed"),
-            "the AXON_FP8_NATIVE=0 child failed:\n{text}"
+        // then a session of its own, saved to fq8.
+        let report = child_report(
+            "chat::tests::fp8_session_q8_child",
+            &[
+                ("AXON_FP8_NATIVE", OsStr::new("0")),
+                ("AXON_TEST_FP8_MODEL", p.as_os_str()),
+                ("AXON_FP8_SESSION_IN", fnat.as_os_str()),
+                ("AXON_FP8_SESSION_OUT", fq8.as_os_str()),
+            ],
+            &fq8.with_extension("report.json"),
         );
-        let report = std::fs::read_to_string(&frep)
-            .unwrap_or_else(|e| panic!("no report from the child ({e}):\n{text}"));
-        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
         let id_q8 = &report["ident"];
-        let q8_rows = report["rows"].as_u64().unwrap();
-        assert_eq!(report["fed"].as_u64(), Some(saved.len() as u64), "{report}");
-        // Had the native file's bytes loaded there, the rows would not be
-        // the ones the Q8_0 form makes.
-        assert_ne!(q8_rows, nat_rows, "Q8_0 rows == native rows");
+        // It restored the native file's tokens, into other rows than the
+        // file's: had its bytes loaded there, the rows would be wrong.
+        assert_eq!(
+            report["fed"].as_u64(),
+            Some(nat_toks.len() as u64),
+            "{report}"
+        );
+        assert_eq!(
+            report["tokens"].as_u64(),
+            Some(tokens_hash(&nat_toks)),
+            "{report}"
+        );
+        let q8_back = report["rows"].as_u64().unwrap();
+        assert_ne!(q8_back, nat_rows, "native -> Q8_0: the file's rows");
         // Nothing but the native net's `weights` tells them apart.
         let strip = |v: &serde_json::Value| {
             let mut v = v.clone();
@@ -2631,6 +2691,8 @@ mod tests {
         assert!(id_q8.get("weights").is_none(), "{id_q8}");
         assert_eq!(strip(&id_nat), strip(id_q8));
         // Q8_0 -> native: tokens, prefilled again.
+        let (q8_toks, q8_file) = file_rows(&fq8, &ident, id_q8);
+        let q8_rows = Hasher::of(&q8_file);
         let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
         y.max_reply = 16;
         let r = (y.load_session(&mut Session::new(fq8.clone(), ident.clone())))
@@ -2641,23 +2703,28 @@ mod tests {
             r.why.as_deref(),
             Some(r#"it was made under weights - (now "fp8-native")"#)
         );
+        assert_eq!(y.hist[..y.fed], q8_toks[..]);
+        let img = cache_image(&y);
         assert_eq!(
-            cache_image(&y),
+            img,
             prefill_image(&net, &y.hist[..y.fed]),
             "Q8_0 -> native: not a fresh prefill's rows"
         );
+        let nat_back = Hasher::of(&img);
+        assert_ne!(nat_back, q8_rows, "Q8_0 -> native: the file's rows");
         let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
         assert!(!got.is_empty());
         eprintln!(
             "FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled \
-             again ({}); each loads back as bytes; identities differ in weights only; the \
-             saved tokens' rows: native {nat_rows:016x}, Q8_0 {q8_rows:016x}",
+             again ({}); each loads back as bytes; identities differ in weights only; rows of \
+             the same tokens, the file's vs the restore's: native -> Q8_0 {nat_rows:016x} vs \
+             {q8_back:016x}, Q8_0 -> native {q8_rows:016x} vs {nat_back:016x}",
             r.why.unwrap()
         );
         drop(x);
         drop(y);
         drop(net);
-        for f in [&fnat, &fq8, &frep] {
+        for f in [&fnat, &fq8, &fq8.with_extension("report.json")] {
             let _ = std::fs::remove_file(f);
         }
         // No `weights` anywhere else.
@@ -2687,9 +2754,9 @@ mod tests {
     /// and the reply after it a fresh prefill's too (exact kernels: bit for
     /// bit); then a turn of its own, saved to AXON_FP8_SESSION_OUT, loads
     /// back as bytes. Then, all checks passed, it writes the restored
-    /// positions, their rows' hash and its own identity as JSON to
-    /// AXON_FP8_SESSION_REPORT (`{"fed", "rows", "ident"}`). Without those
-    /// three variables it does nothing.
+    /// positions, their tokens' and rows' hashes and its own identity as
+    /// JSON to AXON_FP8_SESSION_REPORT (`{"fed", "tokens", "rows",
+    /// "ident"}`). Without those three variables it does nothing.
     #[test]
     #[ignore = "run by gpu_fp8_session_across_native"]
     fn fp8_session_q8_child() {
@@ -2738,7 +2805,7 @@ mod tests {
             prefill_image(&net, &y.hist[..y.fed]),
             "native -> Q8_0: not a fresh prefill's rows"
         );
-        let (fed, rows) = (y.fed, Hasher::of(&img));
+        let (fed, tokens, rows) = (y.fed, tokens_hash(&y.hist[..y.fed]), Hasher::of(&img));
         let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
         let prompt = &y.hist[..y.hist.len() - got.len() - 2];
         assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "native -> Q8_0");
@@ -2755,7 +2822,208 @@ mod tests {
             .unwrap();
         assert!(r.from_file, "Q8_0 -> Q8_0: {r:?}");
         assert_eq!(cache_image(&same), cache_image(&x), "Q8_0 -> Q8_0");
-        let report = serde_json::json!({"fed": fed, "rows": rows, "ident": id});
+        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id});
+        std::fs::write(frep, report.to_string()).unwrap();
+    }
+
+    /// #196's CPU case: a session of an FP8 checkpoint on the CPU saved with
+    /// f32 activations (the default) restores under
+    /// `AXON_FP8_CPU_ACT=e4m3-tok` (the emulation, `model::fp8_cpu_qt`) as
+    /// tokens, prefilled again, and the other way round; within either it
+    /// loads as bytes. The emulating side is this binary run again with the
+    /// variable set (`fp8_session_cpu_act_child`), as in
+    /// `gpu_fp8_session_across_native`, and checked as there: the
+    /// identities differ in the emulating net's `act` only, and the restore
+    /// names that as why; the rows after a restore are a fresh prefill's; in
+    /// each direction the file's rows differ from the restore's, for the
+    /// same tokens. On the CPU the reply after a restore is also a fresh
+    /// conversation's, bit for bit (the emulation rounds per token, so it
+    /// doesn't depend on the batching either). No GPU: it runs wherever the
+    /// checkpoint is (CI has none and skips it, saying so).
+    #[test]
+    fn fp8_session_across_cpu_act() {
+        use crate::kvsave::{Hasher, KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device};
+        use std::ffi::OsStr;
+        assert!(
+            matches!(
+                std::env::var("AXON_FP8_CPU_ACT").as_deref(),
+                Err(_) | Ok("f32")
+            ),
+            "AXON_FP8_CPU_ACT is set: this test's own net must run f32 activations (it sets \
+             the variable in its child). Unset it to run the test."
+        );
+        let Some(p) = crate::testutil::fp8_model_path() else {
+            return;
+        };
+        let m = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let o = BackendOptions::default().device(Device::Cpu).max_ctx(2048);
+        let net = Backend::new(&m, o).unwrap();
+        let ident = crate::kvsave::model_ident(&m, &p, KvIo::kv_shape(&net).2).unwrap();
+        let (ff32, femu) = (session_path("fp8-cpu-f32"), session_path("fp8-cpu-emu"));
+        let frep = femu.with_extension("report.json");
+        // f32: a turn, saved; it loads back as bytes.
+        let mut x = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        x.max_reply = 16;
+        x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        let id_f32 = net.kv_ident(&x.cache).unwrap();
+        assert!(id_f32.get("act").is_none(), "{id_f32}");
+        x.save_session(&mut Session::new(ff32.clone(), ident.clone()))
+            .unwrap();
+        let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        let r = (same.load_session(&mut Session::new(ff32.clone(), ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(r.from_file, "f32 -> f32: {r:?}");
+        assert_eq!(cache_image(&same), cache_image(&x), "f32 -> f32");
+        drop(same);
+        let (f32_toks, f32_file) = file_rows(&ff32, &ident, &id_f32);
+        assert_eq!(f32_toks, x.hist[..x.fed]);
+        let f32_rows = Hasher::of(&f32_file);
+        // The emulating side: f32 -> e4m3-tok, then a session of its own,
+        // saved to femu.
+        let report = child_report(
+            "chat::tests::fp8_session_cpu_act_child",
+            &[
+                ("AXON_FP8_CPU_ACT", OsStr::new("e4m3-tok")),
+                ("AXON_TEST_FP8_MODEL", p.as_os_str()),
+                ("AXON_FP8_SESSION_IN", ff32.as_os_str()),
+                ("AXON_FP8_SESSION_OUT", femu.as_os_str()),
+            ],
+            &frep,
+        );
+        let id_emu = &report["ident"];
+        assert_eq!(
+            report["fed"].as_u64(),
+            Some(f32_toks.len() as u64),
+            "{report}"
+        );
+        assert_eq!(
+            report["tokens"].as_u64(),
+            Some(tokens_hash(&f32_toks)),
+            "{report}"
+        );
+        let emu_back = report["rows"].as_u64().unwrap();
+        assert_ne!(emu_back, f32_rows, "f32 -> e4m3-tok: the file's rows");
+        // Nothing but the emulating net's `act` tells them apart.
+        assert_eq!(id_emu["act"], "e4m3-tok-emu", "{id_emu}");
+        let mut stripped = id_emu.clone();
+        stripped.as_object_mut().unwrap().remove("act");
+        assert_eq!(id_f32, stripped);
+        // e4m3-tok -> f32: tokens, prefilled again; the reply a fresh one's.
+        let (emu_toks, emu_file) = file_rows(&femu, &ident, id_emu);
+        let emu_rows = Hasher::of(&emu_file);
+        let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        y.max_reply = 16;
+        let r = (y.load_session(&mut Session::new(femu.clone(), ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(!r.from_file, "e4m3-tok -> f32: {r:?}");
+        assert_eq!(
+            r.why.as_deref(),
+            Some(r#"it was made under act "e4m3-tok-emu" (now -)"#)
+        );
+        assert_eq!(y.hist[..y.fed], emu_toks[..]);
+        let img = cache_image(&y);
+        assert_eq!(
+            img,
+            prefill_image(&net, &y.hist[..y.fed]),
+            "e4m3-tok -> f32: not a fresh prefill's rows"
+        );
+        let f32_back = Hasher::of(&img);
+        assert_ne!(f32_back, emu_rows, "e4m3-tok -> f32: the file's rows");
+        let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+        let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+        assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "e4m3-tok -> f32");
+        eprintln!(
+            "FP8 CPU sessions across AXON_FP8_CPU_ACT: f32 -> e4m3-tok and e4m3-tok -> f32 \
+             prefilled again ({}); each loads back as bytes; identities differ in act only; \
+             rows of the same tokens, the file's vs the restore's: f32 -> e4m3-tok \
+             {f32_rows:016x} vs {emu_back:016x}, e4m3-tok -> f32 {emu_rows:016x} vs \
+             {f32_back:016x}",
+            r.why.unwrap()
+        );
+        for f in [&ff32, &femu, &frep] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// `fp8_session_across_cpu_act`'s emulating side, run by it in a process
+    /// of its own with `AXON_FP8_CPU_ACT=e4m3-tok`. The f32 session
+    /// (AXON_FP8_SESSION_IN) restores as tokens, its rows a fresh prefill's,
+    /// and the reply after it a fresh conversation's; then a turn of its
+    /// own, saved to AXON_FP8_SESSION_OUT, loads back as bytes; a dense
+    /// GGUF's identity has no `act` under the variable (it has no FP8
+    /// matrices). Then, all checks passed, it writes the restored positions,
+    /// their tokens' and rows' hashes and its own identity as JSON to
+    /// AXON_FP8_SESSION_REPORT (`{"fed", "tokens", "rows", "ident"}`).
+    /// Without those three variables it does nothing.
+    #[test]
+    #[ignore = "run by fp8_session_across_cpu_act"]
+    fn fp8_session_cpu_act_child() {
+        use crate::kvsave::{Hasher, KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device};
+        let (Some(fin), Some(fout), Some(frep)) = (
+            std::env::var_os("AXON_FP8_SESSION_IN"),
+            std::env::var_os("AXON_FP8_SESSION_OUT"),
+            std::env::var_os("AXON_FP8_SESSION_REPORT"),
+        ) else {
+            return;
+        };
+        let (fin, fout) = (
+            std::path::PathBuf::from(fin),
+            std::path::PathBuf::from(fout),
+        );
+        assert_eq!(std::env::var("AXON_FP8_CPU_ACT").as_deref(), Ok("e4m3-tok"));
+        let p = crate::testutil::fp8_model_path().unwrap();
+        let m = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let o = || BackendOptions::default().device(Device::Cpu).max_ctx(2048);
+        let net = Backend::new(&m, o()).unwrap();
+        let ident = crate::kvsave::model_ident(&m, &p, KvIo::kv_shape(&net).2).unwrap();
+        // f32 -> e4m3-tok: tokens, prefilled again.
+        let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        y.max_reply = 16;
+        let r = (y.load_session(&mut Session::new(fin, ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(!r.from_file, "f32 -> e4m3-tok: {r:?}");
+        assert_eq!(
+            r.why.as_deref(),
+            Some(r#"it was made under act - (now "e4m3-tok-emu")"#)
+        );
+        let img = cache_image(&y);
+        assert_eq!(
+            img,
+            prefill_image(&net, &y.hist[..y.fed]),
+            "f32 -> e4m3-tok: not a fresh prefill's rows"
+        );
+        let (fed, tokens, rows) = (y.fed, tokens_hash(&y.hist[..y.fed]), Hasher::of(&img));
+        let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+        let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+        assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "f32 -> e4m3-tok");
+        // Its own turn: saved, and it loads back as bytes.
+        let mut x = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        x.max_reply = 16;
+        x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        let id = net.kv_ident(&x.cache).unwrap();
+        x.save_session(&mut Session::new(fout.clone(), ident.clone()))
+            .unwrap();
+        let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        let r = (same.load_session(&mut Session::new(fout, ident)))
+            .unwrap()
+            .unwrap();
+        assert!(r.from_file, "e4m3-tok -> e4m3-tok: {r:?}");
+        assert_eq!(cache_image(&same), cache_image(&x), "e4m3-tok -> e4m3-tok");
+        // The variable doesn't reach a dense model's identity.
+        if let Some(md) = crate::testutil::model() {
+            let (d, dtok) = (Backend::new(&md, o()).unwrap(), Tokenizer::from_gguf(&md));
+            let c = Chat::new(&d, &dtok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            let did = d.kv_ident(&c.cache).unwrap();
+            assert!(did.get("act").is_none(), "dense GGUF: {did}");
+        }
+        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id});
         std::fs::write(frep, report.to_string()).unwrap();
     }
 

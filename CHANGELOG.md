@@ -6,6 +6,18 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Sessions: a CPU session of an FP8 checkpoint records `AXON_FP8_CPU_ACT`'s emulation (#199, part of #196)
+- **Fix: a `--device cpu` `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
+  `AXON_FP8_CPU_ACT`.** Its emulations (`e4m3-tok`, `e4m3-128`, a diagnostic: the activations rounded through e4m3)
+  make other cache rows than the default f32 activations, but the CPU's KV identity was the same. An emulating net's
+  identity now has `act: e4m3-tok-emu` (or `e4m3-128-emu`, the reply fingerprint's names), and a session saved one
+  way is prefilled again the other way.
+- Nothing else changes: f32 activations (the default), dense models and every GPU net keep their identities and
+  their saved sessions. No output bit changes (the md5 set is unchanged).
+- Tests: `fp8_session_across_cpu_act` restores sessions both ways across the variable (a child process sets it, as
+  #198's GPU test does), and `tiny_fp8_kv_ident_names_cpu_act` checks the field on the tiny checkpoint in CI. Both
+  session tests now compare the rows the session file holds with the restore's, for the same tokens.
+
 ### Sessions: an FP8 checkpoint's fast-mode session records whether fp8.cu made it (#198, part of #196)
 - **Fix: a fast-mode `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
   `AXON_FP8_NATIVE`.** With fp8.cu (fast mode, sm_89+) and with `AXON_FP8_NATIVE=0` (the Q8_0 form) the cache rows
