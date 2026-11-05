@@ -278,11 +278,7 @@ fn fp8_fields(m: &Model, net: &Backend) -> Option<[&'static str; 3]> {
     if !crate::safetensors::is_fp8(m) {
         return None;
     }
-    let cpu_act = match crate::model::fp8_cpu_qt() {
-        crate::quant::fp8::F8S_TOK => "e4m3-tok-emu",
-        crate::quant::fp8::F8S_G128 => "e4m3-128-emu",
-        _ => "f32",
-    };
+    let cpu_act = crate::model::fp8_cpu_act(crate::model::fp8_cpu_qt());
     Some(match &net.0 {
         Inner::Cpu(_) => ["fp8-ref", cpu_act, "f16"],
         Inner::Cuda(n) if n.f8_native() => ["fp8-native", "e4m3-tok", "q8"],

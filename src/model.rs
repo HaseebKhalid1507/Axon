@@ -75,6 +75,16 @@ pub(crate) fn fp8_cpu_qt() -> u32 {
     }
 }
 
+/// The activations of `fp8_cpu_qt`'s type `qt`, as the fingerprint's `act`
+/// and the KV identity name them: `f32`, `e4m3-tok-emu` or `e4m3-128-emu`.
+pub(crate) fn fp8_cpu_act(qt: u32) -> &'static str {
+    match qt {
+        fp8::F8S_TOK => "e4m3-tok-emu",
+        fp8::F8S_G128 => "e4m3-128-emu",
+        _ => "f32",
+    }
+}
+
 /// Tests: build CPU models of FP8 checkpoints with type `qt` inside `f`.
 #[cfg(test)]
 pub(crate) fn with_fp8_cpu_qt<R>(qt: u32, f: impl FnOnce() -> R) -> R {
@@ -1863,6 +1873,14 @@ impl<'a> Qwen2<'a> {
     }
 
     /// A deepseek2 (MLA) model: K-only cache rows of `head_dim` (576).
+    /// The CPU type its FP8 matrices run as (`fp8_cpu_qt` when it was
+    /// built: `F8S` or an emulation's); None without FP8 matrices.
+    pub(crate) fn fp8_qt(&self) -> Option<u32> {
+        (self.output.iter())
+            .chain(self.layers.iter().flat_map(|l| l.weights()))
+            .find_map(|w| w.f8s.as_ref().map(|f| f.1))
+    }
+
     pub(crate) fn is_mla(&self) -> bool {
         self.ds2.is_some()
     }
