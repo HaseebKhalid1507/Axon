@@ -441,18 +441,27 @@ turns PROVISIONAL → FINAL, or not, on 139c's rows, and the PR body quotes it.
   - (Fable) a `Restore` fault after a spill that evicted class 0 under the restoring slot's own chain: the eager pop
     and `lookup`'s hard holds must not conflict, and the tier goes off with the slot at `have`.
   - `keys_hold_the_leaf` (tier.rs:977) asserts today's leaf hold, the opposite of the new behaviour. It is replaced by
-    `keys_mark_residency`: a slot's stored pages are class 0 and evictable (newest first) while it holds them, and
+    `keys_are_class0_and_drain_pops_them` (checkpoint 2's name): a slot's stored pages are class 0 and evictable
+    (newest first) while it holds them, and
     class 1 after `truncate`.
-- **Serve, #170 and the new loop (shady's M3).** Two cfg(test) knobs on `tier::Faults`:
+- **Built in checkpoint 2 (a41d028):** the unit tests above, as `keys_are_class0_and_drain_pops_them`,
+  `shared_pages_and_a_two_page_eviction` (two holders; one `make_room` takes a leaf, then its parent),
+  `a_restore_down_classes`, `a_restores_holds_beat_class0_eviction` (Fable's case) and a seeded `fuzz` (64 seeds, 3
+  sequences on 4 conversations sharing prefixes, 7 pages; `check` and keys == the rows' pages after every op). The
+  serve tests (a)–(c) below are one test, `serve_cuda_cache_ram_idle_flush`.
+- **Serve, #170 and the new loop (shady's M3).** cfg(test) knobs on `tier::Faults` (as built: the piece size, a park
+  after piece k, the loop's events, and a starved arena):
   - `idle_bytes`: one page a piece, so a few pages of backlog are many pieces;
   - a barrier that parks the engine after piece k until the test releases it. Event order is checked, not timing.
 
   The tests:
   - (a) **#170 itself**: a request R sent while the engine is parked after piece 1 of a multi-piece backlog is
-    admitted after at most one more piece (the event log: `piece 1, [piece 2], admit R`).
-  - (b) **the off path inside the idle loop**: a `WriteBehind` fault armed for piece 2's copy, R arriving between
-    pieces 1 and 2. R's reply == the `--cache-ram 0` run's; the off line says write-behind; the gauges are 0; the
-    counters stay at their values before the fault.
+    admitted after at most one more piece (the event log: `piece 1, [piece 2], admit R`). As built the loop looks
+    between pieces, so it is none: `Job, Piece(1), Job`, then the rest of the backlog a page a piece.
+  - (b) **the off path inside the idle loop**: a `WriteBehind` fault armed for piece 2's copy. As built, R comes
+    after the off line, not between pieces 1 and 2: a request arriving there is taken before piece 2 runs (a), and
+    its own steps' write-behind would take the fault instead. R's reply == the `--cache-ram 0` run's; the off line
+    says write-behind; the gauges are 0; the counters stay at piece 1's; no piece runs after the fault.
   - (c) **no progress blocks**: a knob that starves the arena (`take` → None). With a backlog, `Faults::idles` still
     advances (the loop blocks), and flush attempts stay ≤ 1 per step. Then the server stops with the backlog pending
     and returns within the test's timeout.
