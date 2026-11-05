@@ -183,8 +183,9 @@ Works today, honestly scoped:
   head, half the memory, with slightly different results.
 - Sessions: `chat --session FILE` keeps a conversation in a file, saved after every reply.
   At the next start its KV cache is loaded back if the model, KV type, backend and GPU
-  match, else the saved tokens are prefilled again; either way the reply continues as if
-  never stopped (on a CPU/GPU split a re-prefilled cache is close, not exact). Measured:
+  match (for an FP8 checkpoint in fast mode, also whether fp8.cu ran it), else the saved
+  tokens are prefilled again; either way the reply continues as if never stopped (on a
+  CPU/GPU split a re-prefilled cache is close, not exact). Measured:
   a 29.8k-position 7B session restores in 0.41-0.45 s against a 3.16 s re-prefill (RTX 4090).
 - Long context (opt-in): `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768` (llama.cpp's
   flags) takes Qwen2.5 / Qwen3 from 32k to 128k by YaRN RoPE scaling. It changes the output at

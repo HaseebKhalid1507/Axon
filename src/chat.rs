@@ -2507,6 +2507,256 @@ mod tests {
         }
     }
 
+    /// The image of a fresh cache of `ids` prefilled as a token restore
+    /// prefills (`prompt_chunks`): what `load_session` must leave when it
+    /// can't load the file's bytes ("cache == fresh prefill"). The cache is
+    /// the size of the chats in `gpu_fp8_session_across_native` (2048).
+    fn prefill_image<M: crate::kvsave::KvIo>(net: &M, ids: &[u32]) -> Vec<u8> {
+        let mut c = net.new_cache(2048);
+        for r in net.prompt_chunks(ids.len(), 0, &c) {
+            net.feed_batch(&ids[r.clone()], r.start, &mut c);
+        }
+        let mut v = Vec::new();
+        net.kv_save(&c, 0, ids.len(), &mut v).unwrap();
+        v
+    }
+
+    /// #196's FP8 case: a fast-mode session of an FP8 checkpoint saved with
+    /// its matrices on fp8.cu restores under `AXON_FP8_NATIVE=0` (the
+    /// checkpoint's Q8_0 form) as tokens, prefilled again, and the other way
+    /// round; within either it loads as bytes. The Q8_0 side is this binary
+    /// run again with the variable set (`fp8_session_q8_child`): a test
+    /// can't set it in its own process (the engine reads it, and `set_var`
+    /// races the other test threads). Checked: the identities differ in the
+    /// native net's `weights` only, and the restore names that as why; the
+    /// rows after a restore are a fresh prefill's (`prefill_image`); the
+    /// Q8_0 rows of the saved tokens differ from the native ones (the bytes
+    /// would have been wrong); the checkpoint's exact-mode identity and a
+    /// dense GGUF's (either mode) have no `weights`. Fast mode's replies
+    /// aren't compared with `fresh`: fp8.cu's rows depend on the batching
+    /// (`gemm_f8` at 16 rows and more), and its promise is a tolerance.
+    #[test]
+    fn gpu_fp8_session_across_native() {
+        use crate::kvsave::{Hasher, KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device};
+        use crate::numerics::Numerics;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let cc = g.info().unwrap().cc;
+        if cc.0 * 10 + cc.1 < 89 {
+            eprintln!("skipping: no e4m3 tensor cores (sm_89 and later) on this GPU");
+            return;
+        }
+        assert!(
+            std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"),
+            "AXON_FP8_NATIVE=0 is set: this test's own net must run fp8.cu (it sets the \
+             variable in its child). Unset it to run the test."
+        );
+        let Some(p) = crate::testutil::fp8_model_path() else {
+            return;
+        };
+        let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let opts = |n| {
+            BackendOptions::default()
+                .device(Device::Cuda)
+                .max_ctx(2048)
+                .numerics(n)
+        };
+        let m = load();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Backend::new(&m, opts(Numerics::Fast)).unwrap();
+        assert!(
+            crate::numerics::fast_kernels(&net),
+            "fast mode didn't run fp8.cu"
+        );
+        let ident = crate::kvsave::model_ident(&m, &p, KvIo::kv_shape(&net).2).unwrap();
+        let (fnat, fq8) = (session_path("fp8-native"), session_path("fp8-q8"));
+        // Native: a turn, saved; it loads back as bytes.
+        let mut x = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        x.max_reply = 16;
+        x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        let id_nat = net.kv_ident(&x.cache).unwrap();
+        assert_eq!(id_nat["weights"], "fp8-native", "{id_nat}");
+        x.save_session(&mut Session::new(fnat.clone(), ident.clone()))
+            .unwrap();
+        let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        let r = (same.load_session(&mut Session::new(fnat.clone(), ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(r.from_file, "native -> native: {r:?}");
+        assert_eq!(cache_image(&same), cache_image(&x), "native -> native");
+        drop(same);
+        let saved = x.hist[..x.fed].to_vec();
+        let nat_rows = Hasher::of(&prefill_image(&net, &saved));
+        // The Q8_0 side, in a process with AXON_FP8_NATIVE=0: native -> Q8_0,
+        // then a session of its own, saved to fq8.
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+            .arg("chat::tests::fp8_session_q8_child")
+            .env("AXON_FP8_NATIVE", "0")
+            .env("AXON_TEST_FP8_MODEL", &p)
+            .env("AXON_FP8_SESSION_IN", &fnat)
+            .env("AXON_FP8_SESSION_OUT", &fq8)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && text.contains("test result: ok. 1 passed"),
+            "the AXON_FP8_NATIVE=0 child failed:\n{text}"
+        );
+        let line = |tag: &str| {
+            (text.lines())
+                .find_map(|l| l.strip_prefix(tag))
+                .unwrap_or_else(|| panic!("no {tag} line from the child:\n{text}"))
+                .to_owned()
+        };
+        let id_q8: serde_json::Value = serde_json::from_str(&line("FP8-Q8-IDENT ")).unwrap();
+        let rest = line("FP8-Q8-RESTORED ");
+        let (fed, q8_rows) = rest.split_once(' ').unwrap();
+        assert_eq!(fed.parse::<usize>().unwrap(), saved.len(), "{rest}");
+        // Had the native file's bytes loaded there, the rows would not be
+        // the ones the Q8_0 form makes.
+        assert_ne!(
+            q8_rows.parse::<u64>().unwrap(),
+            nat_rows,
+            "Q8_0 rows == native rows"
+        );
+        // Nothing but the native net's `weights` tells them apart.
+        let strip = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            let o = v.as_object_mut().unwrap();
+            o.remove("info");
+            o.remove("weights");
+            v
+        };
+        assert!(id_q8.get("weights").is_none(), "{id_q8}");
+        assert_eq!(strip(&id_nat), strip(&id_q8));
+        // Q8_0 -> native: tokens, prefilled again.
+        let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        y.max_reply = 16;
+        let r = (y.load_session(&mut Session::new(fq8.clone(), ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(!r.from_file, "Q8_0 -> native: {r:?}");
+        assert_eq!(
+            r.why.as_deref(),
+            Some(r#"it was made under weights - (now "fp8-native")"#)
+        );
+        assert_eq!(
+            cache_image(&y),
+            prefill_image(&net, &y.hist[..y.fed]),
+            "Q8_0 -> native: not a fresh prefill's rows"
+        );
+        let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+        assert!(!got.is_empty());
+        eprintln!(
+            "FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled \
+             again ({}); each loads back as bytes; identities differ in weights only; the \
+             saved tokens' rows: native {nat_rows:016x}, Q8_0 {q8_rows}",
+            r.why.unwrap()
+        );
+        drop(x);
+        drop(y);
+        drop(net);
+        let _ = (std::fs::remove_file(&fnat), std::fs::remove_file(&fq8));
+        // No `weights` anywhere else.
+        let me = load();
+        let e = Backend::new(&me, opts(Numerics::Exact)).unwrap();
+        let c = Chat::new(&e, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        let id = e.kv_ident(&c.cache).unwrap();
+        assert!(id.get("weights").is_none(), "FP8 exact: {id}");
+        drop(c);
+        drop(e);
+        let Some(md) = crate::testutil::model() else {
+            return;
+        };
+        let dtok = Tokenizer::from_gguf(&md);
+        for n in [Numerics::Exact, Numerics::Fast] {
+            let d = Backend::new(&md, opts(n)).unwrap();
+            let c = Chat::new(&d, &dtok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            let id = d.kv_ident(&c.cache).unwrap();
+            assert!(id.get("weights").is_none(), "dense GGUF {n}: {id}");
+        }
+    }
+
+    /// `gpu_fp8_session_across_native`'s Q8_0 side, run by it in a process
+    /// of its own with `AXON_FP8_NATIVE=0`: the fast-mode net runs the FP8
+    /// checkpoint's Q8_0 form (exact kernels). The native session
+    /// (AXON_FP8_SESSION_IN) restores as tokens, its rows a fresh prefill's,
+    /// and the reply after it a fresh prefill's too (exact kernels: bit for
+    /// bit); then a turn of its own, saved to AXON_FP8_SESSION_OUT, loads
+    /// back as bytes. Prints the restored positions and their rows' hash
+    /// (`FP8-Q8-RESTORED`) and its identity (`FP8-Q8-IDENT`). Without those
+    /// variables it does nothing.
+    #[test]
+    #[ignore = "run by gpu_fp8_session_across_native"]
+    fn fp8_session_q8_child() {
+        use crate::kvsave::{Hasher, KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device};
+        use crate::numerics::Numerics;
+        let (Some(fin), Some(fout)) = (
+            std::env::var_os("AXON_FP8_SESSION_IN"),
+            std::env::var_os("AXON_FP8_SESSION_OUT"),
+        ) else {
+            return;
+        };
+        let (fin, fout) = (
+            std::path::PathBuf::from(fin),
+            std::path::PathBuf::from(fout),
+        );
+        assert_eq!(std::env::var("AXON_FP8_NATIVE").as_deref(), Ok("0"));
+        let p = crate::testutil::fp8_model_path().unwrap();
+        let m = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let o = BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(2048)
+            .numerics(Numerics::Fast);
+        let net = Backend::new(&m, o).unwrap();
+        assert!(
+            !crate::numerics::fast_kernels(&net),
+            "AXON_FP8_NATIVE=0 ran fp8.cu"
+        );
+        let ident = crate::kvsave::model_ident(&m, &p, KvIo::kv_shape(&net).2).unwrap();
+        // Native -> Q8_0: tokens, prefilled again.
+        let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        y.max_reply = 16;
+        let r = (y.load_session(&mut Session::new(fin, ident.clone())))
+            .unwrap()
+            .unwrap();
+        assert!(!r.from_file, "native -> Q8_0: {r:?}");
+        assert_eq!(
+            r.why.as_deref(),
+            Some(r#"it was made under weights "fp8-native" (now -)"#)
+        );
+        let img = cache_image(&y);
+        assert_eq!(
+            img,
+            prefill_image(&net, &y.hist[..y.fed]),
+            "native -> Q8_0: not a fresh prefill's rows"
+        );
+        println!("FP8-Q8-RESTORED {} {}", y.fed, Hasher::of(&img));
+        let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+        let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+        assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "native -> Q8_0");
+        // Its own turn: saved, and it loads back as bytes.
+        let mut x = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        x.max_reply = 16;
+        x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        let id = net.kv_ident(&x.cache).unwrap();
+        x.save_session(&mut Session::new(fout.clone(), ident.clone()))
+            .unwrap();
+        let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        let r = (same.load_session(&mut Session::new(fout, ident)))
+            .unwrap()
+            .unwrap();
+        assert!(r.from_file, "Q8_0 -> Q8_0: {r:?}");
+        assert_eq!(cache_image(&same), cache_image(&x), "Q8_0 -> Q8_0");
+        println!("FP8-Q8-IDENT {id}");
+    }
+
     /// `turns_match_fresh_prefill` split across devices (`--gpu-layers`):
     /// layers 0..12 on the CPU, the rest and the head on the GPU.
     #[test]
