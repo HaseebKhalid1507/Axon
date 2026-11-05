@@ -6,6 +6,15 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Identity: an FP8 checkpoint's `act` is the net's, and a split names its CPU layers' emulation (#200, part of #196)
+- The reply fingerprint's `act` for an FP8 checkpoint on the CPU now comes from the net (the type its matrices were
+  built as), as the KV identity's does since #199, not from `AXON_FP8_CPU_ACT` read again when the fingerprint is
+  made. The CLI's fingerprints don't change: there the two always agreed.
+- A CPU/GPU split (`--gpu-layers`) of an FP8 checkpoint whose CPU layers run `AXON_FP8_CPU_ACT`'s emulation now says
+  so: `act=q8 (cpu layers e4m3-tok-emu)` (or `e4m3-128-emu`). It was `act=q8`, as with f32 activations, which it
+  still is. A split's sessions are unaffected: it has no KV identity, so they always restore as tokens.
+- No other fingerprint and no output bit changes.
+
 ### Sessions: a CPU session of an FP8 checkpoint records `AXON_FP8_CPU_ACT`'s emulation (#199, part of #196)
 - **Fix: a `--device cpu` `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
   `AXON_FP8_CPU_ACT`.** Its emulations (`e4m3-tok`, `e4m3-128`, a diagnostic: the activations rounded through e4m3)
