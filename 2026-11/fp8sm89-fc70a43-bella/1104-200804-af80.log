@@ -1,0 +1,77 @@
+[axon-run 20:08:04] submitted 1104-200804-af80 by /home/haseeb/.cache/axon-fp8sm89: shard 2/3 of 1104-200804-d98e, 356 tests: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-fc70a43 serve:: cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b cuda::qwen2::tests::gp
+[axon-run 21:19:06] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 21:19:06] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 21:19:06] scope axon-job-1104-200804-af80-1793845146.scope in app-axonjobs.slice: MemoryMax 20002 MB, MemoryHigh 18001 MB, no swap, oomd pressure kill 80% (claim 12652 MB): an OOM here kills only this job
+[axon-run 21:19:06] job 1104-200804-af80 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-200804-af80-1793845146 --slice=app-axonjobs.slice -p MemoryMax=20002M -p MemoryHigh=18001M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-fc70a43 serve:: cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b cuda::qwen2::tests::gpu_prefill_logits_match_forward_big cuda::qwen2::tests::gpu_prefill_wave_split_bits cuda::qwen2::tests::gpu_products_match_reference_bits cuda::qwen2::tests::gpu_products_real_weights_q2k_q3k cuda::qwen2::tests::gpu_prompt_chunks_bits cuda::qwen2::tests::gpu_q8_attention_matches_reference cuda::qwen2::tests::gpu_q8_kv_close_to_f16_0_5b cuda::qwen2::tests::gpu_q8_kv_close_to_f16_1_5b cuda::qwen2::tests::gpu_q8_llama cuda::qwen2::tests::gpu_q8_qwen3 cuda::qwen2::tests::gpu_q8_qwen3_4b cuda::qwen2::tests::gpu_q8_store_matches_rule cuda::qwen2::tests::gpu_qkv_rope_matches_cpu cuda::qwen2::tests::gpu_qwen3_matches_reference_forward cuda::qwen2::tests::gpu_rmsnorm_matches_cpu cuda::qwen2::tests::gpu_split_attention_matches_decode_bits cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference cuda::qwen2::tests::gpu_tc_attention_close_to_f64 cuda::qwen2::tests::gpu_too_big_is_an_error cuda::qwen2::tests::gpu_verify_matches_forward_argmax_0_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_1_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_0_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits cuda::qwen2::tests::lm_chunk_ranges cuda::qwen2::tests::magic_i2f_is_cvt_rn cuda::qwen2::tests::q6k8_never_costs_context quant:: cuda::qwen2::sample_tests:: cuda::qwen2::paged_tests:: cuda::qwen2::experts:: chat:: safetensors:: cuda::qwen2::moe:: moe::ds2_tests:: cuda::qwen2::kvio:: cuda::qwen2::stream:: moe::oss_tests:: kvstore:: testutil:: rope:: --test-threads 6
+axon-q 21:19:07 start slot 16-23: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-fc70a43 serve:: cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama cuda::qwen2::t
+
+running 356 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::framing_matches_template ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... ok
+test chat::tests::full_context_drops_oldest has been running for over 60 seconds
+test chat::tests::mistral_framing_and_replies has been running for over 60 seconds
+test chat::tests::moe_turns_match_fresh_prefill has been running for over 60 seconds
+test chat::tests::qwen3_thinking_turns has been running for over 60 seconds
+test chat::tests::session_across_numerics_modes ... ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::set_system_reuses_the_shared_prefix ... ok
+test chat::tests::turns_match_fresh_prefill_cuda ... ok
+test chat::tests::session_hostile_state ... ok
+test chat::tests::turns_match_fresh_prefill_hybrid ... ok
+test chat::tests::user_text_cannot_forge_turns ... ok
+test chat::tests::session_continues_cpu ... ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test chat::tests::qwen3_thinking_turns ... ok
+test chat::tests::turns_match_fresh_prefill ... ok
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+test cuda::qwen2::experts::tests::resident_placement_and_identity ... ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::kvio::tests::bandwidth ... ignored
+test cuda::qwen2::kvio::tests::rows_round_trip_multi_round ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_profile_counts_every_layer ... ok
+test cuda::qwen2::moe::tests::moe_profile_lines_sum ... ok
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits ... ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... ok
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_gemma3 ... ok
+test cuda::qwen2::experts::tests::cuda_experts_qwen3moe_match_cpu ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 ... ok
+test chat::tests::full_context_drops_oldest ... ok
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... ok
+test cuda::qwen2::sample_tests::cpu_and_gpu_differ_only_where_logits_do ... ok
+test cuda::qwen2::sample_tests::kernels_match_cpu_candidates ... ok
+test cuda::qwen2::sample_tests::model_candidates_match ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_llama ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_q8 ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_qwen3 ... ok
+test cuda::qwen2::sample_tests::samp_kernel_profile ... ignored
+test cuda::qwen2::sample_tests::step_cost_cuda ... ignored
+test cuda::qwen2::stream::tests::unpermute_bench ... ignored, benchmark: unpermute_bench -- --ignored --nocapture
+test cuda::qwen2::stream::tests::unpermute_inverts_repack ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_store_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k has been running for over 60 seconds
+[axon-run 21:28:36] signal 15: stopping the job
+[axon-run 21:28:37] exit 143 after 570.3s (host bella)
