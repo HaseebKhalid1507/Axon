@@ -1,0 +1,29 @@
+{
+ "label": "fp8sm89-fc70a43-logx-sm120",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1104-212054-8064",
+   "name": "fp8sm89-fc70a43-logx-sm120",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fc70a43",
+   "binary": "bash",
+   "started": 1793845745.1091976,
+   "ended": 1793845883.5932777,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d431012cc5d1a20d1c147ad29914b515c335ab6fe7af153bfb4ef999f0cae15d",
+   "log_bytes": 289399
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-04 21:31:24 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
