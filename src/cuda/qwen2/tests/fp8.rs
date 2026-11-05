@@ -493,3 +493,348 @@ fn gpu_fp8_load_diag() {
     let o = net(&mo, Device::Cuda, Numerics::Fast);
     super::numerics::load_diag(&r, &f, &o, &mr, &Sizes::FP8);
 }
+
+// ---------------------------------------------------------------------------
+// #190 diagnostic: what the e4m3 mma computes on this GPU.
+
+/// A value +-m * 2^e (m >= 0).
+#[derive(Clone, Copy)]
+struct Term {
+    neg: bool,
+    m: u64,
+    e: i32,
+}
+
+fn term_code(c: u8) -> Term {
+    let (ex, mm) = (((c >> 3) & 15) as i32, (c & 7) as u64);
+    let (m, e) = if ex == 0 { (mm, -9) } else { (8 + mm, ex - 10) };
+    Term {
+        neg: c & 0x80 != 0,
+        m,
+        e,
+    }
+}
+
+fn term_prod(a: u8, b: u8) -> Term {
+    let (x, y) = (term_code(a), term_code(b));
+    Term {
+        neg: x.neg != y.neg,
+        m: x.m * y.m,
+        e: x.e + y.e,
+    }
+}
+
+fn term_f32(v: f32) -> Term {
+    let b = v.to_bits();
+    let (ex, fr) = (((b >> 23) & 255) as i32, (b & 0x7f_ffff) as u64);
+    let (m, e) = if ex == 0 {
+        (fr, -149)
+    } else {
+        (fr | 1 << 23, ex - 150)
+    };
+    Term {
+        neg: b >> 31 == 1,
+        m,
+        e,
+    }
+}
+
+/// floor(log2 |t|) (t != 0).
+fn term_top(t: &Term) -> i32 {
+    63 - t.m.leading_zeros() as i32 + t.e
+}
+
+/// A model of one e4m3 mma step: the products of `g` consecutive k (and
+/// the accumulator if `c_aligned`) aligned to the largest's exponent and
+/// cut to `f` bits below it (toward zero, or toward -inf if `floor`),
+/// summed exactly; not `c_aligned`: the products' sum rounded into c (f32).
+#[derive(Clone, Copy, Debug)]
+struct MmaModel {
+    f: i32,
+    g: usize,
+    floor: bool,
+    c_aligned: bool,
+}
+
+fn model_step(md: &MmaModel, c: f32, ps: &[Term]) -> f32 {
+    let ct = term_f32(c);
+    let cs = [ct];
+    let all = ps.iter().chain(if md.c_aligned { &cs[..] } else { &[] });
+    let Some(emax) = all.clone().filter(|t| t.m != 0).map(term_top).max() else {
+        return if md.c_aligned { 0.0 } else { c };
+    };
+    let qe = emax - md.f;
+    let mut s: i128 = 0;
+    for t in all {
+        if t.m == 0 {
+            continue;
+        }
+        let sh = t.e - qe;
+        let (n, exact) = if sh >= 0 {
+            ((t.m as i128) << sh, true)
+        } else if -sh >= 64 {
+            (0, false)
+        } else {
+            ((t.m >> -sh) as i128, t.m & ((1u64 << -sh) - 1) == 0)
+        };
+        s += match (t.neg, md.floor && !exact) {
+            (false, _) => n,
+            (true, false) => -n,
+            (true, true) => -n - 1,
+        };
+    }
+    let v = s as f64 * 2f64.powi(qe);
+    if md.c_aligned {
+        v as f32
+    } else {
+        (c as f64 + v) as f32
+    }
+}
+
+/// The model's accumulator for one output: c0, then k ascending in steps of g.
+fn model_dot(md: &MmaModel, w: &[u8], a: &[u8], c0: f32) -> f32 {
+    let p: Vec<Term> = w.iter().zip(a).map(|(&x, &y)| term_prod(x, y)).collect();
+    p.chunks(md.g).fold(c0, |c, ch| model_step(md, c, ch))
+}
+
+/// diag_chain_f8's raw accumulators ([nb][rows]).
+#[allow(clippy::too_many_arguments)]
+fn diag_chain(
+    g: &Gpu,
+    km: &Module,
+    w: &[u8],
+    rows: usize,
+    k: usize,
+    qa: &[u8],
+    nb: usize,
+    c0: Option<&[f32]>,
+    p: i32,
+    h16: bool,
+) -> Vec<f32> {
+    let f = km.function("diag_chain_f8").unwrap();
+    let (wd, qd) = (g.upload(w).unwrap(), g.upload(qa).unwrap());
+    let cd = c0.map(|c| g.upload(c).unwrap());
+    let out = g.alloc(rows * nb * 4).unwrap();
+    out.zero().unwrap();
+    // SAFETY: diag_chain_f8's signature; w rows x k, qa nb x k, c0 nb x rows.
+    unsafe {
+        g.launch(
+            &f,
+            (nb.div_ceil(8) as u32, rows.div_ceil(16) as u32, 1),
+            (32, 1, 1),
+            0,
+            &[
+                wd.arg(),
+                Arg::I32(rows as i32),
+                Arg::I32(k as i32),
+                qd.arg(),
+                Arg::I32(nb as i32),
+                cd.as_ref().map_or(Arg::Ptr(0), |c| c.arg()),
+                Arg::I32(p),
+                Arg::I32(h16 as i32),
+                out.arg(),
+            ],
+        )
+        .unwrap();
+    }
+    g.sync().unwrap();
+    out.read::<f32>().unwrap()
+}
+
+/// #190, run by hand (`--ignored --nocapture`) on each architecture: the
+/// raw e4m3 mma accumulators against a family of models (alignment width,
+/// step size, truncation, whether the accumulator joins the alignment),
+/// over random, accumulator-seeded, sparse and chained data; the best
+/// models over the §3 grid; and the §3 anchor's margin for the chain,
+/// promotion every 1 and 4 mmas, and an f16 mma of the same codes.
+#[test]
+#[ignore]
+fn gpu_fp8_mma_diag() {
+    let Some(g) = f8_gpu() else {
+        return;
+    };
+    let src = format!(
+        "{}\n{}",
+        crate::cuda::KERNELS_F8,
+        include_str!("fp8_diag.cu")
+    );
+    let mut o = crate::cuda::mode_opts(&crate::cuda::KERNEL_OPTS, Numerics::Fast);
+    o.push(crate::cuda::F8_DEFINE);
+    let km = Module::load(&g, &src, &o).unwrap().0;
+    let cc = g.info().unwrap().cc;
+    println!("DIAG cc {}.{}", cc.0, cc.1);
+    // The failing output of #190.
+    let mut s = 3u64;
+    let (w, ws, qa, das) = operands(64, 128, 17, &mut s);
+    let y = product(&g, &km, "gemm_ref_f8", &w, &ws, 128, &qa, &das);
+    let raw = diag_chain(&g, &km, &w, 64, 128, &qa, 17, None, 0, false);
+    println!(
+        "REPRO y0 {} ({:#x}) raw0 {} rescaled {} exact {}",
+        y[0],
+        y[0].to_bits(),
+        raw[0],
+        (raw[0] * ws[0]) * das[0],
+        f8_gemm_f64(&w[..128], &ws[..1], 128, &qa[..128], &das[..1])[0].0
+    );
+    // Data sets: (name, w, rows, k, qa, nb, c0).
+    type Set = (
+        String,
+        Vec<u8>,
+        usize,
+        usize,
+        Vec<u8>,
+        usize,
+        Option<Vec<f32>>,
+    );
+    let mut sets: Vec<Set> = Vec::new();
+    let mut s = 101u64;
+    let w32 = test_codes(1024 * 32, &mut s);
+    let q32 = test_codes(8 * 32, &mut s);
+    sets.push(("rand32".into(), w32.clone(), 1024, 32, q32.clone(), 8, None));
+    let c0: Vec<f32> = floats(8 * 1024, &mut s).iter().map(|v| v * 256.0).collect();
+    sets.push((
+        "c0-32".into(),
+        w32.clone(),
+        1024,
+        32,
+        q32.clone(),
+        8,
+        Some(c0),
+    ));
+    let sparse: Vec<u8> = w32
+        .iter()
+        .map(|&c| if lcg(&mut s) % 8 == 0 { c } else { 0 })
+        .collect();
+    sets.push(("sparse32".into(), sparse, 1024, 32, q32.clone(), 8, None));
+    // Same-magnitude codes (exponent fields 7..8: 1 <= |v| < 4), both signs.
+    let narrow = |n: usize, s: &mut u64| -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                let r = lcg(s);
+                ((r & 0x80) as u8) | ((7 + (r >> 8) % 2) << 3) as u8 | (r >> 16 & 7) as u8
+            })
+            .collect()
+    };
+    let (wn, qn) = (narrow(1024 * 32, &mut s), narrow(8 * 32, &mut s));
+    sets.push(("narrow32".into(), wn, 1024, 32, qn, 8, None));
+    for k in [64usize, 128, 896] {
+        let w = test_codes(64 * k, &mut s);
+        let q = test_codes(8 * k, &mut s);
+        sets.push((format!("chain{k}"), w, 64, k, q, 8, None));
+    }
+    let (wn, qn) = (narrow(64 * 896, &mut s), narrow(8 * 896, &mut s));
+    sets.push(("narrow896".into(), wn, 64, 896, qn, 8, None));
+    let got: Vec<Vec<f32>> = sets
+        .iter()
+        .map(|(_, w, rows, k, q, nb, c0)| {
+            diag_chain(&g, &km, w, *rows, *k, q, *nb, c0.as_deref(), 0, false)
+        })
+        .collect();
+    for (i, v) in got[0].iter().take(64).enumerate() {
+        println!("RAW rand32 {i} {:#010x}", v.to_bits());
+    }
+    let mut models = Vec::new();
+    for f in 10..=24 {
+        for gs in [4usize, 8, 16, 32] {
+            for floor in [false, true] {
+                for c_aligned in [true, false] {
+                    models.push(MmaModel {
+                        f,
+                        g: gs,
+                        floor,
+                        c_aligned,
+                    });
+                }
+            }
+        }
+    }
+    let mut exact_models = Vec::new();
+    for md in &models {
+        let mut line = format!("MODEL {md:?}:");
+        let mut total = 0;
+        for ((name, w, rows, k, q, nb, c0), gv) in sets.iter().zip(&got) {
+            let mut bad = 0;
+            for t in 0..*nb {
+                for r in 0..*rows {
+                    let c = c0.as_ref().map_or(0.0, |c| c[t * rows + r]);
+                    let m = model_dot(md, &w[r * k..(r + 1) * k], &q[t * k..(t + 1) * k], c);
+                    if m != gv[t * rows + r] {
+                        bad += 1;
+                    }
+                }
+            }
+            total += bad;
+            line += &format!(" {name} {bad}/{}", rows * nb);
+        }
+        if total == 0 {
+            exact_models.push(*md);
+        }
+        if total < 2000 {
+            println!("{line}");
+        }
+    }
+    println!("EXACT MODELS {exact_models:?}");
+    // The §3 grid, as gpu_fp8_gemm_bits_and_anchor draws it.
+    let mut s = 3u64;
+    let mut worst = [0f64; 4];
+    for k in [128usize, 896, 4864] {
+        for rows in [64usize, 128, 576, 1024] {
+            for nb in [17usize, 24, 64, 65, 128, 160, 520, 1024] {
+                let (w, ws, qa, das) = operands(rows, k, nb, &mut s);
+                let sample = anchor_sample(&w, &ws, k, &qa, &das, &mut s);
+                let rf = product(&g, &km, "gemm_ref_f8", &w, &ws, k, &qa, &das);
+                let mut line = format!("GRID k {k} rows {rows} nb {nb}:");
+                for (vi, (p, h16)) in [(0, false), (1, false), (4, false), (0, true)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let raw = diag_chain(&g, &km, &w, rows, k, &qa, nb, None, p, h16);
+                    let y: Vec<f32> = (0..rows * nb)
+                        .map(|i| (raw[i] * ws[i % rows]) * das[i / rows])
+                        .collect();
+                    if vi == 0 {
+                        let nbits = y
+                            .iter()
+                            .zip(&rf)
+                            .filter(|(a, b)| a.to_bits() != b.to_bits())
+                            .count();
+                        line += &format!(" [ref==chain mism {nbits}]");
+                    }
+                    let (mut mx, mut fails, mut rel) = (0f64, 0, 0f64);
+                    for &(i, (e, tol)) in &sample {
+                        let err = (y[i] as f64 - e).abs();
+                        mx = mx.max(err / tol);
+                        // err / (sc * sum|p|): tol / c of the anchor.
+                        rel = rel.max(err / (tol / ((k as f64 / 32.0 + 40.0) * 2f64.powi(-23))));
+                        if err > tol {
+                            fails += 1;
+                        }
+                    }
+                    worst[vi] = worst[vi].max(mx);
+                    let nm = ["chain", "P1", "P4", "f16"][vi];
+                    line += &format!(
+                        " {nm} max {mx:.3}x fails {fails}/{} rel {rel:.2e};",
+                        sample.len()
+                    );
+                }
+                if let Some(md) = exact_models.first() {
+                    let raw = diag_chain(&g, &km, &w, rows, k, &qa, nb, None, 0, false);
+                    let bad = sample
+                        .iter()
+                        .filter(|&&(i, _)| {
+                            let (t, r) = (i / rows, i % rows);
+                            model_dot(md, &w[r * k..(r + 1) * k], &qa[t * k..(t + 1) * k], 0.0)
+                                != raw[i]
+                        })
+                        .count();
+                    line += &format!(" model {bad}/{}", sample.len());
+                }
+                println!("{line}");
+            }
+        }
+    }
+    println!(
+        "WORST chain {:.3}x P1 {:.3}x P4 {:.3}x f16 {:.3}x",
+        worst[0], worst[1], worst[2], worst[3]
+    );
+}
