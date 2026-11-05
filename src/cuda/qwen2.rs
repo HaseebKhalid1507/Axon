@@ -1997,6 +1997,16 @@ impl<'g> CudaQwen2<'g> {
         self.tc_attn = on;
     }
 
+    /// Tests: the split attention's count as a GPU of another SM count
+    /// would have it (`max_split`), before making caches (their scratch is
+    /// sized for it). It sets that path's reduction order, so its bits
+    /// (#203).
+    #[cfg(test)]
+    pub(crate) fn set_max_split(&mut self, k: usize) {
+        assert!((1..=MAX_SPLIT).contains(&k), "split count {k}");
+        self.max_split = k;
+    }
+
     /// Free VRAM now.
     pub(crate) fn free_bytes(&self) -> Result<u64, String> {
         Ok(self.gpu.info()?.free_bytes)

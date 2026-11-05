@@ -6,7 +6,9 @@
 //! continues as the uninterrupted one would. They are only that function
 //! *for one identity*: the model file, the KV type, the RoPE table, the
 //! backend and its numerics (the source and options of the kernel module
-//! the net runs, GPU architecture; the numerics mode, `crate::numerics`).
+//! the net runs, the GPU architecture and, where they change the bits on
+//! one architecture, its split-attention count and code target,
+//! `gpu_extra`; the numerics mode, `crate::numerics`).
 //! A file records its identity in the header; one made under another
 //! identity is never loaded as bytes, only as tokens, which are prefilled
 //! again. A file is never wrong, only slower.
@@ -431,6 +433,22 @@ impl KvIo for Qwen2<'_> {
     }
 }
 
+/// A GPU session identity's `gpu` (#203): the fingerprint's `gpu` field
+/// (`identity::gpu_field`) when it says more than the architecture,
+/// `class`. Both of its other parts change the cache's bits on one
+/// architecture: the split attention's count (`split`,
+/// `CudaQwen2::split_attention`: Gemma 3, gpt-oss and everything below
+/// sm_80), set by the SM count, which sets that path's reduction order
+/// (`cuda::qwen2::max_split`); and the code (`code`, `cuda::code_target`)
+/// when it isn't the device's plain cubin: an older cubin of its major,
+/// sm_90a, or PTX that the driver compiles (with the driver's version).
+/// None when it's neither, so the default identity (sm_80 and later, the
+/// tensor-core attention, the device's plain cubin) is what it was before.
+pub(crate) fn gpu_extra(arch: &str, code: &str, split: Option<usize>) -> Option<String> {
+    let g = crate::identity::gpu_field(arch, code, split);
+    (g != arch).then_some(g)
+}
+
 fn check_range(lo: usize, hi: usize, max_ctx: usize) -> io::Result<()> {
     if lo > hi || hi > max_ctx {
         return Err(io::Error::other(format!(
@@ -457,6 +475,10 @@ impl<'g> KvIo for CudaQwen2<'g> {
         let num = crate::cuda::numerics_tag(self.gpu(), self.src_hash()).ok()?;
         let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
+        // As the fingerprint's (`identity::gpu`): one that can't be read is
+        // "unknown (why)", which matches no file's known code.
+        let code =
+            crate::cuda::code_target(self.gpu()).map_or_else(|e| format!("unknown ({e})"), |c| c.0);
         let mut id = json!({
             "backend": "cuda",
             "class": class,
@@ -475,6 +497,9 @@ impl<'g> KvIo for CudaQwen2<'g> {
         // the fingerprint does (#198). Only a native net.
         if self.f8_native() {
             id["weights"] = json!("fp8-native");
+        }
+        if let Some(g) = gpu_extra(&class, &code, self.split_attention()) {
+            id["gpu"] = json!(g);
         }
         Some(id)
     }
@@ -1256,6 +1281,76 @@ mod tests {
             &json!({ "n": n }),
         )
         .unwrap()
+    }
+
+    /// #203: a GPU session's identity has the fingerprint's `gpu` field
+    /// when it says more than the architecture, and only then. A Gemma 3
+    /// 4B session (4 kv heads) from an RTX 4050 Laptop (20 SMs: 40 splits)
+    /// doesn't load as bytes on a 4090 (128 SMs: 256), both sm_89, nor a
+    /// PTX build's once NVRTC builds the device's own cubin; the why names
+    /// `gpu`. The default (no split attention, the device's own cubin) adds
+    /// nothing: those identities are what they were. The SM count and the
+    /// code target can't be changed on one GPU, so they're injected here;
+    /// `chat::tests::gpu_session_split_count` runs live nets.
+    #[test]
+    fn gpu_extra_names_split_and_code() {
+        use crate::cuda::qwen2::max_split;
+        for a in ["sm_61", "sm_89", "sm_120"] {
+            assert_eq!(gpu_extra(a, a, None), None, "{a}");
+        }
+        let (k4050, k4090) = (max_split(20, 4), max_split(128, 4));
+        assert_eq!((k4050, k4090), (40, 256));
+        let g = |code: &str, split| gpu_extra("sm_89", code, split).unwrap();
+        assert_eq!(g("sm_89", Some(k4050)), "sm_89, split attention 40");
+        assert_eq!(g("sm_89", Some(k4090)), "sm_89, split attention 256");
+        let ptx = gpu_extra("sm_120", "compute_90 PTX, driver 12.8", None);
+        assert_eq!(
+            ptx.as_deref(),
+            Some("sm_120 [code compute_90 PTX, driver 12.8]")
+        );
+        assert_eq!(
+            gpu_extra("sm_90", "sm_90a", None).as_deref(),
+            Some("sm_90 [code sm_90a]")
+        );
+        assert_eq!(
+            gpu_extra("sm_61", "sm_61", Some(max_split(10, 2))).as_deref(),
+            Some("sm_61, split attention 40")
+        );
+        // As a session file's identity (`CudaQwen2::kv_ident`'s `gpu`).
+        let id = |class: &str, gpu: Option<String>| {
+            let mut v = json!({"model": "x", "row_bytes": ROW, "class": class});
+            if let Some(g) = gpu {
+                v["gpu"] = json!(g);
+            }
+            v
+        };
+        let (t, _) = toks();
+        for (made, now) in [
+            (
+                id("sm_89", Some(g("sm_89", Some(k4050)))),
+                id("sm_89", Some(g("sm_89", Some(k4090)))),
+            ),
+            (id("sm_120", ptx.clone()), id("sm_120", None)),
+            (id("sm_120", None), id("sm_120", ptx.clone())),
+        ] {
+            let path = scratch("gpu-extra.axkv");
+            save(
+                &mut Session::new(path.clone(), json!({})),
+                &made,
+                &t[..100],
+                1,
+            );
+            let (_, same) = reload(&mut Session::new(path.clone(), json!({})), &made, &t, ROW);
+            assert_eq!(same.unwrap(), image(ROW, &t[..100]), "{made}");
+            let l = (Session::new(path.clone(), json!({})).read(Some(&now)))
+                .unwrap()
+                .unwrap();
+            let s = |v: &Value| v.get("gpu").map_or("-".into(), |g| g.to_string());
+            let why = format!("it was made under gpu {} (now {})", s(&made), s(&now));
+            assert_eq!(l.ident_err.as_deref(), Some(why.as_str()));
+            let (_, e) = reload(&mut Session::new(path.clone(), json!({})), &now, &t, ROW);
+            assert!(e.is_err(), "{made} -> {now}: loaded as bytes");
+        }
     }
 
     /// Saves append while the tokens extend, rewrite otherwise; a new

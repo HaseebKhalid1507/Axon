@@ -91,12 +91,13 @@ and the token's position, never on the batch. The tests that hold this in place:
     on every GPU, divides long contexts into `max_split = 8 × SMs / kv heads` parts (at most
     256), so its order depends on the card's SM count, not just the architecture: a 4050
     (20 SMs) and a 4090 (128) can differ past ~32 × max_split positions. On that path the
-    identity's `gpu` carries the count (`sm_89, split attention 64`). Not audited across
-    cards.
+    identity's `gpu` carries the count (`sm_89, split attention 64`), and so does a session
+    file's GPU identity (#203). Not audited across cards.
   - The code loaded: the device's own cubin by default. When NVRTC can't build that (an
     older toolkit: an older cubin of the major, or PTX the driver compiles) or on sm_90 with
     `AXON_HOPPER` (sm_90a code), the `gpu` field names it (`sm_120 [code compute_90 PTX,
-    driver 12.8]`). Only same-target builds were audited.
+    driver 12.8]`), as a session file's GPU identity does (#203). Only same-target builds
+    were audited.
   - sm_120 vs sm_89, and sm_80/sm_90: not audited yet. The GEMMs (integer sums, IEEE
     fma/mul/div) should be architecture-exact, but f16 `mma.sync` internal accumulation is
     architecture-specific (Hawkeye, arXiv:2603.20421).
