@@ -1,0 +1,29 @@
+{
+ "label": "fp8sm89-104294e-diag",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1104-195209-4f1e",
+   "name": "fp8sm89-104294e-diag-sm89",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-04_19:52.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "104294e",
+   "binary": "axon-test-104294e",
+   "started": 1793839944.47508,
+   "ended": 1793840033.5929518,
+   "attempts": 1,
+   "remote_job": "20261105-005233-axon-test-104294e-819",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "559460c80ed67755556382845949eb70da3fe72f40cbc4af6e3452d1c64e16fe",
+   "log_bytes": 24954
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-04 19:53:54 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
