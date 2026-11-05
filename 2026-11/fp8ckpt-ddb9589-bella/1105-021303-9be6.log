@@ -1,0 +1,58 @@
+[axon-run 02:13:03] submitted 1105-021303-9be6 by /home/haseeb/.cache/axon-fp8ckpt: /usr/bin/bash missing193.sh ./axon-test-ddb9589 ./axon-test-dbg-ddb9589
+[axon-run 03:39:12] scope axon-job-1105-021303-9be6-1793867952.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 03:39:12] job 1105-021303-9be6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-021303-9be6-1793867952 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash missing193.sh ./axon-test-ddb9589 ./axon-test-dbg-ddb9589
+axon-q 03:39:12 start slot 16-23: /usr/bin/bash missing193.sh ./axon-test-ddb9589 ./axon-test-dbg-ddb9589
+empty dir entries: 0
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0
+######## ./axon-test-ddb9589
+== axon-test-ddb9589-A: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt 
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical' (1116398) panicked at src/testutil.rs:88:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... 
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (1116408) panicked at src/testutil.rs:88:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.56s
+rc=101
+PROOF A: missing checkpoint, no skip variable: both tests FAIL, each with the panic
+== axon-test-ddb9589-B: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt AXON_SKIP_FP8_MODEL_TESTS=1
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.47s
+rc=0
+PROOF B: AXON_SKIP_FP8_MODEL_TESTS=1: both tests skip (ok), each saying so
+== axon-test-ddb9589-C: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt AXON_SKIP_MODEL_TESTS=1
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_MODEL_TESTS is set
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_MODEL_TESTS is set
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.49s
+rc=0
+PROOF C: AXON_SKIP_MODEL_TESTS=1: both tests skip (ok), each saying so
+######## ./axon-test-dbg-ddb9589
+== axon-test-dbg-ddb9589-A: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt 
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical' (1116528) panicked at src/testutil.rs:88:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... 
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (1116542) panicked at src/testutil.rs:88:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.51s
+rc=101
+PROOF A: missing checkpoint, no skip variable: both tests FAIL, each with the panic
+== axon-test-dbg-ddb9589-B: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt AXON_SKIP_FP8_MODEL_TESTS=1
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.52s
+rc=0
+PROOF B: AXON_SKIP_FP8_MODEL_TESTS=1: both tests skip (ok), each saying so
+== axon-test-dbg-ddb9589-C: AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt AXON_SKIP_MODEL_TESTS=1
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_MODEL_TESTS is set
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/missing193-ce70a294c690/empty-fp8-ckpt is not present and AXON_SKIP_MODEL_TESTS is set
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.49s
+rc=0
+PROOF C: AXON_SKIP_MODEL_TESTS=1: both tests skip (ok), each saying so
+MISSING-CHECKPOINT PATH: AS INTENDED
+[axon-run 03:39:15] exit 0 after 3.6s (host bella)
