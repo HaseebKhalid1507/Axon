@@ -1,0 +1,72 @@
+[axon-run 21:34:21] submitted 1104-213421-547f by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-bc81a3a cuda::qwen2::tests::wide_flips_rule cuda::qwen2::tests::top1_binomial_rule cuda::qwen2::tests::sane_backstops cuda::qwen2::tests::ref_spread_zero_fails_by_name --nocapture
+[axon-run 21:43:20] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 21:43:20] scope axon-job-1104-213421-547f-1793846600.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 21:43:20] job 1104-213421-547f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1104-213421-547f-1793846600 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-bc81a3a cuda::qwen2::tests::wide_flips_rule cuda::qwen2::tests::top1_binomial_rule cuda::qwen2::tests::sane_backstops cuda::qwen2::tests::ref_spread_zero_fails_by_name --nocapture --test-threads 6
+axon-q 21:43:20 start slot 16-23: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-bc81a3a cuda::qwen2::tests::wide_flips_rule cuda::qwen2::tests::top1_binomial_rule cuda::qwen2::tests::sane_backstops cuda::qwen2::tests::ref_spread_zero
+
+running 4 tests
+note: 12 top-1 flips at margin >= 0.5 over 1014 positions, above max(2, n/100) 10, within the FP8 bound 16 (the floor's 10; #192)
+note: 16 top-1 flips at margin >= 0.5 over 1014 positions, above max(2, n/100) 10, within the FP8 bound 16 (the floor's 10; #192)
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:379:32:
+top-1 agreement 274/294 (cpu vs itself 276)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'cuda::qwen2::tests::sane_backstops' (2785383) panicked at src/cuda/qwen2/tests.rs:506:5:
+1 of 1 positions with a non-finite logit
+
+thread 'cuda::qwen2::tests::ref_spread_zero_fails_by_name' (2785382) panicked at src/cuda/qwen2/tests.rs:292:5:
+reference spread is 0: cpu and rows are the same model (AXON_REPACK=0? build the reference with Qwen2::new_with(m, true))
+
+thread 'cuda::qwen2::tests::wide_flips_rule' (2785385) panicked at src/cuda/qwen2/tests.rs:419:5:
+a top-1 flip with margin >= 5.28 or 17 >= 0.5 (allowed 16, from the floor's 10; max(2, n/100) 10): [0.53, 0.654, 0.686, 0.765, 1.191, 1.768, 1.768, 1.768, 2.917, 2.917, 0.53, 0.654, 0.686, 0.765, 1.191, 1.768, 1.768, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+
+thread 'cuda::qwen2::tests::sane_backstops' (2785383) panicked at src/cuda/qwen2/tests.rs:506:5:
+1 of 1 positions with a non-finite logit
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:388:13:
+top-1 agreement 267/294 (floor 276, 2 SE 8.2)
+
+thread 'cuda::qwen2::tests::sane_backstops' (2785383) panicked at src/cuda/qwen2/tests.rs:505:5:
+nothing graded
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:388:13:
+top-1 agreement 899/1000 (floor 900, 2 SE 19.0)
+
+thread 'cuda::qwen2::tests::wide_flips_rule' (2785385) panicked at src/cuda/qwen2/tests.rs:419:5:
+a top-1 flip with margin >= 5.28 or 11 >= 0.5 (allowed 10; max(2, n/100) 10): [0.53, 0.654, 0.686, 0.765, 1.191, 1.768, 1.768, 1.768, 2.917, 2.917, 0.53, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]test cuda::qwen2::tests::ref_spread_zero_fails_by_name ... 
+ok
+
+thread 'cuda::qwen2::tests::sane_backstops' (2785383) panicked at src/cuda/qwen2/tests.rs:512:5:
+max logit difference: all 12 (< 12)
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:496:9:
+max logit difference
+
+thread 'cuda::qwen2::tests::wide_flips_rule' (2785385) panicked at src/cuda/qwen2/tests.rs:419:5:
+a top-1 flip with margin >= 5.28 or 11 >= 0.5 (allowed 10, from the floor's 0; max(2, n/100) 10): [0.53, 0.654, 0.686, 0.765, 1.191, 1.768, 1.768, 1.768, 2.917, 2.917, 0.53, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:489:9:
+max logit difference: top-20 6 (< 6), all 8.515 (< 12)
+test cuda::qwen2::tests::sane_backstops ... ok
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:489:9:
+max logit difference: top-20 4 (< 6), all 12 (< 12)
+
+test cuda::qwen2::tests::wide_flips_rule ... ok
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:451:9:
+max KL 0.6, 11 positions above 0.5 vs the floor's 5 (allowed 10): (index, KL, reference margin, previous KL): [(0, 0.6, 1.0, 0.0), (1, 0.6, 1.0, 0.0), (2, 0.6, 1.0, 0.0), (3, 0.6, 1.0, 0.0), (4, 0.6, 1.0, 0.0), (5, 0.6, 1.0, 0.0), (6, 0.6, 1.0, 0.0), (7, 0.6, 1.0, 0.0), (8, 0.6, 1.0, 0.0), (9, 0.6, 1.0, 0.0), (10, 0.6, 1.0, 0.0)]; the floor's: [(0, 0.6, 1.0, 0.0), (1, 0.6, 1.0, 0.0), (2, 0.6, 1.0, 0.0), (3, 0.6, 1.0, 0.0), (4, 0.6, 1.0, 0.0)]
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:451:9:
+max KL 0.6, 2 positions above 0.5 vs the floor's 0 (allowed 1): (index, KL, reference margin, previous KL): [(0, 0.6, 1.0, 0.0), (1, 0.6, 1.0, 0.0)]; the floor's: []
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:451:9:
+max KL 0.6, 3 positions above 0.5 vs the floor's 1 (allowed 2): (index, KL, reference margin, previous KL): [(0, 0.6, 1.0, 0.0), (1, 0.6, 1.0, 0.0), (2, 0.6, 1.0, 0.0)]; the floor's: [(0, 0.6, 1.0, 0.0)]
+
+thread 'cuda::qwen2::tests::top1_binomial_rule' (2785384) panicked at src/cuda/qwen2/tests.rs:461:9:
+max KL 0.6 (above 0.5 (index, KL, reference margin, previous KL): [(0, 0.6, 1.0, 0.0), (1, 0.6, 1.0, 0.0)])
+test cuda::qwen2::tests::top1_binomial_rule ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 842 filtered out; finished in 0.00s
+
+[axon-run 21:43:20] exit 0 after 0.1s (host bella)
