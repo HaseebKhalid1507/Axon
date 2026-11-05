@@ -792,13 +792,13 @@ fn gpu_fp8_mma_diag() {
                     let y: Vec<f32> = (0..rows * nb)
                         .map(|i| (raw[i] * ws[i % rows]) * das[i / rows])
                         .collect();
-                    if vi == 0 {
+                    if vi == 3 {
                         let nbits = y
                             .iter()
                             .zip(&rf)
                             .filter(|(a, b)| a.to_bits() != b.to_bits())
                             .count();
-                        line += &format!(" [ref==chain mism {nbits}]");
+                        line += &format!(" [ref==f16 mism {nbits}]");
                     }
                     let (mut mx, mut fails, mut rel) = (0f64, 0, 0f64);
                     for &(i, (e, tol)) in &sample {
@@ -837,4 +837,93 @@ fn gpu_fp8_mma_diag() {
         "WORST chain {:.3}x P1 {:.3}x P4 {:.3}x f16 {:.3}x",
         worst[0], worst[1], worst[2], worst[3]
     );
+}
+
+/// gemm_f8's time per launch on this GPU, as built (before sm_120: f16
+/// mmas, #190) and with the e4m3 mma forced (`AXON_F8_E4M3_ACC`, the path
+/// before #190's fix), interleaved, medians of 9 rounds of 20 launches, at
+/// the 0.5B's and the 7B's matrix shapes, 512 tokens. Run by hand
+/// (`--ignored --nocapture`), alone on the GPU.
+#[test]
+#[ignore]
+fn gpu_fp8_gemm_speed() {
+    let Some(g) = f8_gpu() else {
+        return;
+    };
+    let new = Kernels::module_f8(&g).unwrap();
+    let mut o = crate::cuda::mode_opts(&crate::cuda::KERNEL_OPTS, Numerics::Fast);
+    o.push(crate::cuda::F8_DEFINE);
+    o.push("-DAXON_F8_E4M3_ACC");
+    let old = Module::load(&g, crate::cuda::KERNELS_F8, &o).unwrap().0;
+    let cc = g.info().unwrap().cc;
+    let mut s = 5u64;
+    let nb = 512usize;
+    for (rows, k) in [
+        (896usize, 896usize),
+        (4864, 896),
+        (896, 4864),
+        (3584, 3584),
+        (18944, 3584),
+        (3584, 18944),
+    ] {
+        let (w, ws, qa, das) = operands(rows, k, nb, &mut s);
+        let (wd, wsd, qd, dd) = (
+            g.upload(&w).unwrap(),
+            g.upload(&ws).unwrap(),
+            g.upload(&qa).unwrap(),
+            g.upload(&das).unwrap(),
+        );
+        let out = g.alloc(rows * nb * 4).unwrap();
+        let run = |m: &Module, n: usize| -> f64 {
+            let f = m.function("gemm_f8").unwrap();
+            g.sync().unwrap();
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                // SAFETY: gemm_f8's signature; buffers as `product`'s.
+                unsafe {
+                    g.launch(
+                        &f,
+                        (nb.div_ceil(64) as u32, rows.div_ceil(64) as u32, 1),
+                        (256, 1, 1),
+                        2 * 2 * 64 * 144,
+                        &[
+                            wd.arg(),
+                            Arg::I32(rows as i32),
+                            Arg::I32(k as i32),
+                            qd.arg(),
+                            dd.arg(),
+                            Arg::I32(nb as i32),
+                            wsd.arg(),
+                            Arg::Ptr(0),
+                            Arg::I32(0),
+                            out.arg(),
+                            Arg::U64(rows as u64),
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            g.sync().unwrap();
+            t.elapsed().as_secs_f64() * 1e6 / n as f64
+        };
+        run(&old, 3);
+        run(&new, 3);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..9 {
+            a.push(run(&old, 20));
+            b.push(run(&new, 20));
+        }
+        a.sort_by(f64::total_cmp);
+        b.sort_by(f64::total_cmp);
+        let (ma, mb) = (a[4], b[4]);
+        let tf = |us: f64| 2.0 * (rows * k * nb) as f64 / us / 1e6;
+        println!(
+            "SPEED sm_{}{} rows {rows} k {k} nb {nb}: e4m3 {ma:.1} us ({:.0} TFLOPS) as built {mb:.1} us ({:.0} TFLOPS): x{:.3}",
+            cc.0,
+            cc.1,
+            tf(ma),
+            tf(mb),
+            mb / ma
+        );
+    }
 }

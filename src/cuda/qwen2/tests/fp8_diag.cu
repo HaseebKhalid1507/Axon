@@ -4,7 +4,8 @@
 // accumulators (no scales) out[t * rows + r], started from c0 (null: 0);
 // P > 0: every P mmas the accumulators are added into f32 registers
 // (__fadd_rn) and restarted from 0 (a promotion); h16: each k32 step as two
-// m16n8k16 f16 mmas of the codes converted to f16 (exact) instead.
+// m16n8k16 f16 mmas of the codes converted to f16 (exact) instead, else the
+// e4m3 mma itself on every architecture (diag_mma_e4m3, not fp8.cu's mma_f8).
 __device__ __forceinline__ u32 diag_h2(u32 v) {
     u32 r;
     unsigned short s = (unsigned short)v;
@@ -14,6 +15,13 @@ __device__ __forceinline__ u32 diag_h2(u32 v) {
 __device__ __forceinline__ void diag_mma_h(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
+        "{%8,%9}, {%0,%1,%2,%3};"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void diag_mma_e4m3(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
         "{%8,%9}, {%0,%1,%2,%3};"
         : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
@@ -45,7 +53,7 @@ diag_chain_f8(const u8* __restrict__ w, int rows, int K, const u8* __restrict__ 
             diag_mma_h(d, diag_h2(a2), diag_h2(a3), diag_h2(a2 >> 16), diag_h2(a3 >> 16), diag_h2(b1),
                        diag_h2(b1 >> 16));
         } else {
-            mma_f8(d, a0, a1, a2, a3, b0, b1);
+            diag_mma_e4m3(d, a0, a1, a2, a3, b0, b1);
         }
         if (P > 0 && ++n == P) {
             n = 0;
