@@ -305,8 +305,12 @@ The field is named for that: `gpu` = holders on the device, not "slots". Posted 
   `spilled`/`spill_ms`, `restored`/`restore_ms` and `wb`/`wb_ms` (pages, ms): the tier's copies since the line
   before. An admission runs between two steps, so its copies land on the next step's line and their ms explain the
   gap between the two lines' `t_ms + ms` and the next `t_ms`. A spill inside a step (preempt, unfeed) is inside that
-  step's `ms`. `restored × 3.5 MiB / restore_ms` is the rate a restore got (§2.8.2). The clock is read only while
-  a trace is open.
+  step's `ms`. The clock is read only while a trace is open. **Correction (after the s4 replay, 1105-124635-28ee):**
+  `restored × 3.5 MiB / restore_ms` is *not* the rate a restore got, as this said: the copies are only enqueued on
+  the stream, so `*_ms` is the host's enqueue time (s4: 11,745 pages in 15 ms). Their device time lands in the next
+  step's `ms` outside `feed_ms` and `dec_ms` (main's steps never have more than 0.8 ms there; the candidate's have
+  more only with copies), so the rate is ESTIMATED as `pages × 3.5 MiB / (ms − feed_ms − dec_ms)` on a line with
+  one kind of copy: s4's restores 28.8 GB/s, spills 27.7–27.9 GB/s (the log entry has the numbers).
 - `Metrics::kv_ram_off` zeroes the new gauge with the others and keeps the counters (#181's rule). #181's tests
   assert the gauges and counters they know; the new ones are added to the same assertions.
 
@@ -451,9 +455,10 @@ D2H / H2D, medians as in §2.8.1:
 - **The fast-mode clause applies:** the rerun landed in the fast mode again, so **the slow mode (7.1 GB/s,
   §2.8.1's three runs) stays unmeasured**. The hypothesis is weakened: 139c and 0d10 both started in P8, 139c with
   the desktop near idle, and both ran fast from their first row, so "idle desktop → low clocks → slow 2D copies" is
-  not enough to explain the three slow runs. Their cause is unknown. As written, the resume cell reads its own
-  restore rate: the trace's `restored × 3.5 MiB / restore_ms` per admission (§2.7). The PR reports it; the rule is
-  not re-read. If ≤ 0.3 s fails with a slow restore, §8 says what goes in the PR.
+  not enough to explain the three slow runs. Their cause is unknown. As written, the resume cell was to read its own
+  restore rate from `restored × 3.5 MiB / restore_ms`; that measures the enqueue, not the copy (§2.7's
+  correction). It reads the estimate §2.7 now gives instead (s4's restores: ≈ 28.8 GB/s, the fast mode). The PR
+  reports it; the rule is not re-read. If ≤ 0.3 s fails with a slow restore, §8 says what goes in the PR.
 - **0d10 answers Q4 by measurement:** #48's 32k slot copies at the same rates as f763's 25.6k one. A page copy is
   one 3.5 MiB 2D copy whatever the slot's length; only its pitch changes.
 - Observation, not used above: the same pattern, one Xorg sample at 89–99 % and a mean near 8 %, also tainted
