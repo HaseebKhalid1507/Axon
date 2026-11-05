@@ -328,7 +328,14 @@ Rules:
       kernel a shape routes to changes GPU cache bits without touching a .cu byte or an option, so it still needs the
       `NUMERICS_VERSION_EXACT` bump, which `host N` carries. The two per-device facts in the fingerprint's `gpu`
       field that change bits on one architecture, the split-attention count and the code target, are in the
-      identity as `gpu` where the fingerprint names them (`kvsave::gpu_extra`, #203).
+      identity as `gpu` where the fingerprint names them (`kvsave::gpu_extra`, #203). Where that key is new, a
+      session saved before restores once as tokens: Gemma 3, anything below sm_80, and every build that isn't the
+      device's plain cubin. That includes every H100 / H200 session by default (sm_90a). Those bytes weren't stale,
+      since the tag's `hopper true` already recorded the choice; the key only tells apart builds where `hopper true`
+      didn't give sm_90a (an NVRTC older than 12), and is kept so the session identity and the fingerprint share one
+      definition. gpt-oss takes the split attention too, but a MoE has no GPU session image yet. A PTX build's code
+      names the driver's CUDA version, so its sessions restore once as tokens after each driver update that changes
+      that version.
     - *Fast kernels whose rows depend on the batching* (a token restore then gives a fresh prefill's rows, equal to
       the uninterrupted cache's only within tolerance; a byte restore continues exactly): fp8.cu's FP8 matrices,
       `gemv_f8` up to 16 tokens a pass and `gemm_f8` (wgmma on Hopper) above (#177). A fast kernel that joins this

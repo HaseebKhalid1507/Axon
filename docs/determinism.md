@@ -93,11 +93,14 @@ and the token's position, never on the batch. The tests that hold this in place:
     (20 SMs) and a 4090 (128) can differ past ~32 × max_split positions. On that path the
     identity's `gpu` carries the count (`sm_89, split attention 64`), and so does a session
     file's GPU identity (#203). Not audited across cards.
-  - The code loaded: the device's own cubin by default. When NVRTC can't build that (an
-    older toolkit: an older cubin of the major, or PTX the driver compiles) or on sm_90 with
-    `AXON_HOPPER` (sm_90a code), the `gpu` field names it (`sm_120 [code compute_90 PTX,
-    driver 12.8]`), as a session file's GPU identity does (#203). Only same-target builds
-    were audited.
+  - The code loaded: the device's own cubin by default, except on sm_90 (H100, H200), where
+    the default is sm_90a code (NVRTC 12 or later; `AXON_HOPPER=0` builds the plain sm_90
+    cubin). For sm_90a, and when NVRTC can't build the device's cubin (an older toolkit: an
+    older cubin of the major, or PTX the driver compiles), the `gpu` field names the code
+    (`sm_90 [code sm_90a]`, `sm_120 [code compute_90 PTX, driver 12.8]`), as a session
+    file's GPU identity does (#203). The PTX string names the driver's CUDA version (the
+    driver compiles that PTX), so a driver update that changes the version prefills a PTX
+    build's sessions again once. Only same-target builds were audited.
   - sm_120 vs sm_89, and sm_80/sm_90: not audited yet. The GEMMs (integer sums, IEEE
     fma/mul/div) should be architecture-exact, but f16 `mma.sync` internal accumulation is
     architecture-specific (Hawkeye, arXiv:2603.20421).
