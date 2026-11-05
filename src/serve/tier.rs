@@ -655,7 +655,9 @@ impl PoolTier {
                 continue;
             }
             let room = self.t.store.room(parent, self.t.page);
-            self.arena.free.extend(self.t.store.take_evicted());
+            self.arena
+                .free
+                .extend(self.t.store.take_evicted().into_iter().map(|(_, a)| a));
             if !room {
                 break;
             }
@@ -711,7 +713,9 @@ impl PoolTier {
             return Ok(true);
         }
         let room = self.t.store.room(parent, self.t.page);
-        self.arena.free.extend(self.t.store.take_evicted());
+        self.arena
+            .free
+            .extend(self.t.store.take_evicted().into_iter().map(|(_, a)| a));
         if !room {
             return Ok(false);
         }
