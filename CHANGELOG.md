@@ -35,7 +35,9 @@ measurements behind them.
   `fast/1.3` in every fast-mode identity, on every GPU (sm_120 too) and for GGUF models; their bits don't change.
   Exact-mode fingerprints don't change. A `chat --session` saved in fast mode carries `fast/1.2`, so it restores once
   as tokens (prefilled again) instead of as KV bytes the old e4m3 path made. On sm_120 that happens although its bits
-  are the same: the [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843) is the bump with no waiver, and accepts that.
+  are the same: the
+  [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843)
+  is the bump with no waiver, and accepts that.
 - **The FP8 graded gate's wide-flip count is set relative to its CPU floor** (#192, test-only). On the 0.5B's
   1014-position decode arm, the floor alone has 10 top-1 flips at margin ≥ 0.5, which is all of the old
   `max(2, n/100)` = 10. A 4090 had 12. The bound is now the floor's count plus 2 binomial SE (16 there), for the FP8
