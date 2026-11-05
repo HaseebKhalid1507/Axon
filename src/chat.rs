@@ -2590,7 +2590,11 @@ mod tests {
         let saved = x.hist[..x.fed].to_vec();
         let nat_rows = Hasher::of(&prefill_image(&net, &saved));
         // The Q8_0 side, in a process with AXON_FP8_NATIVE=0: native -> Q8_0,
-        // then a session of its own, saved to fq8.
+        // then a session of its own, saved to fq8. Its results come back in
+        // a file, not on stdout: libtest prints `test <name> ... ` with no
+        // newline, so the child's first line of output shares that line.
+        let frep = fq8.with_extension("report.json");
+        let _ = std::fs::remove_file(&frep);
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
             .arg("chat::tests::fp8_session_q8_child")
@@ -2598,6 +2602,7 @@ mod tests {
             .env("AXON_TEST_FP8_MODEL", &p)
             .env("AXON_FP8_SESSION_IN", &fnat)
             .env("AXON_FP8_SESSION_OUT", &fq8)
+            .env("AXON_FP8_SESSION_REPORT", &frep)
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).to_string()
@@ -2606,23 +2611,15 @@ mod tests {
             out.status.success() && text.contains("test result: ok. 1 passed"),
             "the AXON_FP8_NATIVE=0 child failed:\n{text}"
         );
-        let line = |tag: &str| {
-            (text.lines())
-                .find_map(|l| l.strip_prefix(tag))
-                .unwrap_or_else(|| panic!("no {tag} line from the child:\n{text}"))
-                .to_owned()
-        };
-        let id_q8: serde_json::Value = serde_json::from_str(&line("FP8-Q8-IDENT ")).unwrap();
-        let rest = line("FP8-Q8-RESTORED ");
-        let (fed, q8_rows) = rest.split_once(' ').unwrap();
-        assert_eq!(fed.parse::<usize>().unwrap(), saved.len(), "{rest}");
+        let report = std::fs::read_to_string(&frep)
+            .unwrap_or_else(|e| panic!("no report from the child ({e}):\n{text}"));
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let id_q8 = &report["ident"];
+        let q8_rows = report["rows"].as_u64().unwrap();
+        assert_eq!(report["fed"].as_u64(), Some(saved.len() as u64), "{report}");
         // Had the native file's bytes loaded there, the rows would not be
         // the ones the Q8_0 form makes.
-        assert_ne!(
-            q8_rows.parse::<u64>().unwrap(),
-            nat_rows,
-            "Q8_0 rows == native rows"
-        );
+        assert_ne!(q8_rows, nat_rows, "Q8_0 rows == native rows");
         // Nothing but the native net's `weights` tells them apart.
         let strip = |v: &serde_json::Value| {
             let mut v = v.clone();
@@ -2632,7 +2629,7 @@ mod tests {
             v
         };
         assert!(id_q8.get("weights").is_none(), "{id_q8}");
-        assert_eq!(strip(&id_nat), strip(&id_q8));
+        assert_eq!(strip(&id_nat), strip(id_q8));
         // Q8_0 -> native: tokens, prefilled again.
         let mut y = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
         y.max_reply = 16;
@@ -2654,13 +2651,15 @@ mod tests {
         eprintln!(
             "FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled \
              again ({}); each loads back as bytes; identities differ in weights only; the \
-             saved tokens' rows: native {nat_rows:016x}, Q8_0 {q8_rows}",
+             saved tokens' rows: native {nat_rows:016x}, Q8_0 {q8_rows:016x}",
             r.why.unwrap()
         );
         drop(x);
         drop(y);
         drop(net);
-        let _ = (std::fs::remove_file(&fnat), std::fs::remove_file(&fq8));
+        for f in [&fnat, &fq8, &frep] {
+            let _ = std::fs::remove_file(f);
+        }
         // No `weights` anywhere else.
         let me = load();
         let e = Backend::new(&me, opts(Numerics::Exact)).unwrap();
@@ -2687,18 +2686,20 @@ mod tests {
     /// (AXON_FP8_SESSION_IN) restores as tokens, its rows a fresh prefill's,
     /// and the reply after it a fresh prefill's too (exact kernels: bit for
     /// bit); then a turn of its own, saved to AXON_FP8_SESSION_OUT, loads
-    /// back as bytes. Prints the restored positions and their rows' hash
-    /// (`FP8-Q8-RESTORED`) and its identity (`FP8-Q8-IDENT`). Without those
-    /// variables it does nothing.
+    /// back as bytes. Then, all checks passed, it writes the restored
+    /// positions, their rows' hash and its own identity as JSON to
+    /// AXON_FP8_SESSION_REPORT (`{"fed", "rows", "ident"}`). Without those
+    /// three variables it does nothing.
     #[test]
     #[ignore = "run by gpu_fp8_session_across_native"]
     fn fp8_session_q8_child() {
         use crate::kvsave::{Hasher, KvIo, Session};
         use crate::lm::{Backend, BackendOptions, Device};
         use crate::numerics::Numerics;
-        let (Some(fin), Some(fout)) = (
+        let (Some(fin), Some(fout), Some(frep)) = (
             std::env::var_os("AXON_FP8_SESSION_IN"),
             std::env::var_os("AXON_FP8_SESSION_OUT"),
+            std::env::var_os("AXON_FP8_SESSION_REPORT"),
         ) else {
             return;
         };
@@ -2737,7 +2738,7 @@ mod tests {
             prefill_image(&net, &y.hist[..y.fed]),
             "native -> Q8_0: not a fresh prefill's rows"
         );
-        println!("FP8-Q8-RESTORED {} {}", y.fed, Hasher::of(&img));
+        let (fed, rows) = (y.fed, Hasher::of(&img));
         let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
         let prompt = &y.hist[..y.hist.len() - got.len() - 2];
         assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "native -> Q8_0");
@@ -2754,7 +2755,8 @@ mod tests {
             .unwrap();
         assert!(r.from_file, "Q8_0 -> Q8_0: {r:?}");
         assert_eq!(cache_image(&same), cache_image(&x), "Q8_0 -> Q8_0");
-        println!("FP8-Q8-IDENT {id}");
+        let report = serde_json::json!({"fed": fed, "rows": rows, "ident": id});
+        std::fs::write(frep, report.to_string()).unwrap();
     }
 
     /// `turns_match_fresh_prefill` split across devices (`--gpu-layers`):
