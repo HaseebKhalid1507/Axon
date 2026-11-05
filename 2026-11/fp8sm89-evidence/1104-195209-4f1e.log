@@ -1,0 +1,187 @@
+[axon-run 19:52:09] submitted 1104-195209-4f1e by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-104294e cuda::qwen2::tests::fp8::gpu_fp8_mma_diag --exact --ignored --nocapture
+[axon-run 19:52:25] job 1104-195209-4f1e -> pod1 [RTX 4090 sm_89 secure] (pod 3kaax9y6dxzi1r): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-fp8sm89 /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-104294e cuda::qwen2::tests::fp8::gpu_fp8_mma_diag --exact --ignored --nocapture
+axon-remote: uploading axon-test-104294e (3800759c7ae2ed17de81d7c8) + source of /home/haseeb/.cache/axon-wt-fp8sm89
+
+sent 2,377,923 bytes  received 6,326 bytes  953,699.60 bytes/sec
+total size is 8,194,389  speedup is 3.44
+
+sent 7,468,611 bytes  received 35 bytes  2,987,458.40 bytes/sec
+total size is 24,304,664  speedup is 3.25
+axon-remote: job 20261105-005233-axon-test-104294e-819 on pod1 (GPU, 5000 MB)
+[axon-node 00:52:33] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 00:52:34] run axon-test-104294e (3800759c7ae2ed17de81d7c8) as /home/haseeb/.cache/axon-wt-fp8sm89 on 97a5a4bc4e1d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::fp8::gpu_fp8_mma_diag has been running for over 60 seconds
+DIAG cc 8.9
+REPRO y0 -0.31081602 (0xbe9f2347) raw0 -155408 rescaled -0.31081602 exact -0.3107885997747955
+RAW rand32 0 0x45d42800
+RAW rand32 1 0xc4703000
+RAW rand32 2 0xc3894000
+RAW rand32 3 0x462d9400
+RAW rand32 4 0x46f0c000
+RAW rand32 5 0xc5566800
+RAW rand32 6 0xc79b3400
+RAW rand32 7 0x46e82800
+RAW rand32 8 0x47714800
+RAW rand32 9 0x47aa6c00
+RAW rand32 10 0xc6b59800
+RAW rand32 11 0xc4995800
+RAW rand32 12 0x45d22800
+RAW rand32 13 0xc64df800
+RAW rand32 14 0xc4d0f000
+RAW rand32 15 0xc54cb400
+RAW rand32 16 0xc51e5000
+RAW rand32 17 0xc74e5000
+RAW rand32 18 0xc6e67400
+RAW rand32 19 0x4675d000
+RAW rand32 20 0xc6d4c800
+RAW rand32 21 0xc5139800
+RAW rand32 22 0x46486800
+RAW rand32 23 0xc586a400
+RAW rand32 24 0x45d3dc00
+RAW rand32 25 0xc4c13800
+RAW rand32 26 0xc59b3c00
+RAW rand32 27 0x456b4400
+RAW rand32 28 0x4690ac00
+RAW rand32 29 0x47119800
+RAW rand32 30 0xc5796000
+RAW rand32 31 0xc40ef800
+RAW rand32 32 0xc789ec00
+RAW rand32 33 0xc5abd800
+RAW rand32 34 0x46175c00
+RAW rand32 35 0xc6a96800
+RAW rand32 36 0x45ab2800
+RAW rand32 37 0x454e0800
+RAW rand32 38 0xc67ae400
+RAW rand32 39 0x460eec00
+RAW rand32 40 0xc3960000
+RAW rand32 41 0x47160c00
+RAW rand32 42 0x476ea000
+RAW rand32 43 0xc64de800
+RAW rand32 44 0x476e5400
+RAW rand32 45 0xc657b000
+RAW rand32 46 0xc724c000
+RAW rand32 47 0x45066c00
+RAW rand32 48 0xc50a0800
+RAW rand32 49 0x4483f000
+RAW rand32 50 0x469fdc00
+RAW rand32 51 0xc5f7d000
+RAW rand32 52 0x46d80400
+RAW rand32 53 0x46377400
+RAW rand32 54 0x4753d000
+RAW rand32 55 0x475b0000
+RAW rand32 56 0xc5c27c00
+RAW rand32 57 0xc603c800
+RAW rand32 58 0x46066800
+RAW rand32 59 0x4687cc00
+RAW rand32 60 0xc5d3cc00
+RAW rand32 61 0x4661d400
+RAW rand32 62 0x44089000
+RAW rand32 63 0x45ac0c00
+EXACT MODELS []
+GRID k 128 rows 64 nb 17: [ref==chain mism 0] chain max 100.418x fails 1024/1088 rel 5.27e-4; P1 max 55.338x fails 998/1088 rel 2.90e-4; P4 max 100.418x fails 1024/1088 rel 5.27e-4; f16 max 0.085x fails 0/1088 rel 4.46e-7;
+GRID k 128 rows 64 nb 24: [ref==chain mism 0] chain max 102.051x fails 1443/1536 rel 5.35e-4; P1 max 47.096x fails 1408/1536 rel 2.47e-4; P4 max 102.051x fails 1443/1536 rel 5.35e-4; f16 max 0.103x fails 0/1536 rel 5.38e-7;
+GRID k 128 rows 64 nb 64: [ref==chain mism 0] chain max 144.103x fails 3859/4096 rel 7.56e-4; P1 max 52.491x fails 3691/4096 rel 2.75e-4; P4 max 144.103x fails 3859/4096 rel 7.56e-4; f16 max 0.091x fails 0/4096 rel 4.80e-7;
+GRID k 128 rows 64 nb 65: [ref==chain mism 0] chain max 95.247x fails 1939/2048 rel 5.00e-4; P1 max 44.791x fails 1831/2048 rel 2.35e-4; P4 max 95.247x fails 1939/2048 rel 5.00e-4; f16 max 0.082x fails 0/2048 rel 4.32e-7;
+GRID k 128 rows 64 nb 128: [ref==chain mism 0] chain max 115.036x fails 1931/2048 rel 6.03e-4; P1 max 47.687x fails 1879/2048 rel 2.50e-4; P4 max 115.036x fails 1931/2048 rel 6.03e-4; f16 max 0.089x fails 0/2048 rel 4.65e-7;
+GRID k 128 rows 64 nb 160: [ref==chain mism 0] chain max 137.402x fails 1929/2048 rel 7.21e-4; P1 max 50.289x fails 1844/2048 rel 2.64e-4; P4 max 137.402x fails 1929/2048 rel 7.21e-4; f16 max 0.094x fails 0/2048 rel 4.94e-7;
+GRID k 128 rows 64 nb 520: [ref==chain mism 0] chain max 94.168x fails 1924/2048 rel 4.94e-4; P1 max 49.789x fails 1812/2048 rel 2.61e-4; P4 max 94.168x fails 1924/2048 rel 4.94e-4; f16 max 0.086x fails 0/2048 rel 4.50e-7;
+GRID k 128 rows 64 nb 1024: [ref==chain mism 0] chain max 173.186x fails 1934/2048 rel 9.08e-4; P1 max 49.755x fails 1864/2048 rel 2.61e-4; P4 max 173.186x fails 1934/2048 rel 9.08e-4; f16 max 0.087x fails 0/2048 rel 4.59e-7;
+GRID k 128 rows 128 nb 17: [ref==chain mism 0] chain max 102.834x fails 2042/2176 rel 5.39e-4; P1 max 39.478x fails 1983/2176 rel 2.07e-4; P4 max 102.834x fails 2042/2176 rel 5.39e-4; f16 max 0.089x fails 0/2176 rel 4.67e-7;
+GRID k 128 rows 128 nb 24: [ref==chain mism 0] chain max 144.889x fails 2881/3072 rel 7.60e-4; P1 max 65.997x fails 2785/3072 rel 3.46e-4; P4 max 144.889x fails 2881/3072 rel 7.60e-4; f16 max 0.123x fails 0/3072 rel 6.48e-7;
+GRID k 128 rows 128 nb 64: [ref==chain mism 0] chain max 103.594x fails 1925/2048 rel 5.43e-4; P1 max 47.956x fails 1857/2048 rel 2.52e-4; P4 max 103.594x fails 1925/2048 rel 5.43e-4; f16 max 0.098x fails 0/2048 rel 5.13e-7;
+GRID k 128 rows 128 nb 65: [ref==chain mism 0] chain max 89.872x fails 1933/2048 rel 4.71e-4; P1 max 51.833x fails 1866/2048 rel 2.72e-4; P4 max 89.872x fails 1933/2048 rel 4.71e-4; f16 max 0.085x fails 0/2048 rel 4.46e-7;
+GRID k 128 rows 128 nb 128: [ref==chain mism 0] chain max 113.381x fails 1928/2048 rel 5.95e-4; P1 max 40.582x fails 1847/2048 rel 2.13e-4; P4 max 113.381x fails 1928/2048 rel 5.95e-4; f16 max 0.081x fails 0/2048 rel 4.25e-7;
+GRID k 128 rows 128 nb 160: [ref==chain mism 0] chain max 109.247x fails 1936/2048 rel 5.73e-4; P1 max 48.975x fails 1850/2048 rel 2.57e-4; P4 max 109.247x fails 1936/2048 rel 5.73e-4; f16 max 0.091x fails 0/2048 rel 4.77e-7;
+GRID k 128 rows 128 nb 520: [ref==chain mism 0] chain max 132.580x fails 1922/2048 rel 6.95e-4; P1 max 52.560x fails 1863/2048 rel 2.76e-4; P4 max 132.580x fails 1922/2048 rel 6.95e-4; f16 max 0.092x fails 0/2048 rel 4.82e-7;
+GRID k 128 rows 128 nb 1024: [ref==chain mism 0] chain max 100.315x fails 1929/2048 rel 5.26e-4; P1 max 52.848x fails 1827/2048 rel 2.77e-4; P4 max 100.315x fails 1929/2048 rel 5.26e-4; f16 max 0.101x fails 0/2048 rel 5.32e-7;
+GRID k 128 rows 576 nb 17: [ref==chain mism 0] chain max 108.978x fails 1938/2048 rel 5.72e-4; P1 max 44.870x fails 1854/2048 rel 2.35e-4; P4 max 108.978x fails 1938/2048 rel 5.72e-4; f16 max 0.096x fails 0/2048 rel 5.04e-7;
+GRID k 128 rows 576 nb 24: [ref==chain mism 0] chain max 130.064x fails 1927/2048 rel 6.82e-4; P1 max 51.978x fails 1863/2048 rel 2.73e-4; P4 max 130.064x fails 1927/2048 rel 6.82e-4; f16 max 0.108x fails 0/2048 rel 5.64e-7;
+GRID k 128 rows 576 nb 64: [ref==chain mism 0] chain max 106.808x fails 1936/2048 rel 5.60e-4; P1 max 56.748x fails 1869/2048 rel 2.98e-4; P4 max 106.808x fails 1936/2048 rel 5.60e-4; f16 max 0.096x fails 0/2048 rel 5.05e-7;
+GRID k 128 rows 576 nb 65: [ref==chain mism 0] chain max 105.825x fails 1925/2048 rel 5.55e-4; P1 max 67.552x fails 1836/2048 rel 3.54e-4; P4 max 105.825x fails 1925/2048 rel 5.55e-4; f16 max 0.088x fails 0/2048 rel 4.60e-7;
+GRID k 128 rows 576 nb 128: [ref==chain mism 0] chain max 105.638x fails 1935/2048 rel 5.54e-4; P1 max 46.311x fails 1835/2048 rel 2.43e-4; P4 max 105.638x fails 1935/2048 rel 5.54e-4; f16 max 0.094x fails 0/2048 rel 4.93e-7;
+GRID k 128 rows 576 nb 160: [ref==chain mism 0] chain max 95.366x fails 1938/2048 rel 5.00e-4; P1 max 58.450x fails 1851/2048 rel 3.07e-4; P4 max 95.366x fails 1938/2048 rel 5.00e-4; f16 max 0.120x fails 0/2048 rel 6.28e-7;
+GRID k 128 rows 576 nb 520: [ref==chain mism 0] chain max 111.750x fails 1912/2048 rel 5.86e-4; P1 max 42.648x fails 1861/2048 rel 2.24e-4; P4 max 111.750x fails 1912/2048 rel 5.86e-4; f16 max 0.098x fails 0/2048 rel 5.12e-7;
+GRID k 128 rows 576 nb 1024: [ref==chain mism 0] chain max 120.777x fails 1926/2048 rel 6.33e-4; P1 max 54.448x fails 1866/2048 rel 2.86e-4; P4 max 120.777x fails 1926/2048 rel 6.33e-4; f16 max 0.094x fails 0/2048 rel 4.94e-7;
+GRID k 128 rows 1024 nb 17: [ref==chain mism 0] chain max 103.175x fails 1921/2048 rel 5.41e-4; P1 max 43.637x fails 1841/2048 rel 2.29e-4; P4 max 103.175x fails 1921/2048 rel 5.41e-4; f16 max 0.089x fails 0/2048 rel 4.64e-7;
+GRID k 128 rows 1024 nb 24: [ref==chain mism 0] chain max 99.063x fails 1906/2048 rel 5.20e-4; P1 max 53.398x fails 1829/2048 rel 2.80e-4; P4 max 99.063x fails 1906/2048 rel 5.20e-4; f16 max 0.092x fails 0/2048 rel 4.83e-7;
+GRID k 128 rows 1024 nb 64: [ref==chain mism 0] chain max 97.029x fails 1933/2048 rel 5.09e-4; P1 max 47.341x fails 1842/2048 rel 2.48e-4; P4 max 97.029x fails 1933/2048 rel 5.09e-4; f16 max 0.108x fails 0/2048 rel 5.64e-7;
+GRID k 128 rows 1024 nb 65: [ref==chain mism 0] chain max 101.435x fails 1940/2048 rel 5.32e-4; P1 max 49.474x fails 1841/2048 rel 2.59e-4; P4 max 101.435x fails 1940/2048 rel 5.32e-4; f16 max 0.090x fails 0/2048 rel 4.73e-7;
+GRID k 128 rows 1024 nb 128: [ref==chain mism 0] chain max 123.055x fails 1913/2048 rel 6.45e-4; P1 max 49.360x fails 1860/2048 rel 2.59e-4; P4 max 123.055x fails 1913/2048 rel 6.45e-4; f16 max 0.124x fails 0/2048 rel 6.48e-7;
+GRID k 128 rows 1024 nb 160: [ref==chain mism 0] chain max 123.419x fails 1923/2048 rel 6.47e-4; P1 max 49.913x fails 1862/2048 rel 2.62e-4; P4 max 123.419x fails 1923/2048 rel 6.47e-4; f16 max 0.080x fails 0/2048 rel 4.18e-7;
+GRID k 128 rows 1024 nb 520: [ref==chain mism 0] chain max 95.713x fails 1921/2048 rel 5.02e-4; P1 max 64.534x fails 1866/2048 rel 3.38e-4; P4 max 95.713x fails 1921/2048 rel 5.02e-4; f16 max 0.123x fails 0/2048 rel 6.44e-7;
+GRID k 128 rows 1024 nb 1024: [ref==chain mism 0] chain max 113.859x fails 1919/2048 rel 5.97e-4; P1 max 41.405x fails 1846/2048 rel 2.17e-4; P4 max 113.859x fails 1919/2048 rel 5.97e-4; f16 max 0.097x fails 0/2048 rel 5.07e-7;
+GRID k 896 rows 64 nb 17: [ref==chain mism 0] chain max 59.611x fails 1000/1088 rel 4.83e-4; P1 max 8.973x fails 752/1088 rel 7.27e-5; P4 max 16.611x fails 901/1088 rel 1.35e-4; f16 max 0.108x fails 0/1088 rel 8.72e-7;
+GRID k 896 rows 64 nb 24: [ref==chain mism 0] chain max 76.811x fails 1404/1536 rel 6.23e-4; P1 max 8.885x fails 1026/1536 rel 7.20e-5; P4 max 23.987x fails 1268/1536 rel 1.94e-4; f16 max 0.134x fails 0/1536 rel 1.08e-6;
+GRID k 896 rows 64 nb 64: [ref==chain mism 0] chain max 89.931x fails 3766/4096 rel 7.29e-4; P1 max 11.690x fails 2767/4096 rel 9.48e-5; P4 max 24.394x fails 3353/4096 rel 1.98e-4; f16 max 0.120x fails 0/4096 rel 9.69e-7;
+GRID k 896 rows 64 nb 65: [ref==chain mism 0] chain max 58.908x fails 1863/2048 rel 4.78e-4; P1 max 9.429x fails 1380/2048 rel 7.64e-5; P4 max 22.439x fails 1670/2048 rel 1.82e-4; f16 max 0.125x fails 0/2048 rel 1.02e-6;
+GRID k 896 rows 64 nb 128: [ref==chain mism 0] chain max 67.701x fails 1843/2048 rel 5.49e-4; P1 max 8.607x fails 1424/2048 rel 6.98e-5; P4 max 20.519x fails 1696/2048 rel 1.66e-4; f16 max 0.112x fails 0/2048 rel 9.10e-7;
+GRID k 896 rows 64 nb 160: [ref==chain mism 0] chain max 67.203x fails 1858/2048 rel 5.45e-4; P1 max 8.240x fails 1368/2048 rel 6.68e-5; P4 max 19.115x fails 1693/2048 rel 1.55e-4; f16 max 0.121x fails 0/2048 rel 9.80e-7;
+GRID k 896 rows 64 nb 520: [ref==chain mism 0] chain max 98.203x fails 1861/2048 rel 7.96e-4; P1 max 10.129x fails 1384/2048 rel 8.21e-5; P4 max 25.314x fails 1683/2048 rel 2.05e-4; f16 max 0.150x fails 0/2048 rel 1.22e-6;
+GRID k 896 rows 64 nb 1024: [ref==chain mism 0] chain max 71.895x fails 1866/2048 rel 5.83e-4; P1 max 9.242x fails 1412/2048 rel 7.49e-5; P4 max 32.304x fails 1717/2048 rel 2.62e-4; f16 max 0.135x fails 0/2048 rel 1.09e-6;
+GRID k 896 rows 128 nb 17: [ref==chain mism 0] chain max 89.455x fails 1993/2176 rel 7.25e-4; P1 max 10.379x fails 1500/2176 rel 8.41e-5; P4 max 22.309x fails 1840/2176 rel 1.81e-4; f16 max 0.115x fails 0/2176 rel 9.30e-7;
+GRID k 896 rows 128 nb 24: [ref==chain mism 0] chain max 76.525x fails 2792/3072 rel 6.20e-4; P1 max 10.828x fails 2122/3072 rel 8.78e-5; P4 max 21.219x fails 2552/3072 rel 1.72e-4; f16 max 0.129x fails 0/3072 rel 1.04e-6;
+GRID k 896 rows 128 nb 64: [ref==chain mism 0] chain max 75.727x fails 1868/2048 rel 6.14e-4; P1 max 9.802x fails 1418/2048 rel 7.95e-5; P4 max 21.080x fails 1688/2048 rel 1.71e-4; f16 max 0.117x fails 0/2048 rel 9.48e-7;
+GRID k 896 rows 128 nb 65: [ref==chain mism 0] chain max 62.972x fails 1879/2048 rel 5.10e-4; P1 max 8.880x fails 1371/2048 rel 7.20e-5; P4 max 18.913x fails 1719/2048 rel 1.53e-4; f16 max 0.125x fails 0/2048 rel 1.01e-6;
+GRID k 896 rows 128 nb 128: [ref==chain mism 0] chain max 78.534x fails 1867/2048 rel 6.37e-4; P1 max 9.827x fails 1381/2048 rel 7.97e-5; P4 max 23.158x fails 1708/2048 rel 1.88e-4; f16 max 0.136x fails 0/2048 rel 1.10e-6;
+GRID k 896 rows 128 nb 160: [ref==chain mism 0] chain max 87.127x fails 1868/2048 rel 7.06e-4; P1 max 10.879x fails 1382/2048 rel 8.82e-5; P4 max 19.862x fails 1719/2048 rel 1.61e-4; f16 max 0.156x fails 0/2048 rel 1.26e-6;
+GRID k 896 rows 128 nb 520: [ref==chain mism 0] chain max 65.067x fails 1864/2048 rel 5.27e-4; P1 max 9.232x fails 1354/2048 rel 7.48e-5; P4 max 19.575x fails 1711/2048 rel 1.59e-4; f16 max 0.132x fails 0/2048 rel 1.07e-6;
+GRID k 896 rows 128 nb 1024: [ref==chain mism 0] chain max 68.084x fails 1855/2048 rel 5.52e-4; P1 max 10.951x fails 1355/2048 rel 8.88e-5; P4 max 26.327x fails 1682/2048 rel 2.13e-4; f16 max 0.120x fails 0/2048 rel 9.69e-7;
+GRID k 896 rows 576 nb 17: [ref==chain mism 0] chain max 72.635x fails 1875/2048 rel 5.89e-4; P1 max 10.791x fails 1394/2048 rel 8.75e-5; P4 max 18.200x fails 1709/2048 rel 1.48e-4; f16 max 0.118x fails 0/2048 rel 9.54e-7;
+GRID k 896 rows 576 nb 24: [ref==chain mism 0] chain max 69.379x fails 1866/2048 rel 5.62e-4; P1 max 8.868x fails 1330/2048 rel 7.19e-5; P4 max 19.422x fails 1709/2048 rel 1.57e-4; f16 max 0.133x fails 0/2048 rel 1.08e-6;
+GRID k 896 rows 576 nb 64: [ref==chain mism 0] chain max 72.567x fails 1856/2048 rel 5.88e-4; P1 max 10.898x fails 1386/2048 rel 8.83e-5; P4 max 27.157x fails 1681/2048 rel 2.20e-4; f16 max 0.137x fails 0/2048 rel 1.11e-6;
+GRID k 896 rows 576 nb 65: [ref==chain mism 0] chain max 73.679x fails 1876/2048 rel 5.97e-4; P1 max 10.056x fails 1399/2048 rel 8.15e-5; P4 max 25.706x fails 1693/2048 rel 2.08e-4; f16 max 0.153x fails 0/2048 rel 1.24e-6;
+GRID k 896 rows 576 nb 128: [ref==chain mism 0] chain max 90.246x fails 1867/2048 rel 7.32e-4; P1 max 9.758x fails 1401/2048 rel 7.91e-5; P4 max 28.373x fails 1670/2048 rel 2.30e-4; f16 max 0.128x fails 0/2048 rel 1.04e-6;
+GRID k 896 rows 576 nb 160: [ref==chain mism 0] chain max 76.623x fails 1869/2048 rel 6.21e-4; P1 max 9.414x fails 1418/2048 rel 7.63e-5; P4 max 20.816x fails 1682/2048 rel 1.69e-4; f16 max 0.119x fails 0/2048 rel 9.63e-7;
+GRID k 896 rows 576 nb 520: [ref==chain mism 0] chain max 82.899x fails 1858/2048 rel 6.72e-4; P1 max 9.154x fails 1427/2048 rel 7.42e-5; P4 max 19.284x fails 1713/2048 rel 1.56e-4; f16 max 0.126x fails 0/2048 rel 1.02e-6;
+GRID k 896 rows 576 nb 1024: [ref==chain mism 0] chain max 96.170x fails 1859/2048 rel 7.80e-4; P1 max 9.247x fails 1389/2048 rel 7.50e-5; P4 max 20.717x fails 1690/2048 rel 1.68e-4; f16 max 0.176x fails 0/2048 rel 1.43e-6;
+GRID k 896 rows 1024 nb 17: [ref==chain mism 0] chain max 73.768x fails 1864/2048 rel 5.98e-4; P1 max 10.546x fails 1392/2048 rel 8.55e-5; P4 max 20.076x fails 1667/2048 rel 1.63e-4; f16 max 0.126x fails 0/2048 rel 1.02e-6;
+GRID k 896 rows 1024 nb 24: [ref==chain mism 0] chain max 113.828x fails 1859/2048 rel 9.23e-4; P1 max 9.264x fails 1383/2048 rel 7.51e-5; P4 max 16.736x fails 1700/2048 rel 1.36e-4; f16 max 0.123x fails 0/2048 rel 9.99e-7;
+GRID k 896 rows 1024 nb 64: [ref==chain mism 0] chain max 67.716x fails 1861/2048 rel 5.49e-4; P1 max 11.971x fails 1357/2048 rel 9.70e-5; P4 max 22.131x fails 1711/2048 rel 1.79e-4; f16 max 0.117x fails 0/2048 rel 9.47e-7;
+GRID k 896 rows 1024 nb 65: [ref==chain mism 0] chain max 75.886x fails 1864/2048 rel 6.15e-4; P1 max 8.986x fails 1387/2048 rel 7.28e-5; P4 max 22.008x fails 1719/2048 rel 1.78e-4; f16 max 0.126x fails 0/2048 rel 1.02e-6;
+GRID k 896 rows 1024 nb 128: [ref==chain mism 0] chain max 77.391x fails 1872/2048 rel 6.27e-4; P1 max 10.560x fails 1400/2048 rel 8.56e-5; P4 max 22.880x fails 1695/2048 rel 1.85e-4; f16 max 0.127x fails 0/2048 rel 1.03e-6;
+GRID k 896 rows 1024 nb 160: [ref==chain mism 0] chain max 79.703x fails 1865/2048 rel 6.46e-4; P1 max 12.620x fails 1386/2048 rel 1.02e-4; P4 max 21.034x fails 1687/2048 rel 1.71e-4; f16 max 0.138x fails 0/2048 rel 1.12e-6;
+GRID k 896 rows 1024 nb 520: [ref==chain mism 0] chain max 66.346x fails 1878/2048 rel 5.38e-4; P1 max 9.041x fails 1392/2048 rel 7.33e-5; P4 max 22.591x fails 1723/2048 rel 1.83e-4; f16 max 0.118x fails 0/2048 rel 9.55e-7;
+GRID k 896 rows 1024 nb 1024: [ref==chain mism 0] chain max 65.749x fails 1852/2048 rel 5.33e-4; P1 max 8.971x fails 1334/2048 rel 7.27e-5; P4 max 20.224x fails 1714/2048 rel 1.64e-4; f16 max 0.139x fails 0/2048 rel 1.13e-6;
+GRID k 4864 rows 64 nb 17: [ref==chain mism 0] chain max 22.403x fails 841/1088 rel 5.13e-4; P1 max 1.219x fails 10/1088 rel 2.79e-5; P4 max 4.032x fails 213/1088 rel 9.23e-5; f16 max 0.131x fails 0/1088 rel 3.00e-6;
+GRID k 4864 rows 64 nb 24: [ref==chain mism 0] chain max 19.887x fails 1169/1536 rel 4.55e-4; P1 max 1.301x fails 20/1536 rel 2.98e-5; P4 max 2.840x fails 263/1536 rel 6.50e-5; f16 max 0.086x fails 0/1536 rel 1.98e-6;
+GRID k 4864 rows 64 nb 64: [ref==chain mism 0] chain max 24.520x fails 3021/4096 rel 5.61e-4; P1 max 1.380x fails 32/4096 rel 3.16e-5; P4 max 2.982x fails 715/4096 rel 6.83e-5; f16 max 0.084x fails 0/4096 rel 1.93e-6;
+GRID k 4864 rows 64 nb 65: [ref==chain mism 0] chain max 31.811x fails 1533/2048 rel 7.28e-4; P1 max 1.262x fails 8/2048 rel 2.89e-5; P4 max 2.958x fails 367/2048 rel 6.77e-5; f16 max 0.082x fails 0/2048 rel 1.89e-6;
+GRID k 4864 rows 64 nb 128: [ref==chain mism 0] chain max 25.939x fails 1532/2048 rel 5.94e-4; P1 max 1.361x fails 14/2048 rel 3.12e-5; P4 max 2.859x fails 369/2048 rel 6.54e-5; f16 max 0.097x fails 0/2048 rel 2.22e-6;
+GRID k 4864 rows 64 nb 160: [ref==chain mism 0] chain max 18.951x fails 1523/2048 rel 4.34e-4; P1 max 1.128x fails 20/2048 rel 2.58e-5; P4 max 3.179x fails 415/2048 rel 7.28e-5; f16 max 0.080x fails 0/2048 rel 1.83e-6;
+GRID k 4864 rows 64 nb 520: [ref==chain mism 0] chain max 31.387x fails 1487/2048 rel 7.18e-4; P1 max 1.734x fails 15/2048 rel 3.97e-5; P4 max 3.471x fails 386/2048 rel 7.94e-5; f16 max 0.115x fails 0/2048 rel 2.63e-6;
+GRID k 4864 rows 64 nb 1024: [ref==chain mism 0] chain max 23.187x fails 1538/2048 rel 5.31e-4; P1 max 1.412x fails 23/2048 rel 3.23e-5; P4 max 3.030x fails 361/2048 rel 6.94e-5; f16 max 0.082x fails 0/2048 rel 1.88e-6;
+GRID k 4864 rows 128 nb 17: [ref==chain mism 0] chain max 24.405x fails 1639/2176 rel 5.59e-4; P1 max 1.600x fails 21/2176 rel 3.66e-5; P4 max 3.122x fails 416/2176 rel 7.14e-5; f16 max 0.098x fails 0/2176 rel 2.25e-6;
+GRID k 4864 rows 128 nb 24: [ref==chain mism 0] chain max 27.999x fails 2336/3072 rel 6.41e-4; P1 max 1.564x fails 33/3072 rel 3.58e-5; P4 max 3.162x fails 588/3072 rel 7.24e-5; f16 max 0.115x fails 0/3072 rel 2.64e-6;
+GRID k 4864 rows 128 nb 64: [ref==chain mism 0] chain max 24.808x fails 1510/2048 rel 5.68e-4; P1 max 1.365x fails 13/2048 rel 3.12e-5; P4 max 2.591x fails 395/2048 rel 5.93e-5; f16 max 0.110x fails 0/2048 rel 2.52e-6;
+GRID k 4864 rows 128 nb 65: [ref==chain mism 0] chain max 34.178x fails 1541/2048 rel 7.82e-4; P1 max 1.432x fails 14/2048 rel 3.28e-5; P4 max 3.319x fails 389/2048 rel 7.60e-5; f16 max 0.088x fails 0/2048 rel 2.01e-6;
+GRID k 4864 rows 128 nb 128: [ref==chain mism 0] chain max 22.426x fails 1552/2048 rel 5.13e-4; P1 max 1.464x fails 14/2048 rel 3.35e-5; P4 max 2.715x fails 401/2048 rel 6.21e-5; f16 max 0.088x fails 0/2048 rel 2.01e-6;
+GRID k 4864 rows 128 nb 160: [ref==chain mism 0] chain max 23.445x fails 1501/2048 rel 5.37e-4; P1 max 1.595x fails 21/2048 rel 3.65e-5; P4 max 3.128x fails 369/2048 rel 7.16e-5; f16 max 0.117x fails 0/2048 rel 2.69e-6;
+GRID k 4864 rows 128 nb 520: [ref==chain mism 0] chain max 28.501x fails 1552/2048 rel 6.52e-4; P1 max 1.447x fails 16/2048 rel 3.31e-5; P4 max 2.481x fails 375/2048 rel 5.68e-5; f16 max 0.104x fails 0/2048 rel 2.37e-6;
+GRID k 4864 rows 128 nb 1024: [ref==chain mism 0] chain max 27.532x fails 1544/2048 rel 6.30e-4; P1 max 1.421x fails 18/2048 rel 3.25e-5; P4 max 2.805x fails 386/2048 rel 6.42e-5; f16 max 0.082x fails 0/2048 rel 1.88e-6;
+GRID k 4864 rows 576 nb 17: [ref==chain mism 0] chain max 27.640x fails 1519/2048 rel 6.33e-4; P1 max 1.401x fails 19/2048 rel 3.21e-5; P4 max 2.654x fails 360/2048 rel 6.07e-5; f16 max 0.102x fails 0/2048 rel 2.34e-6;
+GRID k 4864 rows 576 nb 24: [ref==chain mism 0] chain max 26.054x fails 1542/2048 rel 5.96e-4; P1 max 1.548x fails 14/2048 rel 3.54e-5; P4 max 2.532x fails 392/2048 rel 5.80e-5; f16 max 0.085x fails 0/2048 rel 1.94e-6;
+GRID k 4864 rows 576 nb 64: [ref==chain mism 0] chain max 36.440x fails 1524/2048 rel 8.34e-4; P1 max 1.567x fails 19/2048 rel 3.59e-5; P4 max 3.368x fails 379/2048 rel 7.71e-5; f16 max 0.082x fails 0/2048 rel 1.87e-6;
+GRID k 4864 rows 576 nb 65: [ref==chain mism 0] chain max 27.126x fails 1512/2048 rel 6.21e-4; P1 max 1.301x fails 24/2048 rel 2.98e-5; P4 max 2.796x fails 367/2048 rel 6.40e-5; f16 max 0.111x fails 0/2048 rel 2.55e-6;
+GRID k 4864 rows 576 nb 128: [ref==chain mism 0] chain max 23.710x fails 1552/2048 rel 5.43e-4; P1 max 1.470x fails 33/2048 rel 3.36e-5; P4 max 3.045x fails 382/2048 rel 6.97e-5; f16 max 0.113x fails 0/2048 rel 2.58e-6;
+GRID k 4864 rows 576 nb 160: [ref==chain mism 0] chain max 22.186x fails 1542/2048 rel 5.08e-4; P1 max 1.333x fails 14/2048 rel 3.05e-5; P4 max 3.206x fails 380/2048 rel 7.34e-5; f16 max 0.102x fails 0/2048 rel 2.33e-6;
+GRID k 4864 rows 576 nb 520: [ref==chain mism 0] chain max 25.721x fails 1549/2048 rel 5.89e-4; P1 max 1.370x fails 13/2048 rel 3.14e-5; P4 max 3.340x fails 382/2048 rel 7.64e-5; f16 max 0.079x fails 0/2048 rel 1.80e-6;
+GRID k 4864 rows 576 nb 1024: [ref==chain mism 0] chain max 27.175x fails 1551/2048 rel 6.22e-4; P1 max 1.339x fails 24/2048 rel 3.07e-5; P4 max 2.853x fails 419/2048 rel 6.53e-5; f16 max 0.101x fails 0/2048 rel 2.31e-6;
+GRID k 4864 rows 1024 nb 17: [ref==chain mism 0] chain max 22.147x fails 1514/2048 rel 5.07e-4; P1 max 1.398x fails 23/2048 rel 3.20e-5; P4 max 3.176x fails 384/2048 rel 7.27e-5; f16 max 0.101x fails 0/2048 rel 2.31e-6;
+GRID k 4864 rows 1024 nb 24: [ref==chain mism 0] chain max 23.349x fails 1530/2048 rel 5.34e-4; P1 max 1.296x fails 17/2048 rel 2.97e-5; P4 max 3.160x fails 412/2048 rel 7.23e-5; f16 max 0.078x fails 0/2048 rel 1.79e-6;
+GRID k 4864 rows 1024 nb 64: [ref==chain mism 0] chain max 24.997x fails 1532/2048 rel 5.72e-4; P1 max 1.643x fails 22/2048 rel 3.76e-5; P4 max 2.937x fails 364/2048 rel 6.72e-5; f16 max 0.100x fails 0/2048 rel 2.29e-6;
+GRID k 4864 rows 1024 nb 65: [ref==chain mism 0] chain max 29.098x fails 1522/2048 rel 6.66e-4; P1 max 1.412x fails 20/2048 rel 3.23e-5; P4 max 2.651x fails 354/2048 rel 6.07e-5; f16 max 0.121x fails 0/2048 rel 2.76e-6;
+GRID k 4864 rows 1024 nb 128: [ref==chain mism 0] chain max 24.750x fails 1549/2048 rel 5.66e-4; P1 max 1.225x fails 17/2048 rel 2.80e-5; P4 max 2.813x fails 396/2048 rel 6.44e-5; f16 max 0.089x fails 0/2048 rel 2.04e-6;
+GRID k 4864 rows 1024 nb 160: [ref==chain mism 0] chain max 25.721x fails 1558/2048 rel 5.89e-4; P1 max 1.600x fails 23/2048 rel 3.66e-5; P4 max 2.720x fails 408/2048 rel 6.22e-5; f16 max 0.115x fails 0/2048 rel 2.63e-6;
+GRID k 4864 rows 1024 nb 520: [ref==chain mism 0] chain max 26.368x fails 1523/2048 rel 6.04e-4; P1 max 1.401x fails 16/2048 rel 3.21e-5; P4 max 2.693x fails 348/2048 rel 6.16e-5; f16 max 0.091x fails 0/2048 rel 2.08e-6;
+GRID k 4864 rows 1024 nb 1024: [ref==chain mism 0] chain max 24.371x fails 1525/2048 rel 5.58e-4; P1 max 1.310x fails 16/2048 rel 3.00e-5; P4 max 2.676x fails 400/2048 rel 6.13e-5; f16 max 0.088x fails 0/2048 rel 2.01e-6;
+WORST chain 173.186x P1 67.552x P4 173.186x f16 0.176x
+test cuda::qwen2::tests::fp8::gpu_fp8_mma_diag ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 827 filtered out; finished in 78.04s
+
+[axon-node 00:53:52] exit 0 after 78.1s
+[axon-node 00:53:52] peak RSS 692 MB (job process tree PSS, 2 s samples x38)
+[axon-run 19:53:53] exit 0 after 87.4s (host pod1)

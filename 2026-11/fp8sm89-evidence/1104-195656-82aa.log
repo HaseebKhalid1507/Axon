@@ -1,0 +1,35 @@
+[axon-run 19:56:56] submitted 1104-195656-82aa by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-1589821 cuda::qwen2::tests::fp8:: --nocapture
+[axon-run 19:56:56] job 1104-195656-82aa -> pod1 [RTX 4090 sm_89 secure] (pod 3kaax9y6dxzi1r): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-fp8sm89 /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-1589821 cuda::qwen2::tests::fp8:: --nocapture
+axon-remote: uploading axon-test-1589821 (40f8c9ddac27b49c097bf8a2) + source of /home/haseeb/.cache/axon-wt-fp8sm89 (delta vs 1 earlier upload(s) there)
+
+sent 17,663 bytes  received 500 bytes  12,108.67 bytes/sec
+total size is 8,199,625  speedup is 451.45
+
+sent 6,564,367 bytes  received 29,628 bytes  2,637,598.00 bytes/sec
+total size is 24,322,264  speedup is 3.69
+axon-remote: job 20261105-005704-axon-test-1589821-1204 on pod1 (GPU, 5000 MB)
+[axon-node 00:57:04] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 00:57:04] run axon-test-1589821 (40f8c9ddac27b49c097bf8a2) as /home/haseeb/.cache/axon-wt-fp8sm89 on 97a5a4bc4e1d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 8 tests
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed ... ignored
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8sm89/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is not present
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_load_diag ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_mma_diag ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... ok
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8sm89/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is not present
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 821 filtered out; finished in 79.06s
+
+[axon-node 00:58:23] exit 0 after 79.1s
+[axon-node 00:58:23] peak RSS 723 MB (job process tree PSS, 2 s samples x39)
+[axon-run 19:58:24] exit 0 after 87.8s (host pod1)

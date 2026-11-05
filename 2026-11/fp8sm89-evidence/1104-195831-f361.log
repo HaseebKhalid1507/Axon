@@ -1,0 +1,31 @@
+[axon-run 19:58:31] submitted 1104-195831-f361 by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-dbg-1589821 cuda::qwen2::tests::fp8:: --nocapture
+[axon-run 19:58:31] job 1104-195831-f361 -> pod1 [RTX 4090 sm_89 secure] (pod 3kaax9y6dxzi1r): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-fp8sm89 /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-dbg-1589821 cuda::qwen2::tests::fp8:: --nocapture
+axon-remote: uploading axon-test-dbg-1589821 (b9e1e3998af572dd2c46365c) + source of /home/haseeb/.cache/axon-wt-fp8sm89 (delta vs 2 earlier upload(s) there)
+
+sent 13,752 bytes  received 58 bytes  9,206.67 bytes/sec
+total size is 8,199,625  speedup is 593.75
+
+sent 7,219,251 bytes  received 29,652 bytes  2,071,115.14 bytes/sec
+total size is 26,129,968  speedup is 3.60
+axon-remote: job 20261105-005840-axon-test-dbg-1589821-1550 on pod1 (GPU, 5000 MB)
+[axon-node 00:58:40] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 00:58:40] run axon-test-dbg-1589821 (b9e1e3998af572dd2c46365c) as /home/haseeb/.cache/axon-wt-fp8sm89 on 97a5a4bc4e1d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 8 tests
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed ... ignored
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8sm89/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is not present
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_load_diag ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_mma_diag ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor ... ok
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-wt-fp8sm89/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is not present
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 821 filtered out; finished in 6.34s
+
+[axon-node 00:58:47] exit 0 after 6.4s
+[axon-node 00:58:47] peak RSS 187 MB (job process tree PSS, 2 s samples x3)
+[axon-run 19:58:48] exit 0 after 16.5s (host pod1)

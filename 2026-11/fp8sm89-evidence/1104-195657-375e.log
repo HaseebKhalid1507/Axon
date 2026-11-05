@@ -1,0 +1,24 @@
+[axon-run 19:56:57] submitted 1104-195657-375e by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-1589821 cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed --exact --ignored --nocapture
+[axon-run 19:58:53] job 1104-195657-375e -> pod1 [RTX 4090 sm_89 secure] (pod 3kaax9y6dxzi1r): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-fp8sm89 /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-1589821 cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed --exact --ignored --nocapture
+axon-remote: job 20261105-005856-axon-test-1589821-1682 on pod1 (GPU, 5000 MB)
+[axon-node 00:58:57] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 00:58:57] run axon-test-1589821 (40f8c9ddac27b49c097bf8a2) as /home/haseeb/.cache/axon-wt-fp8sm89 on 97a5a4bc4e1d, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 19:59:53] FOREIGN_GPU sample max=0% mean=0.0% n=2
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed has been running for over 60 seconds
+SPEED sm_89 rows 896 k 896 nb 512: e4m3 8.4 us (98 TFLOPS) as built 11.5 us (72 TFLOPS): x1.367
+SPEED sm_89 rows 4864 k 896 nb 512: e4m3 32.0 us (140 TFLOPS) as built 41.4 us (108 TFLOPS): x1.295
+SPEED sm_89 rows 896 k 4864 nb 512: e4m3 29.6 us (151 TFLOPS) as built 45.9 us (97 TFLOPS): x1.549
+SPEED sm_89 rows 3584 k 3584 nb 512: e4m3 79.8 us (165 TFLOPS) as built 113.0 us (116 TFLOPS): x1.417
+SPEED sm_89 rows 18944 k 3584 nb 512: e4m3 380.4 us (183 TFLOPS) as built 504.0 us (138 TFLOPS): x1.325
+SPEED sm_89 rows 3584 k 18944 nb 512: e4m3 375.6 us (185 TFLOPS) as built 526.4 us (132 TFLOPS): x1.402
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 828 filtered out; finished in 73.22s
+
+[axon-node 01:00:10] exit 0 after 73.3s
+[axon-node 01:00:10] peak RSS 728 MB (job process tree PSS, 2 s samples x36)
+[axon-run 20:00:11] exit 0 after 77.3s (host pod1)
+[axon-run 20:00:12] FOREIGN_GPU max=0% mean=0.0% samples=2
