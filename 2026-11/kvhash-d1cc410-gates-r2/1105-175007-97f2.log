@@ -1,0 +1,32 @@
+[axon-run 17:50:07] submitted 1105-175007-97f2 by /home/haseeb/.cache/axon-kvhash: /usr/bin/bash infodiff.sh ./axon-c54a730 ./axon-d1cc410 /home/haseeb/.cache/axon-kvhash/infoout-d1cc410
+[axon-run 17:52:53] scope axon-job-1105-175007-97f2-1793919173.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 17:52:53] job 1105-175007-97f2 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-175007-97f2-1793919173 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash infodiff.sh ./axon-c54a730 ./axon-d1cc410 /home/haseeb/.cache/axon-kvhash/infoout-d1cc410
+axon-q 17:52:53 start slot 16-23: /usr/bin/bash infodiff.sh ./axon-c54a730 ./axon-d1cc410 /home/haseeb/.cache/axon-kvhash/infoout-d1cc410
+GGUF info identical (6 fingerprint lines)
+FP8 info, base -> cand:
+< fingerprint cpu: fp_6fec582bbbf50149 (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cpu, cpu x86_64 fma, r8, kv f16)
+< fingerprint cpu --numerics fast: fp_fe25dbc110e3e5ad (numerics fast/1.3; no fast kernels on this backend yet; running exact kernels; identity says fast)
+< fingerprint cuda --kv f16: fp_bb14628610b93b8c (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv f16)
+< fingerprint cuda --kv f16 --numerics fast: fp_f889e37b4d1df519 (numerics fast/1.3; no fast kernels on this backend yet; running exact kernels; identity says fast)
+< fingerprint cuda --kv q8: fp_a1c516a11bbf2325 (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv q8)
+< fingerprint cuda --kv q8 --numerics fast: fp_2d610ffc0845ac66 (numerics fast/1.3; no fast kernels on this backend yet; running exact kernels; identity says fast)
+> fingerprint cpu: fp_28bb31b5bd1abaef (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cpu, cpu x86_64 fma, r8, kv f16, weights fp8-ref, act f32, head f16)
+> fingerprint cpu --numerics fast: fp_f4646cce1f2ccc0c (numerics fast/1.3; no fast kernels on this backend yet; running exact kernels; identity says fast)
+> fingerprint cuda --kv f16: fp_10725a59c422d71e (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv f16, weights fp8-q8, act q8, head q8)
+> fingerprint cuda --kv f16 --numerics fast: fp_675eeaec882a5967 (numerics fast/1.3, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv f16, weights fp8-native, act 
+> fingerprint cuda --kv q8: fp_4df1eb225a8422b4 (numerics exact/1, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv q8, weights fp8-q8, act q8, head q8)
+> fingerprint cuda --kv q8 --numerics fast: fp_ea748ac4c53cfe2d (numerics fast/1.3, model 6fa3ad25111bc5f6, types F32:289 F16:2 F8_E4M3:168, backend cuda, gpu sm_120, kv q8, weights fp8-native, act e4
+SAME  gguf cpu: fp_d44d20d119beefbc
+SAME  gguf cpu --numerics fast: fp_f7e16a31c9117e4a
+SAME  gguf cuda --kv f16: fp_9a080eff145acd98
+SAME  gguf cuda --kv f16 --numerics fast: fp_1d40d541fdfb835d
+SAME  gguf cuda --kv q8: fp_671a6a69ab88c075
+SAME  gguf cuda --kv q8 --numerics fast: fp_4608d261da1b33d3
+SAME  f8 cpu: fp_28bb31b5bd1abaef
+SAME  f8 cpu --numerics fast: fp_f4646cce1f2ccc0c
+SAME  f8 cuda --kv f16: fp_10725a59c422d71e
+SAME  f8 cuda --kv f16 --numerics fast: fp_675eeaec882a5967
+SAME  f8 cuda --kv q8: fp_4df1eb225a8422b4
+SAME  f8 cuda --kv q8 --numerics fast: fp_ea748ac4c53cfe2d
+INFODIFF: 12 predictions checked against gen; 0 problems
+[axon-run 17:54:52] exit 0 after 118.7s (host bella)

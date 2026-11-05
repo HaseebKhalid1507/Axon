@@ -1,0 +1,68 @@
+[axon-run 17:50:07] submitted 1105-175007-eca8 by /home/haseeb/.cache/axon-kvhash: /home/haseeb/.cache/axon-kvhash/bin/axon-test-dbg-d1cc410 identity:: kvsave:: chat::tests::session chat::tests::gpu_session_module_hash chat::tests::gpu_fp8_session chat::tests::fp8_session cuda::tests::gpu_fast_module cuda::tests::numerics_tag serve::tests::serve_identity safetensors::tests::tiny_fp8 gguf::tests::unsized --nocapture
+[axon-run 17:51:24] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 17:51:24] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 17:51:24] scope axon-job-1105-175007-eca8-1793919084.scope in app-axonjobs.slice: MemoryMax 9667 MB, MemoryHigh 8700 MB, no swap, oomd pressure kill 80% (claim 5762 MB): an OOM here kills only this job
+[axon-run 17:51:24] job 1105-175007-eca8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-175007-eca8-1793919084 --slice=app-axonjobs.slice -p MemoryMax=9667M -p MemoryHigh=8700M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvhash/bin/axon-test-dbg-d1cc410 identity:: kvsave:: chat::tests::session chat::tests::gpu_session_module_hash chat::tests::gpu_fp8_session chat::tests::fp8_session cuda::tests::gpu_fast_module cuda::tests::numerics_tag serve::tests::serve_identity safetensors::tests::tiny_fp8 gguf::tests::unsized --nocapture --test-threads 4
+axon-q 17:51:24 start slot 16-23: /home/haseeb/.cache/axon-kvhash/bin/axon-test-dbg-d1cc410 identity:: kvsave:: chat::tests::session chat::tests::gpu_session_module_hash chat::tests::gpu_fp8_session chat::tests::fp8_session cuda::test
+
+running 44 tests
+test chat::tests::fp8_session_cpu_act_child ... ignored, run by fp8_session_across_cpu_act
+test chat::tests::fp8_session_q8_child ... ignored, run by gpu_fp8_session_across_native
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled again (it was made under numerics "kernels a25d57670454402fe19cef6e637008ab sm_120 hopper true host 1" (now "kernels 173bf0e309a6683e43e7dbc157cc99cc sm_120 hopper true host 1"), weights - (now "fp8-native")); each loads back as bytes; identities differ in numerics and weights only; rows of the same tokens, the file's vs the restore's: native -> Q8_0 aed614569e88f277 vs 9837be048e390780, Q8_0 -> native 9837be048e390780 vs d910f52f7baa00ff
+test chat::tests::gpu_fp8_session_across_native ... ok
+test chat::tests::session_across_numerics_modes ... ok
+test chat::tests::gpu_session_module_hash ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+FP8 CPU sessions across AXON_FP8_CPU_ACT: f32 -> e4m3-tok and e4m3-tok -> f32 prefilled again (it was made under act "e4m3-tok-emu" (now -)); each loads back as bytes; identities differ in act only; rows of the same tokens, the file's vs the restore's: f32 -> e4m3-tok 93821e51db64172f vs 0fa479354b67ba0c, e4m3-tok -> f32 0fa479354b67ba0c vs 93821e51db64172f
+test chat::tests::fp8_session_across_cpu_act ... ok
+test cuda::tests::gpu_fast_module_own_cache_entry ... ok
+test cuda::tests::numerics_tag_hashes_the_module ... ok
+test gguf::tests::unsized_types_are_named_not_sized ... ok
+test identity::tests::fields ... ok
+test identity::tests::fingerprint_stable_and_sensitive ... ok
+test identity::tests::model_digest_golden ... ok
+test identity::tests::model_digest_sees_the_file ... ok
+test identity::tests::numerics_mode_in_the_fingerprint ... ok
+note: not streaming the CPU layers for prefill: layer 0 q: type F8S can't be streamed
+split:       gpu layers 12/24, 0.34 GiB on GPU
+test chat::tests::session_hostile_state ... ok
+note: not streaming the CPU layers for prefill: layer 0 q: type F8S_TOK can't be streamed
+split:       gpu layers 12/24, 0.34 GiB on GPU
+test identity::tests::of_fp8_split_act_is_the_nets ... ok
+test identity::tests::of_split_attention_gemma3 ... ok
+test chat::tests::session_after_forgetting ... ok
+test identity::tests::rope_scaling_in_the_fingerprint ... ok
+test identity::tests::sha256_vectors ... ok
+test kvsave::tests::canonical_names_one_session ... ok
+test kvsave::tests::file_appends_rewrites_and_checks ... ok
+test kvsave::tests::hasher_streams ... ok
+test kvsave::tests::hostile_headers ... ok
+test kvsave::tests::lock_refuses_a_second_holder ... ok
+test kvsave::tests::not_a_session_file ... ok
+test kvsave::tests::orphan_records_never_load ... ok
+test kvsave::tests::same_length_foreign_rewrite_never_restores_wrong_state ... ok
+test kvsave::tests::second_writer_then_save_rewrites ... ok
+test kvsave::tests::segments_split_at_pages ... ok
+test kvsave::tests::torn_tail_then_new_process_saves_on ... ok
+test safetensors::tests::tiny_fp8_checkpoint_is_its_exact_dequant ... ok
+test safetensors::tests::tiny_fp8_fingerprint_act_is_the_nets ... ok
+test safetensors::tests::tiny_fp8_kv_ident_names_cpu_act ... ok
+test safetensors::tests::tiny_fp8_predicted_is_of ... ok
+test identity::tests::predicted_is_of ... ok
+test chat::tests::session_continues_cpu ... ok
+test serve::tests::serve_identity ... ok
+split:       gpu layers 12/24, 0.28 GiB on GPU, prefill streams the CPU layers (batches >= 32)
+test identity::tests::of_split_and_pipeline ... ok
+axon: --numerics fast: no fast kernels on this backend yet; running exact kernels; identity says fast
+axon: --numerics fast: no fast kernels on this backend yet; running exact kernels; identity says fast
+test serve::tests::serve_identity_fast ... ok
+axon: --numerics fast: no fast kernels on this backend yet; running exact kernels; identity says fast
+test serve::tests::serve_identity_cpu ... ok
+axon: --numerics fast: no fast kernels on this backend yet; running exact kernels; identity says fast
+test serve::tests::serve_identity_fast_cpu ... ok
+
+test result: ok. 42 passed; 0 failed; 2 ignored; 0 measured; 817 filtered out; finished in 84.77s
+
+[axon-run 17:52:49] exit 0 after 85.0s (host bella)
