@@ -72,17 +72,17 @@ pub fn fp8_model_path() -> Option<PathBuf> {
 }
 
 /// `fp8_model_path`'s rule, given the skip variable that is set, if any:
-/// `path` if it holds a model.safetensors, else None (said on stderr) with a
-/// skip variable, else a panic.
+/// `path` if it holds a model.safetensors, else None (said by `skip_note`)
+/// with a skip variable, else a panic.
 fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Option<PathBuf> {
     if path.join("model.safetensors").exists() {
         return Some(path);
     }
     if let Some(var) = skip {
-        eprintln!(
-            "skipping: the FP8 checkpoint {} is not present and {var} is set",
+        skip_note(format_args!(
+            "the FP8 checkpoint {} is not present and {var} is set",
             path.display()
-        );
+        ));
         return None;
     }
     panic!(
@@ -91,6 +91,22 @@ fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Option<PathBuf> 
          AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.",
         path.display()
     );
+}
+
+/// Say on stderr that the running test skips, and why:
+/// `skipping: {why} ({test})`. Straight to stderr, as `serialize_gpu` does:
+/// libtest captures eprintln! inside a test and shows it only if the test
+/// fails, so a skip said with eprintln! reads as a bare `... ok` in a gate
+/// log, as #193's skips did. The test's name is its thread's (libtest names
+/// each test's thread), since parallel tests' lines interleave; one write,
+/// so the line stays whole.
+pub fn skip_note(why: std::fmt::Arguments) {
+    use std::io::Write;
+    let line = format!(
+        "skipping: {why} ({})\n",
+        std::thread::current().name().unwrap_or("?")
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
 }
 
 #[test]
