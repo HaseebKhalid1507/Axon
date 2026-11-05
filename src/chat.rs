@@ -2588,13 +2588,17 @@ mod tests {
     /// can't set it in its own process (the engine reads it, and `set_var`
     /// races the other test threads). Checked: the identities differ in the
     /// native net's `weights` only, and the restore names that as why; the
-    /// rows after a restore are a fresh prefill's (`prefill_image`); in each
-    /// direction the rows the file holds (`file_rows`: the bytes a restore
-    /// would load) differ from the restore's, for the same tokens, so only
-    /// the weights tell them apart; the checkpoint's exact-mode identity and
-    /// a dense GGUF's (either mode) have no `weights`. Fast mode's replies
-    /// aren't compared with `fresh`: fp8.cu's rows depend on the batching
-    /// (`gemm_f8` at 16 rows and more), and its promise is a tolerance.
+    /// rows after a restore are a fresh prefill's (`prefill_image`); each
+    /// file holds its conversation's rows (`file_rows`: the bytes a restore
+    /// would load), and in each direction they differ from the restore's,
+    /// for the same tokens. Q8_0 -> native compares two prefills' rows (the
+    /// Q8_0 conversation's are its prefill's: exact kernels), so only the
+    /// weights tell them apart; native -> Q8_0's native rows include the
+    /// reply's one-token passes, so the batching differs there as well. The
+    /// checkpoint's exact-mode identity and a dense GGUF's (either mode)
+    /// have no `weights`. Fast mode's replies aren't compared with `fresh`:
+    /// fp8.cu's rows depend on the batching (`gemv_f8` up to 16 tokens a
+    /// pass, `gemm_f8` above), and its promise is a tolerance.
     #[test]
     fn gpu_fp8_session_across_native() {
         use crate::kvsave::{Hasher, KvIo, Session};
@@ -2652,6 +2656,7 @@ mod tests {
         drop(same);
         let (nat_toks, nat_file) = file_rows(&fnat, &ident, &id_nat);
         assert_eq!(nat_toks, x.hist[..x.fed]);
+        assert_eq!(nat_file, cache_image(&x), "native: the file's rows");
         let nat_rows = Hasher::of(&nat_file);
         // The Q8_0 side, in a process with AXON_FP8_NATIVE=0: native -> Q8_0,
         // then a session of its own, saved to fq8.
@@ -2816,6 +2821,9 @@ mod tests {
         let id = net.kv_ident(&x.cache).unwrap();
         x.save_session(&mut Session::new(fout.clone(), ident.clone()))
             .unwrap();
+        let (own_toks, own_file) = file_rows(&fout, &ident, &id);
+        assert_eq!(own_toks, x.hist[..x.fed]);
+        assert_eq!(own_file, cache_image(&x), "Q8_0: the file's rows");
         let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
         let r = (same.load_session(&mut Session::new(fout, ident)))
             .unwrap()
@@ -2834,9 +2842,9 @@ mod tests {
     /// variable set (`fp8_session_cpu_act_child`), as in
     /// `gpu_fp8_session_across_native`, and checked as there: the
     /// identities differ in the emulating net's `act` only, and the restore
-    /// names that as why; the rows after a restore are a fresh prefill's; in
-    /// each direction the file's rows differ from the restore's, for the
-    /// same tokens. On the CPU the reply after a restore is also a fresh
+    /// names that as why; the rows after a restore are a fresh prefill's;
+    /// each file holds its conversation's rows, and in each direction they
+    /// differ from the restore's, for the same tokens. On the CPU the reply after a restore is also a fresh
     /// conversation's, bit for bit (the emulation rounds per token, so it
     /// doesn't depend on the batching either). No GPU: it runs wherever the
     /// checkpoint is (CI has none and skips it, saying so).
@@ -2880,6 +2888,7 @@ mod tests {
         drop(same);
         let (f32_toks, f32_file) = file_rows(&ff32, &ident, &id_f32);
         assert_eq!(f32_toks, x.hist[..x.fed]);
+        assert_eq!(f32_file, cache_image(&x), "f32: the file's rows");
         let f32_rows = Hasher::of(&f32_file);
         // The emulating side: f32 -> e4m3-tok, then a session of its own,
         // saved to femu.
@@ -3010,6 +3019,9 @@ mod tests {
         let id = net.kv_ident(&x.cache).unwrap();
         x.save_session(&mut Session::new(fout.clone(), ident.clone()))
             .unwrap();
+        let (own_toks, own_file) = file_rows(&fout, &ident, &id);
+        assert_eq!(own_toks, x.hist[..x.fed]);
+        assert_eq!(own_file, cache_image(&x), "e4m3-tok: the file's rows");
         let mut same = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
         let r = (same.load_session(&mut Session::new(fout, ident)))
             .unwrap()

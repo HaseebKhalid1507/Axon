@@ -1562,6 +1562,33 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
     }
 }
 
+/// The fingerprint's `act` on the CPU is the net's, the type its FP8
+/// matrices were built as (`Qwen2::fp8_qt`), as kvsave's is: each net here
+/// is built under the test override (`with_fp8_cpu_qt`, standing in for
+/// AXON_FP8_CPU_ACT at load) and fingerprinted after it, where the
+/// override is gone. A split's CPU layers: `identity::tests::
+/// of_fp8_split_act_is_the_nets` (a GPU and the checkpoint).
+#[test]
+fn tiny_fp8_fingerprint_act_is_the_nets() {
+    use crate::lm::{Backend, BackendOptions, Device};
+    use crate::quant::fp8::{F8S, F8S_G128, F8S_TOK};
+    let d = Dir::new("fp8-fp-act");
+    write_tiny_fp8(&d, |_| {});
+    let path = d.0.to_str().unwrap();
+    for (qt, act) in [
+        (F8S, "f32"),
+        (F8S_TOK, "e4m3-tok-emu"),
+        (F8S_G128, "e4m3-128-emu"),
+    ] {
+        let m = load_dir(&d.0).unwrap();
+        let o = BackendOptions::default().device(Device::Cpu).max_ctx(16);
+        let net = crate::model::with_fp8_cpu_qt(qt, || Backend::new(&m, o).unwrap());
+        let c = crate::identity::of(path, &m, &net).canonical();
+        assert!(c.contains("\nweights=fp8-ref\n"), "{c}");
+        assert!(c.contains(&format!("\nact={act}\n")), "{act}: {c}");
+    }
+}
+
 /// FP8 checkpoints Axon doesn't run, refused by name.
 #[test]
 fn fp8_checkpoints_refused_cleanly() {

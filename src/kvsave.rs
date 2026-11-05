@@ -1,13 +1,22 @@
 //! KV save/restore: a sequence's cache rows to a file and back, exactly.
 //!
 //! A cache's bytes are a pure function of the token prefix (decode ==
-//! batched prefill == verify, bit for bit), so copying them is exact: a
-//! restored cache continues as the uninterrupted one would. They are only
-//! that function *for one identity*: the model file, the KV type, the RoPE
+//! batched prefill == verify, bit for bit; fast mode's one exception is
+//! below), so copying them is exact: a restored cache continues as the
+//! uninterrupted one would. They are only that function *for one
+//! identity*: the model file, the KV type, the RoPE
 //! table, the backend and its numerics (kernel sources, GPU architecture,
 //! driver; the numerics mode, `crate::numerics`). A file records its identity in the header; one made under
 //! another identity is never loaded as bytes, only as tokens, which are
 //! prefilled again. A file is never wrong, only slower.
+//!
+//! The exception: in fast mode an FP8 checkpoint's matrices on fp8.cu take
+//! one kernel up to 16 tokens a pass (`gemv_f8`) and another above
+//! (`gemm_f8`, or wgmma on Hopper), which agree only within tolerance, so
+//! its rows depend on the batching. A file's bytes still continue exactly
+//! as the uninterrupted cache would; its tokens prefilled again give a fresh
+//! prefill's rows, equal to the uninterrupted cache's only within that
+//! tolerance (docs/design/determinism-modes.md §4.3).
 //!
 //! # File format `AXKV` v1
 //!

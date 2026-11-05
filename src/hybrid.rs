@@ -602,6 +602,11 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         self.gpu.as_ref()
     }
 
+    /// The CPU half, if it has CPU layers.
+    pub(crate) fn cpu_net(&self) -> Option<&Qwen2<'m>> {
+        self.cpu.as_ref()
+    }
+
     /// With streaming: the smallest prefill batch streamed, and whether
     /// one-token steps stream too (AXON_STREAM_DECODE).
     pub(crate) fn streams(&self) -> Option<(usize, bool)> {
