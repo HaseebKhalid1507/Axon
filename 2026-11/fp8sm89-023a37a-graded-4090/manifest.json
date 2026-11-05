@@ -1,0 +1,29 @@
+{
+ "label": "fp8sm89-023a37a-graded-4090",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1105-004038-45de",
+   "name": "fp8sm89-023a37a-graded-4090",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-05_00:41.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "023a37a",
+   "binary": "bash",
+   "started": 1793857303.4872236,
+   "ended": 1793860245.97412,
+   "attempts": 1,
+   "remote_job": "20261105-054202-bash-1811766",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "616123563ebbb9b3eb5eec3bd7e89b70306205c36c5e9364d3ba72fc13140cc0",
+   "log_bytes": 12840
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 01:30:46 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
