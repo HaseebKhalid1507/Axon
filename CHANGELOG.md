@@ -6,6 +6,15 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Shared-prefix KV pages: groundwork, no behaviour change (#164)
+- **The paged KV pool counts who holds each page, and a prefix index can pin pages** (C1 + C2 of the shared-prefix
+  design, [docs/design/shared-prefix-pages.md](docs/design/shared-prefix-pages.md)). Nothing maps, pins or indexes
+  pages yet, so every page has one holder and the pool allocates, releases and copies exactly as before: the same
+  bits (the md5 and serve identity gates against main). The rule sharing rests on, "a page shared or indexed is never
+  written again", is checked in debug builds on the pool's batched writes (feeds, steps, `adopt`) and the RAM
+  tier's page copies (#166). A single request's writes through a slot view aren't checked yet: that is C3's, with
+  the engine work (claim, index, evict). In-flight dedupe (C4) is a later PR too.
+
 ### KV RAM tier, opt-in (#166)
 - **`axon serve --cache-ram BYTES|auto`: keep conversations' KV pages in host RAM, off by default.** When a slot goes to
   another conversation, its KV pages stay in host memory, and its next turn copies the longest stored prefix back
