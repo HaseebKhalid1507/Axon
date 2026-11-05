@@ -444,7 +444,7 @@ fn run() -> std::io::Result<()> {
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {
         Ok(ids) => {
-            if let Some((_, Ok(i))) = ids.first() {
+            if let Some((_, Ok([i, _]))) = ids.first() {
                 let model = &i.fields[1].1;
                 println!(
                     "model digest: {model} (sampled SHA-256, identity numerics {} | {})",
@@ -453,19 +453,23 @@ fn run() -> std::io::Result<()> {
                 );
             }
             // Each placement in both numerics modes: exact's full tuple,
-            // then fast's fingerprint (the same tuple but its numerics
-            // field; no fast kernel exists yet, so it runs exact's).
+            // then fast's fingerprint: where fast mode runs exact's kernels,
+            // the same tuple but its numerics field; where it runs its own
+            // (an FP8 checkpoint on fp8.cu), its own full tuple.
             for (what, i) in ids {
                 match i {
-                    Ok(i) => {
-                        println!("fingerprint {what}: {}", i.line());
-                        let f = i.with_numerics(Numerics::Fast);
-                        println!(
-                            "fingerprint {what} --numerics fast: {} (numerics {}; {})",
-                            f.fingerprint(),
-                            Numerics::Fast.tag(),
-                            numerics::FAST_NOTE
-                        );
+                    Ok([e, f]) => {
+                        println!("fingerprint {what}: {}", e.line());
+                        if f == e.with_numerics(Numerics::Fast) {
+                            println!(
+                                "fingerprint {what} --numerics fast: {} (numerics {}; {})",
+                                f.fingerprint(),
+                                Numerics::Fast.tag(),
+                                numerics::FAST_NOTE
+                            );
+                        } else {
+                            println!("fingerprint {what} --numerics fast: {}", f.line());
+                        }
                     }
                     Err(why) => println!("fingerprint {what}: none ({why})"),
                 }

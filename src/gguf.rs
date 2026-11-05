@@ -404,6 +404,11 @@ const UNSIZED_NAMES: &[(u32, &str)] = &[
     (crate::safetensors::QT_U32, "U32"),
     (crate::safetensors::QT_U64, "U64"),
     (crate::safetensors::QT_BOOL, "BOOL"),
+    // Axon-private: the CPU's FP8 matrix types (`crate::quant::fp8`), built
+    // at load, never in a file (named in messages: a split's streaming note).
+    (crate::quant::fp8::F8S, "F8S"),
+    (crate::quant::fp8::F8S_TOK, "F8S_TOK"),
+    (crate::quant::fp8::F8S_G128, "F8S_G128"),
 ];
 
 /// Whether `id`'s block size is known (its tensors' byte sizes are checked).
@@ -1662,6 +1667,10 @@ mod tests {
             (29, "IQ1_M"),
             (31, "Q4_0_4_4"),
             (36, "IQ4_NL_4_4"),
+            // The CPU's FP8 types (a split's streaming note, #196).
+            (crate::quant::fp8::F8S, "F8S"),
+            (crate::quant::fp8::F8S_TOK, "F8S_TOK"),
+            (crate::quant::fp8::F8S_G128, "F8S_G128"),
         ] {
             assert_eq!(qtype(id).name, n);
             assert!(!sized(id), "{n}");

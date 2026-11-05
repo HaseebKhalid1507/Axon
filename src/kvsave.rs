@@ -1,22 +1,24 @@
 //! KV save/restore: a sequence's cache rows to a file and back, exactly.
 //!
 //! A cache's bytes are a pure function of the token prefix (decode ==
-//! batched prefill == verify, bit for bit; fast mode's one exception is
-//! below), so copying them is exact: a restored cache continues as the
-//! uninterrupted one would. They are only that function *for one
-//! identity*: the model file, the KV type, the RoPE
-//! table, the backend and its numerics (kernel sources, GPU architecture,
-//! driver; the numerics mode, `crate::numerics`). A file records its identity in the header; one made under
-//! another identity is never loaded as bytes, only as tokens, which are
-//! prefilled again. A file is never wrong, only slower.
+//! batched prefill == verify, bit for bit; in fast mode, only where its
+//! kernels keep that, below), so copying them is exact: a restored cache
+//! continues as the uninterrupted one would. They are only that function
+//! *for one identity*: the model file, the KV type, the RoPE table, the
+//! backend and its numerics (the source and options of the kernel module
+//! the net runs, GPU architecture; the numerics mode, `crate::numerics`).
+//! A file records its identity in the header; one made under another
+//! identity is never loaded as bytes, only as tokens, which are prefilled
+//! again. A file is never wrong, only slower.
 //!
-//! The exception: in fast mode an FP8 checkpoint's matrices on fp8.cu take
-//! one kernel up to 16 tokens a pass (`gemv_f8`) and another above
-//! (`gemm_f8`, or wgmma on Hopper), which agree only within tolerance, so
-//! its rows depend on the batching. A file's bytes still continue exactly
-//! as the uninterrupted cache would; its tokens prefilled again give a fresh
-//! prefill's rows, equal to the uninterrupted cache's only within that
-//! tolerance (docs/design/determinism-modes.md §4.3).
+//! Fast mode's kernels may make rows that depend on the batching (fast
+//! mode promises tolerance, not batch invariance: docs/design/
+//! determinism-modes.md §4.3 lists where; today an FP8 checkpoint's
+//! matrices on fp8.cu, one kernel up to 16 tokens a pass, `gemv_f8`, and
+//! another above, `gemm_f8` or wgmma on Hopper). A file's bytes still
+//! continue exactly as the uninterrupted cache would; its tokens prefilled
+//! again give a fresh prefill's rows, equal to the uninterrupted cache's
+//! only within that tolerance.
 //!
 //! # File format `AXKV` v1
 //!
@@ -58,10 +60,18 @@ const MAGIC: &[u8; 4] = b"AXKV";
 const KIND_KV: u8 = 1;
 const KIND_STATE: u8 = 2;
 
-/// Bump when the CPU's (or the host side's) cache bits change for the same
-/// model and settings: files from before are then prefilled again. The
-/// GPU's kernels are covered by their source hash (`cuda::numerics_tag`).
-pub const NUMERICS: u32 = 1;
+/// The version of the CPU's and the host side's cache bits for the same
+/// model and settings, in every identity (`cpu N`, `... host N`): exact
+/// mode's numerics version, `identity::NUMERICS_VERSION_EXACT`, whose rule
+/// already covers any change that can change a cache bit in exact mode (a
+/// cache bit that changes changes the outputs after it). One counter, one
+/// rule: before #196 this was a second counter with its own, and a change
+/// that bumped one but not the other would have restored stale CPU bytes.
+/// A bump of it for a change that leaves the cache alone (the sampler, a
+/// template) costs one prefill per saved session, never a wrong cache.
+/// Fast-only changes are in `numerics_mode` (`Backend::kv_ident`); the
+/// GPU's kernels in their module's hash too (`cuda::numerics_tag`).
+pub const NUMERICS: u32 = crate::identity::NUMERICS_VERSION_EXACT;
 
 /// lo..hi split at multiples of PAGE.
 pub fn segments(lo: usize, hi: usize) -> Vec<(usize, usize)> {
@@ -440,7 +450,11 @@ impl<'g> KvIo for CudaQwen2<'g> {
             return None;
         }
         let (layers, kvd, hd) = self.kv_shape();
-        let num = crate::cuda::numerics_tag(self.gpu(), self.fast()).ok()?;
+        // The module this net runs, whichever it is (#196): its one module.
+        // A MoE's router module (moe.cu, mla.cu) isn't in it; a MoE has no
+        // image yet (`Backend::kv_ident`), and when it gets one its
+        // identity must hash that module too.
+        let num = crate::cuda::numerics_tag(self.gpu(), self.src_hash()).ok()?;
         let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
         let mut id = json!({
@@ -455,11 +469,10 @@ impl<'g> KvIo for CudaQwen2<'g> {
             "row_bytes": self.cache_row_bytes(c),
         });
         // An FP8 checkpoint's matrices on fp8.cu (fast mode, sm_89+, unless
-        // AXON_FP8_NATIVE=0) make other rows than its Q8_0 form, and nothing
-        // above tells the two apart: `numerics_tag` hashes KERNELS whichever
-        // module loaded (#196). So a native net says so, and a session saved
-        // by one restores into the other as tokens. Only a native net: every
-        // other identity, and the sessions saved under it, stay as they were.
+        // AXON_FP8_NATIVE=0) make other rows than its Q8_0 form. Its module
+        // (KERNELS_F8, `F8_DEFINE`) already gives it its own `numerics`; this
+        // names why for people (a restore's "made under weights ..."), as
+        // the fingerprint does (#198). Only a native net.
         if self.f8_native() {
             id["weights"] = json!("fp8-native");
         }

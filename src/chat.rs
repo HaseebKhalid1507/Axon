@@ -2427,6 +2427,120 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// #196: a session's GPU identity is the kernel module its net runs,
+    /// source and options (`Module::src_hash`, `cuda::numerics_tag`). The
+    /// plain module's tag is main's before #196 in both modes
+    /// (`numerics_tag_pre196`), and nothing else in a plain net's identity
+    /// changed, so a file main saved has this file's header: it restores as
+    /// bytes. A file saved under another module (module_ext: the same
+    /// kernels under KERNEL_OPTS_EXT, the same bits for this model's types,
+    /// another hash) restores as tokens, prefilled again, naming `numerics`
+    /// alone as why, and the other way round: the cache a restore leaves is
+    /// a fresh prefill's, and the conversation goes on as a fresh one would.
+    #[test]
+    fn gpu_session_module_hash() {
+        use crate::cuda::qwen2::CudaQwen2;
+        use crate::kvsave::{KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device, Lm};
+        use crate::numerics::Numerics;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let kx = crate::cuda::Kernels::module_ext(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let path = crate::testutil::model_path().unwrap();
+        let plain = CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        let ext = CudaQwen2::new(&g, &kx, &m, 2048).unwrap();
+        let ident = crate::kvsave::model_ident(&m, &path, plain.head_dim).unwrap();
+        let host = crate::kvsave::NUMERICS;
+        // A turn on each, saved; it loads back as bytes on its own module.
+        let turn = |net: &CudaQwen2, f: &std::path::Path, what: &str| {
+            let mut x = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            x.max_reply = 16;
+            x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+            x.save_session(&mut Session::new(f.to_path_buf(), ident.clone()))
+                .unwrap();
+            let image = cache_image(&x);
+            let mut same = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            let r = (same.load_session(&mut Session::new(f.to_path_buf(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(r.from_file, "{what} -> {what}: {r:?}");
+            assert_eq!(cache_image(&same), image, "{what} -> {what}");
+            (
+                net.kv_ident(&x.cache).unwrap(),
+                image,
+                x.hist[..x.fed].to_vec(),
+            )
+        };
+        let (fp, fx) = (session_path("module-plain"), session_path("module-ext"));
+        let (id_p, img_p, toks_p) = turn(&plain, &fp, "plain");
+        let (id_x, img_x, toks_x) = turn(&ext, &fx, "ext");
+        let main = crate::cuda::numerics_tag_pre196(&g, false).unwrap();
+        assert_eq!(
+            id_p["numerics"],
+            format!("{main} host {host}"),
+            "main's tag"
+        );
+        // The same bits, another module: only `numerics` (and `info`) differ.
+        assert_eq!((&img_p, &toks_p), (&img_x, &toks_x), "module_ext's bits");
+        let strip = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            let o = v.as_object_mut().unwrap();
+            o.remove("info");
+            o.remove("numerics");
+            v
+        };
+        assert_ne!(id_p["numerics"], id_x["numerics"]);
+        assert_eq!(strip(&id_p), strip(&id_x));
+        // Across modules: tokens, prefilled again.
+        for (net, f, (file_id, now_id), what) in [
+            (&ext, &fp, (&id_p, &id_x), "plain -> ext"),
+            (&plain, &fx, (&id_x, &id_p), "ext -> plain"),
+        ] {
+            let mut y = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            y.max_reply = 16;
+            let r = (y.load_session(&mut Session::new(f.clone(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(!r.from_file, "{what}: {r:?}");
+            let why = format!(
+                "it was made under numerics {} (now {})",
+                file_id["numerics"], now_id["numerics"]
+            );
+            assert_eq!(r.why.as_deref(), Some(why.as_str()), "{what}");
+            assert_eq!(y.hist[..y.fed], toks_p[..], "{what}");
+            let img = cache_image(&y);
+            assert!(
+                img == prefill_image(net, &y.hist[..y.fed]),
+                "{what}: not a fresh prefill"
+            );
+            let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+            let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+            assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "{what}");
+        }
+        // Fast mode's plain module: main's fast tag too.
+        let o = BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64)
+            .numerics(Numerics::Fast);
+        let f = Backend::new(&m, o).unwrap();
+        let fid = f.kv_ident(&f.new_cache(64)).unwrap();
+        let main_fast = crate::cuda::numerics_tag_pre196(&g, true).unwrap();
+        assert_eq!(
+            fid["numerics"],
+            format!("{main_fast} host {host}"),
+            "main's fast tag"
+        );
+        for f in [fp, fx] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
     /// The numerics mode is in a session file's identity (ADR M5): a file
     /// saved by an exact-mode chat is restored into a fast-mode one as
     /// tokens (prefilled again; `numerics_mode` is named as why), and the
@@ -2586,8 +2700,9 @@ mod tests {
     /// round; within either it loads as bytes. The Q8_0 side is this binary
     /// run again with the variable set (`fp8_session_q8_child`): a test
     /// can't set it in its own process (the engine reads it, and `set_var`
-    /// races the other test threads). Checked: the identities differ in the
-    /// native net's `weights` only, and the restore names that as why; the
+    /// races the other test threads). Checked: the identities differ in
+    /// `numerics` (each net's module: fp8.cu's is its own, #196) and the
+    /// native net's `weights` only, and the restore names those as why; the
     /// rows after a restore are a fresh prefill's (`prefill_image`); each
     /// file holds its conversation's rows (`file_rows`: the bytes a restore
     /// would load), and in each direction they differ from the restore's,
@@ -2685,16 +2800,33 @@ mod tests {
         );
         let q8_back = report["rows"].as_u64().unwrap();
         assert_ne!(q8_back, nat_rows, "native -> Q8_0: the file's rows");
-        // Nothing but the native net's `weights` tells them apart.
+        // Nothing but the module (`numerics`) and the native net's `weights`
+        // tells them apart.
         let strip = |v: &serde_json::Value| {
             let mut v = v.clone();
             let o = v.as_object_mut().unwrap();
             o.remove("info");
+            o.remove("numerics");
             o.remove("weights");
             v
         };
         assert!(id_q8.get("weights").is_none(), "{id_q8}");
+        assert_ne!(id_nat["numerics"], id_q8["numerics"]);
         assert_eq!(strip(&id_nat), strip(id_q8));
+        let num = |a: &serde_json::Value, b: &serde_json::Value| {
+            format!("numerics {} (now {})", a["numerics"], b["numerics"])
+        };
+        assert_eq!(
+            report["why"].as_str(),
+            Some(
+                format!(
+                    r#"it was made under {}, weights "fp8-native" (now -)"#,
+                    num(&id_nat, id_q8)
+                )
+                .as_str()
+            ),
+            "native -> Q8_0"
+        );
         // Q8_0 -> native: tokens, prefilled again.
         let (q8_toks, q8_file) = file_rows(&fq8, &ident, id_q8);
         let q8_rows = Hasher::of(&q8_file);
@@ -2706,7 +2838,13 @@ mod tests {
         assert!(!r.from_file, "Q8_0 -> native: {r:?}");
         assert_eq!(
             r.why.as_deref(),
-            Some(r#"it was made under weights - (now "fp8-native")"#)
+            Some(
+                format!(
+                    r#"it was made under {}, weights - (now "fp8-native")"#,
+                    num(id_q8, &id_nat)
+                )
+                .as_str()
+            )
         );
         assert_eq!(y.hist[..y.fed], q8_toks[..]);
         let img = cache_image(&y);
@@ -2721,7 +2859,7 @@ mod tests {
         assert!(!got.is_empty());
         eprintln!(
             "FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled \
-             again ({}); each loads back as bytes; identities differ in weights only; rows of \
+             again ({}); each loads back as bytes; identities differ in numerics and weights only; rows of \
              the same tokens, the file's vs the restore's: native -> Q8_0 {nat_rows:016x} vs \
              {q8_back:016x}, Q8_0 -> native {q8_rows:016x} vs {nat_back:016x}",
             r.why.unwrap()
@@ -2800,9 +2938,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!r.from_file, "native -> Q8_0: {r:?}");
-        assert_eq!(
-            r.why.as_deref(),
-            Some(r#"it was made under weights "fp8-native" (now -)"#)
+        // The file's module and its `weights` (the parent checks the tags).
+        let why = r.why.clone().unwrap();
+        assert!(
+            why.starts_with("it was made under numerics ")
+                && why.ends_with(r#", weights "fp8-native" (now -)"#),
+            "{why}"
         );
         let img = cache_image(&y);
         assert_eq!(
@@ -2830,7 +2971,7 @@ mod tests {
             .unwrap();
         assert!(r.from_file, "Q8_0 -> Q8_0: {r:?}");
         assert_eq!(cache_image(&same), cache_image(&x), "Q8_0 -> Q8_0");
-        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id});
+        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id, "why": why});
         std::fs::write(frep, report.to_string()).unwrap();
     }
 
