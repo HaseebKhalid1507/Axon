@@ -219,3 +219,31 @@ The 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1
 **Known cause of the decode miss:** an FP8-native net runs a single token as a one-row batched pass (`gemv_f8` plus
 the batched path's per-layer launches) with no decode-step kernels and no CUDA graphs (§10). Follow-up, not in this
 PR: give F8 nets the decode-graph GEMV path, then re-gate on bella and the H100 (roadmap).
+
+## 13. sm_89 (#190, 2026-11-04)
+The §3 anchor first ran on sm_89 at main af281d9 (a 4090 pod) and failed: `gemm_ref_f8` missed it, and so did
+`gemm_f8`, since the two agree bit for bit. The cause is the instruction, not our code. On sm_89,
+`mma.sync … e4m3.e4m3.f32` keeps only about 14 bits of each k32 step's sum: it cuts its terms, the incoming
+accumulator among them, about 13 bits below the largest. That rule gives #190's output exactly (−155408 against
+an exact −155394.285), though it does not fit every output of the diagnostic. This is the narrow in-mma
+accumulator §3 was written to catch. Before 2026-11-04 the §3 checks ran only on bella (sm_120); the H100 never
+ran them.
+- Measured on the 4090 (`gpu_fp8_mma_diag`, 1104-195209-4f1e): worst error at the §3 shapes relative to the
+  tolerance, at K 128 / 896 / 4864:
+
+  | path | 4090 | bella (1104-194742-ccb2) |
+  |---|---|---|
+  | e4m3 chain (as of main) | 173× / 114× / 36× | 0.062× / 0.078× / 0.050× |
+  | accumulator moved into f32 every 4 mmas (128 K: the planned `AXON_F8_PROMOTE`) | 173× / 32× / 4.0× | 0.062× / 0.018× / 0.005× |
+  | accumulator moved into f32 after every mma | 68× / 13× / 1.7× | 0.039× / 0.023× / 0.006× |
+  | the codes as f16 (exact: e4m3 ⊂ f16), two `m16n8k16` f16 → f32 mmas per k32 step | 0.124× / 0.176× / 0.131× | 0.089× / 0.120× / 0.095× |
+
+  No promotion schedule can fix a cut that happens inside the instruction.
+- Built: `mma_f8` in `fp8.cu`. `__CUDA_ARCH__ >= 1200` keeps the e4m3 mma (sm_120 is unchanged: its code is the
+  same and md5s are identical). Older architectures convert each fragment register to f16 (`cvt.rn.f16x2.e4m3x2`)
+  and run the two f16 mmas on the same fragments, so `gemm_f8`, `gemm_ref_f8` and their loads and tiling don't
+  change. `-DAXON_F8_E4M3_ACC` forces the e4m3 mma, so its speed can still be measured.
+- Cost on the 4090 (`gpu_fp8_gemm_speed`, `gemm_f8` alone, nb 512, medians of 9 × 20 launches): 1.30–1.55× the
+  e4m3 time. At the 0.5B and 7B shapes that is 98–185 TFLOPS with e4m3 against 72–138 with f16 (1104-195657-375e).
+- sm_90 (Hopper, reported at about 14 bits too) and sm_100 also take the f16 path. Neither is measured. On Hopper,
+  WP-A3's wgmma with per-128 promotion is the fast path.
