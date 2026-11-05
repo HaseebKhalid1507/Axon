@@ -41,29 +41,128 @@ pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// The FP8 test checkpoint: RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic, a
+/// Hugging Face directory (`AXON_TEST_FP8_MODEL` overrides it).
+pub const FP8_MODEL: &str = "models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic";
+
+/// The variables that let a missing `FP8_MODEL` skip its tests:
+/// `AXON_SKIP_MODEL_TESTS` (every model test, CI) and
+/// `AXON_SKIP_FP8_MODEL_TESTS` (only this checkpoint's, for a host with the
+/// GGUFs but not it).
+const FP8_SKIP_VARS: [&str; 2] = ["AXON_SKIP_MODEL_TESTS", "AXON_SKIP_FP8_MODEL_TESTS"];
+
+/// Path of the FP8 checkpoint (`FP8_MODEL`), or None to skip.
+///
+/// A missing checkpoint is a test failure, as a missing GGUF is
+/// (`model_path`), unless one of `FP8_SKIP_VARS` is set. It used to skip
+/// quietly, and libtest reports a test that returns early as `ok`, so gate
+/// runs on GPUs without the checkpoint showed the FP8 gate passing when it
+/// had never run (#193). The callers check for a usable GPU first
+/// (`gpu_fp8_graded_vs_fp8_ref` for an sm_89+ one; the exact-mode test runs
+/// on any), so a host without one, CI included, never gets here.
+pub fn fp8_model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(FP8_MODEL),
+    };
+    let skip = FP8_SKIP_VARS
+        .into_iter()
+        .find(|v| std::env::var_os(v).is_some());
+    match fp8_checkpoint_or_skip(path, skip) {
+        Fp8Checkpoint::Use(p) => Some(p),
+        Fp8Checkpoint::Skip(why) => {
+            skip_note(format_args!("{why}"));
+            None
+        }
+    }
+}
+
+/// `fp8_checkpoint_or_skip`'s decision.
+#[derive(Debug, PartialEq)]
+enum Fp8Checkpoint {
+    /// The checkpoint is there.
+    Use(PathBuf),
+    /// It isn't and a skip variable is set: the test skips, saying this.
+    Skip(String),
+}
+
+/// `fp8_model_path`'s rule, given the skip variable that is set, if any:
+/// use `path` if it holds a model.safetensors, else skip (why) with a skip
+/// variable, else a panic. It decides and says nothing: the caller, the
+/// test that skips, prints the skip (`skip_note`), so this rule's own unit
+/// tests print no skip line into a suite's log (#197's review: they did,
+/// and axon-run read the run as one whose test had skipped itself).
+fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Fp8Checkpoint {
+    if path.join("model.safetensors").exists() {
+        return Fp8Checkpoint::Use(path);
+    }
+    if let Some(var) = skip {
+        return Fp8Checkpoint::Skip(format!(
+            "the FP8 checkpoint {} is not present and {var} is set",
+            path.display()
+        ));
+    }
+    panic!(
+        "the FP8 checkpoint {} is missing (no model.safetensors). Download \
+         RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set \
+         AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.",
+        path.display()
+    );
+}
+
+/// Say on stderr that the running test skips, and why:
+/// `skipping: {why} ({test})`. Straight to stderr, as `serialize_gpu` does:
+/// libtest captures eprintln! inside a test and shows it only if the test
+/// fails, so a skip said with eprintln! reads as a bare `... ok` in a gate
+/// log, as #193's skips did. The test's name is its thread's (libtest names
+/// each test's thread), since parallel tests' lines interleave; one write,
+/// so the line stays whole.
+pub fn skip_note(why: std::fmt::Arguments) {
+    use std::io::Write;
+    let line = format!(
+        "skipping: {why} ({})\n",
+        std::thread::current().name().unwrap_or("?")
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
+#[test]
+fn fp8_checkpoint_present_is_used() {
+    let dir = std::env::temp_dir().join(format!("axon-fp8-ckpt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("model.safetensors"), b"").unwrap();
+    let got = fp8_checkpoint_or_skip(dir.clone(), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(got, Fp8Checkpoint::Use(dir));
+}
+
+#[test]
+fn fp8_checkpoint_missing_skips_only_when_asked() {
+    let missing = fixtures().join("no-fp8-checkpoint-here");
+    for var in FP8_SKIP_VARS {
+        // The reason names the path and the variable that was set.
+        let why = format!(
+            "the FP8 checkpoint {} is not present and {var} is set",
+            missing.display()
+        );
+        assert_eq!(
+            fp8_checkpoint_or_skip(missing.clone(), Some(var)),
+            Fp8Checkpoint::Skip(why)
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "no-fp8-checkpoint-here is missing (no model.safetensors). Download")]
+fn fp8_checkpoint_missing_fails() {
+    fp8_checkpoint_or_skip(fixtures().join("no-fp8-checkpoint-here"), None);
+}
+
 /// Path of the test model (`AXON_TEST_MODEL` overrides MODEL; fixture-based
 /// tests like matches_ollama only make sense for MODEL), or None to skip.
 ///
 /// A missing model is a test failure, not a silent pass. CI doesn't have the
 /// 470 MB file, so it opts out explicitly with `AXON_SKIP_MODEL_TESTS=1`.
-/// The FP8 0.5B checkpoint (RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic in
-/// models/hf/, or AXON_TEST_FP8_MODEL), None (skipped, said so) when absent.
-pub fn fp8_model_path() -> Option<PathBuf> {
-    let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {
-        Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic"),
-    };
-    if !path.join("model.safetensors").exists() {
-        eprintln!(
-            "skipping: the FP8 checkpoint {} is not present",
-            path.display()
-        );
-        return None;
-    }
-    Some(path)
-}
-
 pub fn model_path() -> Option<PathBuf> {
     let path = match std::env::var_os("AXON_TEST_MODEL") {
         Some(p) => PathBuf::from(p),

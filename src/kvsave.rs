@@ -1,13 +1,22 @@
 //! KV save/restore: a sequence's cache rows to a file and back, exactly.
 //!
 //! A cache's bytes are a pure function of the token prefix (decode ==
-//! batched prefill == verify, bit for bit), so copying them is exact: a
-//! restored cache continues as the uninterrupted one would. They are only
-//! that function *for one identity*: the model file, the KV type, the RoPE
+//! batched prefill == verify, bit for bit; fast mode's one exception is
+//! below), so copying them is exact: a restored cache continues as the
+//! uninterrupted one would. They are only that function *for one
+//! identity*: the model file, the KV type, the RoPE
 //! table, the backend and its numerics (kernel sources, GPU architecture,
 //! driver; the numerics mode, `crate::numerics`). A file records its identity in the header; one made under
 //! another identity is never loaded as bytes, only as tokens, which are
 //! prefilled again. A file is never wrong, only slower.
+//!
+//! The exception: in fast mode an FP8 checkpoint's matrices on fp8.cu take
+//! one kernel up to 16 tokens a pass (`gemv_f8`) and another above
+//! (`gemm_f8`, or wgmma on Hopper), which agree only within tolerance, so
+//! its rows depend on the batching. A file's bytes still continue exactly
+//! as the uninterrupted cache would; its tokens prefilled again give a fresh
+//! prefill's rows, equal to the uninterrupted cache's only within that
+//! tolerance (docs/design/determinism-modes.md §4.3).
 //!
 //! # File format `AXKV` v1
 //!
@@ -358,14 +367,25 @@ impl KvIo for Qwen2<'_> {
         }
         let (layers, kvd, hd) = self.kv_shape();
         let (name, size) = c.elem();
-        Some(json!({
+        let mut id = json!({
             "backend": "cpu",
             "class": cpu_class(),
             "numerics": format!("cpu {NUMERICS}"),
             "kv": name,
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
             "row_bytes": 2 * layers * kvd * size,
-        }))
+        });
+        // AXON_FP8_CPU_ACT's emulations round an FP8 checkpoint's
+        // activations through e4m3 before its matrices: other rows than the
+        // default f32 activations make, and nothing above tells the two
+        // apart (#196). So an emulating net names them as the fingerprint
+        // does (`act`), and a session saved by one restores into the other
+        // as tokens. Only an emulating net: every other identity, and the
+        // sessions saved under it, stay as they were.
+        if let Some(q) = self.fp8_qt().filter(|&q| q != crate::quant::fp8::F8S) {
+            id["act"] = json!(crate::model::fp8_cpu_act(q));
+        }
+        Some(id)
     }
 
     fn kv_save(&self, c: &KvCache, lo: usize, hi: usize, out: &mut dyn Write) -> io::Result<()> {
@@ -423,7 +443,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
         let num = crate::cuda::numerics_tag(self.gpu(), self.fast()).ok()?;
         let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
-        Some(json!({
+        let mut id = json!({
             "backend": "cuda",
             "class": class,
             "numerics": format!("{num} host {NUMERICS}"),
@@ -433,7 +453,17 @@ impl<'g> KvIo for CudaQwen2<'g> {
             "kv": self.cache_kv_name(c),
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
             "row_bytes": self.cache_row_bytes(c),
-        }))
+        });
+        // An FP8 checkpoint's matrices on fp8.cu (fast mode, sm_89+, unless
+        // AXON_FP8_NATIVE=0) make other rows than its Q8_0 form, and nothing
+        // above tells the two apart: `numerics_tag` hashes KERNELS whichever
+        // module loaded (#196). So a native net says so, and a session saved
+        // by one restores into the other as tokens. Only a native net: every
+        // other identity, and the sessions saved under it, stay as they were.
+        if self.f8_native() {
+            id["weights"] = json!("fp8-native");
+        }
+        Some(id)
     }
 
     fn kv_save(
@@ -463,7 +493,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
 
 impl KvIo for Backend<'_> {
     /// The model's (`Qwen2`'s, `CudaQwen2`'s) and, in the fast numerics
-    /// mode, `numerics_mode` ("fast/1.2"): a session saved in one mode is
+    /// mode, `numerics_mode` ("fast/1.3"): a session saved in one mode is
     /// restored into the other as tokens (prefilled again), never as bytes.
     /// Exact mode adds nothing, so files saved before the modes still load.
     fn kv_ident(&self, cache: &BackendCache) -> Option<Value> {

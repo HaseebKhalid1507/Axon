@@ -113,11 +113,28 @@ gemv_f8(const u8* __restrict__ w, int rows, int K, const u8* __restrict__ qa,
     }
 }
 
-// mma.sync.m16n8k32 e4m3 x e4m3 -> f32 (sm_89+): D = A B + C. Fragments
-// (the int8 m16n8k32 layout; g = lane / 4, q = lane % 4): a0 (row g, k 4q..),
-// a1 (row g + 8, k 4q..), a2 (row g, k 16 + 4q..), a3 (row g + 8, k 16 + 4q..);
-// b0 (col g, k 4q..), b1 (col g, k 16 + 4q..); c0, c1 (row g, cols 2q, 2q + 1),
-// c2, c3 (row g + 8, same cols).
+// One k32 step of the e4m3 product, D = A B + C, on the int8 m16n8k32
+// fragments (g = lane / 4, q = lane % 4): a0 (row g, k 4q..), a1 (row g + 8,
+// k 4q..), a2 (row g, k 16 + 4q..), a3 (row g + 8, k 16 + 4q..); b0 (col g,
+// k 4q..), b1 (col g, k 16 + 4q..); c0, c1 (row g, cols 2q, 2q + 1), c2, c3
+// (row g + 8, same cols).
+// sm_120 and later: one mma.sync.m16n8k32 e4m3 x e4m3 -> f32 (it met the
+// f64 anchor, §3, with 12.8x to spare on bella). On sm_89 that instruction
+// keeps only about 14 bits of the sum: terms are cut about 13 bits below the
+// largest of them and the accumulator (that rule gives #190's failing output
+// exactly, though not every output of the diagnostic). A 4090 missed the
+// anchor by up to 173x at the §3 shapes, and by 67.6x even with the
+// accumulator moved into f32 after every mma (gpu_fp8_mma_diag,
+// 1104-195209-4f1e): the cut is inside the instruction. So below sm_120 the
+// codes become f16 (exact: e4m3 is a subset) and the step is two m16n8k16
+// f16 x f16 -> f32 mmas, k 0..15 then 16..31, on the same fragments (a0's
+// bytes 0, 1 are its k 2q, 2q + 1 there and bytes 2, 3 its k 2q + 8, 2q + 9;
+// the same map for b): within 0.18x of the anchor's tolerance at every §3
+// shape on the 4090, at 1.3-1.55x gemm_f8's e4m3 time (gpu_fp8_gemm_speed).
+// sm_90 and sm_100 aren't measured; they take the f16 path too (Hopper's
+// e4m3 accumulation is reported at about 14 bits as well).
+// -DAXON_F8_E4M3_ACC forces the e4m3 mma (tests: its speed).
+#if __CUDA_ARCH__ >= 1200 || defined(AXON_F8_E4M3_ACC)
 __device__ __forceinline__ void mma_f8(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
     asm volatile(
         "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
@@ -125,6 +142,25 @@ __device__ __forceinline__ void mma_f8(float* d, u32 a0, u32 a1, u32 a2, u32 a3,
         : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
+#else
+// Codes 0, 1 of x (its low 16 bits) as an f16x2.
+__device__ __forceinline__ u32 f8h2(u32 x) {
+    u32 r;
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(r) : "h"((unsigned short)x));
+    return r;
+}
+__device__ __forceinline__ void mma_h16(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
+        "{%8,%9}, {%0,%1,%2,%3};"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void mma_f8(float* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
+    mma_h16(d, f8h2(a0), f8h2(a1), f8h2(a0 >> 16), f8h2(a1 >> 16), f8h2(b0), f8h2(b0 >> 16));
+    mma_h16(d, f8h2(a2), f8h2(a3), f8h2(a2 >> 16), f8h2(a3 >> 16), f8h2(b1), f8h2(b1 >> 16));
+}
+#endif
 
 // GEMM for nb > 16 (D5): 64 rows x 64 tokens a block of 8 warps (2 x 4: 32
 // rows x 16 tokens each, 2 x 2 mma tiles), K in stages of 128 bytes through

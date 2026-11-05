@@ -6,6 +6,98 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Identity: an FP8 checkpoint's `act` is the net's, and a split names its CPU layers' emulation (#200, part of #196)
+- The reply fingerprint's `act` for an FP8 checkpoint on the CPU now comes from the net (the type its matrices were
+  built as), as the KV identity's does since #199, not from `AXON_FP8_CPU_ACT` read again when the fingerprint is
+  made. The CLI's fingerprints don't change: there the two always agreed.
+- A CPU/GPU split (`--gpu-layers`) of an FP8 checkpoint whose CPU layers run `AXON_FP8_CPU_ACT`'s emulation now says
+  so: `act=q8 (cpu layers e4m3-tok-emu)` (or `e4m3-128-emu`). It was `act=q8`, as with f32 activations, which it
+  still is. A split's sessions are unaffected: it has no KV identity, so they always restore as tokens.
+- No other fingerprint and no output bit changes.
+
+### Sessions: a CPU session of an FP8 checkpoint records `AXON_FP8_CPU_ACT`'s emulation (#199, part of #196)
+- **Fix: a `--device cpu` `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
+  `AXON_FP8_CPU_ACT`.** Its emulations (`e4m3-tok`, `e4m3-128`, a diagnostic: the activations rounded through e4m3)
+  make other cache rows than the default f32 activations, but the CPU's KV identity was the same. An emulating net's
+  identity now has `act: e4m3-tok-emu` (or `e4m3-128-emu`, the reply fingerprint's names), and a session saved one
+  way is prefilled again the other way.
+- Nothing else changes: f32 activations (the default), dense models and every GPU net keep their identities and
+  their saved sessions. No output bit changes (the md5 set is unchanged).
+- Tests: `fp8_session_across_cpu_act` restores sessions both ways across the variable (a child process sets it, as
+  #198's GPU test does), and `tiny_fp8_kv_ident_names_cpu_act` checks the field on the tiny checkpoint in CI. Both
+  session tests now compare the rows the session file holds with the restore's, for the same tokens.
+
+### Sessions: an FP8 checkpoint's fast-mode session records whether fp8.cu made it (#198, part of #196)
+- **Fix: a fast-mode `chat --session` of an FP8 checkpoint no longer restores as KV bytes across
+  `AXON_FP8_NATIVE`.** With fp8.cu (fast mode, sm_89+) and with `AXON_FP8_NATIVE=0` (the Q8_0 form) the cache rows
+  differ, but the KV identity was the same, so a session saved one way loaded its bytes the other way and the
+  conversation went on from rows a fresh prefill wouldn't make. The identity of a net running fp8.cu now has
+  `weights: fp8-native`, and a session saved one way is prefilled again the other way.
+- **Fast-mode FP8 sessions saved with fp8.cu before this restore once as tokens** (prefilled again). Nothing else
+  changes: dense GGUF models, either mode, and FP8 checkpoints in exact mode or under `AXON_FP8_NATIVE=0` keep their
+  identities and their saved sessions. No output bit changes (the md5 set is unchanged).
+- #196 stays open for the full fix: the KV identity should hash the source and options of the module the net runs.
+
+### Tests: FP8 test skips show in a captured log; `AXON_FP8_NATIVE=0` fails the FP8 engine tests (#197)
+- **A skipped FP8 test now says so in a normal test log, not only under `--nocapture`.** The FP8 checkpoint's skip
+  (missing, with `AXON_SKIP_FP8_MODEL_TESTS` or `AXON_SKIP_MODEL_TESTS` set) and the FP8 tests' skip on a GPU below
+  sm_89 go straight to stderr (`testutil::skip_note`) and name the test. libtest captures `eprintln!` in a passing
+  test, so those skips read as a bare `ok` in a gate log, the blind spot #193 was about (shady's review of #195).
+  Only a test that skips prints the line: the checkpoint rule's own unit tests print none, so a `skipping:` line in a
+  suite's log means a test skipped (axon-run reads one near a log's end as a run whose test skipped itself).
+- **`AXON_FP8_NATIVE=0` fails `gpu_fp8_graded_vs_fp8_ref`** (and the ignored `gpu_fp8_load_diag`) with a message
+  naming it. It turns the engine's native FP8 off, so the test has nothing to grade. It used to skip every FP8 test
+  quietly, as "no e4m3 tensor cores". The FP8 kernel tests no longer read it: they run on any sm_89+ GPU. README
+  documents the variable.
+- CONTRIBUTING's FP8 checkpoint download uses `curl -fL` and checks all 9 files' sha256 (`sha256sum -c`).
+
+### Tests: a missing FP8 checkpoint fails the FP8 checkpoint tests (#193)
+- **`gpu_fp8_exact_is_q8_and_bit_identical` and `gpu_fp8_graded_vs_fp8_ref` now fail when the FP8 0.5B checkpoint
+  is missing** (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`, or `AXON_TEST_FP8_MODEL`), as the GGUF
+  test models already do. They used to return early, which libtest reports as `ok`. Three 4090 gate runs showed the
+  FP8 graded gate passing that way without running it (#193). `AXON_SKIP_MODEL_TESTS=1` (CI) or the new
+  `AXON_SKIP_FP8_MODEL_TESTS=1` skips them instead. The download and its sha256 are in CONTRIBUTING.md. Only a host
+  with a usable GPU reaches the check: the exact-mode test runs on any, the graded test on sm_89+.
+
+### FP8 on sm_89: the fast-mode GEMM runs f16 mmas below sm_120 (#190, #192)
+- **Correction to #177: below sm_120, `--numerics fast` no longer runs FP8 prefill on e4m3 tensor cores.** On sm_89
+  the e4m3 `mma.sync` keeps only about 14 bits of each k32 step's sum, and the FP8 GEMM missed its f64 accuracy anchor
+  by up to 173× on a 4090 (#190). For every compile target below sm_120, `gemm_f8` now converts the e4m3 codes to f16
+  (exact: e4m3 is a subset of f16) and runs each k32 step as two f16 mmas with f32 accumulate. That is within 0.18× of
+  the anchor's tolerance on the 4090. Cost: 1.30–1.55× the e4m3 GEMM time (4090, `gemm_f8` alone at the 0.5B and 7B
+  shapes). Decode (`gemv_f8`, CUDA cores) and the activation quantizer are unchanged. Exact mode (the default, Q8_0)
+  and every GGUF model never run this code
+  ([docs/log/2026-11-04-fp8-sm89.md](docs/log/2026-11-04-fp8-sm89.md)).
+- **End to end, MEASURED on the FP8 0.5B only:** on a 4090 in `--numerics fast`, prefill is 17–22 % slower (586- and
+  2260-token prompts) and decode is unchanged. The 7B is not measured. At its shapes the GEMM alone is 1.32–1.42×,
+  24–30 % less throughput, and more of its prefill is GEMM than the 0.5B's, so its prefill cost is likely nearer
+  that (ESTIMATED).
+- **sm_120 is unchanged.** Its cubin keeps the e4m3 mma: the code is the same, and the md5 gate against main is
+  identical, FP8 `--numerics fast` included.
+- **H100 (sm_90) and sm_100 change too, unmeasured.** They are below sm_120, so FP8 fast-mode prefill takes the f16
+  path there as well, with new bits. No anchor, graded or speed run exists on either until the #176 probe.
+- **Every fast-mode fingerprint changes once.** `NUMERICS_VERSION_FAST` 2 → 3, so `numerics=fast/1.2` becomes
+  `fast/1.3` in every fast-mode identity, on every GPU (sm_120 too) and for GGUF models; their bits don't change.
+  Exact-mode fingerprints don't change. A `chat --session` saved in fast mode carries `fast/1.2`, so it restores once
+  as tokens (prefilled again) instead of as KV bytes the old e4m3 path made. On sm_120 that happens although its bits
+  are the same: the
+  [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843)
+  is the bump with no waiver, and accepts that.
+- **The FP8 graded gate's wide-flip count is set relative to its CPU floor** (#192, test-only). On the 0.5B's
+  1014-position decode arm, the floor alone has 10 top-1 flips at margin ≥ 0.5, which is all of the old
+  `max(2, n/100)` = 10. A 4090 had 12. The bound is now the floor's count plus 2 binomial SE (16 there), for the FP8
+  gate only; the order-only gates are unchanged. The difference starts in shared code: without any FP8 kernel, a 4090
+  and bella differ at 931 of 933 decode positions.
+
+### Shared-prefix KV pages: groundwork, no behaviour change (#164)
+- **The paged KV pool counts who holds each page, and a prefix index can pin pages** (C1 + C2 of the shared-prefix
+  design, [docs/design/shared-prefix-pages.md](docs/design/shared-prefix-pages.md)). Nothing maps, pins or indexes
+  pages yet, so every page has one holder and the pool allocates, releases and copies exactly as before: the same
+  bits (the md5 and serve identity gates against main). The rule sharing rests on, "a page shared or indexed is never
+  written again", is checked in debug builds on the pool's batched writes (feeds, steps, `adopt`) and the RAM
+  tier's page copies (#166). A single request's writes through a slot view aren't checked yet: that is C3's, with
+  the engine work (claim, index, evict). In-flight dedupe (C4) is a later PR too.
+
 ### KV RAM tier, opt-in (#166)
 - **`axon serve --cache-ram BYTES|auto`: keep conversations' KV pages in host RAM, off by default.** When a slot goes to
   another conversation, its KV pages stay in host memory, and its next turn copies the longest stored prefix back

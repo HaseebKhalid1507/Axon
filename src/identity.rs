@@ -82,7 +82,10 @@ pub const NUMERICS_VERSION_EXACT: u32 = 1;
 /// parts) bumps `NUMERICS_VERSION_EXACT`, which moves fast's tag as well,
 /// so it doesn't bump this one. The first fast kernel is a bump.
 /// 2: FP8 checkpoints' native kernels (fp8.cu, docs/design/fp8-weights.md).
-pub const NUMERICS_VERSION_FAST: u32 = 2;
+/// 3: their GEMM's e4m3 product step runs as two f16 mmas for any compile
+/// target below sm_120 (fp8.cu `mma_f8`, #190): new fast bits on sm_89, 90,
+/// 100; the sm_12x cubin is unchanged, but the counter is one for all.
+pub const NUMERICS_VERSION_FAST: u32 = 3;
 
 /// The tuple's format, the first line of `canonical`.
 const SCHEME: &str = "axon-identity/1";
@@ -153,10 +156,10 @@ impl Identity {
 
     /// The tuple with an FP8 checkpoint's `weights`, `act` and `head`
     /// fields (`fp8_fields`); no fields for any other model.
-    pub fn with_fp8(mut self, f: Option<[&'static str; 3]>) -> Identity {
+    pub fn with_fp8(mut self, f: Option<[String; 3]>) -> Identity {
         if let Some([w, a, h]) = f {
             self.fields
-                .extend([("weights", w.into()), ("act", a.into()), ("head", h.into())]);
+                .extend([("weights", w), ("act", a), ("head", h)]);
         }
         self
     }
@@ -271,21 +274,35 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
 /// `fp8-native` (fp8.cu, the fast set), `fp8-q8` (Q8_0 at load: exact mode,
 /// or a GPU below sm_89) or `fp8-ref` (the CPU: exact dequant); the
 /// activations its matrices read; the head's type. None for other models.
-fn fp8_fields(m: &Model, net: &Backend) -> Option<[&'static str; 3]> {
+/// The CPU's activations are the net's, the type its FP8 matrices were
+/// built as (`Qwen2::fp8_qt`), as kvsave's `act` is, not AXON_FP8_CPU_ACT's
+/// value now. A split's are its GPU layers' (`q8`), and its CPU layers' too
+/// when those emulate the GPU's rounding (`q8 (cpu layers e4m3-tok-emu)`);
+/// at f32 they aren't named, as before the emulation existed.
+fn fp8_fields(m: &Model, net: &Backend) -> Option<[String; 3]> {
+    use crate::model::{Qwen2, fp8_cpu_act};
     if !crate::safetensors::is_fp8(m) {
         return None;
     }
-    let cpu_act = match crate::model::fp8_cpu_qt() {
-        crate::quant::fp8::F8S_TOK => "e4m3-tok-emu",
-        crate::quant::fp8::F8S_G128 => "e4m3-128-emu",
-        _ => "f32",
+    // Every FP8 matrix of a CPU net has its F8S slot (`model::build`).
+    let qt = |n: &Qwen2<'_>| {
+        n.fp8_qt()
+            .expect("an FP8 checkpoint's CPU net has FP8 matrices")
     };
-    Some(match &net.0 {
-        Inner::Cpu(_) => ["fp8-ref", cpu_act, "f16"],
-        Inner::Cuda(n) if n.f8_native() => ["fp8-native", "e4m3-tok", "q8"],
-        Inner::Cuda(_) | Inner::Pipeline(_) => ["fp8-q8", "q8", "q8"],
-        Inner::Hybrid(_) | Inner::Moe(_) => ["fp8-q8 (cpu layers fp8-ref)", "q8", "q8"],
-    })
+    let f = |w: &str, a: &str, h: &str| Some([w.into(), a.into(), h.into()]);
+    match &net.0 {
+        Inner::Cpu(n) => f("fp8-ref", fp8_cpu_act(qt(n)), "f16"),
+        Inner::Cuda(n) if n.f8_native() => f("fp8-native", "e4m3-tok", "q8"),
+        Inner::Cuda(_) | Inner::Pipeline(_) => f("fp8-q8", "q8", "q8"),
+        Inner::Hybrid(n) => {
+            let emu = (n.cpu_net().map(qt)).filter(|&q| q != crate::quant::fp8::F8S);
+            let act = emu.map_or("q8".into(), |q| {
+                format!("q8 (cpu layers {})", fp8_cpu_act(q))
+            });
+            f("fp8-q8 (cpu layers fp8-ref)", &act, "q8")
+        }
+        Inner::Moe(_) => f("fp8-q8 (cpu layers fp8-ref)", "q8", "q8"),
+    }
 }
 
 /// The `rope` field: the model's effective RoPE scaling, read from its
@@ -819,18 +836,18 @@ mod tests {
         let f = base().with_numerics(Numerics::Fast);
         assert_eq!(
             f.canonical(),
-            "axon-identity/1\nnumerics=fast/1.2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=fast/1.3\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         assert_eq!(
             f.fingerprint(),
-            "fp_c9b871192100d614",
-            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767)"
+            "fp_1c52be76f68d4895",
+            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767, fast/1.2 fp_c9b871192100d614)"
         );
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
-        assert_eq!(f.json()["numerics"], "fast/1.2");
-        assert!(f.line().contains("numerics fast/1.2"), "{}", f.line());
+        assert_eq!(f.json()["numerics"], "fast/1.3");
+        assert!(f.line().contains("numerics fast/1.3"), "{}", f.line());
         // Back to exact: the same tuple as never fast.
         assert_eq!(f.with_numerics(Numerics::Exact), e);
         // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's
@@ -990,6 +1007,50 @@ mod tests {
         assert_ne!(unk.fingerprint(), "fp_unknown");
         assert_eq!(unk.clone().unreadable("model").fingerprint(), "fp_unknown");
         assert_eq!(base("sm_89").unreadable("gpu").fingerprint(), "fp_unknown");
+    }
+
+    /// A split of an FP8 checkpoint names its CPU layers' activations in
+    /// `act` when they emulate the GPU's rounding (AXON_FP8_CPU_ACT; here
+    /// the test override, `model::with_fp8_cpu_qt`, at build), read from
+    /// its CPU half after the override is gone. At f32 the field is `q8`,
+    /// its GPU layers', as before. The CPU-only case:
+    /// `safetensors::tests::tiny_fp8_fingerprint_act_is_the_nets`.
+    #[test]
+    fn of_fp8_split_act_is_the_nets() {
+        use crate::quant::fp8::{F8S, F8S_TOK};
+        let Some(g0) = crate::testutil::gpu() else {
+            return;
+        };
+        drop(g0);
+        let Some(p) = crate::testutil::fp8_model_path() else {
+            return;
+        };
+        let path = p.to_str().unwrap();
+        for (qt, act) in [(F8S, "q8"), (F8S_TOK, "q8 (cpu layers e4m3-tok-emu)")] {
+            let m = crate::gguf::load_with(path, Some(false)).unwrap();
+            let n = crate::hybrid::block_count(&m).unwrap();
+            let o = crate::lm::BackendOptions::default()
+                .device(crate::lm::Device::Cuda)
+                .max_ctx(256)
+                .gpu_layers(Some(n / 2));
+            let net = crate::model::with_fp8_cpu_qt(qt, || Backend::new(&m, o).unwrap());
+            let Inner::Hybrid(h) = &net.0 else {
+                panic!("not a split")
+            };
+            assert_eq!(h.cpu_net().and_then(|c| c.fp8_qt()), Some(qt));
+            let id = of(path, &m, &net);
+            let get = |k: &str| {
+                (id.fields.iter())
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.as_str())
+            };
+            assert_eq!(
+                get("weights"),
+                Some("fp8-q8 (cpu layers fp8-ref)"),
+                "{id:?}"
+            );
+            assert_eq!(get("act"), Some(act), "{id:?}");
+        }
     }
 
     /// `of` on a real CPU/GPU split and a two-stage pipeline (both stages on

@@ -2187,7 +2187,7 @@ fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
     v
 }
 
-/// Whether `gpu` has e4m3 tensor cores (sm_89 and later, `mma.sync` e4m3).
+/// Whether fast mode runs FP8 natively on `gpu`: sm_89+ (e4m3) and AXON_FP8_NATIVE isn't 0.
 pub(crate) fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
     let cc = gpu.info()?.cc;
     Ok(cc.0 * 10 + cc.1 >= 89 && std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"))
@@ -2309,7 +2309,8 @@ impl<'m> Kernels<'m> {
         n: Numerics,
     ) -> Result<Module<'g>, String> {
         let ext = needs_ext(m);
-        // FP8 natively only in fast mode on sm >= 89 (e4m3 mma.sync); else
+        // FP8 natively only in fast mode on sm >= 89 (fp8.cu's `mma_f8`:
+        // e4m3 mma.sync on sm_120+, f16 mmas below, #190); else
         // the plain module, which runs the Q8_0 form (D1, ruling 4).
         let f8 = crate::safetensors::is_fp8(m) && n == Numerics::Fast && f8_native_cc(gpu)?;
         let src = if m.arch == "gpt-oss" {

@@ -40,9 +40,11 @@ of VRAM. The identity records `head=q8`. Both modes share these kernels.
 mode (and fast below sm_89) loads the plain module: same text, options and cache key as main, so the Q8_0 fallback
 is today's kernels. `act_bytes` grows only in that module's nets; every routing branch keys on `qt == F8_E4M3`.
 **D5. GEMM numerics (fast only), A1's form.** 64-row tiles; each output's 4 f32 accumulators carry the whole K
-through chained `mma.sync.m16n8k32.row.col.f32.e4m3.e4m3.f32`; epilogue `y = (acc·ws[r])·das[t]` (two `fmul.rn`), then
-`gm_store` (bias, residual, stride). `-DAXON_F8_PROMOTE` (an FADD into CUDA-core f32 every 128 K) exists only for the
-case where the f64 anchor (§3) shows the in-mma accumulation narrower than f32.
+through chained `mma.sync.m16n8k32.row.col.f32.e4m3.e4m3.f32` (on sm_120+; below sm_120 each step is two f16 mmas,
+§13); epilogue `y = (acc·ws[r])·das[t]` (two `fmul.rn`), then
+`gm_store` (bias, residual, stride). `-DAXON_F8_PROMOTE` (an FADD into CUDA-core f32 every 128 K) was planned for the
+case where the f64 anchor (§3) shows the in-mma accumulation narrower than f32. It was never built: on sm_89 the
+cut is inside the instruction, and promotion after every mma still misses (§13).
 **D6. GEMV numerics for nb ≤ 16, CUDA cores (fast only).** One warp per row; lane l owns bytes 4l..4l+4 of each
 128-byte chunk (coalesced); `acc_l = fma(w, a, acc_l)` over its K/32 values in order (e4m3×e4m3 products are exact
 in f32); xor tree (16, 8, 4, 2, 1); `y = (Σ·ws[r])·das[t]`. Weights are read once for all nb tokens. Same operands as
@@ -50,17 +52,22 @@ D5, another order: the ADR's fast mode allows it, and decode is graded on its ow
 **D7. CPU reference `fp8-ref` = exact dequant, f32 activations, F16 head** (spec §3.6 numerics, not its AVX2
 kernel): F8_E4M3 joins the F32/F16 float fallback (CODE `quant.rs:2749`: its order, SIMD == scalar as F16's), the row
 scale applied to each dot; weights read in place from the mmap. It is HF F32's twin (validated at KL ≤ 1e-4, §6 A),
-the graded gate's reference (§6 B), and exact on the CPU. Emulation (`Fp8Cpu { act, head_q8 }`; CLI
-`AXON_FP8_CPU_ACT=f32|e4m3-tok|e4m3-128`, `AXON_FP8_CPU_HEAD=f16|q8`): activations round-trip through the Rust twin
-of D2's quantizer, the head through the Q8_0 converter: the fast path's precision in the CPU's order. Head on/off
-splits the KL into head vs GEMM (review SHOULD 3). Slow prefill (f32 FMA): not a product path.
+the graded gate's reference (§6 B), and exact on the CPU. Emulation (`model::fp8_cpu_qt`, types `F8S_TOK` /
+`F8S_G128`; `AXON_FP8_CPU_ACT=f32|e4m3-tok|e4m3-128`): activations round-trip through the Rust twin of D2's quantizer,
+the fast path's activation precision in the CPU's order. The fingerprint's `act` names it, and so does an emulating
+net's KV identity (`act`, #199), so a session isn't restored as bytes across the variable. Both read it from the net
+(`Qwen2::fp8_qt`, the type its matrices were built as, #200), and a CPU/GPU split names its CPU layers' emulation too
+(§4). The head stays F16: the
+planned `AXON_FP8_CPU_HEAD=f16|q8` (the head through the Q8_0 converter, to split the KL into head vs GEMM, review
+SHOULD 3) was never built. Slow prefill (f32 FMA): not a product path.
 
 ## 3. Kernels and their references (ruling 5)
 Every FP8 kernel has two checks: **bits** against a reference of its own order (tiling, staging, odd K, scale
 indexing), and an **independent f64 anchor**: a Rust f64 GEMM of the dequantized values, `E = ws·das·Σ w·a` (exact
 e4m3 products, f64 sum), with the pre-registered tolerance **`|y − E| ≤ 2⁻²³·(K/32 + 40)·ws·das·Σ|w·a|`**: f32
 recursive summation over ≤ K/32 chained steps plus ≤ 32 in-instruction terms, the tree and two scale roundings, ×2
-slack. A narrower in-mma accumulator (Hopper's ~14 bits) fails it at K ≥ 896: that is what it is for.
+slack. A narrower in-mma accumulator (Hopper's ~14 bits) fails it at K ≥ 896: that is what it is for. (sm_89's
+fails it at K 128 already, §13.)
 | kernel (file) | used for | bits reference | anchor shapes |
 |---|---|---|---|
 | `quant_f8_tok` + `quant_warp` xf (`fp8.cu`, `decode.cu` `#ifdef AXON_F8`) | every F8 matrix's input | Rust twin `quant::quantize_act_f8` (integer RNE, no shared code): 256 codes, ties, satfinite, subnormals, the `n = 896` tail, 10⁶ random rows | `|q·s − x| ≤ s·½ulp_e4m3(x/s)` |
@@ -69,7 +76,7 @@ slack. A narrower in-mma accumulator (Hopper's ~14 bits) fails it at K ≥ 896: 
 | FP8→Q8_0, F16→Q8_0 converter (`quant.rs`, Rust, in the upload ring workers) | D1 fallback, D3 head | `quantize_q8_0` of the exact f32 dequant; GPU arena read back == CPU bytes | — |
 Plus `gemv_f8` at nb 16 vs `gemm_f8` at nb 17 (the same 16 tokens + 1), within 2× the tolerance. (Per-channel only:
 block-scaled weights, Stage C, need a per-128 promotion variant, not just other arguments.) Hopper seam: `bgemm`'s F8 branch
-is `match f8_route(nb, module) { Gemv, MmaSync, Wgmma }`, `Wgmma` → `MmaSync` until WP-A3 (sm_90 runs `mma.sync`).
+is `match f8_route(nb, module) { Gemv, MmaSync, Wgmma }`, `Wgmma` → `MmaSync` until WP-A3 (sm_90 runs `mma.sync`, as f16 mmas since #190, §13).
 Every FP8 launch calls `fast_launched()`; decode graphs count at capture (§6 B says where).
 
 ## 4. Routing and identity
@@ -77,9 +84,12 @@ Every FP8 launch calls `fast_launched()`; decode graphs count at capture (§6 B 
 |---|---|---|---|
 | `--numerics exact` (default) | Q8_0 at load, plain module: `weights=fp8-q8 act=q8 head=q8` | same | `weights=fp8-ref act=f32 head=f16` |
 | `--numerics fast` | native, F8 module: `weights=fp8-native act=e4m3-tok head=q8` | fp8-q8, plain module, FAST_NOTE | fp8-ref plus FAST_NOTE |
+A CPU/GPU split (`--gpu-layers`, either mode: it refuses the F8 module) is `weights=fp8-q8 (cpu layers fp8-ref)
+act=q8 head=q8`, and under D7's emulation `act=q8 (cpu layers e4m3-tok-emu)` (or `e4m3-128-emu`, #200).
 The `weights/act/head` fields appear **only for FP8 checkpoints**, so GGUF tuples gain nothing.
 `numerics::fast_kernels(net)` (CODE `numerics.rs:98`) is true only for fp8-native. `NUMERICS_VERSION_FAST` goes 1 → 2
-by the ADR's "a fast kernel bumps it": GGUF fast fingerprints change, their bits don't. `gpu_refusal` stays for BF16
+by the ADR's "a fast kernel bumps it": GGUF fast fingerprints change, their bits don't. (2 → 3 with §13's change
+below sm_120.) `gpu_refusal` stays for BF16
 safetensors and lifts for FP8.
 
 ## 5. Files
@@ -219,3 +229,37 @@ The 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1
 **Known cause of the decode miss:** an FP8-native net runs a single token as a one-row batched pass (`gemv_f8` plus
 the batched path's per-layer launches) with no decode-step kernels and no CUDA graphs (§10). Follow-up, not in this
 PR: give F8 nets the decode-graph GEMV path, then re-gate on bella and the H100 (roadmap).
+
+## 13. sm_89 (#190, 2026-11-04)
+The §3 anchor first ran on sm_89 at main af281d9 (a 4090 pod) and failed: `gemm_ref_f8` missed it, and so did
+`gemm_f8`, since the two agree bit for bit. The cause is the instruction, not our code. On sm_89,
+`mma.sync … e4m3.e4m3.f32` keeps only about 14 bits of each k32 step's sum: it cuts its terms, the incoming
+accumulator among them, about 13 bits below the largest. That rule gives #190's output exactly (−155408 against
+an exact −155394.285), though it does not fit every output of the diagnostic. This is the narrow in-mma
+accumulator §3 was written to catch. Before 2026-11-04 the §3 checks ran only on bella (sm_120); the H100 never
+ran them.
+- Measured on the 4090 (`gpu_fp8_mma_diag`, 1104-195209-4f1e): worst error at the §3 shapes relative to the
+  tolerance, at K 128 / 896 / 4864:
+
+  | path | 4090 | bella (1104-194742-ccb2) |
+  |---|---|---|
+  | e4m3 chain (as of main) | 173× / 114× / 36× | 0.062× / 0.078× / 0.050× |
+  | accumulator moved into f32 every 4 mmas (128 K: the planned `AXON_F8_PROMOTE`) | 173× / 32× / 4.0× | 0.062× / 0.018× / 0.005× |
+  | accumulator moved into f32 after every mma | 67.6× / 13× / 1.7× | 0.039× / 0.023× / 0.006× |
+  | the codes as f16 (exact: e4m3 ⊂ f16), two `m16n8k16` f16 → f32 mmas per k32 step | 0.124× / 0.176× / 0.131× | 0.089× / 0.120× / 0.095× |
+
+  No promotion schedule can fix a cut that happens inside the instruction.
+- Built: `mma_f8` in `fp8.cu`. `__CUDA_ARCH__ >= 1200` keeps the e4m3 mma (the sm_12x cubin is unchanged: its code
+  is the same and md5s are identical). The `#if` keys on the compile target, not the card: an sm_120 card whose
+  NVRTC lacks sm_120 gets older PTX and the f16 path, correct and slower (`code_target` is in the identity). Older architectures convert each fragment register to f16 (`cvt.rn.f16x2.e4m3x2`)
+  and run the two f16 mmas on the same fragments, so `gemm_f8`, `gemm_ref_f8` and their loads and tiling don't
+  change. `-DAXON_F8_E4M3_ACC` forces the e4m3 mma, so its speed can still be measured.
+- Cost on the 4090 (`gpu_fp8_gemm_speed`, `gemm_f8` alone, nb 512, medians of 9 × 20 launches): 1.30–1.55× the
+  e4m3 time. At the 0.5B and 7B shapes that is 98–185 TFLOPS with e4m3 against 72–138 with f16 (1104-195657-375e).
+- Every target below sm_120 takes the f16 path: sm_90 (Hopper; its e4m3 accumulation is reported at about 14 bits
+  too, CLAIMED: DeepSeek-V3's report, wgmma on H800) and sm_100 among them. Neither is measured; the NVRTC-only test
+  `nvrtc_fp8_product_step_by_target` pins the routing (the e4m3 mma in the PTX at compute_120 only). On Hopper,
+  WP-A3's wgmma with per-128 promotion is the fast path.
+- `NUMERICS_VERSION_FAST` 2 → 3: fast-mode bits change below sm_120 (identity.rs's rule;
+  [lead ruling](https://github.com/HaseebKhalid1507/Axon/pull/191#issuecomment-6651890843):
+  no waiver).

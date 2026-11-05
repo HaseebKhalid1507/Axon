@@ -412,7 +412,8 @@ above, and why:
   from reading `fast` as faster today.
 - **M1: the counters are tied, structurally.** §4.3's rule "a change to a shared kernel bumps both" leaned on whoever
   bumped `NUMERICS_VERSION_EXACT` remembering the second counter. Instead fast's tag carries exact's counter:
-  `numerics=fast/<exact>.<fast>`, `fast/1.1` today. Code both modes run (every kernel today, the request-to-text code)
+  `numerics=fast/<exact>.<fast>`, `fast/1.1` at the time (`fast/1.2` with #177's FP8 kernels, `fast/1.3` since
+  #190). Code both modes run (every kernel today, the request-to-text code)
   bumps `NUMERICS_VERSION_EXACT` alone and moves both modes' fingerprints; `NUMERICS_VERSION_FAST` counts fast-only
   changes (a fast kernel, its routing). Free now, since no client holds a fast fingerprint yet.
 - **M1: the mode is a `Backend`'s** (`BackendOptions::numerics`, public; `axon::Numerics`, non-exhaustive), and the
@@ -442,7 +443,11 @@ above, and why:
   fast == exact to bits only while the backend has no fast kernel, then delegates them to these arms: fast mode's
   promise is tolerance on every path (determinism.md's table), not "a fixed reply on a fixed placement".
 - **M5: exact sessions are unchanged.** A fast-mode backend adds `numerics_mode` to its kvsave identity; exact adds
-  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact.
+  nothing, so session files saved before the modes still restore as bytes. Draft models always run exact. A net
+  running an FP8 checkpoint on fp8.cu also adds `weights: fp8-native`: without it, its sessions and those of the
+  same checkpoint's Q8_0 form under `AXON_FP8_NATIVE=0` had one identity (#196, #198). On the CPU, a net running an
+  FP8 checkpoint under an `AXON_FP8_CPU_ACT` emulation adds `act` (`e4m3-tok-emu`, `e4m3-128-emu`) the same way
+  (#199): f32 activations, the default, add nothing.
 
 ---
 

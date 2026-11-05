@@ -1523,6 +1523,72 @@ fn tiny_fp8_checkpoint_is_its_exact_dequant() {
     assert_eq!(run(&m), run(&g));
 }
 
+/// #196's CPU case, on the tiny FP8 checkpoint (so CI runs it): a CPU net
+/// built under an AXON_FP8_CPU_ACT emulation (`model::fp8_cpu_qt`, here
+/// its thread-local override) makes other cache rows than f32 activations,
+/// and its KV identity says so, `act` as the fingerprint names it; f32 (the
+/// default) adds nothing, so those identities are what they were.
+/// `chat::tests::fp8_session_across_cpu_act` restores real sessions across
+/// the variable.
+#[test]
+fn tiny_fp8_kv_ident_names_cpu_act() {
+    use crate::kvsave::KvIo;
+    use crate::quant::fp8::{F8S, F8S_G128, F8S_TOK};
+    let d = Dir::new("fp8-act");
+    write_tiny_fp8(&d, |_| {});
+    let ids = [256u32, 10, 72, 101, 108, 108, 111, 263];
+    // A load per net: building one repacks the matrices and releases the
+    // mapped tensors it copied (strict under test).
+    let run = |qt| {
+        let m = load_dir(&d.0).unwrap();
+        crate::model::with_fp8_cpu_qt(qt, || {
+            let net = crate::model::Qwen2::new(&m);
+            assert_eq!(net.fp8_qt(), Some(qt));
+            let mut c = crate::Lm::new_cache(&net, 16);
+            crate::Lm::prefill_logits(&net, &ids, 0, &mut c);
+            let mut rows = Vec::new();
+            net.kv_save(&c, 0, ids.len(), &mut rows).unwrap();
+            (net.kv_ident(&c).unwrap(), rows)
+        })
+    };
+    let (id, rows) = run(F8S);
+    assert!(id.get("act").is_none(), "{id}");
+    for (qt, act) in [(F8S_TOK, "e4m3-tok-emu"), (F8S_G128, "e4m3-128-emu")] {
+        let (mut e, erows) = run(qt);
+        assert_eq!(e["act"], act, "{e}");
+        assert_ne!(erows, rows, "{act}: f32's rows");
+        e.as_object_mut().unwrap().remove("act");
+        assert_eq!(e, id, "{act}");
+    }
+}
+
+/// The fingerprint's `act` on the CPU is the net's, the type its FP8
+/// matrices were built as (`Qwen2::fp8_qt`), as kvsave's is: each net here
+/// is built under the test override (`with_fp8_cpu_qt`, standing in for
+/// AXON_FP8_CPU_ACT at load) and fingerprinted after it, where the
+/// override is gone. A split's CPU layers: `identity::tests::
+/// of_fp8_split_act_is_the_nets` (a GPU and the checkpoint).
+#[test]
+fn tiny_fp8_fingerprint_act_is_the_nets() {
+    use crate::lm::{Backend, BackendOptions, Device};
+    use crate::quant::fp8::{F8S, F8S_G128, F8S_TOK};
+    let d = Dir::new("fp8-fp-act");
+    write_tiny_fp8(&d, |_| {});
+    let path = d.0.to_str().unwrap();
+    for (qt, act) in [
+        (F8S, "f32"),
+        (F8S_TOK, "e4m3-tok-emu"),
+        (F8S_G128, "e4m3-128-emu"),
+    ] {
+        let m = load_dir(&d.0).unwrap();
+        let o = BackendOptions::default().device(Device::Cpu).max_ctx(16);
+        let net = crate::model::with_fp8_cpu_qt(qt, || Backend::new(&m, o).unwrap());
+        let c = crate::identity::of(path, &m, &net).canonical();
+        assert!(c.contains("\nweights=fp8-ref\n"), "{c}");
+        assert!(c.contains(&format!("\nact={act}\n")), "{act}: {c}");
+    }
+}
+
 /// FP8 checkpoints Axon doesn't run, refused by name.
 #[test]
 fn fp8_checkpoints_refused_cleanly() {

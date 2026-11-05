@@ -143,7 +143,8 @@ Works today, honestly scoped:
   (the GPU has no F16 matrix kernels). **FP8 checkpoints** (compressed-tensors per-channel e4m3 with
   dynamic per-token activations, RedHatAI's `*-FP8-dynamic`) run everywhere: in exact mode (the
   default) as Q8_0 converted at load (today's kernels and bit contract; the 7B passes both accuracy bars against the CPU FP8 reference (KL 1.2e-3, top-1 98.1 %), while the 0.5B scores 96.7 % top-1 against HF F32, below the 97 % bar), on the CPU as the exact dequant (slow; the accuracy reference), and on the
-  GPU natively with `--numerics fast` (sm_89+: e4m3 tensor cores, [fp8-weights.md](docs/design/fp8-weights.md)).
+  GPU natively with `--numerics fast` (sm_89+; the prefill GEMM's tensor cores multiply e4m3 on sm_120+ and f16 below,
+  #190; [fp8-weights.md](docs/design/fp8-weights.md)).
   Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
   without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other
   architectures are refused with a message (roadmap). The pre-tokenizer must be one
@@ -183,8 +184,9 @@ Works today, honestly scoped:
   head, half the memory, with slightly different results.
 - Sessions: `chat --session FILE` keeps a conversation in a file, saved after every reply.
   At the next start its KV cache is loaded back if the model, KV type, backend and GPU
-  match, else the saved tokens are prefilled again; either way the reply continues as if
-  never stopped (on a CPU/GPU split a re-prefilled cache is close, not exact). Measured:
+  match (for an FP8 checkpoint in fast mode, also whether fp8.cu ran it), else the saved
+  tokens are prefilled again; either way the reply continues as if never stopped (on a
+  CPU/GPU split a re-prefilled cache is close, not exact). Measured:
   a 29.8k-position 7B session restores in 0.41-0.45 s against a 3.16 s re-prefill (RTX 4090).
 - Long context (opt-in): `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768` (llama.cpp's
   flags) takes Qwen2.5 / Qwen3 from 32k to 128k by YaRN RoPE scaling. It changes the output at
@@ -232,7 +234,7 @@ cd Axon
 cargo build --release
 
 mkdir -p models
-curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
+curl -fL -o models/qwen2.5-0.5b-q4_k_m.gguf \
   https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
 ./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32
@@ -776,9 +778,11 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
+| `AXON_FP8_NATIVE=0` | cuda, FP8 checkpoint, `--numerics fast`: run the Q8_0 form converted at load, as exact mode does, instead of fp8.cu's kernels (the fingerprint says `weights=fp8-q8`). A `chat --session` file records whether fp8.cu ran (the KV identity has `weights: fp8-native`, #198), so a session saved with it set and restored without it, or the other way round, prefills its saved tokens again instead of loading their KV bytes. With it set, `gpu_fp8_graded_vs_fp8_ref` fails (it has no native FP8 to grade); the FP8 kernel tests don't read it |
 | `AXON_ADMIT=fifo\|sjf` | `serve`: same as `--admit-order` (any case; default sjf); any other value refuses to start |
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
+| `AXON_SKIP_FP8_MODEL_TESTS=1` | tests: skip the ones that need the FP8 checkpoint (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`); without it, or `AXON_SKIP_MODEL_TESTS`, a missing checkpoint fails them on a host with a GPU |
 
 ## Numbers
 
