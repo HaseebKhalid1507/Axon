@@ -1,0 +1,26 @@
+[axon-run 20:12:38] submitted 1104-201238-8646 by /home/haseeb/.cache/axon-fp8sm89: /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-fc70a43 cuda::qwen2::tests::fp8:: --skip gpu_fp8_graded_vs_fp8_ref --nocapture
+[axon-run 21:13:37] job 1104-201238-8646 -> pod1 [RTX 4090 sm_89 secure] (pod 3kaax9y6dxzi1r): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-fp8sm89 /home/haseeb/.cache/axon-fp8sm89/bin/axon-test-fc70a43 cuda::qwen2::tests::fp8:: --skip gpu_fp8_graded_vs_fp8_ref --nocapture
+axon-remote: job 20261105-021339-axon-test-fc70a43-12332 on pod1 (GPU, 5000 MB)
+[axon-node 02:13:39] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1420/24564 MB; sharing with 20261105-010027-axon-test-1589821-1960, 20261105-011317-axon-test-fc70a43-8772 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 02:13:39] waiting for /home/haseeb/.cache/axon-wt-fp8sm89 (jobs of another source snapshot use that path: 20261105-010027-axon-test-1589821-1960)
+[axon-node 02:16:12] run axon-test-fc70a43 (c4c46ab3ec8fa80499e3de6e) as /home/haseeb/.cache/axon-wt-fp8sm89 on 97a5a4bc4e1d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23688 MB of 24564 (used 396); GPU processes pid:MB 12505:386
+
+running 7 tests
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_speed ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_load_diag ... ignored
+test cuda::qwen2::tests::fp8::gpu_fp8_mma_diag ... ignored
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+0.5B FP8 (exact: Q8_0) F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 2 attention paths x 2 split counts
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor ... ok
+
+test result: ok. 4 passed; 0 failed; 3 ignored; 0 measured; 822 filtered out; finished in 93.42s
+
+[axon-node 02:17:46] exit 0 after 93.7s
+[axon-node 02:17:46] peak RSS 1147 MB (job process tree PSS, 2 s samples x46)
+[axon-run 21:17:47] exit 0 after 250.3s (host pod1)
