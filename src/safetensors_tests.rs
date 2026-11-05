@@ -1589,6 +1589,42 @@ fn tiny_fp8_fingerprint_act_is_the_nets() {
     }
 }
 
+/// `axon info`'s CPU identity of an FP8 checkpoint is gen's under each of
+/// the CPU's activation types (`model::with_fp8_cpu_qt`, as AXON_FP8_CPU_ACT
+/// would set it), in both modes (#196: it had no FP8 fields). The CPU's
+/// only: the tiny model's shapes are the CPU's (the GPU's placements:
+/// `identity::tests::predicted_is_of`).
+#[test]
+fn tiny_fp8_predicted_is_of() {
+    use crate::lm::{Backend, BackendOptions, Device};
+    use crate::numerics::Numerics;
+    use crate::quant::fp8::{F8S, F8S_G128, F8S_TOK};
+    let d = Dir::new("fp8-predicted");
+    write_tiny_fp8(&d, |_| {});
+    let path = d.0.to_str().unwrap();
+    for qt in [F8S, F8S_TOK, F8S_G128] {
+        crate::model::with_fp8_cpu_qt(qt, || {
+            let m = load_dir(&d.0).unwrap();
+            let (label, ids) = crate::identity::predicted(path, &m).unwrap().remove(0);
+            assert_eq!(label, "cpu");
+            for (n, want) in [Numerics::Exact, Numerics::Fast]
+                .into_iter()
+                .zip(ids.unwrap())
+            {
+                let m = load_dir(&d.0).unwrap();
+                let o = BackendOptions::default()
+                    .device(Device::Cpu)
+                    .max_ctx(16)
+                    .numerics(n);
+                let net = Backend::new(&m, o).unwrap();
+                let got = crate::identity::of(path, &m, &net);
+                assert!(got.canonical().contains("\nweights=fp8-ref\n"), "{got:?}");
+                assert_eq!(want, got, "{qt} {n}");
+            }
+        });
+    }
+}
+
 /// FP8 checkpoints Axon doesn't run, refused by name.
 #[test]
 fn fp8_checkpoints_refused_cleanly() {
