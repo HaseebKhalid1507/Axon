@@ -1,0 +1,63 @@
+[axon-run 04:01:47] submitted 1105-040147-5d05 by /home/haseeb/.cache/axon-fp8ckpt: /usr/bin/bash skipvis.sh ./axon-test-ddb9589 ./axon-test-818cc91 ./axon-test-dbg-818cc91
+[axon-run 04:32:57] scope axon-job-1105-040147-5d05-1793871177.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 04:32:57] job 1105-040147-5d05 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-040147-5d05-1793871177 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash skipvis.sh ./axon-test-ddb9589 ./axon-test-818cc91 ./axon-test-dbg-818cc91
+axon-q 04:32:57 start slot 16-23: /usr/bin/bash skipvis.sh ./axon-test-ddb9589 ./axon-test-818cc91 ./axon-test-dbg-818cc91
+empty dir entries: 0
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0
+######## ./axon-test-ddb9589 (base)
+== axon-test-ddb9589-S.out: env AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt AXON_SKIP_FP8_MODEL_TESTS=1 axon-test-ddb9589 cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.38s
+rc=0
+PROOF S base: captured, the two skips leave no line (bare ok)
+== axon-test-ddb9589-N.out: env AXON_FP8_NATIVE=0 axon-test-ddb9589 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.39s
+rc=0
+PROOF N base: AXON_FP8_NATIVE=0, captured: both tests a bare ok
+== axon-test-ddb9589-N-nocapture.out: env AXON_FP8_NATIVE=0 axon-test-ddb9589 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin --nocapture
+skipping: no e4m3 tensor cores (sm_89 and later) on this GPU
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+skipping: no e4m3 tensor cores (sm_89 and later) on this GPU
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.36s
+rc=0
+PROOF N base: --nocapture shows why: both skipped as "no e4m3 tensor cores" on an sm_89+ GPU
+######## ./axon-test-818cc91 (cand)
+== axon-test-818cc91-S.out: env AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt AXON_SKIP_FP8_MODEL_TESTS=1 axon-test-818cc91 cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set (cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical)
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set (cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref)
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.33s
+rc=0
+PROOF S cand: captured, each skip names its variable and its test
+== axon-test-818cc91-N.out: env AXON_FP8_NATIVE=0 axon-test-818cc91 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... FAILED
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (1875659) panicked at src/cuda/qwen2/tests/fp8.rs:180:5:
+AXON_FP8_NATIVE=0 is set: fast mode runs the FP8 checkpoint as Q8_0, so this test has no native FP8 to grade. Unset it to run the test (the FP8 kernel tests don't read it).
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.36s
+rc=101
+PROOF N cand: AXON_FP8_NATIVE=0: graded FAILS naming it; the quantizer RAN (ok, no skip)
+######## ./axon-test-dbg-818cc91 (cand)
+== axon-test-dbg-818cc91-S.out: env AXON_TEST_FP8_MODEL=/home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt AXON_SKIP_FP8_MODEL_TESTS=1 axon-test-dbg-818cc91 cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set (cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref)
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+skipping: the FP8 checkpoint /home/haseeb/.cache/axon-podjob/skipvis-bc2c81a39e77/empty-fp8-ckpt is not present and AXON_SKIP_FP8_MODEL_TESTS is set (cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical)
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.31s
+rc=0
+PROOF S cand: captured, each skip names its variable and its test
+== axon-test-dbg-818cc91-N.out: env AXON_FP8_NATIVE=0 axon-test-dbg-818cc91 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... FAILED
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (1875709) panicked at src/cuda/qwen2/tests/fp8.rs:180:5:
+AXON_FP8_NATIVE=0 is set: fast mode runs the FP8 checkpoint as Q8_0, so this test has no native FP8 to grade. Unset it to run the test (the FP8 kernel tests don't read it).
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 848 filtered out; finished in 0.42s
+rc=101
+PROOF N cand: AXON_FP8_NATIVE=0: graded FAILS naming it; the quantizer RAN (ok, no skip)
+SKIP VISIBILITY: AS INTENDED
+[axon-run 04:33:00] exit 0 after 3.1s (host bella)
