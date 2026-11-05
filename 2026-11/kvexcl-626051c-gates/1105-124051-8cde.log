@@ -1,0 +1,114 @@
+[axon-run 12:40:51] submitted 1105-124051-8cde by /home/haseeb/.cache/axon-kvexcl: /usr/bin/bash md5excl.sh ./axon-base-c54a730 ./axon-626051c md5out-626051c ./serve_md5.py
+[axon-run 13:29:01] job 1105-124051-8cde -> pod1 [RTX 4090 sm_89 secure] (pod ker70i6gq4ytk8): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 10554 --src /home/haseeb/.cache/axon-podjob/md5excl-f2122f29441b /usr/bin/bash md5excl.sh ./axon-base-c54a730 ./axon-626051c md5out-626051c ./serve_md5.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (9368d8d2f82e23c89fc9a4f7) + source of /home/haseeb/.cache/axon-podjob/md5excl-f2122f29441b
+
+sent 7,493,435 bytes  received 125 bytes  4,995,706.67 bytes/sec
+total size is 24,368,548  speedup is 3.25
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261105-182906-bash-720 on pod1 (GPU, 10554 MB)
+[axon-node 18:29:06] GPU slot taken; job wants 10554 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 18:29:06] run bash (9368d8d2f82e23c89fc9a4f7) as /home/haseeb/.cache/axon-podjob/md5excl-f2122f29441b on 30e0937f1ea8, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	22703eeab624	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	22703eeab624	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	73e02ab67347	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	73e02ab67347	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p2	2ddddfdcb068	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p2	2ddddfdcb068	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	02b667ba5ddc	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	02b667ba5ddc	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	a0a829819411	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	a0a829819411	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	ff493ed15da7	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	ff493ed15da7	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	91013838d08b	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	91013838d08b	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p2	6fab94b325fe	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p2	6fab94b325fe	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	15395ccf5c86	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	15395ccf5c86	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	c3e22f8d32bc	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	c3e22f8d32bc	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	89486fda9149	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	89486fda9149	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN MD5 differing: 0 of 30
+base: ready after 2.0 s
+SERVE base: cached 0, restored None, digest 735e69f8bfdf
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest 735e69f8bfdf
+candtier: ready after 2.0 s
+SERVE candtier: cached 13888, restored 13888.0, digest 735e69f8bfdf
+SERVE MD5 cuda f16 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 42/42 same
+base: ready after 2.0 s
+SERVE base: cached 0, restored None, digest 7f6eeea7e133
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest 7f6eeea7e133
+candtier: ready after 1.0 s
+SERVE candtier: cached 13888, restored 13888.0, digest 7f6eeea7e133
+SERVE MD5 cuda q8 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 42/42 same
+base: ready after 1.0 s
+SERVE base: cached 17, restored None, digest 36474ce1926a
+cand: ready after 1.0 s
+SERVE cand: cached 17, restored None, digest 36474ce1926a
+candtier: ready after 1.0 s
+SERVE candtier: cached 13635, restored 13618.0, digest 36474ce1926a
+SERVE MD5 cuda f16 google_gemma-3-1b-it-Q4_K_M.gguf: 42/42 same
+base: ready after 1.0 s
+SERVE base: cached 0, restored None, digest b0ccc5e07637
+cand: ready after 1.0 s
+SERVE cand: cached 0, restored None, digest b0ccc5e07637
+candtier: ready after 1.0 s
+SERVE candtier: cached 13888, restored 13888.0, digest b0ccc5e07637
+SERVE MD5 cuda q8 Qwen3-0.6B-Q8_0.gguf: 42/42 same
+base: ready after 1.0 s
+SERVE base: cached 6, restored None, digest 376ef9c9f1c6
+cand: ready after 1.0 s
+SERVE cand: cached 6, restored None, digest 376ef9c9f1c6
+candtier: ready after 1.0 s
+SERVE candtier: cached 13890, restored 13884.0, digest 376ef9c9f1c6
+SERVE MD5 cpu f16 qwen2.5-0.5b-q4_k_m.gguf: 42/42 same
+RC 0
+[axon-node 18:35:09] exit 0 after 363.1s
+[axon-node 18:35:09] peak RSS 1263 MB (job process tree PSS, 2 s samples x180)
+[axon-run 13:35:10] exit 0 after 368.8s (host pod1)

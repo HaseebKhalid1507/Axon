@@ -1,0 +1,76 @@
+[axon-run 12:42:12] submitted 1105-124212-b8b6 by /home/haseeb/.cache/axon-kvexcl: /usr/bin/bash replayexcl.sh ./axon-base-c54a730 ./axon-626051c ./agent_replay-c54a730.py ./board-trace-v1.json 4 1
+[axon-run 15:12:53] scope axon-job-1105-124212-b8b6-1793909573.scope in app-axonjobs.slice: MemoryMax 13513 MB, MemoryHigh 12161 MB, no swap, oomd pressure kill 80% (claim 8326 MB): an OOM here kills only this job
+[axon-run 15:12:53] job 1105-124212-b8b6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-124212-b8b6-1793909573 --slice=app-axonjobs.slice -p MemoryMax=13513M -p MemoryHigh=12161M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash replayexcl.sh ./axon-base-c54a730 ./axon-626051c ./agent_replay-c54a730.py ./board-trace-v1.json 4 1
+axon-q 15:12:53 start slot 16-23: /usr/bin/bash replayexcl.sh ./axon-base-c54a730 ./axon-626051c ./agent_replay-c54a730.py ./board-trace-v1.json 4 1
+SMOKE
+== replayexcl speed 4, 1 rounds: base ./axon-base-c54a730, cand ./axon-626051c --cache-ram 6G
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, 58, P4
+               total        used        free      shared  buff/cache   available
+Mem:              30          15           7           0           8          14
+trace sha256 713285ba54487e17  replay sha256 34b1910bc52539b7
+## base-r0 15:12:53: ./axon-base-c54a730 serve ... --ctx 32768 --parallel 16 --kv f16  (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-base-r0.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=3.0 ttft_new_p50=None ttft_resume_p50=0.009 ttft_turn_p50=0.019 goodput_tok_s=394.92 itl_p99_ms=3.93 warm_per_gb=None reprefill_share=0.002 reprefill_net_share=0.0011 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 495232
+## cand-r0 15:13:14: ./axon-626051c serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-cand-r0.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=2.9 ttft_new_p50=None ttft_resume_p50=0.013 ttft_turn_p50=0.019 goodput_tok_s=395.19 itl_p99_ms=3.81 warm_per_gb=None reprefill_share=0.0002 reprefill_net_share=-0.0007 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 496168 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 1073479680 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 1365 axon_kv_ram_gpu_pages 1321 axon_kv_ram_written_pages_total 2356 axon_kv_ram_spilled_pages_total 991 axon_kv_ram_restored_tokens_total 936 axon_kv_ram_hits_total 3
+ROUND r0 TAINTED or failed: rerun for both binaries
+## base-r0-a1 15:13:34: ./axon-base-c54a730 serve ... --ctx 32768 --parallel 16 --kv f16  (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-base-r0-a1.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=2.9 ttft_new_p50=None ttft_resume_p50=0.008 ttft_turn_p50=0.019 goodput_tok_s=395.53 itl_p99_ms=3.94 warm_per_gb=None reprefill_share=0.002 reprefill_net_share=0.0011 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 495232
+## cand-r0-a1 15:13:55: ./axon-626051c serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-cand-r0-a1.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=2.8 ttft_new_p50=None ttft_resume_p50=0.012 ttft_turn_p50=0.019 goodput_tok_s=395.6 itl_p99_ms=3.88 warm_per_gb=None reprefill_share=0.0002 reprefill_net_share=-0.0007 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 496168 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 1073479680 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 1365 axon_kv_ram_gpu_pages 1321 axon_kv_ram_written_pages_total 2356 axon_kv_ram_spilled_pages_total 991 axon_kv_ram_restored_tokens_total 936 axon_kv_ram_hits_total 3
+ROUND r0-a1 TAINTED or failed: rerun for both binaries
+## base-r0-a2 15:14:15: ./axon-base-c54a730 serve ... --ctx 32768 --parallel 16 --kv f16  (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-base-r0-a2.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=2.8 ttft_new_p50=None ttft_resume_p50=0.008 ttft_turn_p50=0.019 goodput_tok_s=394.85 itl_p99_ms=3.86 warm_per_gb=None reprefill_share=0.002 reprefill_net_share=0.0011 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 495232
+## cand-r0-a2 15:14:36: ./axon-626051c serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G (trace /home/haseeb/.cache/axon-podjob/replayexcl-7ec5048d14c0/out-s4/trace-cand-r0-a2.jsonl)
+requests=58 errors=0 first_error=None wall_s=14.8 prime_s=2.9 ttft_new_p50=None ttft_resume_p50=0.014 ttft_turn_p50=0.019 goodput_tok_s=395.03 itl_p99_ms=3.75 warm_per_gb=None reprefill_share=0.0002 reprefill_net_share=-0.0007 out_tokens_short=0 prompt_mismatch=0 prompt_checked=58 preempted=0 prefills_unfed=0 tainted=True
+  axon_prompt_cached_tokens_total 496168 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 1073479680 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 1365 axon_kv_ram_gpu_pages 1321 axon_kv_ram_written_pages_total 2356 axon_kv_ram_spilled_pages_total 991 axon_kv_ram_restored_tokens_total 936 axon_kv_ram_hits_total 3
+ROUND r0-a2 TAINTED or failed; no extra rounds left: round 0 has no clean pair
+RUN base r0-a1: md5 683915618f2c tainted True foreign 13/41 errors 0 out_tok_s 395.53 itl_p99 3.94 reprefill 0.002 ttft_resume_p50 0.008 ttft_turn_p50 0.019 goodput 395.53 preempted 0 wall 14.8
+RUN base r0-a2: md5 683915618f2c tainted True foreign 15.5/22 errors 0 out_tok_s 394.85 itl_p99 3.86 reprefill 0.002 ttft_resume_p50 0.008 ttft_turn_p50 0.019 goodput 394.85 preempted 0 wall 14.8
+RUN base r0: md5 683915618f2c tainted True foreign 24.5/49 errors 0 out_tok_s 394.92 itl_p99 3.93 reprefill 0.002 ttft_resume_p50 0.009 ttft_turn_p50 0.019 goodput 394.92 preempted 0 wall 14.8
+RUN cand r0-a1: md5 683915618f2c tainted True foreign 25/42 errors 0 out_tok_s 395.6 itl_p99 3.88 reprefill 0.0002 ttft_resume_p50 0.012 ttft_turn_p50 0.019 goodput 395.6 preempted 0 wall 14.8
+RUN cand r0-a2: md5 683915618f2c tainted True foreign 22.8/42 errors 0 out_tok_s 395.03 itl_p99 3.75 reprefill 0.0002 ttft_resume_p50 0.014 ttft_turn_p50 0.019 goodput 395.03 preempted 0 wall 14.8
+RUN cand r0: md5 683915618f2c tainted True foreign 14.2/26 errors 0 out_tok_s 395.19 itl_p99 3.81 reprefill 0.0002 ttft_resume_p50 0.013 ttft_turn_p50 0.019 goodput 395.19 preempted 0 wall 14.8
+CLEAN ROUNDS 0 of 1 wanted: []
+MD5 DIFFER []
+MEDIAN itl_p99_ms: base None cand None raw base [] cand []
+MEDIAN output_tok_s: base None cand None raw base [] cand []
+MEDIAN reprefill_share: base None cand None raw base [] cand []
+MEDIAN reprefill_tokens: base None cand None raw base [] cand []
+MEDIAN ttft_resume_p50: base None cand None raw base [] cand []
+MEDIAN ttft_turn_p50: base None cand None raw base [] cand []
+MEDIAN ttft_new_p50: base None cand None raw base [] cand []
+MEDIAN goodput_tok_s: base None cand None raw base [] cand []
+MEDIAN warm_per_gb: base None cand None raw base [] cand []
+MEDIAN preempted: base None cand None raw base [] cand []
+TRACE trace-base-r0-a1.jsonl: 2227 steps; step p99 13.5 ms; steps > 171 ms 0, gaps > 171 ms 7, of which copies >= half: 0; spilled 0 pages 0 ms (-), restored 0 pages 0 ms (-), wb 0 pages 0 ms
+  gap 2961 ms before step at 12431: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1663 ms before step at 18875: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1221 ms before step at 16935: spilled None (None ms) restored None (None ms) wb None (None ms)
+TRACE trace-base-r0-a2.jsonl: 2226 steps; step p99 13.2 ms; steps > 171 ms 0, gaps > 171 ms 7, of which copies >= half: 0; spilled 0 pages 0 ms (-), restored 0 pages 0 ms (-), wb 0 pages 0 ms
+  gap 2963 ms before step at 12390: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1662 ms before step at 18834: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1228 ms before step at 16892: spilled None (None ms) restored None (None ms) wb None (None ms)
+TRACE trace-base-r0.jsonl: 2227 steps; step p99 13.3 ms; steps > 171 ms 0, gaps > 171 ms 6, of which copies >= half: 0; spilled 0 pages 0 ms (-), restored 0 pages 0 ms (-), wb 0 pages 0 ms
+  gap 2961 ms before step at 12494: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1661 ms before step at 18938: spilled None (None ms) restored None (None ms) wb None (None ms)
+  gap 1221 ms before step at 16998: spilled None (None ms) restored None (None ms) wb None (None ms)
+TRACE trace-cand-r0-a1.jsonl: 2232 steps; step p99 13.5 ms; steps > 171 ms 0, gaps > 171 ms 6, of which copies >= half: 0; spilled 991 pages 3 ms (1207.10 GB/s), restored 16 pages 0 ms (298.07 GB/s), wb 1365 pages 8 ms
+  gap 2960 ms before step at 12393: spilled 248 (0.709 ms) restored 0 (0.013 ms) wb 0 (0.002 ms)
+  gap 1660 ms before step at 18837: spilled 303 (0.774 ms) restored 2 (0.03 ms) wb 0 (0.006 ms)
+  gap 1214 ms before step at 16895: spilled 11 (0.094 ms) restored 11 (0.041 ms) wb 0 (0.002 ms)
+TRACE trace-cand-r0-a2.jsonl: 2425 steps; step p99 13.1 ms; steps > 171 ms 0, gaps > 171 ms 6, of which copies >= half: 0; spilled 991 pages 3 ms (1237.07 GB/s), restored 16 pages 0 ms (304.25 GB/s), wb 1365 pages 8 ms
+  gap 2957 ms before step at 12433: spilled 248 (0.697 ms) restored 0 (0.013 ms) wb 0 (0.002 ms)
+  gap 1662 ms before step at 18876: spilled 303 (0.769 ms) restored 2 (0.031 ms) wb 0 (0.003 ms)
+  gap 1211 ms before step at 16937: spilled 11 (0.097 ms) restored 11 (0.041 ms) wb 0 (0.002 ms)
+TRACE trace-cand-r0.jsonl: 2429 steps; step p99 13.1 ms; steps > 171 ms 0, gaps > 171 ms 6, of which copies >= half: 0; spilled 991 pages 3 ms (1207.50 GB/s), restored 16 pages 0 ms (305.83 GB/s), wb 1365 pages 9 ms
+  gap 2962 ms before step at 12403: spilled 248 (0.72 ms) restored 0 (0.013 ms) wb 0 (0.002 ms)
+  gap 1658 ms before step at 18845: spilled 303 (0.783 ms) restored 2 (0.03 ms) wb 0 (0.002 ms)
+  gap 1210 ms before step at 16905: spilled 11 (0.094 ms) restored 11 (0.04 ms) wb 0 (0.002 ms)
+REPLAYEXCL SHORT OR MD5 DIFFER
+REPLAYEXCL DONE speed 4 rc 1
+[axon-run 15:14:56] exit 1 after 123.0s (host bella)
