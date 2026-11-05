@@ -68,22 +68,39 @@ pub fn fp8_model_path() -> Option<PathBuf> {
     let skip = FP8_SKIP_VARS
         .into_iter()
         .find(|v| std::env::var_os(v).is_some());
-    fp8_checkpoint_or_skip(path, skip)
+    match fp8_checkpoint_or_skip(path, skip) {
+        Fp8Checkpoint::Use(p) => Some(p),
+        Fp8Checkpoint::Skip(why) => {
+            skip_note(format_args!("{why}"));
+            None
+        }
+    }
+}
+
+/// `fp8_checkpoint_or_skip`'s decision.
+#[derive(Debug, PartialEq)]
+enum Fp8Checkpoint {
+    /// The checkpoint is there.
+    Use(PathBuf),
+    /// It isn't and a skip variable is set: the test skips, saying this.
+    Skip(String),
 }
 
 /// `fp8_model_path`'s rule, given the skip variable that is set, if any:
-/// `path` if it holds a model.safetensors, else None (said on stderr) with a
-/// skip variable, else a panic.
-fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Option<PathBuf> {
+/// use `path` if it holds a model.safetensors, else skip (why) with a skip
+/// variable, else a panic. It decides and says nothing: the caller, the
+/// test that skips, prints the skip (`skip_note`), so this rule's own unit
+/// tests print no skip line into a suite's log (#197's review: they did,
+/// and axon-run read the run as one whose test had skipped itself).
+fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Fp8Checkpoint {
     if path.join("model.safetensors").exists() {
-        return Some(path);
+        return Fp8Checkpoint::Use(path);
     }
     if let Some(var) = skip {
-        eprintln!(
-            "skipping: the FP8 checkpoint {} is not present and {var} is set",
+        return Fp8Checkpoint::Skip(format!(
+            "the FP8 checkpoint {} is not present and {var} is set",
             path.display()
-        );
-        return None;
+        ));
     }
     panic!(
         "the FP8 checkpoint {} is missing (no model.safetensors). Download \
@@ -93,6 +110,22 @@ fn fp8_checkpoint_or_skip(path: PathBuf, skip: Option<&str>) -> Option<PathBuf> 
     );
 }
 
+/// Say on stderr that the running test skips, and why:
+/// `skipping: {why} ({test})`. Straight to stderr, as `serialize_gpu` does:
+/// libtest captures eprintln! inside a test and shows it only if the test
+/// fails, so a skip said with eprintln! reads as a bare `... ok` in a gate
+/// log, as #193's skips did. The test's name is its thread's (libtest names
+/// each test's thread), since parallel tests' lines interleave; one write,
+/// so the line stays whole.
+pub fn skip_note(why: std::fmt::Arguments) {
+    use std::io::Write;
+    let line = format!(
+        "skipping: {why} ({})\n",
+        std::thread::current().name().unwrap_or("?")
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
 #[test]
 fn fp8_checkpoint_present_is_used() {
     let dir = std::env::temp_dir().join(format!("axon-fp8-ckpt-{}", std::process::id()));
@@ -100,14 +133,22 @@ fn fp8_checkpoint_present_is_used() {
     std::fs::write(dir.join("model.safetensors"), b"").unwrap();
     let got = fp8_checkpoint_or_skip(dir.clone(), None);
     std::fs::remove_dir_all(&dir).unwrap();
-    assert_eq!(got, Some(dir));
+    assert_eq!(got, Fp8Checkpoint::Use(dir));
 }
 
 #[test]
 fn fp8_checkpoint_missing_skips_only_when_asked() {
     let missing = fixtures().join("no-fp8-checkpoint-here");
     for var in FP8_SKIP_VARS {
-        assert_eq!(fp8_checkpoint_or_skip(missing.clone(), Some(var)), None);
+        // The reason names the path and the variable that was set.
+        let why = format!(
+            "the FP8 checkpoint {} is not present and {var} is set",
+            missing.display()
+        );
+        assert_eq!(
+            fp8_checkpoint_or_skip(missing.clone(), Some(var)),
+            Fp8Checkpoint::Skip(why)
+        );
     }
 }
 
