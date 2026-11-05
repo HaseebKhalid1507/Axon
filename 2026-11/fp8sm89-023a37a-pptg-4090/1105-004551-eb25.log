@@ -1,0 +1,67 @@
+[axon-run 00:45:51] submitted 1105-004551-eb25 by /home/haseeb/.cache/axon-fp8sm89: /usr/bin/bash pptg4090.sh ./axon-0e014cd ./axon-023a37a
+[axon-run 01:31:14] job 1105-004551-eb25 -> pod1 [RTX 4090 sm_89 secure] (pod npua6own61gts4): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/pptg4090-4233fdec8d5c /usr/bin/bash pptg4090.sh ./axon-0e014cd ./axon-023a37a
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (9e33ec7d8aad56f8c754c813) + source of /home/haseeb/.cache/axon-podjob/pptg4090-4233fdec8d5c (delta vs 4 earlier upload(s) there)
+
+sent 3,736,635 bytes  received 97 bytes  498,230.93 bytes/sec
+total size is 24,295,174  speedup is 6.50
+
+sent 58 bytes  received 19 bytes  22.00 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261105-063133-bash-1816156 on pod1 (GPU, 5000 MB)
+[axon-node 06:31:33] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 06:31:33] run bash (9e33ec7d8aad56f8c754c813) as /home/haseeb/.cache/axon-podjob/pptg4090-4233fdec8d5c on 6f56319f8863, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+host 6f56319f8863
+NVIDIA GeForce RTX 4090, 595.91.07, 8.9, 24564 MiB, 450.00 W
+CUDA Version: 13.2
+Model name:                              AMD Ryzen 9 7950X 16-Core Processor
+               total        used        free      shared  buff/cache   available
+Mem:             124           9          41           0          74         115
+Linux 6.8.0-138-generic
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+checkpoint: present on this node
+checkpoint sha256 5c804f9499421e548f50f5db893035377b2c8b807ecdef1226710ab001f3b2b0 (= bella's)
+[axon-run 01:31:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 01:32:22] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 01:32:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+identity:    fp_82f46c18bb1fac47
+axon-identity/1
+numerics=fast/1.3
+gpu=sm_89
+RAW r1 base p1 ntok_pp 586 104924.82 tg 414.00
+RAW r1 cand p1 ntok_pp 586 75397.78 tg 404.98
+RAW r1 base p2 ntok_pp 2260 121395.81 tg 401.03
+RAW r1 cand p2 ntok_pp 2260 100744.39 tg 388.96
+RAW r2 cand p1 ntok_pp 586 75727.81 tg 402.28
+[axon-run 01:33:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RAW r2 base p1 ntok_pp 586 97144.68 tg 404.76
+RAW r2 cand p2 ntok_pp 2260 100534.12 tg 401.14
+RAW r2 base p2 ntok_pp 2260 121425.68 tg 389.63
+RAW r3 base p1 ntok_pp 586 96768.73 tg 401.05
+RAW r3 cand p1 ntok_pp 586 75734.68 tg 404.03
+RAW r3 base p2 ntok_pp 2260 121358.53 tg 400.70
+RAW r3 cand p2 ntok_pp 2260 100879.18 tg 389.06
+RAW r4 cand p1 ntok_pp 586 75747.33 tg 400.14
+RAW r4 base p1 ntok_pp 586 96626.94 tg 401.30
+[axon-run 01:34:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RAW r4 cand p2 ntok_pp 2260 100433.86 tg 397.75
+RAW r4 base p2 ntok_pp 2260 121184.91 tg 399.76
+RAW r5 base p1 ntok_pp 586 96810.70 tg 398.10
+RAW r5 cand p1 ntok_pp 586 75758.32 tg 401.74
+RAW r5 base p2 ntok_pp 2260 121266.99 tg 398.20
+RAW r5 cand p2 ntok_pp 2260 100513.70 tg 404.91
+== medians (min-max) over 5 rounds
+base p1 pp median 586 (586-586)
+base p1 tg128 median tg (tg-tg)
+cand p1 pp median 586 (586-586)
+cand p1 tg128 median tg (tg-tg)
+base p2 pp median 2260 (2260-2260)
+base p2 tg128 median tg (tg-tg)
+cand p2 pp median 2260 (2260-2260)
+cand p2 tg128 median tg (tg-tg)
+p1 prompt tokens ntok_pp
+p2 prompt tokens ntok_pp
+[axon-node 06:34:25] exit 0 after 172.3s
+[axon-node 06:34:25] peak RSS 1637 MB (job process tree PSS, 2 s samples x85)
+[axon-run 01:34:27] exit 0 after 192.8s (host pod1)
+[axon-run 01:34:30] FOREIGN_GPU max=0% mean=0.0% samples=5
