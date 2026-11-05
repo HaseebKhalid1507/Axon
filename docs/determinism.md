@@ -122,7 +122,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 
 | field      | what                                                                  |
 |------------|-----------------------------------------------------------------------|
-| `numerics` | the mode and its version, `exact/1` or `fast/1.2` (fast's is exact's counter and its own: `NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`): Axon's kernels and sampler (bumped by rule, below). Until 2026-10-29 the line was `numerics=1`, the same kernels as `exact/1`: every fingerprint changed once then (the release note in CHANGELOG.md), not a single output bit |
+| `numerics` | the mode and its version, `exact/1` or `fast/1.3` (fast's is exact's counter and its own: `NUMERICS_VERSION_EXACT`, `NUMERICS_VERSION_FAST`): Axon's kernels and sampler (bumped by rule, below). Until 2026-10-29 the line was `numerics=1`, the same kernels as `exact/1`: every fingerprint changed once then (the release note in CHANGELOG.md), not a single output bit |
 | `model`    | SHA-256 over the GGUF file's length, its whole header (all metadata, tensor names, shapes, quant types) and samples of the tensor data |
 | `types`    | the quant types and their tensor counts (readable; the header hash covers them) |
 | `backend`  | `cpu`, `cuda`, `cuda+cpu` with the layer split (and `prefill streams >=N` when it streams), or a pipeline with its cuts |
@@ -189,7 +189,7 @@ handling. A change that keeps every bit (proven by the md5 gate) doesn't bump it
 `NUMERICS_VERSION_FAST` is bumped by a change to a fast-set kernel or to its routing. A
 change to code both modes run (today every kernel: fast mode has none of its own) bumps
 `NUMERICS_VERSION_EXACT` alone, and fast's fingerprints move with it anyway: fast's tag is
-`fast/<exact>.<fast>` (`fast/1.1`), so no second bump has to be remembered. A new flag that
+`fast/<exact>.<fast>` (`fast/1.3` today), so no second bump has to be remembered. A new flag that
 changes bits adds a field to the tuple, set only when the flag is, so default fingerprints
 stay put (as `--rope-scaling` adds `rope`).
 
