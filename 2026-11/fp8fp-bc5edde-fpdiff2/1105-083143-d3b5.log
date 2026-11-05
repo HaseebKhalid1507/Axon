@@ -1,0 +1,38 @@
+[axon-run 08:31:43] submitted 1105-083143-d3b5 by /home/haseeb/.cache/axon-fp8fp: /usr/bin/bash fpdiff.sh ./axon-c81ba26 ./axon-bc5edde /home/haseeb/.cache/axon-fp8fp/fpout2-bc5edde
+[axon-run 09:28:48] scope axon-job-1105-083143-d3b5-1793888928.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 09:28:48] job 1105-083143-d3b5 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-083143-d3b5-1793888928 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash fpdiff.sh ./axon-c81ba26 ./axon-bc5edde /home/haseeb/.cache/axon-fp8fp/fpout2-bc5edde
+axon-q 09:28:48 start slot 16-23: /usr/bin/bash fpdiff.sh ./axon-c81ba26 ./axon-bc5edde /home/haseeb/.cache/axon-fp8fp/fpout2-bc5edde
+ID same  out same  f8-cpu (9 fields): act=f32
+ID same  out same  f8-cpu-e4m3tok (9 fields): act=e4m3-tok-emu
+ID same  out same  f8-cuda (9 fields): act=q8
+ID same  out same  f8-cuda-fast (9 fields): act=e4m3-tok
+ID same  out same  f8-split (10 fields): act=q8
+REFUSED both (rc 2, same stderr)  f8-split-fast: axon: --device cuda: FP8 natively runs every layer of a dense model on one GPU; --numerics exact runs its Q8_0 form
+ID DIFF  out same  f8-split-e4m3tok (10 fields):
+    < identity:    fp_cc8bf5ffc3fa702a
+    > identity:    fp_35865a82bc7b2511
+    < act=q8
+    > act=q8 (cpu layers e4m3-tok-emu)
+ID DIFF  out same  f8-split-e4m3-128 (10 fields):
+    < identity:    fp_cc8bf5ffc3fa702a
+    > identity:    fp_c1cf6de8bfb481fb
+    < act=q8
+    > act=q8 (cpu layers e4m3-128-emu)
+ID same  out same  gguf-cpu (6 fields): no FP8 fields
+ID same  out same  gguf-cuda (6 fields): no FP8 fields
+ID same  out same  gguf-split (7 fields): no FP8 fields
+FPDIFF: 11 placements (2 identity tuples differ, as expected only if 2); 0 unexpected
+-- cand f8-split-e4m3tok's tuple:
+identity:    fp_35865a82bc7b2511
+axon-identity/1
+numerics=exact/1
+model=6fa3ad25111bc5f68beab43e0114914c890e142eea28fd4c683309d87fb6c560
+types=F32:289 F16:2 F8_E4M3:168
+backend=cuda+cpu, gpu layers 12/24
+gpu=sm_120
+cpu=x86_64 fma, r8
+kv=f16 (cpu layers f16)
+weights=fp8-q8 (cpu layers fp8-ref)
+act=q8 (cpu layers e4m3-tok-emu)
+head=q8
+[axon-run 09:30:53] exit 0 after 124.3s (host bella)

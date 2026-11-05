@@ -1,0 +1,29 @@
+{
+ "label": "fp8fp-bc5edde-fpdiff2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1105-083143-d3b5",
+   "name": "fp8fp-bc5edde-fpdiff2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bc5edde",
+   "binary": "bash",
+   "started": 1793888928.6436384,
+   "ended": 1793889054.7078328,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2371c1c2624c3896c092d0a9a5043f809a0c7f7209fa67ed1f950e2d7eb67cd1",
+   "log_bytes": 2409
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 09:30:55 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
