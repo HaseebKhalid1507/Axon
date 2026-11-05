@@ -190,6 +190,13 @@ price of a tree store, and the plan's fallback has it too. A gauge exposes it (�
   first), then class 1 (LRU). Then `truncate(s, keep / PAGE)` turns the pages past `keep` from class 0 into class 1
   (`resident(k, false)`), with no copy for the ones already written behind or restored. That transition is the point
   of the design: a page leaves the GPU and RAM keeps it, as RAM's own.
+  **Checkpoint 2 change (found by serve test (a), §3):** a spill whose `keep` covers every whole page the slot holds
+  (`admit` / `lend_solo` of a conversation's next turn in its own slot) gives nothing up, and copies nothing. Today's
+  `spill` copies the slot's whole unstored chain whatever `keep` is. Under the inclusive tier that was nearly free,
+  because the write-behind had already stored those pages. Under this design, on a full tier, the write-behind
+  copies nothing, so a next turn's admission would copy its conversation's whole chain (steady state: ≈ 269 pages,
+  ≈ 0.13 s at 28 GB/s) before its first token, evicting class 0 and then class 1 to hold duplicates of rows the GPU
+  keeps. A partial give-up still copies the kept parents, because a stored page needs its stored parent.
 - **Steady state (Fable's H1, shady's M4).** These are the facts the design has to live with:
   1. **The tier fills early.** The working set (5,164 pages) is ≫ the tier (1,755). A page is copied the first time
      the GPU holds it, so the tier fills once ≈ 1,755 / 5,164 = 34 % of the distinct pages have been computed, about
