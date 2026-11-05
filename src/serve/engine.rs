@@ -552,6 +552,23 @@ struct StepTrace {
     feed_ms: f64,
     /// This step's decode pass: rows, the sum of their positions, ms.
     dec: Option<(usize, usize, f64)>,
+    /// The KV RAM tier's copies since the last line, pages and ms each, by
+    /// `TierCopy`. An admission's (its spill and restore) run between two
+    /// steps, so they go on the next step's line, and its ms explain that
+    /// line's gap after the one before.
+    tier: [(usize, f64); 3],
+}
+
+/// What a KV RAM tier copy was, on a step trace's line (`StepTrace::tier`).
+#[derive(Clone, Copy)]
+enum TierCopy {
+    /// A slot's pages before it gives its rows up (`Batch::spill`).
+    Spill,
+    /// Stored pages into a slot (`Batch::restore`).
+    Restore,
+    /// The write-behind (a step's, or a piece of the idle flush): the pages
+    /// slots now name that they didn't, copied or found stored.
+    Behind,
 }
 
 impl StepTrace {
@@ -573,6 +590,7 @@ impl StepTrace {
                     fed: 0,
                     feed_ms: 0.0,
                     dec: None,
+                    tier: [(0, 0.0); 3],
                 })
             }
             Err(e) => {
@@ -595,8 +613,9 @@ impl StepTrace {
             ),
             None => "\"rows\":0,\"depth\":null,\"dec_ms\":null".into(),
         };
+        let [(sp, sp_ms), (re, re_ms), (wb, wb_ms)] = self.tier;
         format!(
-            "{{\"t_ms\":{t_ms:.3},\"ms\":{ms:.3},\"feeds\":{},\"fed\":{},\"feed_ms\":{:.3},{dec},\"prefilling\":{prefilling},\"running\":{running}}}",
+            "{{\"t_ms\":{t_ms:.3},\"ms\":{ms:.3},\"feeds\":{},\"fed\":{},\"feed_ms\":{:.3},{dec},\"prefilling\":{prefilling},\"running\":{running},\"spilled\":{sp},\"spill_ms\":{sp_ms:.3},\"restored\":{re},\"restore_ms\":{re_ms:.3},\"wb\":{wb},\"wb_ms\":{wb_ms:.3}}}",
             self.feeds, self.fed, self.feed_ms
         )
     }
@@ -734,12 +753,24 @@ impl<'a, 't> Batch<'a, 't> {
         if keep / PAGE >= self.held[s].len() / PAGE {
             return;
         }
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
         match t.write(self.net, &self.pool, s, &self.held[s]) {
-            Ok(_) => {
+            Ok(n) => {
                 t.t.truncate(s, keep / PAGE);
                 t.check_slot(s, &self.held[s]);
+                self.traced(TierCopy::Spill, n, t0);
             }
             Err(e) => self.tier_failed("spill", &e),
+        }
+    }
+
+    /// With a `StepTrace`: a tier copy of `pages` that started at `t0`
+    /// (`Some` only when tracing) goes on the next step's line.
+    fn traced(&mut self, what: TierCopy, pages: usize, t0: Option<Instant>) {
+        if let (Some(tr), Some(t0)) = (self.trace.as_mut(), t0) {
+            let c = &mut tr.tier[what as usize];
+            c.0 += pages;
+            c.1 += t0.elapsed().as_secs_f64() * 1e3;
         }
     }
 
@@ -767,11 +798,13 @@ impl<'a, 't> Batch<'a, 't> {
         };
         let mut order: Vec<usize> = (0..self.slots).collect();
         order.sort_by_key(|&s| (self.busy[s], self.used[s]));
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
         match t.write_some(self.net, &self.pool, &self.held, &order, bytes) {
             Ok(n) => {
                 for s in 0..self.slots {
                     t.check_slot(s, &self.held[s]);
                 }
+                self.traced(TierCopy::Behind, n, t0);
                 n
             }
             Err(e) => {
@@ -844,11 +877,13 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(t) = self.tier.as_mut() else {
             return Ok(have);
         };
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
         if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
             // The slot keeps `have` (its rows past it are fed again).
             self.tier_failed("restore", &e);
             return Ok(have);
         }
+        self.traced(TierCopy::Restore, to.saturating_sub(have / PAGE), t0);
         if to * PAGE <= have {
             return Ok(have);
         }
@@ -1370,6 +1405,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
         if let Some(tr) = self.trace.as_mut() {
             (tr.feeds, tr.fed, tr.feed_ms, tr.dec) = (0, 0, 0.0, None);
+            tr.tier = [(0, 0.0); 3];
         }
         res
     }
@@ -2960,6 +2996,7 @@ mod trace_tests {
             fed: 700,
             feed_ms: 31.25,
             dec: Some((128, 128 * 790 + 64, 18.6)),
+            tier: [(414, 57.25), (0, 0.0), (5, 0.5)],
         };
         let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 52.5, 2, 128)).unwrap();
         assert_eq!(v["fed"], 700);
@@ -2969,6 +3006,16 @@ mod trace_tests {
         assert_eq!(v["dec_ms"], 18.6);
         assert_eq!(v["ms"], 52.5);
         assert_eq!(v["running"], 128);
+        assert_eq!(v["spilled"], 414);
+        assert_eq!(v["spill_ms"], 57.25);
+        assert_eq!(
+            (v["restored"].clone(), v["restore_ms"].clone()),
+            (0.into(), 0.0.into())
+        );
+        assert_eq!(
+            (v["wb"].clone(), v["wb_ms"].clone()),
+            (5.into(), 0.5.into())
+        );
         tr.dec = None;
         let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 30.0, 1, 0)).unwrap();
         assert_eq!(v["rows"], 0);
