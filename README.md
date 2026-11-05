@@ -211,12 +211,10 @@ Works today, honestly scoped:
   uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
   `--cache-ram BYTES|auto` (opt-in, default 0: off) keeps conversations' KV pages in pinned host RAM
-  and copies them back on the next turn, bit for bit. It helps only when the work written during the
-  gap fits between the GPU pool's size and the tier's (≈ 11–185 pages of 64 on bella's 7B f16 at 6G):
-  the tier is written as pages fill, so it also holds the pool's pages. **Sizing: useful capacity ≈
-  `--cache-ram` − the GPU pool's KV bytes**; on bella's 7B f16 (pool ≈ 5.4–6.0 GiB) 6G buys almost nothing
-  and about 20G is where it works (the 4090 replay 1ed0: 20G over a 5.25 GiB pool). An exclusive tier is
-  pending ([design](docs/design/agent-workload.md) §6 row B).
+  and copies them back on the next turn, bit for bit. Copies of pages the GPU pool still holds are
+  written only into free room and are the first evicted, so the tier's useful capacity is about its
+  size, not its size minus the pool's. Whether it becomes the default is decided by bella's gate
+  ([design](docs/design/kv-ram-tier-exclusive.md) §6).
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the
@@ -615,14 +613,19 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   On the GPU the **whole size is page-locked (unswappable) RAM from server start**, used or
   not: a thread pins it in 64 MiB pieces while the server already runs (or, with
   `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 8 GiB
-  at start. The tier is inclusive (pages are copied as they fill, so it also holds what the GPU pool
-  still has): its useful capacity is about `--cache-ram` minus the GPU pool's KV bytes (positions ×
-  KV bytes a position: 56 KiB on Qwen2.5-7B f16), so it must be sized well above the pool. Size it to
+  at start. With the GPU's paged pool, pages are copied as they fill only into the tier's free room
+  (while requests decode, at most 16 MiB a step; an idle server copies the rest in 64 MiB pieces and
+  takes a new request between two), and a slot's pages not yet stored are copied when it gives its
+  rows up. The copies of pages the pool still holds are evicted first (newest first), then RAM's own
+  pages (least recently used), so its useful capacity is about `--cache-ram` (a 7B f16 position is
+  56 KiB). The one cache (the CPU, `--parallel 1`) stores its new pages after each request. Size it to
   what you keep warm, and leave the rest of the machine room: under a
   cgroup memory limit, pinned memory can't be reclaimed (the CPU path's pages are ordinary
   memory, taken as they are stored). Off where the cache has
   no page image (a CPU/GPU split, several GPUs, MoE, deepseek2). It lives as long as the
-  process (surviving a restart is a later stage). `/metrics` adds `axon_kv_ram_*`.
+  process (surviving a restart is a later stage). `/metrics` adds `axon_kv_ram_*`
+  (`axon_kv_ram_gpu_pages`: stored pages the GPU pool still holds; `axon_kv_ram_spilled_pages_total`:
+  pages copied as a slot gave its rows up), and `AXON_SERVE_TRACE`'s step lines its copies.
 - A request's `priority` field is accepted and ignored (requests start in arrival order, or
   shortest prompt first by default; `--admit-order fifo` for arrival order).
 
