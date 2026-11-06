@@ -188,6 +188,26 @@ impl PrefixIndex {
         out
     }
 
+    /// `peek` given the blocks' chain keys from the root (`kvstore::keys`
+    /// of `tokens`, worked out once per prompt: `Job::block_keys`): no
+    /// hashing, a lookup and a compare a block. An index of another root
+    /// (a salted one) hashes, as `peek`.
+    pub fn peek_keyed(&self, tokens: &[u32], keys: &[Key]) -> Vec<(Key, u32)> {
+        if self.root != ROOT {
+            return self.peek(tokens);
+        }
+        let mut out: Vec<(Key, u32)> = Vec::new();
+        let mut parent = self.root;
+        for (b, &key) in tokens.chunks_exact(PAGE).zip(keys) {
+            match self.map.get(&key) {
+                Some(n) if n.parent == parent && *n.tokens == *b => out.push((key, n.page)),
+                _ => break,
+            }
+            parent = key;
+        }
+        out
+    }
+
     /// `walk` of a prompt, capped where sharing must stop: whole blocks
     /// below its last position (which admission always feeds again, so the
     /// page holding it is the request's own: specs §2.1 condition 3).
@@ -523,6 +543,20 @@ mod tests {
         let w = x.peek(&c);
         assert_eq!(pages(&w), [0, 1]);
         assert!(x.peek(&toks(9, PAGE)).is_empty());
+        // Keyed (#214): the same blocks without hashing; a key that isn't
+        // the block's (another prompt's) stops the walk there.
+        let ks = crate::kvstore::keys(&c);
+        assert_eq!(x.peek_keyed(&c, &ks), w);
+        assert_eq!(x.peek_keyed(&c, &ks[..1]), w[..1]);
+        let other = crate::kvstore::keys(&b);
+        assert!(x.peek_keyed(&c, &other).is_empty());
+        let mut cut = c.clone();
+        cut[PAGE + 3] ^= 1;
+        assert_eq!(
+            x.peek_keyed(&cut, &ks),
+            w[..1],
+            "tokens that aren't the key's"
+        );
         x.peek(&a);
         assert_eq!(x.peek(&c), w);
         assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(1));

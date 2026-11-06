@@ -289,6 +289,20 @@ pub trait BatchLm: Lm {
     /// the slot's cap (nothing changed).
     fn map_pages(&self, pool: &mut Self::Pool, slot: usize, pages: &[u32]) -> Result<(), String>;
 
+    /// Shared prefixes: for each `(i, page)` of `swaps`, slot `slot`'s
+    /// `i`th page becomes `page`, a live page (another slot's, or the
+    /// prefix index's) holding the bytes the slot's page does (the same
+    /// block after the same prefix), read only to it; the page it had
+    /// leaves it (free if nothing else holds it). Err for a plain pool, a
+    /// page that isn't live or that the slot would hold twice, or a slot
+    /// without an `i`th page (nothing changed).
+    fn replace_pages(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        swaps: &[(usize, u32)],
+    ) -> Result<(), String>;
+
     /// The prefix index holds `page` (a slot's): kept, immutable, after the
     /// last slot releases it, until `unpin_page`.
     fn pin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String>;
@@ -312,6 +326,10 @@ pub trait BatchLm: Lm {
     /// in `mine` (shared prefixes' admission: what it can't have); None for
     /// a plain pool.
     fn busy_pages(&self, pool: &Self::Pool, busy: &[bool], mine: &[u32]) -> Option<usize>;
+
+    /// Pages slot `slot` alone holds: what releasing it gives up (to the
+    /// free list, or the prefix index's warm set); None for a plain pool.
+    fn excl_pages(&self, pool: &Self::Pool, slot: usize) -> Option<usize>;
 
     /// Debug builds: slot `slot` may write positions lo..hi (every page of
     /// them it holds is its alone, unpinned: the immutability rule, E3);
@@ -1365,6 +1383,18 @@ impl BatchLm for Backend<'_> {
         }
     }
 
+    fn replace_pages(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        swaps: &[(usize, u32)],
+    ) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.replace_pages(pool, slot, swaps),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
     fn pin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String> {
         match &self.0 {
             Inner::Cuda(n) => n.pin_page(pool, page),
@@ -1394,6 +1424,10 @@ impl BatchLm for Backend<'_> {
 
     fn busy_pages(&self, pool: &Self::Pool, busy: &[bool], mine: &[u32]) -> Option<usize> {
         pool.busy_pages(busy, mine)
+    }
+
+    fn excl_pages(&self, pool: &Self::Pool, slot: usize) -> Option<usize> {
+        pool.excl_pages(slot)
     }
 
     #[cfg(debug_assertions)]
