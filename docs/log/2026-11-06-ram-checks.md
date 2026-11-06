@@ -15,27 +15,42 @@
   bytes, so a cap that the upload itself didn't fit in was an OOM kill rather than a refusal. The check now runs after
   the CUDA context and the module are made, so `avail()` reads what they leave, and before any tensor goes up. Its need
   (`model::GpuHalfHost`) changes in two ways:
-  - **`staging`** (`CudaQwen2::upload_staging`): the bytes `upload::Ring::new` page-locks, which is
-    `upload::Shape::pick` of the plan's total. That's 4 × 4 MiB, or 8 × 8 MiB for 1 GiB or more, and none under
-    64 MiB or with `AXON_UPLOAD_RING=0`. It's added to the need. The ring is freed before the CPU half is built, so
-    adding it overstates the peak by at most its size, and that slack also covers the upload's smaller host costs.
-    It's counted even when the upload then skips the ring (a cold page cache).
+  - **`staging`** (`CudaQwen2::upload_staging`): the most the upload holds at once, the larger of two phases that
+    never overlap. First the bytes `upload::Ring::new` page-locks, which is `upload::Shape::pick` of the plan's total:
+    4 × 4 MiB, or 8 × 8 MiB for 1 GiB or more, none under 64 MiB, or `AXON_UPLOAD_RING`'s size. Then, after the
+    ring is freed, the matrices the plan converts to Q8_0 on the host (`plan.conv`: an FP8 checkpoint's split, which
+    takes the Q8_0 path), one `rows × Q8_0` buffer at a time, each allocated while its source is still held and
+    dropped after its write: the largest of them counts. On the FP8 0.5B that's the tied head, 151936 × 952 B
+    (138 MiB) against a 16 MiB ring; on a 7B FP8, its untied head, ~552 MiB. #206's first version counted the ring
+    alone (shady's review, MUST 1): the FP8 0.5B at 23 GPU layers then needed about the tolerance, so no RAM figure
+    refused it and the head's conversion was an OOM kill. The staging is added to the need; both phases are over
+    before the CPU half is built, so adding it overstates the peak by at most its size. It's counted even when the
+    upload then skips the ring (a cold page cache).
   - **`freed`** (`Model::release_gain`): on a copy of the file (or the loader's arena), the GPU half's bytes that
     `release` hands back as each tensor is uploaded. These are the whole 2 MiB blocks of each run of the GPU half's
     tensors, joined across bytes no tensor owns, exactly as `release` drops them. On a file mapping it's 0, because
-    those pages are page cache. It's credited against the CPU half's need, not the ring's, because the ring is pinned
-    while the copy still holds those bytes.
+    those pages are page cache. A safetensors checkpoint's converted tensors (AUX: a BF16 head made F16) are
+    anonymous, so they're credited too, on a default load (the 7B FP8's untied head: ~1039 MiB). It's credited
+    against the CPU half's need, not the staging, because the ring is pinned, and each conversion is allocated,
+    while those bytes are still held.
   The refusal names both: `(its repacked weights … GiB, the KV cache of … tokens … GiB, the GPU half's upload staging
   0.02 GiB, less the GPU half's … GiB of the copy, handed back as it goes up)`.
 - **#185, `model::ram_remedy`: the refusal names its ways out**, after `(bound by …)`:
-  - When the weights fit without the cache: the longest `--ctx`, in steps of 256, whose KV floor fits beside them.
-  - The CPU model: `to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N part of it)`.
+  - When the weights fit without the cache: the longest `--ctx`, in steps of 256, whose KV floor fits beside them,
+    computed as the verdict is (with the staging and the credit), so always under the `--ctx` refused, and none when
+    the staging alone is over the room.
+  - The CPU model: `to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N part of it)`, as far as
+    the model can take it (`model::GpuWays`, after shady's review): a BF16/F16 safetensors checkpoint runs on the CPU
+    only (`safetensors::gpu_refusal`), so its refusal names the `--ctx`, else `more free RAM (the model runs on the CPU
+    only)`; gemma3 doesn't split (`hybrid::split_refusal`, now shared with `build` and `plan`), so its refusal names
+    `--device cuda` alone.
   - A split chosen with `--gpu-layers`: `more --gpu-layers than G (fewer layers on the CPU), if the GPU has room`.
   - `--gpu-layers 0`: `--gpu-layers N (N layers on the GPU)`.
   - An automatic split (`hybrid::auto_gpu_layers`): `The split was picked to fit the GPU's memory (G of N layers
     there), so RAM is now the limit; to fit: a smaller --ctx, which also leaves the GPU room for more layers`.
 
-  With #184 the remedy's `--ctx` is computed with the staging added and the copy's credit given.
+  The staging's plan, which now runs before the check, keeps the split's `{g}/{n} layers on the GPU: …, or fewer
+  --gpu-layers` wrapper on its own refusals (the FP8 module's, `gpu_type_ok`'s).
   `check_ram_split` takes `auto` (`CpuHalf { k, n, auto, gpu }`), and `HybridQwen2::build`'s `margin` parameter became
   `auto` (the margin is derived from it, as before).
 - README (CPU memory limits), CHANGELOG.
@@ -78,6 +93,21 @@ passes there.
   releasing a run of four 1.5 MiB tensors and one apart drops equal `release_gain`, and it's 0 on a file mapping.
 - `hybrid::tests::hybrid_ram_check_on_real_splits`: the edge now includes the ring. At main's order the 0.5B at one
   GPU layer is built a byte under the edge (the ring isn't weighed).
+
+After shady's review (round 4, dfbf2a4), each new test fails on a second expect-fail tree: dfbf2a4 with the
+staging back to the ring alone, `GpuWays` always both, the plan's errors unwrapped and the `--ctx` figure back to
+0a2b680's.
+- `hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions` (GPU, the FP8 0.5B): at 1, 12 and 23 GPU layers the
+  staging is at least the head's Q8_0 bytes (151936 × 952 = 138 MiB) and every GPU-half FP8 matrix's; at 23 the
+  split is refused a byte under the edge and built at it, and the built CPU half is the estimate.
+- `hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording` (GPU, sm_89 and up): the FP8 module refuses a split
+  in the staging's `plan`, and the message keeps `{g}/{n} layers on the GPU: …, or fewer --gpu-layers`.
+- `model::ram_dense_tests::remedy_names_only_what_the_model_takes`: a GGUF qwen3's refusal names the GPU whole and in
+  part, gemma3's `--device cuda` alone, a CPU-only model's the `--ctx`, else more free RAM.
+- `safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu`: the tiny BF16 checkpoint is CPU-only (`GpuWays` none)
+  and its refusal names `--ctx 768`, else more free RAM; the tiny FP8 checkpoint's names the GPU.
+- `model::ram_dense_tests::split_refusal_wording_and_cap`: + a credit over the CPU half with the staging alone over
+  the room: no `--ctx` is named (0a2b680's figure was `--ctx 8960`, past the 8192 refused).
 
 ### Gates
 Product code e6704b7; 0a2b680 fixes the copy test (test-only).
