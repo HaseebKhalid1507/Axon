@@ -1,0 +1,29 @@
+{
+ "label": "ramchk-e6704b7-cpu-rel-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1106-074156-e184",
+   "name": "ramchk-e6704b7-cpu-rel-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "e6704b7",
+   "binary": "axon-test-e6704b7",
+   "started": 1793974335.4992328,
+   "ended": 1793974507.4393828,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "698f95cdbd0fb40b708cec9d5657a37608afdbfc92312fa6c77e5767718d6108",
+   "log_bytes": 12265
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 09:15:08 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
