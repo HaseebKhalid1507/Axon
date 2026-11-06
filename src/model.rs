@@ -1927,6 +1927,21 @@ impl<'a> Qwen2<'a> {
         }
     }
 
+    /// Bytes of the arena the repacked matrices and the FP8 matrices' F8S
+    /// rows share (0 if there's none): the tests' check on the RAM
+    /// estimate (`dense_ram_need_keep`). `r8_arena` finds it through the
+    /// repacked ones only, which an FP8 model's layers have none of.
+    #[cfg(test)]
+    pub(crate) fn arena_len(&self) -> u64 {
+        let w = self
+            .layers
+            .iter()
+            .flat_map(|l| l.weights())
+            .chain(self.output.as_ref())
+            .find_map(|w| w.r8.as_ref().or(w.f8s.as_ref().map(|b| &b.0)));
+        w.map_or(0, |r| r.map.len() as u64)
+    }
+
     /// The whole mapping the repacked matrices live in (None if none is).
     pub(crate) fn r8_arena(&self) -> Option<&[u8]> {
         let w = self
@@ -6553,7 +6568,7 @@ mod ram_dense_tests {
                 let m = load();
                 let need = dense_ram_need_keep(&m, repack, elem, keep);
                 let net = Qwen2::new_layers(&m, repack, keep);
-                let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+                let built = net.arena_len();
                 assert!(built > 0, "repack {repack} k={keep}: no FP8 arena built");
                 assert_eq!(
                     need.arena,

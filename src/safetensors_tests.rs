@@ -1578,7 +1578,7 @@ fn tiny_fp8_ram_arena_without_repack() {
             let m = load_dir(&d.0).unwrap();
             let need = dense_ram_need_keep(&m, repack, 2, keep);
             let net = Qwen2::new_layers(&m, repack, keep);
-            let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+            let built = net.arena_len();
             assert!(built > 0, "repack {repack} k={keep}: no arena built");
             assert_eq!(
                 need.arena,
