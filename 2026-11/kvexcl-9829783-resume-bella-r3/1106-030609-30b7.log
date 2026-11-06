@@ -1,0 +1,87 @@
+[axon-run 03:06:09] submitted 1106-030609-30b7 by /home/haseeb/.cache/axon-kvexcl: /usr/bin/bash resumeexcl.sh ./t-9829783-rel ./axon-base-7a2c9cf ./axon-9829783 ./kv_resume_bench-fe5117d.py
+[axon-run 03:06:09] timing job waiting: foreign GPU load 12 % 36 s ago (kitty 77324 12%), quiet 36 s of the 120 s needed (on bella; > 10 %)
+[axon-run 05:08:13] scope axon-job-1106-030609-30b7-1793959693.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 05:08:13] job 1106-030609-30b7 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-030609-30b7-1793959693 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /usr/bin/bash resumeexcl.sh ./t-9829783-rel ./axon-base-7a2c9cf ./axon-9829783 ./kv_resume_bench-fe5117d.py
+== outputs in out-resume-parabellum
+== bandwidth 05:08:13
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, 59, P4
+[axon-run 05:08:45] FOREIGN_GPU sample max=99% mean=21.0% n=6
+[axon-run 05:09:19] FOREIGN_GPU sample max=16% mean=8.3% n=6
+device NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120), slot 25600 positions = 1.367 GiB
+GPU state (start): P0, 1057 MHz, 14001 MHz, 1515 MHz, Enabled, 0x0000000000000400
+BW D2H contiguous                        51.50 ms   28.51 GB/s
+BW H2D contiguous                        62.64 ms   23.44 GB/s
+BW D2H one 2D copy                       51.55 ms   28.48 GB/s
+BW H2D one 2D copy                       64.74 ms   22.68 GB/s
+BW D2H 2D per 16-pos page                55.13 ms   26.63 GB/s
+BW H2D 2D per 16-pos page                66.84 ms   21.96 GB/s
+BW D2H 2D per 64-pos page                52.63 ms   27.89 GB/s
+BW H2D 2D per 64-pos page                66.59 ms   22.05 GB/s
+BW D2H 2D per 256-pos page               52.19 ms   28.13 GB/s
+BW H2D 2D per 256-pos page               70.13 ms   20.93 GB/s
+BW D2H 56 x 1D per 64-pos page           88.51 ms   16.59 GB/s  (enqueue   84.23 ms)
+BW D2H 56 x 1D, one page                  0.22 ms   16.75 GB/s  (enqueue    0.05 ms)
+BW H2D 56 x 1D per 64-pos page          102.46 ms   14.33 GB/s  (enqueue   97.98 ms)
+BW H2D 56 x 1D, one page                  0.30 ms   12.40 GB/s  (enqueue    0.06 ms)
+BW D2H 1D per page, scattered host       54.91 ms   26.74 GB/s  (enqueue    0.37 ms)
+BW H2D 1D per page, scattered host       66.32 ms   22.14 GB/s  (enqueue    0.38 ms)
+BW D2D 2D per page (gather)               5.41 ms  271.15 GB/s  (enqueue    0.59 ms)
+BW D2D 56 x 1D per page (gather)         41.54 ms   35.34 GB/s  (enqueue   39.88 ms)
+BW D2D 2D per page (scatter)              5.42 ms  270.75 GB/s  (enqueue    0.56 ms)
+BW D2D 56 x 1D per page (scatter)        43.85 ms   33.47 GB/s  (enqueue   42.19 ms)
+BW D2H gather path (2D D2D + 1D)         59.15 ms   24.82 GB/s  (enqueue    0.88 ms)
+BW D2H gather path, one page              0.15 ms   25.19 GB/s  (enqueue    0.00 ms)
+BW H2D scatter path (2D D2D + 1D)        69.81 ms   21.03 GB/s  (enqueue    0.91 ms)
+BW H2D scatter path, one page             0.16 ms   22.63 GB/s  (enqueue    0.00 ms)
+GPU state (after the copies, idle): P0, 2010 MHz, 14001 MHz, 2010 MHz, Enabled, 0x0000000000000400
+GPU state (busy): P0, 1792 MHz, 14001 MHz, 1957 MHz, Enabled, 0x0000000000000400
+BW D2H 2D per 64-pos page (busy)         52.16 ms   28.15 GB/s
+BW H2D 2D per 64-pos page (busy)         66.63 ms   22.03 GB/s
+BW D2H 56 x 1D per 64-pos page (busy)    84.05 ms   17.47 GB/s  (enqueue   80.08 ms)
+BW D2H 56 x 1D, one page (busy)           0.20 ms   18.30 GB/s  (enqueue    0.05 ms)
+BW H2D 56 x 1D per 64-pos page (busy)    98.38 ms   14.92 GB/s  (enqueue   94.55 ms)
+BW H2D 56 x 1D, one page (busy)           0.21 ms   17.37 GB/s  (enqueue    0.06 ms)
+BW D2H 1D per page, scattered host (busy)    52.67 ms   27.87 GB/s  (enqueue    0.39 ms)
+BW H2D 1D per page, scattered host (busy)    61.60 ms   23.83 GB/s  (enqueue    0.39 ms)
+BW D2D 2D per page (gather) (busy)        6.84 ms  214.67 GB/s  (enqueue    0.60 ms)
+BW D2D 56 x 1D per page (gather) (busy)    44.56 ms   32.94 GB/s  (enqueue   42.34 ms)
+BW D2D 2D per page (scatter) (busy)       6.71 ms  218.67 GB/s  (enqueue    0.59 ms)
+BW D2D 56 x 1D per page (scatter) (busy)    54.30 ms   27.03 GB/s  (enqueue   51.63 ms)
+BW D2H gather path (2D D2D + 1D) (busy)    70.65 ms   20.78 GB/s  (enqueue    0.98 ms)
+BW D2H gather path, one page (busy)       0.15 ms   24.44 GB/s  (enqueue    0.00 ms)
+BW H2D scatter path (2D D2D + 1D) (busy)    84.01 ms   17.47 GB/s  (enqueue    0.95 ms)
+BW H2D scatter path, one page (busy)      0.14 ms   25.42 GB/s  (enqueue    0.00 ms)
+GPU state (busy, at the end): P0, 2752 MHz, 14001 MHz, 2377 MHz, Enabled, 0x0000000000000400
+BW host_alloc   64 MiB (+ free)             26.22 ms
+BW host_alloc_uninit   64 MiB (+ free)      19.34 ms
+BW HostAllocator   64 MiB (+ free)         19.59 ms
+BW host_alloc  256 MiB (+ free)            106.53 ms
+BW host_alloc_uninit  256 MiB (+ free)     100.61 ms
+BW HostAllocator  256 MiB (+ free)         94.81 ms
+BW D2H one 64-pos page (3.50 MiB)          0.183 ms   20.09 GB/s
+BW H2D one 64-pos page                     0.194 ms   18.88 GB/s
+BW save() to RAM (staged)               417.22 ms    3.52 GB/s
+BW load() from RAM (staged)             455.00 ms    3.23 GB/s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 876 filtered out; finished in 77.79s
+== TTFT-resume micro-bench 05:09:32
+05:09:32 ## base: /home/haseeb/.cache/axon-kvexcl/axon-base-7a2c9cf serve /home/haseeb/.cache/axon-kvexcl/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 {}
+05:09:33 Traceback (most recent call last):
+05:09:33   File "/home/haseeb/.cache/axon-kvexcl/kv_resume_bench-fe5117d.py", line 396, in <module>
+05:09:33     sys.exit(main())
+05:09:33              ~~~~^^
+05:09:33   File "/home/haseeb/.cache/axon-kvexcl/kv_resume_bench-fe5117d.py", line 361, in main
+05:09:33     row = one_round(name, path, extra, env, a, a.port, r)
+05:09:33   File "/home/haseeb/.cache/axon-kvexcl/kv_resume_bench-fe5117d.py", line 259, in one_round
+05:09:33     wait_up(port, proc)
+05:09:33     ~~~~~~~^^^^^^^^^^^^
+05:09:33   File "/home/haseeb/.cache/axon-kvexcl/kv_resume_bench-fe5117d.py", line 123, in wait_up
+05:09:33     raise RuntimeError(f"server exited {proc.returncode}")
+05:09:33 RuntimeError: server exited 2
+== the candidate's restores (step trace; restore_ms = enqueue; rate ESTIMATED = pages x 3.5 MiB / (ms - feed_ms - dec_ms))
+== foreign GPU (pmon -o T: time gpu pid type sm ... command; samples over 25 % SM by others than axon / t-*)
+   05:08:18       0    4129073     G     49      4      -      -      -      -    Xorg
+   05:08:23       0    4129073     G     26      2      -      -      -      -    Xorg
+  2 foreign samples over 25 % of 39 process samples
+RESUMEEXCL DONE rc 1
+[axon-run 05:09:33] exit 1 after 80.1s (host bella)
+[axon-run 05:09:36] FOREIGN_GPU max=99% mean=14.6% samples=14 top: Xorg 4129073 55%, kitty 77324 33%, kitty 1437239 11%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

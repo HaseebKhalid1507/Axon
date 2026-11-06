@@ -1,0 +1,29 @@
+{
+ "label": "kvexcl-9829783-resume-bella-r3",
+ "verdict": "FAIL (1 of 1); TAINTED timing",
+ "jobs": [
+  {
+   "job": "1106-030609-30b7",
+   "name": "kvexcl-9829783-resume-bella-r3",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1793959693.6291401,
+   "ended": 1793959776.6961966,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=99% mean=14.6%",
+   "redactions": {},
+   "log_sha256": "ecafffec9263506a7446a1046b17d6061543fbacd3c155e1a3920087b85dd748",
+   "log_bytes": 7169
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 05:09:38 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
