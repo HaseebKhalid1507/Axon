@@ -10,9 +10,13 @@ measurements behind them.
 - **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
   free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least
   recently used. `--cache-ram`'s useful capacity is now about its size, where #166's inclusive tier held the GPU
-  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Its gate's clauses pass (design note §6; two read
-  on an RTX 4090, not bella): a 25k session evicted from the GPU resumes in 0.204 s against main's 2.834 s. Still
-  opt-in, default off: the `auto` default waits for the RAM-pinning question (note §7) and is a later change.
+  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Its gate's five clauses pass at the PR's code
+  (9829783, design note §6 and §14), all three timing cells read on an RTX 4090, not bella (the lead's reroute): a 25k
+  session evicted from the GPU resumes in 0.141 s against main's 2.713 s (1105-211420-0618). On bella that resume
+  likely misses the clause's 0.3 s: two TAINTED reads, medians 0.513 s (1105-211421-8e35) and 0.358 s
+  (1106-051210-8062), against main's 8.83 and 8.58 s. The lead waived bella's resume cell as a gate of this PR. Still
+  opt-in, default off: the `auto` default is a later change. It waits for the RAM-pinning question (note §7) and a
+  clean bella s4 replay at its own head; for bella's resume it works from the two tainted reads (note §14).
 - **#170: no unbounded flush.** An idle server writes its backlog in 64 MiB pieces and takes a new request between
   two, instead of one flush of every slot's backlog after a request that ran alone.
 - A conversation's next turn no longer copies the pages its slot keeps before its first token. A spill stores what

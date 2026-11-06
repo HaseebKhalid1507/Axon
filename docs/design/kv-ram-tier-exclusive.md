@@ -1,7 +1,8 @@
 # An exclusive KV RAM tier (WP2, with #170): design note, checkpoint 0, revision 3
 
 - Status: **revision 3 (2026-11-05): the copy path is FINAL, `Rows::page` as it is (§2.8.2, outcome (a) of the
-  `-r2` rows); checkpoints 1–2 built (a41d028), the trace fields of §2.7 added (checkpoint 3); §7's cells next.**
+  `-r2` rows); checkpoints 1–2 built (a41d028), the trace fields of §2.7 added (checkpoint 3). The gate's read is §14:
+  round 2 at 9829783, five clauses PASS on an RTX 4090; bella's resume likely misses 0.3 s; `auto` is a follow-up.**
   Revision 2 read checkpoint 1's first run provisionally (§2.8.1). Branch `feat/kvtier-exclusive`, main c54a730 merged in (84861fc). Author: joestar. Foreman: axon. Reviews of
   revision 0 (ac29b61): shady 7/10 REVISE (commit comment 208187552), Fable BUILD-WITH-CHANGES
   (`specs/kvexcl-cp0-review.md`). Every point either review raised is answered in place; §11 lists where, §12 what
@@ -860,11 +861,15 @@ tier ≈ 170, engine/serve ≈ 80, ops ≈ 20. The tests are most of it (≈ 600
 | CP2's gates at a41d028: smoke 1105-115704-823c 6/0, release 1105-115704-aeee and debug 1105-115846-69b9 192/0 (9 ignored, the `#[ignore]` benches), md5 1105-115953-59cd (pod1, RTX 4090): gen 0/30 differ, serve 42/42 × 5 cells, the third arm (`--cache-ram 1G`, 13.6–13.9k tokens restored per cell) included | PR body |
 | §2.7's trace fields, as built: pages and ms per copy kind on every step line | §2.7 |
 
-## 14. The gate's read (2026-11-05; results, not a revision)
+## 14. The gate's read (2026-11-05 and 11-06, rounds 1 and 2; results, not a revision)
 
 | what | where |
 |---|---|
-| The five clauses PASS: s4 28ee (bella), s1 c76b and the resume cell a169 on an RTX 4090 (the lead's reroute; §7 says bella only, so 4090 numbers). The rule's outcome, `auto`, is not this PR's (§7, §10.3: Haseeb's Q2) | log, "Verdict" |
-| Bella's resume cell on the exclusive tier: unmeasured, ESTIMATED 0.21–0.32 s (fast copy mode), 0.37–0.49 s (slow) | log, "Verdict" |
+| Round 1 (626051c; round 2 below replaces it): the five clauses PASS: s4 28ee (bella), s1 c76b and the resume cell a169 on an RTX 4090 (the lead's reroute; §7 says bella only, so 4090 numbers). The rule's outcome, `auto`, is not this PR's (§7, §10.3: Haseeb's Q2) | log, "Verdict" |
 | §2.3's next-turn spill: a41d028 skips one that gives up nothing; one that gives up a page still copies the slot's whole unstored chain (`write_pages` from `stored(s)`): c76b's s1 resume p50 +26 ms on the 4090 | log, "The s1 TTFT-resume p50" |
 | The lead's ruling: fix it in this PR (e1df27a: a spill stores what it gives up only under a stored parent, §2.3), merge main, then one gate round at the new head, bella's resume cell included (`--timing bella`, no fallback) | log, "The tail-spill fix" |
+| **Round 2 at 9829783 (e1df27a, main 7a2c9cf merged; it replaces round 1): the five clauses PASS, all three timing cells read on an RTX 4090** (the lead's reroute). Resume 0.141 vs 2.713 s (1105-211420-0618). s1 ITL p99 0.998× main (1105-211308-268a). s4 ITL p99 0.981× main, re-prefill 0.06 % vs 0.68 % (1106-051153-a1f3). md5 one per job. Suites 7515 / 110a and md5 vs main ed07 PASS on bella. Bella's s4 (1105-210655-4117) TAINTED by the desktop, not read; its rerun went to the 4090 (the lead) | log, "The tail-spill fix", round 2 table |
+| **Bella's resume cell on the exclusive tier: likely misses ≤ 0.3 s, even clean.** Two TAINTED reads at 9829783: medians 0.513 s (1105-211421-8e35) and 0.358 s (1106-051210-8062) vs main's 8.83 and 8.58 s; 6 of 6 rounds over 0.3 s, the best 0.319 s, with the copies in bella's fast mode (25–28 GB/s). Round 1's estimate (0.21–0.32 s in the fast mode, 0.37–0.49 s in the slow; made before any bella read) was low. The excess is outside the copies: bella / 4090 resume is 2.5–3.6×, about bella's prefill ratio (2.9×) | log, round 2 "Reading it" |
+| **The lead's rulings after round 2 (11-06):** no more bella reruns for #201. **Bella's resume cell is waived as a gate of #201** (8062 TAINTED, read as directional only); `axon-mergeready` lists 8062 as a TAINTED timing gate, and the waiver is the lead's, written in the PR. The `auto` decision works from 8e35 and 8062 and the analysis above | PR body §4 |
+| **Preconditions of the `auto` flip** (a follow-up PR, not this one): Haseeb's answer to Q2 (§7, §10.3); **a clean bella s4 replay at the flip's head** (round 2's only bella s4, 4117, is TAINTED; bella's pool, 1,725 pages against the 4090's 5,288, is where the drop rule of §2.3 costs most: a new conversation in a slot whose shared system prompt isn't stored drops the old one's pages); for bella's resume, a faster resume path or a bella-aware threshold (the row above) | log, "Verdict" |
+| **Follow-up for the flip PR: count the drop.** `/metrics` counts spilled pages (`axon_kv_ram_spilled_pages_total`) but not the pages the drop rule discards, so the flip can't see the rule's cost on a real workload. A counter such as `axon_kv_ram_dropped_pages_total` (shady's review of 878d92b) is code in src/serve and would need a regate, so it is not in #201 | §2.7 |

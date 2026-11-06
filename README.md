@@ -213,8 +213,9 @@ Works today, honestly scoped:
   `--cache-ram BYTES|auto` (opt-in, default 0: off) keeps conversations' KV pages in pinned host RAM
   and copies them back on the next turn, bit for bit. Copies of pages the GPU pool still holds are
   written only into free room and are the first evicted, so the tier's useful capacity is about its
-  size, not its size minus the pool's. Whether it becomes the default is decided by bella's gate
-  ([design](docs/design/kv-ram-tier-exclusive.md) §6).
+  size, not its size minus the pool's. Its gate passed on an RTX 4090; making it the default (`auto`) is
+  a later change, and on bella its resume likely misses the gate's 0.3 s
+  ([design](docs/design/kv-ram-tier-exclusive.md) §6, §14).
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the

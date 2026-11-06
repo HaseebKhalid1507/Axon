@@ -225,6 +225,11 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     estimate's fast-mode range was low; r4 (8062, also TAINTED) read 0.358 s.
   - The tail spill (above): `auto` would have put it on every large-VRAM server, where it is mostly cost. Fixed in
     e1df27a, gates rerun (below).
+  - **A clean bella s4 replay at the flip's head is a precondition** (shady's review of 878d92b). Round 2's only
+    bella s4 (4117) is TAINTED, and bella's short pool (1,725 pages against the 4090's 5,288) is where the drop rule
+    (below) costs most. Bella's resume: the lead waived it as a gate of #201; the flip works from 8e35 and 8062.
+  - **The drop isn't counted.** `/metrics` has `axon_kv_ram_spilled_pages_total` but nothing for the pages the drop
+    rule discards. A counter (`axon_kv_ram_dropped_pages_total`) is code and needs a regate: follow-up, with the flip.
 
 ## The tail-spill fix (e1df27a) and one more gate round (the lead's ruling, 11-05 ~21:00)
 - **The rule.** A spill stores the pages a slot gives up only if the page before them is stored, in the slot's keys
