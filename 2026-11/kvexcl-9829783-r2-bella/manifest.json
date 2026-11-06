@@ -1,0 +1,49 @@
+{
+ "label": "kvexcl-9829783-r2-bella",
+ "verdict": "FAIL (1 of 2); TAINTED timing",
+ "jobs": [
+  {
+   "job": "1105-210655-4117",
+   "name": "kvexcl-9829783-replay-s4",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "7a2c9cf",
+   "binary": "bash",
+   "started": 1793942798.429547,
+   "ended": 1793948046.344959,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=82% mean=13.5%",
+   "redactions": {},
+   "log_sha256": "97e442133bf683ca0926e251047f08f6ee9e6bc9190d175a6b1c8b165c67f111",
+   "log_bytes": 32414
+  },
+  {
+   "job": "1105-211421-8e35",
+   "name": "kvexcl-9829783-resume-bella",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=98% mean=7.7%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1793951105.9315557,
+   "ended": 1793952348.3548517,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=98% mean=7.7%",
+   "redactions": {},
+   "log_sha256": "6e9712bf0e1f7168d358b26738179c6761d64f22879e9da06b799a062aeed74d",
+   "log_bytes": 19731
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 03:05:49 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
