@@ -6,6 +6,27 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### RAM pre-load checks: FP8 without the repack, a split checked before its upload, refusals name the way out (#183, #184, #185)
+- **#183: an FP8 checkpoint with `AXON_REPACK=0` is counted.** The dense and split RAM estimates stopped before the
+  arena when the repack was off, but FP8's matrices take arena rows either way: the FP8 0.5B's ~352 MiB arena went
+  uncounted by the CPU model's check (#142) and the split's (#180). The estimate now counts what the build allocates.
+- **#184: a split's RAM check runs before the GPU half's upload.** It ran after the upload, so a memory limit the
+  upload itself didn't fit in was an OOM kill, not a refusal. It now runs once the CUDA context and the module are
+  made (so the RAM figure is what they leave), adds the upload's own host memory (its page-locked staging ring: 16
+  MiB, 64 MiB for a GPU half of 1 GiB or more, none under 64 MiB, or `AXON_UPLOAD_RING`'s size; or, if larger, the
+  biggest matrix it converts to Q8_0 on the host, as an FP8 checkpoint's split does: the 0.5B's head is 138 MiB, a
+  7B's 552 MiB), and, when the model's bytes are in RAM (a copied file, a checkpoint's converted tensors), credits
+  the GPU half's share, which goes back as it's uploaded. The refusal names both terms. Memory taken before the
+  check is still an OOM kill under a tight cap: the CUDA context (about 0.2 GiB, inferred from #180's caps; a floor
+  before the device is opened stays open in #184) and the safetensors loader's F16 copies (about 520 MiB on the FP8
+  0.5B, about 2 GiB on a 7B FP8; #208).
+- **#185: the refusal names its ways out.** After the bound: the longest `--ctx` (in steps of 256) whose KV cache fits
+  beside the weights, when the weights fit alone (always under the `--ctx` refused); then a GPU for the CPU model
+  (whole, or in part with `--gpu-layers`, as far as the model can take it: not a BF16/F16 safetensors checkpoint,
+  which runs on the CPU only, and no `--gpu-layers` for gemma3, which doesn't split), more `--gpu-layers` for a
+  split chosen by hand, and for a split picked to fit the GPU's memory, that RAM is now the limit and a smaller
+  `--ctx` the way out.
+
 ### KV RAM tier: exclusive, and an idle server's backlog in pieces (#201, follows #166; #170)
 - **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
   free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least

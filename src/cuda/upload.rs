@@ -63,6 +63,11 @@ impl Shape {
         std::env::var("AXON_UPLOAD_RING").is_ok_and(|v| v != "0")
     }
 
+    /// The page-locked staging bytes: `slots` buffers of `slot` bytes.
+    pub fn bytes(&self) -> usize {
+        self.slots * self.slot
+    }
+
     pub fn pick(total: usize) -> Option<Shape> {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let big = total >= 1 << 30;
@@ -205,7 +210,7 @@ fn fill(out: &mut [u8], a: usize, b: usize, pieces: &[Piece]) -> std::io::Result
 impl<'g> Ring<'g> {
     /// Pin the staging memory (the slow part, see `Staging`).
     pub fn new(gpu: &'g Gpu, shape: Shape) -> Result<Ring<'g>, String> {
-        let len = shape.slots * shape.slot;
+        let len = shape.bytes();
         let mem = match Self::registered(gpu, len, shape.threads) {
             Some(m) => m,
             None => Staging::Alloc(gpu.host_alloc(len)?),
