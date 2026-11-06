@@ -1808,13 +1808,17 @@ fn hybrid_ram_refused_before_the_upload() {
 /// FP8 runs only the whole model on one GPU), and its upload converts each
 /// GPU-half FP8 matrix, and the head, to Q8_0 on the host after the ring
 /// is gone: one rows x Q8_0 buffer at a time, allocated while its source
-/// is still held, the head's first. On the FP8 0.5B the head is the tied
-/// F16 embedding, 151936 rows of 952 bytes (138 MiB), and the ring 16 MiB.
-/// The staging counted is at least each of those buffers at 1, 12 and 23
-/// GPU layers (#184's first version counted the ring alone, 16 MiB, and
-/// at 23 the need came to about the tolerance: no RAM figure refused it).
-/// At 23, the split is refused a byte under the edge with the head's
-/// conversion counted, and built at it.
+/// is still held, the head's first. The FP8 0.5B's head is its own
+/// lm_head (`output.weight`: the file carries it though the config ties
+/// it), made F16 in the loader's anonymous arena (260 MiB); as Q8_0 it's
+/// 151936 rows of 952 bytes (138 MiB), and the ring 16 MiB. The staging
+/// counted is at least each of those buffers at 1, 12 and 23 GPU layers.
+/// At 23 the head's F16 bytes, credited as they go up, cover the one-layer
+/// CPU half (16 MiB of arena and its KV), so the need is the staging
+/// alone, the head's conversion: the credit never offsets it (#184's first
+/// version counted the ring alone, and that need, 16 MiB, was under the
+/// tolerance: no RAM figure refused it). The split is refused a byte under
+/// the edge and built at it.
 #[test]
 fn hybrid_fp8_staging_counts_the_q8_conversions() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1863,8 +1867,27 @@ fn hybrid_fp8_staging_counts_the_q8_conversions() {
     let (gl, ctx) = (n - 1, 512);
     let k = n - gl;
     let tol = crate::model::ram_tolerance();
+    let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+    let cpu = half_need(None, &m, k, ctx);
+    let freed = m.release_gain(&|t| gpu_part(&t.name, k, n));
     let need = half_need(Some((&g, &km)), &m, k, ctx);
-    assert!(need > q8(head), "need {need}");
+    eprintln!(
+        "fp8 0.5b {gl}/{n}, --ctx {ctx}: need {} KiB: the CPU half {} KiB, less the credit {} KiB \
+         (none below 0), plus the staging {} KiB; tolerance {} KiB",
+        need >> 10,
+        cpu >> 10,
+        freed >> 10,
+        staging >> 10,
+        tol >> 10
+    );
+    // The premise: a credit over the CPU half, whose rest is still not set
+    // against the staging.
+    assert!(
+        freed > cpu,
+        "{gl}/{n}: credit {freed} not over the CPU half {cpu}"
+    );
+    assert_eq!(need, staging, "{gl}/{n}: the need is the staging alone");
+    assert!(need >= q8(head) && need > tol, "need {need}");
     drop(m);
     let m = load();
     assert!(

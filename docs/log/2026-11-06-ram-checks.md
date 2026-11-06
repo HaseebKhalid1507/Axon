@@ -20,10 +20,12 @@
     4 × 4 MiB, or 8 × 8 MiB for 1 GiB or more, none under 64 MiB, or `AXON_UPLOAD_RING`'s size. Then, after the
     ring is freed, the matrices the plan converts to Q8_0 on the host (`plan.conv`: an FP8 checkpoint's split, which
     takes the Q8_0 path), one `rows × Q8_0` buffer at a time, each allocated while its source is still held and
-    dropped after its write: the largest of them counts. On the FP8 0.5B that's the tied head, 151936 × 952 B
-    (138 MiB) against a 16 MiB ring; on a 7B FP8, its untied head, ~552 MiB. #206's first version counted the ring
-    alone (shady's review, MUST 1): the FP8 0.5B at 23 GPU layers then needed about the tolerance, so no RAM figure
-    refused it and the head's conversion was an OOM kill. The staging is added to the need; both phases are over
+    dropped after its write: the largest of them counts. On the FP8 0.5B that's the head, 151936 × 952 B
+    (138 MiB) against a 16 MiB ring; on a 7B FP8, ~552 MiB. (The 0.5B's head is its own `lm_head`: the file carries
+    it though the config ties it, and it's made F16 in the loader's anonymous arena, 260 MiB, as a 7B's is.) #206's
+    first version counted the ring alone (shady's review, MUST 1): at 23 GPU layers the head's 260 MiB credit then
+    covered the one-layer CPU half, the need was the 16 MiB ring, under the tolerance, so no RAM figure refused it
+    and the head's conversion was an OOM kill. The staging is added to the need; both phases are over
     before the CPU half is built, so adding it overstates the peak by at most its size. It's counted even when the
     upload then skips the ring (a cold page cache).
   - **`freed`** (`Model::release_gain`): on a copy of the file (or the loader's arena), the GPU half's bytes that
@@ -98,8 +100,11 @@ After shady's review (round 4, dfbf2a4), each new test fails on a second expect-
 staging back to the ring alone, `GpuWays` always both, the plan's errors unwrapped and the `--ctx` figure back to
 0a2b680's.
 - `hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions` (GPU, the FP8 0.5B): at 1, 12 and 23 GPU layers the
-  staging is at least the head's Q8_0 bytes (151936 × 952 = 138 MiB) and every GPU-half FP8 matrix's; at 23 the
-  split is refused a byte under the edge and built at it, and the built CPU half is the estimate.
+  staging is at least the head's Q8_0 bytes (151936 × 952 = 138 MiB) and every GPU-half FP8 matrix's. At 23 the
+  credit (the head's F16 bytes) is over the CPU half and the need is the staging alone, exactly: the credit's rest is
+  never set against it. The split is refused a byte under the edge and built at it, and the built CPU half is the
+  estimate. (r4's version asserted a need over the head's Q8_0 bytes, strictly; the need is those bytes exactly, so it
+  failed on bella, 1106-105216-a4d5: the test's off-by-one, not the check's.)
 - `hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording` (GPU, sm_89 and up): the FP8 module refuses a split
   in the staging's `plan`, and the message keeps `{g}/{n} layers on the GPU: …, or fewer --gpu-layers`.
 - `model::ram_dense_tests::remedy_names_only_what_the_model_takes`: a GGUF qwen3's refusal names the GPU whole and in
