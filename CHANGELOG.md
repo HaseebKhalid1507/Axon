@@ -6,6 +6,32 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Shared prefix KV pages: the engine (#207, closes #187; follows #164)
+- **Opt-in: `AXON_SHARE_KV=1`.** Off by default, so a server without it runs main's admission, eviction and spills,
+  decision for decision. #187 ships sharing off by default if any timing clause fails, and two did on the RTX 4090:
+  the fan-out siblings' TTFT over the leader's (0.26× main idle, 0.49× busy, against ≤ 0.25×) and s4's new-session
+  TTFT (1.00×, against ≤ 0.6×). What it does when on: the 7 siblings after the leader each prefill 54 of the
+  6,006 shared tokens (main: two of them all 6,006, the next ~3k and ~1.5k), and their TTFT p50 falls from 2.43 s to 1.05 s idle; the
+  trace replay re-prefills 65 % fewer tokens at speed 4 (1,665 → 577); decode and ITL p99 within 0.5 %
+  (docs/log/2026-11-06-shared-prefix-pages-c3.md).
+- **Requests share the KV pages of a common prefix** (the GPU's paged pool, `serve --parallel` > 1, with
+  `AXON_SHARE_KV=1`). Admission
+  walks the prefix index over the prompt's whole pages and maps the pages it has, another slot's or warm ones kept
+  from a finished request, instead of prefilling them again (`claim_prefix`, design §3.4; phase 1: a prompt that
+  continues mid-way into a shared page is fed again from that page's start, no copy-on-write). Pages are indexed and
+  pinned as they fill (fed, decoded, restored, or written by the request running alone). Room comes from the
+  index's least recently used warm leaves first (`pop_lru_leaf`), then idle slots; with `--cache-ram` an evicted
+  warm page is copied to the RAM tier first (`spill_page` → `Tier::drop_resident` → `unpin_page`), and a slot that
+  gives up indexed pages copies none of them then: they stay on the GPU until evicted.
+- Unset (or anything but `1`), admission, eviction and the tier's spills are main's, decision for decision.
+- `/slots`: `pages_warm`, `pages_shared`. `/metrics`: `axon_kv_pages_warm`, `axon_kv_pages_shared`,
+  `axon_prompt_shared_tokens_total`, `axon_pages_evicted_total`. `AXON_KV_PAGES=N`: an N-page pool (tests, gates).
+- Debug builds check after every step that no page leaks (each page in one state, `refs` == its occurrences in slot
+  lists, the index's holds == `refs`, every indexed page pinned), and the immutability rule (E3) on the request
+  running alone (`lend_solo`'s range), as #164 did on the batched writes.
+- Same bits: gen and serve md5 vs main, with `AXON_PAGE_SHUFFLE`, the kill switch, `--cache-ram` and an undersized
+  pool (docs/log/2026-11-06-shared-prefix-pages-c3.md).
+
 ### RAM pre-load checks: FP8 without the repack, a split checked before its upload, refusals name the way out (#183, #184, #185)
 - **#183: an FP8 checkpoint with `AXON_REPACK=0` is counted.** The dense and split RAM estimates stopped before the
   arena when the repack was off, but FP8's matrices take arena rows either way: the FP8 0.5B's ~352 MiB arena went

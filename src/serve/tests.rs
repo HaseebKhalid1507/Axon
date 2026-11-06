@@ -52,6 +52,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        share: None,
         paged: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
@@ -2051,7 +2052,16 @@ fn serve_paged_pressure() {
         .iter()
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
-    assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
+    // Shared prefixes (off unless the run sets AXON_SHARE_KV=1): no page
+    // is shared (the prompts differ from their first page on), and the
+    // index's warm pages (a preempted request's) are neither held nor free.
+    let warm = sl.get("pages_warm").map_or(0, |w| w.as_u64().unwrap());
+    assert_eq!(
+        sl.get("pages_shared").map_or(0, |w| w.as_u64().unwrap()),
+        0,
+        "{sl}"
+    );
+    assert_eq!(held + sl["pages_free"].as_u64().unwrap() + warm, 40, "{sl}");
     assert!(sl["preempted"].as_u64().unwrap() > 0, "no preemption: {sl}");
 }
 
@@ -6147,6 +6157,8 @@ fn cache_ram_case(device: Device, what: &str, f: impl Fn(&mut Opts)) {
     let run = |ram: u64| {
         let pool = std::cell::Cell::new(false);
         let s = server_with(p.to_str().unwrap(), device, |o| {
+            // The KV RAM tier on main's decisions (with shared prefixes: serve_share_pressure).
+            o.share = Some(false);
             f(o);
             o.cache_ram = super::tier::CacheRam::Bytes(ram);
             pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
@@ -6387,6 +6399,8 @@ fn cache_ram_off_case(device: Device, what: &str, faults: &[TierFault], f: impl 
     let run = |ram: u64, fault: Option<&TierFault>| {
         let pool = std::cell::Cell::new(false);
         let s = server_with(p.to_str().unwrap(), device, |o| {
+            // The KV RAM tier on main's decisions (with shared prefixes: serve_share_pressure).
+            o.share = Some(false);
             f(o);
             o.cache_ram = super::tier::CacheRam::Bytes(ram);
             pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
@@ -6651,6 +6665,8 @@ fn serve_cuda_cache_ram_idle_flush() {
     type Usage = (Value, u64, u64, u64);
     let start = |ram: u64| {
         let s = server_with(path, Device::Cuda, |o| {
+            // The KV RAM tier on main's decisions (with shared prefixes: serve_share_pressure).
+            o.share = Some(false);
             o.parallel = 2;
             o.parallel_set = true;
             o.kv_pages = Some(16);
@@ -6861,6 +6877,8 @@ fn serve_cuda_cache_ram_off_in_reclaim() {
     type Usage = (Value, u64, u64, u64);
     let run = |ram: u64| {
         let s = server_with(path, Device::Cuda, |o| {
+            // The KV RAM tier on main's decisions (with shared prefixes: serve_share_pressure).
+            o.share = Some(false);
             o.parallel = 3;
             o.parallel_set = true;
             o.kv_pages = Some(10);
@@ -7029,6 +7047,8 @@ fn serve_cuda_cache_ram_tail_spill() {
     type Usage = (Value, u64, u64, u64);
     let start = |ram: u64| {
         let s = server_with(path, Device::Cuda, |o| {
+            // The KV RAM tier on main's decisions (with shared prefixes: serve_share_pressure).
+            o.share = Some(false);
             o.parallel = 2;
             o.parallel_set = true;
             o.kv_pages = Some(48);
@@ -7141,4 +7161,536 @@ fn serve_cuda_cache_ram_tail_spill() {
         on[3].1,
         off[3].1
     );
+}
+
+/// AXON_KV_PAGES: a number of pages, at least 1, else the server refuses.
+#[test]
+fn kv_pages_env_parses() {
+    assert_eq!(super::kv_pages_of(None), Ok(None));
+    assert_eq!(super::kv_pages_of(Some(" 48 ")), Ok(Some(48)));
+    for bad in ["0", "", "-3", "4k"] {
+        let e = super::kv_pages_of(Some(bad)).unwrap_err();
+        assert!(e.contains("AXON_KV_PAGES"), "{bad}: {e}");
+    }
+}
+
+/// A completion's reply text and cached prompt tokens (`body` as given).
+fn share_reply(a: SocketAddr, body: &Value) -> (String, u64) {
+    let r = post(a, "/v1/completions", body.clone());
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    (
+        v["choices"][0]["text"].as_str().unwrap().to_string(),
+        v["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap(),
+    )
+}
+
+/// `prompt`'s tokens on server `a` (a 1-token completion's usage).
+fn prompt_tokens(a: SocketAddr, prompt: &str) -> u64 {
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": prompt, "max_tokens": 1, "temperature": 0}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.json()["usage"]["prompt_tokens"].as_u64().unwrap()
+}
+
+fn wait_idle(a: SocketAddr) {
+    wait_for("the pool idle", || {
+        (call(a, "GET", "/slots", "").json()["slots"].as_array())
+            .unwrap()
+            .iter()
+            .all(|x| x["busy"] == false)
+    });
+}
+
+/// AXON_SHARE_KV is opt-in (#207's timing clauses failed, so #187 ships
+/// sharing off by default): on for "1" only; unset, "0" or anything else
+/// is off, main's paths.
+#[test]
+fn share_kv_is_opt_in() {
+    use super::share_on;
+    assert!(!share_on(None));
+    for v in ["", "0", "true", "yes", "2", "on"] {
+        assert!(!share_on(Some(v)), "{v:?}");
+    }
+    assert!(share_on(Some("1")));
+    assert!(share_on(Some(" 1\n")));
+}
+
+/// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
+/// §5.3): `identity_checks` (alone, cached, streamed, under load: 8 slots,
+/// a long prompt prefilled in chunks between decode steps) on a server with
+/// them on and one with them off, f16 and q8 caches: the same fingerprint,
+/// the same texts. /slots has their counts only when they're on.
+#[test]
+fn serve_share_matches_off() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let load = batch_bodies(true);
+    for kv in [crate::kv::KvType::F16, crate::kv::KvType::Q8] {
+        let mut got = Vec::new();
+        for share in [false, true] {
+            let s = server_with(p, Device::Cuda, |o| {
+                o.kv = kv;
+                o.parallel = 8;
+                o.prefill_chunk = 64;
+                o.share = Some(share);
+            });
+            let what = format!("cuda {kv:?}, sharing {share}");
+            let (id, solo) = identity_checks(s.addr, &load, &what, true);
+            wait_idle(s.addr);
+            let sl = call(s.addr, "GET", "/slots", "").json();
+            assert_eq!(sl.get("pages_warm").is_some(), share, "{what}: {sl}");
+            let m = call(s.addr, "GET", "/metrics", "").body;
+            assert_eq!(
+                m.contains("axon_prompt_shared_tokens_total"),
+                share,
+                "{what}"
+            );
+            got.push((id, solo));
+        }
+        assert_eq!(got[0], got[1], "{kv:?}: a reply changed with sharing on");
+    }
+}
+
+/// The fan-out from idle (design §5.3 `serve_fanout_idle`): a leader whose
+/// prompt is a long prefix and a question runs alone, then 7 siblings (the
+/// prefix, another question each) arrive together. Each maps the leader's
+/// pages of the prefix (its slot holds them, idle) instead of prefilling
+/// them, and gets the reply it gets with sharing off. The first sibling may
+/// run alone in the leader's slot (its longest prefix: in place, the
+/// leader's page past the prefix unindexed first); the other 6 map, so
+/// `axon_prompt_shared_tokens_total` is at least 6 times the prefix's
+/// whole pages, and at idle after, those pages are shared (every
+/// sibling's slot holds them).
+#[test]
+fn serve_share_fanout_idle() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let prefix =
+        "The archive keeps letters from the harbour town, sorted by year and sender. ".repeat(40);
+    let bodies: Vec<Value> = (0..8)
+        .map(|i| {
+            json!({"prompt": format!("{prefix}Question {i}: what is letter {} about?", 7 * i + 3),
+                   "max_tokens": 24, "temperature": if i % 2 == 0 { json!(0) } else { json!(0.7) },
+                   "seed": i})
+        })
+        .collect();
+    let run = |share: bool| {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 8;
+            o.parallel_set = true;
+            o.share = Some(share);
+        });
+        let a = s.addr;
+        let lead = share_reply(a, &bodies[0]);
+        let rest: Vec<(String, u64)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (bodies[1..].iter())
+                .map(|b| sc.spawn(move || share_reply(a, b)))
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        wait_idle(a);
+        let m = call(a, "GET", "/metrics", "").body;
+        let sl = call(a, "GET", "/slots", "").json();
+        let n = prompt_tokens(a, &prefix);
+        let mut all = vec![lead];
+        all.extend(rest);
+        (all, m, sl, n)
+    };
+    let (off, _, _, n) = run(false);
+    let (on, m, sl, _) = run(true);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "request {i}: the reply with sharing on");
+    }
+    // The prefix's whole pages (its last token may merge with what follows).
+    let pages = (n - 1) / 64;
+    assert!(pages >= 8, "the prefix: {n} tokens");
+    let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
+    assert!(
+        shared >= 6 * 64 * pages,
+        "{shared} tokens mapped, prefix {pages} pages: {m}"
+    );
+    let mapped = on[1..].iter().filter(|r| r.1 >= 64 * pages).count();
+    assert!(
+        mapped >= 6,
+        "siblings' cached tokens {:?}, prefix {pages} pages",
+        on
+    );
+    assert!(sl["pages_shared"].as_u64().unwrap() >= pages, "{sl}");
+    assert_eq!(
+        metric(&m, "axon_kv_pages_shared"),
+        sl["pages_shared"].as_u64(),
+        "{sl}"
+    );
+}
+
+/// `serve_paged_pressure` with shared prefixes (design §5.3
+/// `serve_share_pressure`): 6 requests sharing a 4-page prefix on a
+/// 40-page pool whose decode pages are taken step by step (kv_grow 0), so
+/// running requests are preempted and prompts unfed while others map their
+/// pages and the index's warm pages are evicted for room; with the KV RAM
+/// tier and without (an evicted page goes to RAM first). Every reply is
+/// the one it gets with sharing off. Run again, every request reports the
+/// prefix cached but those preempted or unfed meanwhile (fed from 0
+/// again). Debug builds check the pool, the index and their holds against
+/// each other after every step.
+#[test]
+fn serve_share_pressure() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let common = "The river runs past the old mill and the bridge. ".repeat(24);
+    let bodies: Vec<Value> = (0..6)
+        .map(|i| {
+            json!({"prompt": format!("{common}Note {i}. Count: 1, 2, 3, 4, 5,"), "max_tokens": 450,
+                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.3) }, "seed": i})
+        })
+        .collect();
+    let together = |a: SocketAddr| -> Vec<(String, u64)> {
+        let start = std::sync::Barrier::new(bodies.len());
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = (bodies.iter())
+                .map(|b| {
+                    let start = &start;
+                    sc.spawn(move || {
+                        start.wait();
+                        share_reply(a, b)
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    };
+    let opts = |o: &mut Opts| {
+        o.parallel = 6;
+        o.parallel_set = true;
+        o.kv_pages = Some(40);
+        o.kv_grow = Some(0);
+    };
+    let off = server_with(p, Device::Cuda, |o| {
+        opts(o);
+        o.share = Some(false);
+    });
+    let refs: Vec<String> = bodies.iter().map(|b| share_reply(off.addr, b).0).collect();
+    drop(off);
+    for ram in [0, 64u64 << 20] {
+        let s = server_with(p, Device::Cuda, |o| {
+            opts(o);
+            o.share = Some(true);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+        });
+        let a = s.addr;
+        if ram > 0 {
+            wait_tier_pinned(a);
+        }
+        let what = format!("cache-ram {ram}");
+        for (i, (t, r)) in together(a).iter().zip(&refs).enumerate() {
+            assert_eq!(&t.0, r, "{what}: request {i} under pressure, sharing on");
+        }
+        wait_idle(a);
+        // Requests preempted or unfed so far.
+        let victims = |a: SocketAddr| {
+            let sl = call(a, "GET", "/slots", "").json();
+            sl["preempted"].as_u64().unwrap() + sl["prefills_unfed"].as_u64().unwrap()
+        };
+        let v0 = victims(a);
+        // Again, its prefix now in the index (warm or held): each request
+        // maps it when admitted. One preempted or unfed after that is fed
+        // from 0 again and reports none cached (`preempt`, `unfeed`: in C3
+        // it doesn't claim its pages again), so at most the round's
+        // victims fall short; the oldest request never gives way, so one
+        // at least reports the prefix.
+        let again = together(a);
+        for (i, (t, r)) in again.iter().zip(&refs).enumerate() {
+            assert_eq!(&t.0, r, "{what}: request {i} again");
+        }
+        wait_idle(a);
+        let v = victims(a) - v0;
+        let cached: Vec<u64> = again.iter().map(|t| t.1).collect();
+        let short = cached.iter().filter(|&&c| c < 192).count() as u64;
+        eprintln!("{what}: again: cached {cached:?}, {v} preempted or unfed");
+        assert!(
+            short < 6 && short <= v,
+            "{what}: again: cached {cached:?}, {v} preempted or unfed"
+        );
+        let sl = call(a, "GET", "/slots", "").json();
+        let m = call(a, "GET", "/metrics", "").body;
+        assert!(
+            sl["preempted"].as_u64().unwrap() > 0,
+            "{what}: no preemption: {sl}"
+        );
+        assert!(
+            metric(&m, "axon_prompt_shared_tokens_total").unwrap() > 0,
+            "{what}: {m}"
+        );
+        let warm = sl["pages_warm"].as_u64().unwrap();
+        assert!(
+            warm + sl["pages_free"].as_u64().unwrap() <= 40,
+            "{what}: {sl}"
+        );
+    }
+}
+
+/// The S1 path maps an indexed prefix and hands over (design §5.3
+/// `serve_share_solo_handover`), 2 slots: A (a prefix and a question) runs
+/// alone; two unrelated prompts take both slots, the second A's (its pages
+/// of the prefix stay in the index, warm); B (the prefix, another question)
+/// runs alone in the other slot, mapping them, and hands over to the batch
+/// when C (the prefix, a third question) arrives, which maps them from B's
+/// slot. B and C get their replies with sharing off.
+#[test]
+fn serve_share_solo_handover() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let prefix =
+        "Every morning the ferry leaves the island at six and returns at noon. ".repeat(30);
+    let q = |s: &str, n: usize| json!({"prompt": format!("{prefix}{s}"), "max_tokens": n, "temperature": 0});
+    let (a_b, b_b, c_b) = (
+        q("Who runs it?", 8),
+        q("Why so early?", 160),
+        q("Is it ever late?", 24),
+    );
+    // Unrelated to each other too (best_slot: least recently used).
+    let x = |i: usize| {
+        let p = [
+            "Kettles whistle when the water boils.",
+            "Rain fell on the tin roof all night.",
+        ];
+        json!({"prompt": p[i - 1], "max_tokens": 8, "temperature": 0})
+    };
+    let run = |share: bool| {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.share = Some(share);
+        });
+        let a = s.addr;
+        let g = &s.generated;
+        share_reply(a, &a_b);
+        share_reply(a, &x(1));
+        share_reply(a, &x(2));
+        let (b, c) = std::thread::scope(|sc| {
+            let g0 = g.load(Ordering::Relaxed);
+            let b = sc.spawn(|| share_reply(a, &b_b));
+            wait_for("B decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
+            let c = share_reply(a, &c_b);
+            (b.join().unwrap(), c)
+        });
+        wait_idle(a);
+        let m = call(a, "GET", "/metrics", "").body;
+        (b, c, m, prompt_tokens(a, &prefix))
+    };
+    let (b0, c0, _, n) = run(false);
+    let (b1, c1, m, _) = run(true);
+    assert_eq!(
+        b1.0, b0.0,
+        "B (alone, mapped, handed over): its reply with sharing off"
+    );
+    assert_eq!(
+        c1.0, c0.0,
+        "C (mapped from B's slot): its reply with sharing off"
+    );
+    let pages = (n - 1) / 64;
+    assert!(pages >= 4, "the prefix: {n} tokens");
+    assert!(
+        b1.1 >= 64 * pages && b1.1 > b0.1,
+        "B cached {} on, {} off",
+        b1.1,
+        b0.1
+    );
+    assert!(c1.1 >= 64 * pages, "C cached {}", c1.1);
+    let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
+    assert!(shared >= 2 * 64 * pages, "{shared}: {m}");
+}
+
+/// The in-place write after a page leaves the index (`Batch::unindex_at`,
+/// design §3.4 and E3), 2 slots, sharing on and off. A (a long prefix and
+/// a question) runs; its whole pages are indexed, its slot alone holding
+/// them. B is the prefix cut where the tokens it shares with A end mid-way
+/// into one of those pages, then another question: it takes A's slot
+/// (`best_slot`), and its claim takes that page and every page after it
+/// out of the index, then B writes the rest of the page in place (it
+/// reports every token it shares with A cached, not only the page's
+/// start). A again: had its pages from the cut on stayed indexed, its
+/// claim would map the page B wrote. Every reply is the one with sharing
+/// off; the server's count of such claims (tests only) is 1 after B with
+/// sharing on, 0 off.
+#[test]
+fn serve_share_unindex_in_place() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(p).unwrap());
+    let prefix =
+        "The lighthouse keeper logs every ship that passes the point after dark. ".repeat(30);
+    let a_text = format!("{prefix}Which ship came last?");
+    let a_ids = tok.encode_prompt(&a_text);
+    // A's whole prompt pages: its slot holds them all once A is fed.
+    let whole = a_ids.len() / 64;
+    // B: the prefix cut at a word where the tokens B shares with A end
+    // mid-way into a page of A's with a whole page after it, and are more
+    // than half of B (best_slot then puts B in A's slot).
+    let words: Vec<&str> = prefix.split_inclusive(' ').collect();
+    let (b_text, common) = (8..words.len())
+        .find_map(|k| {
+            let b = format!("{}Why keep a log?", words[..k].concat());
+            let ids = tok.encode_prompt(&b);
+            let c = (ids.iter().zip(&a_ids)).take_while(|(x, y)| x == y).count();
+            let fits = c >= 128 && (16..=48).contains(&(c % 64)) && c / 64 + 1 < whole;
+            (fits && 2 * c > ids.len()).then_some((b, c as u64))
+        })
+        .expect("a cut mid-way into one of A's pages");
+    let req = |t: &str, n: usize| json!({"prompt": t, "max_tokens": n, "temperature": 0});
+    let run = |share: bool| {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.share = Some(share);
+        });
+        let a = s.addr;
+        let mut got = Vec::new();
+        for (t, n) in [(&a_text, 8), (&b_text, 48), (&a_text, 24)] {
+            let r = share_reply(a, &req(t, n));
+            got.push((r.0, r.1, s.unindexed()));
+        }
+        got
+    };
+    let off = run(false);
+    let on = run(true);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "request {i}: the reply with sharing on");
+    }
+    assert!(
+        off.iter().all(|r| r.2 == 0),
+        "sharing off unindexed: {off:?}"
+    );
+    assert_eq!(
+        (on[0].2, on[1].2),
+        (0, 1),
+        "B's claim (it shares {common} tokens with A, page {} of {whole})",
+        common / 64
+    );
+    // In place from mid-page, on and off; A again too (B's slot holds the
+    // same `common` of A).
+    for r in [&off[1], &on[1], &off[2], &on[2]] {
+        assert_eq!(r.1, common, "cached tokens: {off:?} {on:?}");
+    }
+}
+
+/// Requests sharing a prefix cancelled while decoding and while being fed
+/// (design §5.3 `serve_share_cancel`) give their pages back: a request then
+/// needing 20 of the pool's 24 pages is admitted, the idle slots' rows and
+/// the index's warm pages giving theirs up (some evicted), and gets the
+/// reply it gets with sharing off. Debug builds check the pool, the index
+/// and their holds against each other after every step.
+#[test]
+fn serve_share_cancel_frees() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let prefix = "A lighthouse keeper writes down the weather every hour of the night. ".repeat(24);
+    let opts = |o: &mut Opts| {
+        o.parallel = 3;
+        o.parallel_set = true;
+        o.kv_pages = Some(24);
+        o.prefill_chunk = 16;
+    };
+    let text: String = (0..60)
+        .map(|i| {
+            format!(
+                "Entry {i}: the {} gate opened at {} o'clock. ",
+                ["north", "east"][i % 2],
+                i % 12 + 1
+            )
+        })
+        .collect();
+    let big = json!({"prompt": format!("{text}Summary:"), "max_tokens": 500, "temperature": 0});
+    let off = server_with(p, Device::Cuda, |o| {
+        opts(o);
+        o.share = Some(false);
+    });
+    let want = share_reply(off.addr, &big).0;
+    let n = prompt_tokens(off.addr, &prefix);
+    let nb = prompt_tokens(off.addr, &format!("{text}Summary:"));
+    drop(off);
+    let s = server_with(p, Device::Cuda, |o| {
+        opts(o);
+        o.share = Some(true);
+    });
+    let a = s.addr;
+    let g = &s.generated;
+    assert!(
+        (nb + 500).div_ceil(64) >= 20,
+        "the big request: {nb} prompt tokens"
+    );
+    let stream = |q: &str, n: usize| {
+        let body = json!({"prompt": format!("{prefix}{q}"), "max_tokens": n, "stream": true,
+                          "temperature": 0});
+        let mut c = TcpStream::connect(a).unwrap();
+        c.write_all(request("POST", "/v1/completions", &body.to_string(), true).as_bytes())
+            .unwrap();
+        c
+    };
+    let g0 = g.load(Ordering::Relaxed);
+    let cs: Vec<TcpStream> = ["What is the weather?", "Who is the keeper?"]
+        .iter()
+        .map(|q| stream(q, 600))
+        .collect();
+    wait_for("both decoding", || g.load(Ordering::Relaxed) >= g0 + 40);
+    // A third, a long private part after the prefix: gone while it's fed.
+    let long = format!(
+        "{}And then?",
+        "The storm came from the west and stayed. ".repeat(30)
+    );
+    let g1 = g.load(Ordering::Relaxed);
+    let c3 = stream(&long, 50);
+    wait_for("its prompt being fed", || {
+        g.load(Ordering::Relaxed) >= g1 + 6
+    });
+    drop(c3);
+    drop(cs);
+    wait_idle(a);
+    let (t, _) = share_reply(a, &big);
+    assert_eq!(t, want, "the pool-sized request after the cancels");
+    wait_idle(a);
+    let m = call(a, "GET", "/metrics", "").body;
+    let pages = (n - 1) / 64;
+    let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
+    assert!(
+        shared >= 64 * pages,
+        "the third maps the prefix's {pages} pages: {shared}: {m}"
+    );
+    assert!(metric(&m, "axon_pages_evicted_total").unwrap() > 0, "{m}");
 }

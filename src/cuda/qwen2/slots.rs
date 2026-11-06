@@ -1024,7 +1024,7 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         CudaQwen2::unpin_page(self, pool, page)
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(debug_assertions)]
     fn same_page_bytes(&self, pool: &CudaPool<'g>, a: u32, b: u32) -> Result<bool, String> {
         CudaQwen2::same_page_bytes(self, pool, a, b)
     }
@@ -1032,6 +1032,20 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     #[cfg(any(test, debug_assertions))]
     fn page_state(&self, pool: &CudaPool<'g>, page: u32) -> Option<(u32, bool)> {
         pool.page_state(page)
+    }
+
+    fn busy_pages(&self, pool: &CudaPool<'g>, busy: &[bool], mine: &[u32]) -> Option<usize> {
+        pool.busy_pages(busy, mine)
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_writable(&self, pool: &CudaPool<'g>, slot: usize, lo: usize, hi: usize) {
+        pool.assert_writable(slot, lo, hi)
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_pages(&self, pool: &CudaPool<'g>) {
+        pool.check_pages()
     }
 }
 
@@ -1184,6 +1198,27 @@ impl CudaPool<'_> {
             total: m.total(),
             held: (0..self.slots).map(|s| m.pages(s).len()).collect(),
         })
+    }
+
+    /// `BatchLm::busy_pages` (None: plain).
+    pub fn busy_pages(&self, busy: &[bool], mine: &[u32]) -> Option<usize> {
+        Some(self.pm.as_ref()?.busy_pages(busy, mine))
+    }
+
+    /// `BatchLm::assert_writable` (plain: nothing to check).
+    #[cfg(debug_assertions)]
+    pub fn assert_writable(&self, slot: usize, lo: usize, hi: usize) {
+        if let Some(m) = &self.pm {
+            m.assert_writable(slot, lo, hi);
+        }
+    }
+
+    /// `BatchLm::check_pages`.
+    #[cfg(debug_assertions)]
+    pub fn check_pages(&self) {
+        if let Some(m) = &self.pm {
+            m.check();
+        }
     }
 
     /// `BatchLm::page_state`: page `page`'s (refs, pinned).

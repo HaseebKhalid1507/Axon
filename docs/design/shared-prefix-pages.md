@@ -2,9 +2,30 @@
 
 - Author: gojo (sharekv track), for Jawz (foreman). Date: 2026-10-27 (checkpoint 0, design); 2026-11-04 moved here.
 - Status: **C1 + C2 landed in #164, with no behaviour change** (the refcounted, pinnable `PageMap`; the host
-  `PrefixIndex`; the `BatchLm` share calls; the immutability rule, checked in debug builds). Nothing maps, pins or
-  indexes pages yet. **C3** (the engine: claim, index, evict) and **C4** (in-flight dedupe) are follow-up PRs. The
-  sections below are the checkpoint-0 design as written, read on main `0c23a87`; file:line references are from then.
+  `PrefixIndex`; the `BatchLm` share calls; the immutability rule, checked in debug builds). **C3** (the engine:
+  claim, index, evict; #187) is PR #207: what it built against this design is in "What C3 built" below. **C4**
+  (in-flight dedupe) is a follow-up PR. The sections below are the checkpoint-0 design as written, read on main
+  `0c23a87`; file:line references are from then.
+- **What C3 built** (main `ad0c65e`, after #201's exclusive tier; where it differs from §3):
+  - Claim (§3.4) is phase 1 only: no copy-on-write. A prompt that continues mid-way into a page some other slot or
+    the index holds is fed again from that page's start; a page the slot alone holds and the index has leaves the
+    index (with every block after it) and is written in place.
+  - A page is indexed only under a parent page its slot holds; a duplicate block (the index has it at another page)
+    stays the slot's own, and so do its later pages. So a warm block's descendants are all warm, and the warm set
+    can always be evicted leaf by leaf.
+  - #201's seam (its design §2.6): `Tier::drop_resident` and `Tier::keep_resident` are C3's. The tier keeps the set
+    of stored keys whose bytes the index keeps on the GPU, so those copies stay class 0 (GPU-held) after their slot
+    lets go; a spill with sharing on stores no indexed page (it stays on the GPU), and eviction copies it first.
+  - Admission's room with sharing on: every page no running request holds and its claim doesn't (free, warm, idle
+    slots'), counted once (`BatchLm::busy_pages`). The warm and shared counts are the index's own O(1) counters, not
+    `PoolPages` fields (`BatchLm::pages` runs several times a step).
+  - Not in C3: in-flight dedupe (C4, #188), a preempted or unfed prefill re-claiming its warm pages (#212),
+    copy-on-write. A duplicate block keeps its slot's later pages out of the index (#213).
+  - Off by default, opt-in with `AXON_SHARE_KV=1` (open question 4's answer): #207's timing round on an RTX 4090
+    failed two of #187's clauses, the fan-out siblings' increment (0.26× idle, 0.49× busy, against ≤ 0.25×) and s4's
+    TTFT-new (1.00×, against ≤ 0.6×); warm/GB was untestable there (docs/log/2026-11-06-shared-prefix-pages-c3.md).
+    What leads to a default-on decision: warm/GB measured where the pool fills (#210), and a subagent-start TTFT
+    cell whose ceiling is worked out before it runs (#211).
 - **What C3 inherits from C1 + C2 as landed** (where it differs from the design below):
   - `warm` and `excl` are `PageMap` methods, not `PoolPages` fields (§3.2 had them there): `BatchLm::pages` runs
     several times per engine step and nothing reads them yet. C3 adds them where admission reads them (§3.6) and

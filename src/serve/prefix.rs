@@ -20,8 +20,6 @@
 //! first. A lookup touches deepest first (a prefix is never older than its
 //! extension).
 
-#![cfg_attr(not(test), allow(dead_code))] // the engine takes it in C3
-
 use crate::kvsave::PAGE;
 use crate::kvstore::{Key, ROOT, chain};
 use std::collections::{BTreeSet, HashMap};
@@ -72,6 +70,11 @@ pub struct PrefixIndex {
     /// Page -> its key (a page is indexed under one key at most).
     by_page: HashMap<u32, Key>,
     tick: u64,
+    /// Blocks no slot holds (warm: the pool keeps their pages for a later
+    /// prompt) and blocks more than one slot holds (shared), kept as the
+    /// holds change (/slots and /metrics read them every step).
+    unheld: usize,
+    shared: usize,
 }
 
 impl Default for PrefixIndex {
@@ -88,20 +91,41 @@ impl PrefixIndex {
             lru: BTreeSet::new(),
             by_page: HashMap::new(),
             tick: 0,
+            unheld: 0,
+            shared: 0,
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn root(&self) -> Key {
         self.root
     }
 
     /// Indexed pages.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// The block `key` extends (the root for a first block), if indexed.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))] // the engine's debug check
+    pub fn parent(&self, key: Key) -> Option<Key> {
+        self.map.get(&key).map(|n| n.parent)
+    }
+
+    /// Indexed pages no slot holds (warm).
+    pub fn warm(&self) -> usize {
+        self.unheld
+    }
+
+    /// Indexed pages more than one slot holds.
+    pub fn shared(&self) -> usize {
+        self.shared
     }
 
     /// The key under which `page` is indexed, if it is.
@@ -144,6 +168,22 @@ impl PrefixIndex {
         }
         for &(k, _) in out.iter().rev() {
             self.touch(k);
+        }
+        out
+    }
+
+    /// `walk` without the touch (admission's accounting, `uncached`: a
+    /// request that waits doesn't make its prefix younger).
+    pub fn peek(&self, tokens: &[u32]) -> Vec<(Key, u32)> {
+        let mut out: Vec<(Key, u32)> = Vec::new();
+        let mut parent = self.root;
+        for b in tokens.chunks_exact(PAGE) {
+            let key = chain(parent, b);
+            match self.map.get(&key) {
+                Some(n) if n.parent == parent && *n.tokens == *b => out.push((key, n.page)),
+                _ => break,
+            }
+            parent = key;
         }
         out
     }
@@ -199,6 +239,7 @@ impl PrefixIndex {
                 last: self.tick,
             },
         );
+        self.unheld += 1;
         self.lru.insert((self.tick, key));
         self.by_page.insert(page, key);
         Ins::New(key)
@@ -211,6 +252,11 @@ impl PrefixIndex {
             self.lru.remove(&(n.last, key));
         }
         n.holds += 1;
+        match n.holds {
+            1 => self.unheld -= 1,
+            2 => self.shared += 1,
+            _ => {}
+        }
     }
 
     /// A slot let `key`'s page go.
@@ -218,6 +264,11 @@ impl PrefixIndex {
         let n = self.map.get_mut(&key).expect("an indexed block");
         assert!(n.holds > 0, "release without hold");
         n.holds -= 1;
+        match n.holds {
+            0 => self.unheld += 1,
+            1 => self.shared -= 1,
+            _ => {}
+        }
         if Self::evictable(n) {
             self.lru.insert((n.last, key));
         }
@@ -232,6 +283,11 @@ impl PrefixIndex {
     fn remove(&mut self, key: Key) -> Evicted {
         let n = self.map.remove(&key).expect("an indexed block");
         debug_assert!(n.kids.is_empty());
+        match n.holds {
+            0 => self.unheld -= 1,
+            1 => {}
+            _ => self.shared -= 1,
+        }
         self.lru.remove(&(n.last, key));
         self.by_page.remove(&n.page);
         if n.parent != self.root {
@@ -286,6 +342,8 @@ impl PrefixIndex {
             n.holds = 0; // the own holder's page leaves the index, held
             if h == 0 {
                 self.lru.remove(&(n.last, k));
+            } else {
+                self.unheld += 1; // (h is 1: checked above)
             }
             out.push(self.remove(k));
         }
@@ -319,6 +377,10 @@ impl PrefixIndex {
                 "block {k:#x}: LRU"
             );
         }
+        let unheld = self.map.values().filter(|n| n.holds == 0).count();
+        assert_eq!(self.unheld, unheld, "warm blocks");
+        let shared = self.map.values().filter(|n| n.holds > 1).count();
+        assert_eq!(self.shared, shared, "shared blocks");
         let roots = self.map.values().filter(|n| n.parent == self.root).count();
         assert_eq!(kids + roots, self.map.len());
         assert_eq!(self.by_page.len(), self.map.len());
@@ -437,6 +499,82 @@ mod tests {
         let order: Vec<u32> = std::iter::from_fn(|| x.pop_lru_leaf().map(|e| e.page)).collect();
         assert_eq!(order, [2, 1, 0]);
         assert!(x.is_empty());
+    }
+
+    /// `peek` is `walk` without the touch: the same blocks, and the
+    /// eviction order as it was (a request that waits doesn't make its
+    /// prefix younger). Two copies of one index, A (2 blocks) indexed
+    /// before B (1 block): one only peeked at, the other walked.
+    #[test]
+    fn peek_is_walk_without_the_touch() {
+        let (a, b) = (toks(1, 2 * PAGE), toks(2, PAGE));
+        let fresh = || {
+            let mut x = PrefixIndex::default();
+            put(&mut x, &a, 0);
+            put(&mut x, &b, 2);
+            x
+        };
+        let mut c = a.clone();
+        c.extend(toks(3, 10));
+        let pages = |w: &[(Key, u32)]| w.iter().map(|&(_, p)| p).collect::<Vec<_>>();
+        // Peeked, however often: B is still the most recent, so A's leaf
+        // goes first.
+        let mut x = fresh();
+        let w = x.peek(&c);
+        assert_eq!(pages(&w), [0, 1]);
+        assert!(x.peek(&toks(9, PAGE)).is_empty());
+        x.peek(&a);
+        assert_eq!(x.peek(&c), w);
+        assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(1));
+        // Walked: the same blocks, and the walk touches them, so A is
+        // younger than B now and B's leaf goes first.
+        let mut y = fresh();
+        assert_eq!(y.walk(&c), w);
+        assert_eq!(y.pop_lru_leaf().map(|e| e.page), Some(2));
+        assert_eq!(y.pop_lru_leaf().map(|e| e.page), Some(1));
+        // On the peeked copy, a walk of A's first block alone makes it
+        // younger than B (A's leaf is gone: the block is a leaf now).
+        x.walk(&a[..PAGE]);
+        assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(2));
+        assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(0));
+    }
+
+    /// The warm and shared counts follow the holds (hold, release, evict,
+    /// unindex), as `check` recounts them.
+    #[test]
+    fn warm_and_shared_counts() {
+        let mut x = PrefixIndex::default();
+        let a = toks(1, 3 * PAGE);
+        let k: Vec<Key> = put(&mut x, &a, 0)
+            .iter()
+            .map(|r| match r {
+                Ins::New(k) => *k,
+                _ => unreachable!(),
+            })
+            .collect();
+        let counts = |x: &PrefixIndex| (x.warm(), x.shared());
+        assert_eq!(counts(&x), (3, 0));
+        for &kk in &k {
+            x.hold(kk);
+        }
+        x.hold(k[0]);
+        x.hold(k[0]);
+        assert_eq!(counts(&x), (0, 1));
+        x.check(|p| if p == 0 { 3 } else { 1 });
+        x.release(k[2]);
+        x.release(k[0]);
+        assert_eq!(counts(&x), (1, 1));
+        x.check(|p| [2, 1, 0][p as usize]);
+        assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(2));
+        assert_eq!(counts(&x), (0, 1));
+        // Unindexing the held page 1 (alone): it leaves held, not warm.
+        x.release(k[0]);
+        assert_eq!(x.unindex_subtree(k[1]).map(|v| v.len()), Ok(1));
+        assert_eq!(counts(&x), (0, 0));
+        x.check(|p| u32::from(p == 0));
+        x.release(k[0]);
+        assert_eq!(counts(&x), (1, 0));
+        x.check(|_| 0);
     }
 
     #[test]

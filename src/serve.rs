@@ -125,9 +125,12 @@ pub struct Opts {
     /// Positions per slot at most (None: the context; tests shrink the pool
     /// with it).
     pub slot_ctx: Option<usize>,
-    /// A paged pool's KV pages (None: as many as fit; tests squeeze the
-    /// pool with it).
+    /// A paged pool's KV pages (None: AXON_KV_PAGES, else as many as fit;
+    /// tests squeeze the pool with it).
     pub kv_pages: Option<usize>,
+    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, off unless
+    /// "1": opt-in, #207's timing clauses; a paged pool only).
+    pub share: Option<bool>,
     /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
     /// with Some(false)).
     pub paged: Option<bool>,
@@ -1053,6 +1056,19 @@ fn engine(
     stop: Arc<AtomicBool>,
 ) {
     let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
+    // A paged pool of a set size: tests (`Opts::kv_pages`), or
+    // AXON_KV_PAGES=N (serve gates under an undersized pool; as tests',
+    // refused if no paged pool fits).
+    let kv_pages = match o.kv_pages {
+        Some(k) => Some(k),
+        None => match kv_pages_env() {
+            Ok(k) => k,
+            Err(why) => {
+                let _ = ready.send(Err(Refused(why)));
+                return;
+            }
+        },
+    };
     let rope = crate::rope::RopeArgs {
         ctx: o.ctx,
         ..o.rope.clone()
@@ -1227,8 +1243,8 @@ fn engine(
                 };
                 paged_miss = Some(why);
             }
-            // Tests: fewer pages (the cap within them).
-            plan.map(|p| match o.kv_pages {
+            // Tests, AXON_KV_PAGES: fewer pages (the cap within them).
+            plan.map(|p| match kv_pages {
                 Some(k) => PagedPlan {
                     pages: k.min(p.pages),
                     cap: p.cap.min(k.min(p.pages) * PAGE_TOKENS),
@@ -1297,7 +1313,7 @@ fn engine(
         Asked {
             parallel: o.parallel,
             parallel_set: o.parallel_set,
-            paged: o.kv_pages.is_some(),
+            paged: kv_pages.is_some(),
         },
         &plan,
         paged.is_some(),
@@ -1405,6 +1421,10 @@ fn engine(
             b.set_grow_tokens(g);
         }
         b.metrics = Some(o.metrics.clone());
+        // Shared prefixes (a paged pool's): said at start when on.
+        if b.set_share(o.share.unwrap_or_else(share_env)) && o.log {
+            eprintln!("axon serve: shared prefix KV pages on (AXON_SHARE_KV=1)");
+        }
         b
     });
     // What decides the output bits, before the KV RAM tier's allocator
@@ -1846,6 +1866,37 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
 /// (`paged_env`, read once at serve's start).
+/// AXON_SHARE_KV: shared prefix KV pages, off unless "1" (`share_on`).
+fn share_env() -> bool {
+    share_on(std::env::var("AXON_SHARE_KV").ok().as_deref())
+}
+
+/// AXON_SHARE_KV's value read: on for "1" only, opt-in. #187 ships sharing
+/// off by default if any of its timing clauses fails, and #207's did (the
+/// fan-out's siblings and s4's TTFT-new; docs/log/2026-11-06-shared-prefix-pages-c3.md).
+fn share_on(v: Option<&str>) -> bool {
+    v.is_some_and(|v| v.trim() == "1")
+}
+
+/// AXON_KV_PAGES=N: a paged pool of N KV pages at most (None: unset). Not
+/// a positive number: Err, the server refuses to start.
+fn kv_pages_env() -> Result<Option<usize>, String> {
+    kv_pages_of(std::env::var("AXON_KV_PAGES").ok().as_deref())
+}
+
+/// `kv_pages_env` of the variable's value.
+fn kv_pages_of(v: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v.trim().parse::<usize>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err(format!(
+            "AXON_KV_PAGES={v:?}: a number of KV pages, at least 1"
+        )),
+    }
+}
+
 fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
     device == Device::Cuda && parallel > 1 && paged_env
 }
@@ -2118,6 +2169,7 @@ struct EngineOpts {
     parallel_set: bool,
     slot_ctx: Option<usize>,
     kv_pages: Option<usize>,
+    share: Option<bool>,
     paged: Option<bool>,
     kv_grow: Option<usize>,
     prefill_chunk: usize,
@@ -2181,6 +2233,12 @@ impl Server {
     pub fn tier_faults(&self) -> &tier::Faults {
         &self.sh.metrics.tier_faults
     }
+
+    /// Claims so far that unindexed a page to write it in place
+    /// (`Metrics::unindexed`).
+    pub fn unindexed(&self) -> u64 {
+        self.sh.metrics.unindexed.load(Ordering::Relaxed)
+    }
 }
 
 impl Server {
@@ -2235,6 +2293,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         kv_pages: o.kv_pages,
+        share: o.share,
         paged: o.paged,
         kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
@@ -3315,6 +3374,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        share: None,
         paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,

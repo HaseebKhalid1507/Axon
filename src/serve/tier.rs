@@ -363,11 +363,16 @@ impl Faults {
 /// evicts them first; the sequence then lets go of the evicted ones
 /// (`drain`), and its rows stay. A page whose rows no sequence holds any
 /// more is class 1, RAM's own (docs/design/kv-ram-tier-exclusive.md §2).
+/// Shared prefixes (serve/prefix.rs) add the other holder of §2.6: a page
+/// the prefix index keeps on the GPU after its slot let it go (`warm`).
 pub(super) struct Tier<P> {
     pub store: PageStore<P>,
     /// Image bytes of a page.
     pub page: usize,
     keys: Vec<Vec<Key>>,
+    /// Stored pages the prefix index keeps on the GPU, each a device holder
+    /// (`keep_resident`, until `drop_resident` or the store evicts it).
+    warm: std::collections::HashSet<Key>,
     metrics: Option<Arc<Metrics>>,
 }
 
@@ -381,6 +386,7 @@ impl<P> Tier<P> {
             store: PageStore::new(pages * page),
             page,
             keys: vec![Vec::new(); seqs],
+            warm: Default::default(),
             metrics,
         }
     }
@@ -436,6 +442,42 @@ impl<P> Tier<P> {
         first > self.stored(s) && self.store.peek_len(&held[..first * PAGE]) < first * PAGE
     }
 
+    /// The prefix index keeps `key`'s page on the GPU (a slot about to let it
+    /// go: called before that slot's `truncate`, so the page stays class 0
+    /// throughout, design §2.6). Nothing if the store doesn't have it, or
+    /// the index is its holder already.
+    fn keep_resident(&mut self, key: Key) {
+        if self.store.parent_of(key).is_some() && self.warm.insert(key) {
+            self.store.resident(key, true);
+        }
+    }
+
+    /// `truncate` for a slot the prefix index may keep pages of on the GPU
+    /// (`indexed`: the keys it has): its stored pages past `pages` that the
+    /// index has stay class 0 (`keep_resident`, first), the rest leave the
+    /// device with the slot.
+    pub fn handover(&mut self, s: usize, pages: usize, indexed: impl Fn(Key) -> bool) {
+        let warm: Vec<Key> = (self.keys[s].iter().skip(pages).copied())
+            .filter(|&k| indexed(k))
+            .collect();
+        for k in warm {
+            self.keep_resident(k);
+        }
+        self.truncate(s, pages);
+    }
+
+    /// The prefix index lets `key`'s page go from the GPU (evicted, after
+    /// `PoolTier::spill_page` stored it): RAM's own now, unless a slot holds
+    /// it too. Nothing if the index wasn't its holder.
+    pub fn drop_resident(&mut self, key: Key) {
+        if self.warm.remove(&key) {
+            self.store.resident(key, false);
+            if let Some(m) = &self.metrics {
+                m.kv_ram_gpu_pages.store(self.store.dups() as u64, Relaxed);
+            }
+        }
+    }
+
     /// Sequence `s` gains the stored page `key` (the next of its pages).
     fn push(&mut self, s: usize, key: Key) {
         self.store.resident(key, true);
@@ -458,6 +500,7 @@ impl<P> Tier<P> {
                 ks.pop();
             }
         }
+        self.warm.retain(|k| !gone.contains(k));
         ev.into_iter().map(|(_, p)| p).collect()
     }
 
@@ -489,8 +532,8 @@ impl<P> Tier<P> {
     }
 
     /// Debug builds: the sequences' keys are stored chains from ROOT, and
-    /// each page's device holders are the sequences naming it (none for
-    /// any other page).
+    /// each page's device holders are the sequences naming it and the
+    /// prefix index if it keeps it (none for any other page).
     fn check(&self) {
         if !cfg!(debug_assertions) {
             return;
@@ -507,6 +550,10 @@ impl<P> Tier<P> {
                 *holders.entry(k).or_default() += 1;
                 parent = k;
             }
+        }
+        for &k in &self.warm {
+            assert!(self.store.parent_of(k).is_some(), "{k:x}: warm, not stored");
+            *holders.entry(k).or_default() += 1;
         }
         for (&k, &n) in &holders {
             assert_eq!(self.store.gpu(k), n, "{k:x}: device holders");
@@ -956,7 +1003,6 @@ impl PoolTier {
     /// copied (D2H, ordered before any later reuse of the page) and
     /// stored; else dropped (an orphan; its prefix is prefilled again).
     /// Whether the store has it after.
-    #[allow(dead_code)] // PR C3 calls it (its page-level eviction); the seam agreed on the r10 thread
     pub fn spill_page(
         &mut self,
         net: &Backend,
@@ -1368,6 +1414,51 @@ mod tests {
         // Truncated: sequence 0's tail is class 1.
         t.truncate(0, 1);
         assert_eq!(t.store.dups(), 1);
+        t.check();
+    }
+
+    /// Shared prefixes: a slot's pages the prefix index keeps on the GPU
+    /// stay class 0 when the slot lets them go (`handover`), the index
+    /// their one device holder however many slots hand them over, until
+    /// `drop_resident` (class 1, RAM's own) or the store evicts them
+    /// (`drain` forgets them; the index's GPU page stays).
+    #[test]
+    fn the_index_keeps_pages_class0() {
+        let mut t: Tier<u8> = Tier::new(4, 1, 2, None);
+        let a = toks(1, 3);
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        let ks = t.keys[0].clone();
+        let gpu = |t: &Tier<u8>| ks.iter().map(|&k| t.store.gpu(k)).collect::<Vec<_>>();
+        // The index has a's pages 1 and 2 (page 0 the slot's own: say a
+        // duplicate of another page).
+        t.handover(0, 0, |k| k != ks[0]);
+        assert_eq!(
+            (t.stored(0), gpu(&t), t.store.dups()),
+            (0, vec![0, 1, 1], 2)
+        );
+        t.check();
+        // Slot 1 names them again (no copy), then keeps page 0 only.
+        assert_eq!(store_seq(&mut t, 1, &a), 3);
+        assert_eq!(gpu(&t), [1, 2, 2]);
+        t.handover(1, 1, |_| true);
+        assert_eq!(gpu(&t), [1, 1, 1], "the index: one holder each");
+        t.check();
+        // Evicted from the GPU: RAM's own. Twice: the index isn't its holder.
+        t.drop_resident(ks[2]);
+        t.drop_resident(ks[2]);
+        assert_eq!(gpu(&t), [1, 1, 0]);
+        t.check();
+        // A full store evicts a warm page (class 0) before a class-1 one,
+        // and the index's holder goes with it (the GPU page stays indexed).
+        let mut t: Tier<u8> = Tier::new(2, 1, 2, None);
+        let (a, b, c) = (toks(1, 1), toks(2, 1), toks(3, 1));
+        assert_eq!(store_seq(&mut t, 0, &a), 1);
+        t.handover(0, 0, |_| true);
+        assert_eq!(store_seq(&mut t, 1, &b), 1);
+        t.truncate(1, 0);
+        assert_eq!(store_seq(&mut t, 1, &c), 1);
+        assert!(t.warm.is_empty(), "the evicted warm page forgotten");
+        assert_eq!((t.peek(&a), t.peek(&b)), (0, PAGE), "class 0 first");
         t.check();
     }
 
