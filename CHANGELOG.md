@@ -12,7 +12,9 @@ measurements behind them.
   vectors: 519 MiB on the 0.5B) before any RAM check ran, so under a memory limit the FP8 0.5B was OOM-killed at 765
   MiB and below. The conversion's need (the converted tensors, the conversion threads' buffers) is now checked
   first, on every device, worded as the CPU model's refusal (#185). Near the edge it waits for the CUDA context,
-  which the CLI makes beside the load, and reads the RAM again.
+  which the CLI makes beside the load, and reads the RAM again. Its tolerance is the memory cgroup's charge batches
+  only (256 KiB a CPU): a conversion gives nothing back and its estimate is exact. The CUDA kernels' module (about
+  25 MiB) is still loaded after this check and before the split's (#217).
 - **#209: a split needs the larger of its two steps, not their sum.** The GPU half's upload staging (#184) is freed
   before the CPU half is built; the need is now the larger, each with its own residents (the GPU half's credit
   offsets the CPU half only). The refusal says so, and its `--ctx` is the CPU half's.

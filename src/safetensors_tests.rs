@@ -1756,11 +1756,12 @@ fn conv_need_of(m: &Model) -> ConvNeed {
 /// and with no RAM figure; `axon info`'s load (no conversion) never asks.
 /// A BF16 checkpoint's refusal names its GGUF, which is read from the file;
 /// an FP8 one's doesn't (no GGUF holds its weights). The tiny checkpoints
-/// need less than `model::ram_tolerance` (a 2 MiB arena and a few KiB of
-/// buffers, against 32 MiB and up), so their edge would be below zero
-/// (debug builds trapped the subtraction, release ones wrapped it and
-/// wrapped it back in the check): the test passes half the need as the
-/// tolerance, an edge inside it with the tolerance still added.
+/// need about `model::conv_tolerance` or less (a 2 MiB arena and a few KiB
+/// of buffers, against 256 KiB a CPU), so their edge can be below zero
+/// (with `model::ram_tolerance`, 32 MiB and up, it was: debug builds
+/// trapped the subtraction, release ones wrapped it and wrapped it back in
+/// the check): the test passes half the need as the tolerance, an edge
+/// inside it with the tolerance still added.
 /// `fp8_conversion_need_of_the_checkpoint` has the real tolerance.
 #[test]
 fn conversion_refused_before_it_is_made() {
@@ -1792,9 +1793,9 @@ fn conversion_refused_before_it_is_made() {
     assert_eq!(asked.get(), need.total(), "{need:?}");
     let tol = need.total() / 2;
     eprintln!(
-        "tiny bf16: need {} KiB, model::ram_tolerance {} KiB, the test's {} KiB",
+        "tiny bf16: need {} KiB, model::conv_tolerance {} KiB, the test's {} KiB",
         need.total() >> 10,
-        crate::model::ram_tolerance() >> 10,
+        crate::model::conv_tolerance() >> 10,
         tol >> 10
     );
     let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1), tol) else {
@@ -1840,14 +1841,17 @@ fn conversion_refused_before_it_is_made() {
 
 /// #208 on the FP8 0.5B: its BF16 embedding and lm_head made F16 (2 x
 /// 151936 x 896 x 2 bytes, 519 MiB) with its vectors, and the threads'
-/// buffers, refused a byte under the edge, loaded at it.
+/// buffers, refused a byte under the edge, loaded at it. The edge is the
+/// need less `model::conv_tolerance` (the charge batches): a figure the
+/// dense tolerance (`model::ram_tolerance`) would let through is refused,
+/// as at b4b3's 719-743 MiB caps, where it was OOM-killed converting.
 #[test]
 fn fp8_conversion_need_of_the_checkpoint() {
     use crate::gguf::mem::{Avail, Bound};
     let Some(p) = crate::testutil::fp8_model_path() else {
         return;
     };
-    let tol = crate::model::ram_tolerance();
+    let tol = crate::model::conv_tolerance();
     let host = |bytes| {
         Some(Avail {
             bytes,
@@ -1881,6 +1885,11 @@ fn fp8_conversion_need_of_the_checkpoint() {
         "{e}"
     );
     assert!(load_ram(&p, wish, true, &|_| host(need.total() - tol), tol).is_ok());
+    let dense = crate::model::ram_tolerance();
+    assert!(
+        load_ram(&p, wish, true, &|_| host(need.total() - dense), tol).is_err(),
+        "loaded at the dense tolerance's edge ({dense} B)"
+    );
 }
 
 /// The fingerprint's `act` on the CPU is the net's, the type its FP8

@@ -1357,11 +1357,12 @@ fn conv_need(jobs: &[Job], aux_len: usize, threads: usize) -> ConvNeed {
 
 /// `load`'s RAM check (pure, #208): Err to refuse converting a checkpoint's
 /// tensors, `need`, when it's over the RAM available (`gguf::mem::avail`)
-/// and the tolerance (`model::ram_tolerance`), worded as the CPU model's
-/// refusal (#185): the bound named, then the ways out. The copies are made
-/// on every device (the GPU uploads them, an FP8 checkpoint's embedding and
-/// head as Q8_0), so a GPU isn't one; a BF16/F16 checkpoint's GGUF
-/// is read from its file instead, an FP8 one has none. Ok with no RAM figure.
+/// and the tolerance (`model::conv_tolerance`: the charge batches only),
+/// worded as the CPU model's refusal (#185): the bound named, then the
+/// ways out. The copies are made on every device (the GPU uploads them, an
+/// FP8 checkpoint's embedding and head as Q8_0), so a GPU isn't one; a
+/// BF16/F16 checkpoint's GGUF is read from its file instead, an FP8 one has
+/// none. Ok with no RAM figure.
 pub(crate) fn conv_verdict(
     arch: &str,
     fp8: bool,
@@ -1484,13 +1485,13 @@ pub fn load(
         check,
         fill,
         &avail_settled,
-        crate::model::ram_tolerance(),
+        crate::model::conv_tolerance(),
     )
 }
 
 /// `load`, with the RAM available for a conversion of the bytes given
 /// read by `ram` (`avail_settled`) and the check's tolerance `tol`
-/// (`model::ram_tolerance`); tests pass their own.
+/// (`model::conv_tolerance`); tests pass their own.
 pub(crate) fn load_ram(
     dir: &Path,
     check: impl FnOnce(&Model) -> crate::gguf::CopyWish,

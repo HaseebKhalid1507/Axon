@@ -811,10 +811,30 @@ fn affinity_cpus() -> u64 {
 }
 
 /// `DENSE_CHECK_TOLERANCE` plus a charge batch for each of the `cpus` the
-/// process may run on (`MEMCG_BATCH`): 6 MiB more on a 24-CPU laptop,
+/// process may run on (`batch_tolerance`): 6 MiB more on a 24-CPU laptop,
 /// 48 MiB on a 192-CPU host, where the batches alone could eat a fixed 32.
 pub(crate) fn dense_tolerance(cpus: u64) -> u64 {
-    DENSE_CHECK_TOLERANCE + cpus * MEMCG_BATCH
+    DENSE_CHECK_TOLERANCE + batch_tolerance(cpus)
+}
+
+/// A charge batch for each of the `cpus` (`MEMCG_BATCH`): how far the
+/// figure read can be off, and nothing more.
+fn batch_tolerance(cpus: u64) -> u64 {
+    cpus * MEMCG_BATCH
+}
+
+/// The loader's conversion check's tolerance (`safetensors::load`, #208):
+/// only this process's charge batches (`batch_tolerance`), none of
+/// `DENSE_CHECK_TOLERANCE`, which is there for what a dense load gives
+/// back before its peak. A conversion gives nothing back (every converted
+/// tensor stays, the threads' buffers are held to the end), and its
+/// estimate is exact: the FP8 0.5B's need of 554.0 MiB grew the cgroup's
+/// unreclaimable memory by 554.7-555.0 MiB under five caps (job
+/// 1106-142807-b4b3, bella). With the dense tolerance, 34 MiB on 8 CPUs,
+/// the check let through caps the conversion was then OOM-killed in
+/// (719-743 MiB there), where it refuses now.
+pub(crate) fn conv_tolerance() -> u64 {
+    batch_tolerance(affinity_cpus())
 }
 
 /// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
@@ -6600,6 +6620,9 @@ mod ram_dense_tests {
         assert_eq!(dense_tolerance(192), 80 * MIB);
         assert_eq!(dense_tolerance(24), 38 * MIB);
         assert_eq!(dense_tolerance(8), 34 * MIB);
+        // A conversion's (#208): the batches alone, 2 MiB on 8 CPUs.
+        assert_eq!(batch_tolerance(8), 2 * MIB);
+        assert_eq!(ram_tolerance() - conv_tolerance(), DENSE_CHECK_TOLERANCE);
     }
 
     /// #143: a split's CPU half (`Qwen2::new_layers(m, true, k)`) is what
