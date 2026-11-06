@@ -398,6 +398,9 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
             (_, None) => return Err("GPU layers without a GPU".into()),
             (_, d) => d,
         };
+        if let Some(e) = dev.and_then(|(_, module)| f8_split_refusal(module, k, n, auto)) {
+            return Err(format!("{g}/{n} layers on the GPU: {e}"));
+        }
         // Streaming feeds the GPU half whole prompt chunks: its batch
         // scratch is sized for that, decided up front: if the plan with
         // the bigger scratch and the stream reserve doesn't fit, no
@@ -728,6 +731,24 @@ pub(crate) fn split_refusal(m: &Model) -> Option<String> {
         "gemma3 doesn't split across the CPU and GPU yet: the whole model goes on the GPU (a \
          smaller --ctx), or --device cpu"
             .to_string()
+    })
+}
+
+/// Why a split with `k` of `n` layers on the CPU can't run the GPU half in
+/// `module`, if it can't: an FP8 module (fast mode, sm_89+) runs every
+/// layer of a dense model on one GPU only (`cuda::qwen2::F8_WHOLE`).
+/// Refused before the plan, whose refusal the split wraps as a VRAM
+/// shortfall ("or fewer --gpu-layers", #209: refused too). The ways out:
+/// --numerics exact (its Q8_0 form splits), or, for a split chosen with
+/// --gpu-layers, every layer on the GPU if it has room (an automatic split
+/// was picked because they don't fit).
+pub(crate) fn f8_split_refusal(module: &Module, k: usize, n: usize, auto: bool) -> Option<String> {
+    (k > 0 && module.f8()).then(|| {
+        let all = match auto {
+            true => String::new(),
+            false => format!(", or --gpu-layers {n} (every layer on the GPU), if it has room"),
+        };
+        format!("{}, which splits{all}", crate::cuda::qwen2::F8_WHOLE)
     })
 }
 

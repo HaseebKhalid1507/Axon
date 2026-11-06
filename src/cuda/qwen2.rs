@@ -146,6 +146,13 @@ const PREFILL_BATCH: usize = 1152;
 /// round 4): `build` takes `PREFILL_BATCH` only when its extra scratch fits
 /// besides, so the bigger passes never cost context or tip a placement.
 const PLAN_BATCH: usize = 1024;
+
+/// The plan's refusal of an FP8 module (fast mode, sm_89+) for anything
+/// but every layer of a dense model on one GPU; a split says it with its
+/// own ways out (`hybrid::f8_split_refusal`).
+pub(crate) const F8_WHOLE: &str = "FP8 natively runs every layer of a dense model on one GPU; \
+                                   --numerics exact runs its Q8_0 form";
+
 /// `PREFILL_BATCH` for the GPU half of a split (first > 0, `crate::hybrid`):
 /// the CPU half's batched pass sets the pace, so the hybrid feeds at most
 /// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
@@ -1605,11 +1612,7 @@ impl<'g> CudaQwen2<'g> {
         // as Q8_0 (D1).
         let fp8 = crate::safetensors::is_fp8(m);
         if module.f8() && (first > 0 || !has_head || mla_d.is_some() || moe_dims.is_some()) {
-            return Err(
-                "FP8 natively runs every layer of a dense model on one GPU; \
-                        --numerics exact runs its Q8_0 form"
-                    .into(),
-            );
+            return Err(F8_WHOLE.into());
         }
         let place_h = |t: &'m Tensor, a: &mut Arena<'m>| match fp8 && t.qtype.id == quant::F16 {
             true => place_q8(t, a, None),
