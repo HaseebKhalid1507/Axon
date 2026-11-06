@@ -1,0 +1,67 @@
+[axon-run 16:16:41] submitted 1106-161641-fa75 by /home/haseeb/.cache/axon-ramchk2: /home/haseeb/.cache/axon-ramchk2/bin/axon-test-expectfail hybrid::tests::hybrid_fp8_split_needs_the_larger_step hybrid::tests::hybrid_fp8_split_refusal_names_what_works model::ram_dense_tests::split_refusal_wording_and_cap safetensors::tests::conversion_refused_before_it_is_made safetensors::tests::fp8_conversion_need_of_the_checkpoint safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu safetensors::tests::tiny_fp8_ram_arena_without_repack model::ram_dense_tests::copy_estimate_independent_of_threads --exact --nocapture
+[axon-run 17:19:13] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 17:19:13] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 17:19:13] scope axon-job-1106-161641-fa75-1794003553.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18962 MB): an OOM here kills only this job
+[axon-run 17:19:13] job 1106-161641-fa75 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-161641-fa75-1794003553 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk2/bin/axon-test-expectfail hybrid::tests::hybrid_fp8_split_needs_the_larger_step hybrid::tests::hybrid_fp8_split_refusal_names_what_works model::ram_dense_tests::split_refusal_wording_and_cap safetensors::tests::conversion_refused_before_it_is_made safetensors::tests::fp8_conversion_need_of_the_checkpoint safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu safetensors::tests::tiny_fp8_ram_arena_without_repack model::ram_dense_tests::copy_estimate_independent_of_threads --exact --nocapture --test-threads 6
+axon-q 17:19:13 start slot 16-23: /home/haseeb/.cache/axon-ramchk2/bin/axon-test-expectfail hybrid::tests::hybrid_fp8_split_needs_the_larger_step hybrid::tests::hybrid_fp8_split_refusal_names_what_works model::ram_dense_tests::split_r
+
+running 8 tests
+
+thread 'model::ram_dense_tests::copy_estimate_independent_of_threads' (1675053) panicked at src/model.rs:6626:9:
+assertion `left == right` failed
+  left: 0
+ right: 33554432
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'model::ram_dense_tests::split_refusal_wording_and_cap' (1675054) panicked at src/model.rs:6941:9:
+llama: the CPU half of the split (16 of 32 layers) needs about 2.41 GiB of RAM (the larger of two steps: the GPU half's upload staging 0.06 GiB, then its repacked weights 2.34 GiB, the KV cache of 8192 tokens 0.50 GiB, less the GPU half's 0.50 GiB of the copy, handed back as it goes up) and only 1.00 GiB is available (bound by cgroup /app.slice/split.scope memory.max 3072 MiB); to fit: more --gpu-layers than 16 (fewer layers on the CPU), if the GPU has room
+test model::ram_dense_tests::copy_estimate_independent_of_threads ... FAILED
+test model::ram_dense_tests::split_refusal_wording_and_cap ... FAILED
+tiny bf16: need 2312 KiB, model::conv_tolerance 34816 KiB, the test's 1156 KiB
+
+thread 'safetensors::tests::conversion_refused_before_it_is_made' (1675055) panicked at src/safetensors_tests.rs:1802:9:
+loaded a byte under the edge
+test safetensors::tests::conversion_refused_before_it_is_made ... FAILED
+
+thread 'safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu' (1675057) panicked at src/safetensors_tests.rs:1691:5:
+assertion `left == right` failed
+  left: GpuWays { whole: true, split: true, exact: false }
+ right: GpuWays { whole: true, split: true, exact: true }
+test safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu ... FAILED
+
+thread 'safetensors::tests::tiny_fp8_ram_arena_without_repack' (1675058) panicked at src/safetensors_tests.rs:1598:17:
+repack true: growth 4608 for 147456 e4m3 bytes
+test safetensors::tests::tiny_fp8_ram_arena_without_repack ... FAILED
+fp8 0.5b: 291 tensors converted, arena 534528 KiB (the embedding and head as F16 531776 KiB), buffers 32768 KiB (8 threads), tolerance 34816 KiB
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'safetensors::tests::fp8_conversion_need_of_the_checkpoint' (1675056) panicked at src/safetensors_tests.rs:1880:9:
+loaded a byte under the edge
+test safetensors::tests::fp8_conversion_need_of_the_checkpoint ... FAILED
+
+thread 'hybrid::tests::hybrid_fp8_split_refusal_names_what_works' (1675052) panicked at src/hybrid/tests.rs:1980:5:
+assertion `left == right` failed
+  left: "23/24 layers on the GPU: FP8 natively runs every layer of a dense model on one GPU; --numerics exact runs its Q8_0 form, or fewer --gpu-layers"
+ right: "23/24 layers on the GPU: FP8 natively runs every layer of a dense model on one GPU; --numerics exact runs its Q8_0 form, which splits, or --gpu-layers 24 (every layer on the GPU), if it has room"
+test hybrid::tests::hybrid_fp8_split_refusal_names_what_works ... FAILED
+fp8 0.5b 1/24, --ctx 512: need 141253 KiB, the larger of the staging 141253 KiB and the CPU half 87808 KiB (after the credit 264192 KiB); their sum 229061 KiB; tolerance 34816 KiB
+
+thread 'hybrid::tests::hybrid_fp8_split_needs_the_larger_step' (1675051) panicked at src/hybrid/tests.rs:1950:64:
+room for the larger step: "qwen2: the CPU half of the split (23 of 24 layers) needs about 0.22 GiB of RAM (the larger of two steps: the GPU half's upload staging 0.13 GiB, then its repacked weights 0.33 GiB, the KV cache of 512 tokens 0.01 GiB, less the GPU half's 0.25 GiB of the copy, handed back as it goes up) and only 0.10 GiB is available (bound by host MemAvailable); to fit: more --gpu-layers than 1 (fewer layers on the CPU), if the GPU has room"
+test hybrid::tests::hybrid_fp8_split_needs_the_larger_step ... FAILED
+
+failures:
+
+failures:
+    hybrid::tests::hybrid_fp8_split_needs_the_larger_step
+    hybrid::tests::hybrid_fp8_split_refusal_names_what_works
+    model::ram_dense_tests::copy_estimate_independent_of_threads
+    model::ram_dense_tests::split_refusal_wording_and_cap
+    safetensors::tests::conversion_refused_before_it_is_made
+    safetensors::tests::fp8_conversion_need_of_the_checkpoint
+    safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu
+    safetensors::tests::tiny_fp8_ram_arena_without_repack
+
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 892 filtered out; finished in 1.43s
+
+[axon-run 17:19:14] exit 101 after 1.6s (host bella)
