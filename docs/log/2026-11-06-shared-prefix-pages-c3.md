@@ -1,7 +1,7 @@
 # Shared-prefix KV pages, C3: the engine claims, indexes and evicts shared pages  (PR #207)
 
 - Date: 2026-11-06. Branch: feat/shared-prefix-c3. Base: main ad0c65e (#201's exclusive KV RAM tier and its tail-spill
-  drop rule included). Status: open.
+  drop rule included). Status: open; sharing opt-in after the timing round (Verdict).
 - Pick / design: issue #187 (agent workload row C, stage C3), design note
   [docs/design/shared-prefix-pages.md](../design/shared-prefix-pages.md) §3.3–3.7 ("What C3 built" in its header
   lists where the code differs), spec [docs/design/agent-workload.md](../design/agent-workload.md) §6 row C. Builds on
@@ -28,7 +28,8 @@
   the index lacks spills as before.
 - **Admission's room** (sharing on): every page no running request holds and the claim doesn't (free, warm, idle
   slots'), counted once (`BatchLm::busy_pages`, O(pages held), one bitmap a call). With sharing off, main's formula.
-- **`AXON_SHARE_KV=0`**: off; every path is main's. **`AXON_KV_PAGES=N`**: an N-page pool (at most what fits), the
+- **`AXON_SHARE_KV=1`: opt-in, off by default** (`afb16be`, after the timing round failed two of #187's clauses;
+  Verdict below). Unset or anything but `1`: off, every path is main's. **`AXON_KV_PAGES=N`**: an N-page pool (at most what fits), the
   undersized-pool identity gate's knob (#187: the CLI had none).
 - **Counts.** `/slots` `pages_warm` / `pages_shared`. `/metrics` `axon_kv_pages_warm`, `axon_kv_pages_shared`,
   `axon_prompt_shared_tokens_total`, `axon_pages_evicted_total`. They are the index's O(1) counters, not `PoolPages`
@@ -42,7 +43,7 @@
 - **Tests** (10 new): `serve::engine::claim_tests::claim_prefix_cases`, `serve::prefix::tests::{peek_is_walk_without_the_touch,
   warm_and_shared_counts}`, `serve::tier::tests::the_index_keeps_pages_class0`, `serve::tests::{kv_pages_env_parses,
   serve_share_matches_off, serve_share_fanout_idle, serve_share_pressure, serve_share_solo_handover,
-  serve_share_cancel_frees}`.
+  serve_share_cancel_frees}`; `afb16be` adds `serve::tests::share_kv_is_opt_in`.
 
 ## How it was verified
 Bella (RTX 5070 Ti Laptop, sm_120) for correctness. Timing on an RTX 4090 secure pod (the lead's allowance, ≤ $2 a
@@ -56,6 +57,8 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   600-word system text, greedy and seeded-sampled. Every reply == main's for: sharing on (default),
   `AXON_PAGE_SHUFFLE=1`, `AXON_SHARE_KV=0`, `--cache-ram 1G`, and an undersized pool `AXON_KV_PAGES=48` (alone, with
   `--cache-ram 1G`, with the shuffle).
+- At `afb16be` (sharing opt-in) the same md5 job as `md5share-v2.sh`: every arm that ran sharing on by default
+  sets `AXON_SHARE_KV=1`, and the default (off) and the undersized pool off are arms of their own.
 - Replay md5 under the shuffle (`replayshare.sh` via `replaymd5.sh`, bella): `agent_replay.py run` (main's copy),
   board trace, s4, one round; main vs this head with `AXON_PAGE_SHUFFLE=1`, both `--cache-ram 6G`.
 - Timing (design §6 row C; #187's clauses, read as fixed before any data, in the PR body §4):
@@ -82,7 +85,54 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
 | `serve_share_pressure` ×3, `--nocapture`, `AXON_SERVE_DEBUG=1` (diagnostic, jade GTX 1050) | `76b8f0b` | 1106-090454-2e5f | **PASS** 3 / 3 runs. Every chunked admission of round 2 claimed the prefix (256, 266 or 284 of 285 tokens cached); after the round 3 requests a server report 0 cached, against 4–5 preemptions + unfeeds in that round (every server of every run): the zeros are victims reset after admission, as diagnosed |
 | md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0); serve every reply == main: 7B f16 147/147, 7B q8 147/147, gemma3-1B f16 84/84, Qwen3-0.6B q8 147/147, CPU 0.5B 42/42, in every variant |
 | replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | **PASS**: MD5 SAME, 174 requests each, 0 errors, the round clean |
-| timing (4090 pod) | | not yet submitted | after the correctness gates |
+| timing: s4, warm/GB ladder, fan-out, servetime, s1 (4090 pod) | `76b8f0b` | 1106-094454-b75c, 1106-094455-4ac1, 1106-094455-e8ca, 1106-094456-10cf, 1106-094456-7274 | **two clauses FAIL** (table below) |
+| touched modules' tests + `share_kv_is_opt_in`, release (r3) | `afb16be` | pending | |
+| same, debug assertions + overflow checks (r3) | `afb16be` | pending | |
+| md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | pending | |
+| CI (`check`) | `afb16be`+ | | pending |
+
+### Timing (RTX 4090 pod, `76b8f0b` vs main `ad0c65e`)
+Pod `pod1` (zmu6vy2elvx0ft): RTX 4090 24 GB, secure RunPod, driver 595.91.07, power limit 450 W. Exclusive (`--timing`:
+each job waited for 120 s of 0 % foreign GPU load), both binaries' NVRTC caches warmed first. Every round clean
+(0 TAINTED), 0 errors. Up 2 h 15 min, $2.03; terminated by `downer.sh` at 11:55 once the last job ended.
+
+| clause (PR §4, fixed before any data) | job | main | this head | cand/main | verdict |
+|---|---|---|---|---|---|
+| s4 TTFT-new p50 ≤ 0.6× (3 rounds) | b75c | 1.382 s | 1.386 s | 1.003 | **FAIL** |
+| warm/GB ≥ 1.4× at the ladder's rung | 4ac1 | base warm 7 / 7, 14 / 14, 22 / 22, 29 / 29 turn-sessions at 8 / 16 / 24 / 32 | (not run: no rung) | | **UNTESTABLE** (`WARMLADDER UNTESTABLE`, exit 3) |
+| s1 ITL p99 ≤ 1.02× (3 rounds) | 7274 | 10.54 ms | 10.54 ms | 1.000 | PASS |
+| fan-out idle: siblings' (TTFT − leader's) p50 ≤ 0.25× | e8ca | 1.886 s | 0.493 s | 0.261 | **FAIL** |
+| fan-out idle: leader TTFT p50 ≤ 1.05× | e8ca | 0.549 s | 0.551 s | 1.004 | PASS |
+| fan-out busy (4 decoding): siblings' (TTFT − leader's) p50 ≤ 0.25× | e8ca | 1.339 s | 0.656 s | 0.490 | **FAIL** |
+| fan-out busy: leader TTFT p50 ≤ 1.05× | e8ca | 0.742 s | 0.720 s | 0.969 | PASS |
+| C=1 decode agg tok/s within 2 % (5 rounds + a warm one) | 10cf | 181.00 | 181.00 | 1.000 | PASS |
+| md5 == main (every timing run's replies) | all | | | | PASS: s4 and s1 `2aee881bcf75` on all 12 runs, fan-out SAME over 5 rounds × 2 variants |
+
+INFO (not clauses):
+- s4: re-prefilled tokens 1,665 → 577 (−65 %); goodput 125.96 → 126.87 tok/s; ITL p99 78.68 → 78.49 ms; TTFT-resume
+  p50 0.064 → 0.063 s; warm sessions 18 / 18 on both. s1: re-prefill 3,213 → 2,125 tokens; TTFT-new 0.999×.
+- Fan-out: siblings' TTFT p50 2.434 → 1.045 s idle (0.43×), 2.082 → 1.375 s busy (0.66×). Each sibling after the
+  leader prefilled 54 of the 6,006 shared tokens (busy: the first sibling prefilled 4,854–4,918 of them); main
+  prefilled 6,006, 6,006, ~3.1–3.4k, ~0.9–1.5k, then 54–246.
+- servetime C=8 / C=16: agg tok/s 1.000 / 1.000, ITL p99 1.001 / 1.000.
+- The harness's own `CLAUSE s4 warm/GB … FAIL` line (0.696 both) is not a clause: §4 moved warm/GB off the
+  canonical s4 cell ("The canonical s4 cell caps this clause at 18 / 14 = 1.29× whatever the feature does (§8), so it
+  moves to a cell with headroom"), to the ladder's rung. The ladder found none, so warm/GB is untestable on the 4090
+  (§4 rule 5): neither a pass nor a fail. Base kept every turn-session warm at every rung: the 4090's pool is 5,288
+  pages (338k positions) against bella's 1,722.
+
+**Which TTFT-new clause was registered.** #187's gate line reads "TTFT-new p50 for subagent starts ≤ 0.6×". The PR's
+§4 registered it on s4: "**s4 TTFT-new p50 ≤ 0.6×**, on the canonical s4 cell (the board trace's own sessions)". That
+text is in every revision of the PR body from its creation (11-06 12:39 UTC; the timing jobs were submitted at
+14:44 UTC) and in this log since `9610f6d` (07:38 EST). So it isn't a harness default: it counts. The fan-out
+cell (spec §6 row C, re-registered 10-27 in #160) has its own clause, the siblings' increment ≤ 0.25×, also in §4.
+The s4 clause was unreachable on its cell, and I should have checked that before registering it. Rebuilding the cell
+from the replay's own text builder at the board's flags shows why. Its 13 new sessions are forks. Each prompt's
+longest prefix shared with any earlier prompt is 1,134 tokens for 9 of them, 954, 1,122 and 8,192 for three, and 0
+for two. Their prompts are ~16.2k tokens (p50; compacted to half the 32k budget), so the p50 new prompt has 15,063
+tokens nothing can share. Sharing cuts its prefill by ~7 % at most (ESTIMATED ceiling ≈ 0.93×). The s4 cell measures
+the claim path's cost on new sessions (1.003×: none), not a saving. Per §4 ("I don't argue a miss away") it stands as
+a FAIL. The outcome doesn't hang on it: the fan-out clause fails on its own, in both variants.
 
 ### r1's two failures (3f6b): both test bugs, fixed in `76b8f0b` (tests only)
 - `serve::prefix::tests::peek_is_walk_without_the_touch` (prefix.rs:521, left `Some(2)`, right `Some(1)`;
@@ -108,4 +158,14 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   only `.strtab`, the symbol-name table, differs (134 bytes).
 
 ## Verdict
-Pending the gates. Rule (#187): if a timing clause fails, sharing ships off by default (`AXON_SHARE_KV` opt-in).
+**Sharing ships off by default; `AXON_SHARE_KV=1` turns it on** (`afb16be`). The rule (#187, PR §4): "If any clause
+fails, sharing ships off by default (`AXON_SHARE_KV=1` opt-in)". Two failed: the fan-out siblings' increment (idle
+0.261×, busy 0.490×, against ≤ 0.25×) and s4's TTFT-new p50 (1.003×, against ≤ 0.6×). warm/GB was untestable on the
+4090 (the ladder found no rung). s1 ITL p99, C=1 decode, the leader guards and every md5 passed. Off, the server
+runs main's admission, eviction and spills, decision for decision (the old kill switch's path, md5-gated in 7cb0's
+`AXON_SHARE_KV=0` arm and again at `afb16be`). On, it is as measured above: same bits, same decode, 65 % fewer
+re-prefilled tokens at s4, the fan-out's siblings at 0.43× (idle) and 0.66× (busy) main's TTFT.
+
+Follow-ups (not in this PR): a C=8 subagent-start cell whose new sessions share a real system prompt and tool
+catalog (the fan-out has one, s4 doesn't), so a TTFT-new clause can measure a saving; and the fan-out's idle
+increment, 0.261× against 0.25×: where the siblings' remaining 0.49 s goes is not measured here.

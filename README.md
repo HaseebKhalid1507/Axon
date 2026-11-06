@@ -605,7 +605,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; `AXON_SHARE_KV=0`: off). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default, since
+  its timing gate failed two of its clauses, #207). A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
