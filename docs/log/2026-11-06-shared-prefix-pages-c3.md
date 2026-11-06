@@ -1,4 +1,4 @@
-# Shared-prefix KV pages, C3: the engine claims, indexes and evicts shared pages  (PR #TBD)
+# Shared-prefix KV pages, C3: the engine claims, indexes and evicts shared pages  (PR #207)
 
 - Date: 2026-11-06. Branch: feat/shared-prefix-c3. Base: main ad0c65e (#201's exclusive KV RAM tier and its tail-spill
   drop rule included). Status: open.

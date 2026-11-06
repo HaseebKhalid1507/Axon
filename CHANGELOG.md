@@ -6,7 +6,7 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
-### Shared prefix KV pages: the engine (#TBD, closes #187; follows #164)
+### Shared prefix KV pages: the engine (#207, closes #187; follows #164)
 - **Requests share the KV pages of a common prefix** (the GPU's paged pool, `serve --parallel` > 1). Admission
   walks the prefix index over the prompt's whole pages and maps the pages it has, another slot's or warm ones kept
   from a finished request, instead of prefilling them again (`claim_prefix`, design §3.4; phase 1: a prompt that

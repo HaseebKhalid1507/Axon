@@ -3,7 +3,7 @@
 - Author: gojo (sharekv track), for Jawz (foreman). Date: 2026-10-27 (checkpoint 0, design); 2026-11-04 moved here.
 - Status: **C1 + C2 landed in #164, with no behaviour change** (the refcounted, pinnable `PageMap`; the host
   `PrefixIndex`; the `BatchLm` share calls; the immutability rule, checked in debug builds). **C3** (the engine:
-  claim, index, evict; #187) is PR #TBD: what it built against this design is in "What C3 built" below. **C4**
+  claim, index, evict; #187) is PR #207: what it built against this design is in "What C3 built" below. **C4**
   (in-flight dedupe) is a follow-up PR. The sections below are the checkpoint-0 design as written, read on main
   `0c23a87`; file:line references are from then.
 - **What C3 built** (main `ad0c65e`, after #201's exclusive tier; where it differs from §3):
