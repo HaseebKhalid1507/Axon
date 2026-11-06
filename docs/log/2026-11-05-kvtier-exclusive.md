@@ -220,7 +220,8 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     Bella's resume cell is ESTIMATED at 0.21–0.32 s in its fast copy mode and 0.37–0.49 s in its slow one: a169's
     88 ms outside the copies, scaled by bella / 4090 (1.73× the decode step, 3.06× the full prefill, f763 vs a169),
     plus 414 pages at 28 or 7 GB/s. So the 4090 does not settle bella's ≤ 0.3 s. Rerunning the cell on bella takes
-    ≈ 20 min.
+    ≈ 20 min. **Round 2 (below):** bella read 0.513 s TAINTED (8e35), with its copies in the fast mode, so the
+    estimate's fast-mode range was low; a clean rerun (r4) is queued.
   - The tail spill (above): `auto` would have put it on every large-VRAM server, where it is mostly cost. Fixed in
     e1df27a, gates rerun (below).
 
@@ -242,26 +243,48 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
   (X, then other text) gives up 1 page. It must copy nothing; fc7bb13 copies the whole chain. (b) X stored by the
   idle flush, then starved: Q2 gives up P2's pages under X's stored last page, which alone are stored, and R (P2's
   next turn) restores them. Every reply == `--cache-ram 0`'s.
-- **Before / after (bella):** the test on fc7bb13 + the test alone, 1105-205357-b9a0 (expected FAIL at (a)); after:
-  in the release and debug suites below (`serve::` holds both tests). PENDING.
+- **Before / after (bella):** the test on fc7bb13 + the test alone, 1105-205357-b9a0: FAIL at (a), as designed ("Q
+  gave up 1 page of 5; its spill copied 5 (the whole chain: 5)"). After: PASS in the release (7515) and debug (110a)
+  suites below (`serve::` holds both tests).
 - **The gate round (round 2; it replaces 626051c's)** at 9829783 (e1df27a, main 7a2c9cf merged in 26649ae, one
   test fix), against main 7a2c9cf, the same harnesses (`agent_replay` sha256 34b1910b…, the trace, `serve_md5.py`,
   `kv_resume_bench.py` @fe5117d; `resumeexcl.sh` now writes per host, because bella's and the 4090's resume cells
   share one staged dir). The bar for the fix (the lead's): s1 resume p50 ≤ ≈ 1.10× main with re-prefill tokens still
-  well below main's, and the resume cell's 13.9× unchanged. All PENDING:
+  well below main's, and the resume cell's 13.9× unchanged. Results (MEASURED; base = main 7a2c9cf, cand =
+  9829783 `--cache-ram 6G`; medians over clean rounds; the host class on every row):
 
-  | cell | job | host |
-  |---|---|---|
-  | release `serve:: kvstore:: cuda::qwen2::slots:: cuda::qwen2::kvio::` | 1105-210552-7515 | bella |
-  | debug (debug-assertions, overflow-checks), the same filters | 1105-210552-110a | bella |
-  | md5 vs main, default flags (gen + serve) | 1105-210601-ed07 | bella / pods |
-  | replay s4 | 1105-210655-4117 | `--timing bella` |
-  | replay s1 | 1105-211308-268a | `--timing 4090` (pod1, secure, warmed) |
-  | resume cell | 1105-211420-0618 | `--timing 4090` (pod1, after s1) |
-  | resume cell, bella's (the number `auto` needs) | 1105-211421-8e35 | `--timing bella`, no fallback |
+  | cell | job | host | result |
+  |---|---|---|---|
+  | release `serve:: kvstore:: cuda::qwen2::slots:: cuda::qwen2::kvio::` | 1105-210552-7515 | bella | PASS, 195 / 0 (10 ignored) |
+  | debug (debug-assertions, overflow-checks), the same filters | 1105-210552-110a | bella | PASS, 195 / 0 (10 ignored) |
+  | md5 vs main, default flags (gen + serve, the `--cache-ram 1G` arm) | 1105-210601-ed07 | bella | PASS: gen 0 of 30 differ; serve 42 / 42 same in each of the 5 cells; the tier arm restored 13,618–13,888 tokens a cell |
+  | replay s1 | 1105-211308-268a | RTX 4090, secure pod, warmed | PASS, 3 of 3 rounds clean: ITL p99 10.64 vs 10.66 ms (0.998×); resume p50 0.054 vs 0.056 s; re-prefill 3,213 vs 21,291 tokens (0.11 % vs 0.73 %); goodput 33.16 both; md5 same |
+  | resume cell | 1105-211420-0618 | RTX 4090, the same pod | PASS: 0.141 vs 2.713 s (19.2×), 3 valid rounds each, no VOID, 414 pages restored each; md5 same |
+  | replay s4 | 1105-210655-4117 | bella | TAINTED, not read: all 10 runs (5 rounds incl. 2 reruns), foreign SM mean 6.1–22.2 %, max 37–66 % (desktop). Directional only: goodput 3.79–7.33 → 8.35–15.08 tok/s, re-prefill 21.4–28.2 % → 0.8–6.1 %; one md5 over all 10 runs |
+  | replay s4, rerun on a 4090 (the lead's call) | 1106-051153-a1f3 | RTX 4090, secure pod, warmed | RUNNING |
+  | resume cell, bella's (the number `auto` needs) | 1105-211421-8e35 | bella | TAINTED, not read (max 98 %, mean 7.7 %: kitty, Xorg): 0.389–0.526 s (median 0.513) vs main 8.77–9.22 s (median 8.83); md5 same |
+  | resume cell, bella's, r3 | 1106-030609-30b7 | bella | void: submitted outside the staged dir (no `models/`), the base server exited 2; also TAINTED. Its bandwidth part ran (bulk 2D per page 27.9 / 22.1 GB/s, one page 20.1 / 18.9 GB/s) |
+  | resume cell, bella's, r4 (staged as 8e35) | 1106-051210-8062 | `--timing bella`, no fallback | QUEUED |
+
+  Reading it:
+  - **The fix meets the lead's bar on the 4090.** s1 resume p50 0.96× main (bar ≤ ≈ 1.10×; round 1 read +26 ms at
+    the request level), re-prefill tokens 15 % of main's. The resume cell's 19.2× is not a gain over round 1's 13.9×
+    from the fix: a different pod, and this one copied at 24–26 GB/s (its bandwidth rows), round 1's at ≈ 13 GB/s.
+  - **The s4 rerun is on a 4090** because bella's desktop tainted 4117 and blocked the rerun for hours. A 4090 holds
+    5,288 pages against bella's 1,725, so its s4 evicts less, and the cell tests the tier less hard than bella's;
+    4117's tainted runs are the directional bella evidence.
+  - **Bella's resume likely misses ≤ 0.3 s even clean.** 8e35's copies ran in bella's fast mode (bandwidth rows
+    25–28 GB/s; each restore's step line 36–66 ms), so the excess isn't the slow copy mode: bella / 4090 resume is
+    3.6×, about bella's prefill ratio (first turn 8.9 vs 3.07 s, 2.9×). The time is outside the copies (the
+    prompt's last 196 tokens prefilled at 26.5k depth, the first step, tokenize and lookup; not attributed line by
+    line). So the `auto` flip (a follow-up PR, Haseeb's OK) needs a faster resume path on bella or a bella-aware
+    threshold (main's resume is 8.8 s there; 17× in 8e35). This PR stays opt-in. r4 is the clean read.
 
 ## What didn't work
 - 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
   rounds were VOID; fixed in fe5117d.
 - 2d32: Xorg load on bella tainted 3 candidate runs. SHORT, 2 clean rounds of 3; rerun as c76b.
 - a41d028 fixed only half of the next-turn spill: one given-up page still copied the whole chain (above; e1df27a).
+- Round 2 on bella: the desktop (zen, kitty, Xorg) tainted every s4 run (4117, 3 rounds + 2 reruns) and the resume
+  cell (8e35); the s4 rerun then waited 3 h behind a kitty window drawing ~10 % all night, so it went to a 4090
+  (a1f3). The resume rerun stays on bella (r3 30b7 was submitted outside the staged dir and is void; r4 8062).
