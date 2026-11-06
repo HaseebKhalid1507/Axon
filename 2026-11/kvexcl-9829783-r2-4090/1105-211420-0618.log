@@ -1,0 +1,150 @@
+[axon-run 21:14:20] submitted 1105-211420-0618 by /home/haseeb/.cache/axon-kvexcl: /usr/bin/bash resumeexcl.sh ./t-9829783-rel ./axon-base-7a2c9cf ./axon-9829783 ./kv_resume_bench-fe5117d.py
+[axon-run 21:14:20] timing job waiting: foreign GPU load 0 % max, quiet 53 s of the 120 s needed (on pod1; > 10 %)
+[axon-run 22:17:11] job 1105-211420-0618 -> pod1 [RTX 4090 sm_89 secure] (pod 7fdxocwppmbigq): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/resumeexcl-d1cdf3688a38 /usr/bin/bash resumeexcl.sh ./t-9829783-rel ./axon-base-7a2c9cf ./axon-9829783 ./kv_resume_bench-fe5117d.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (57b265cede12a85b8d7ad92a) + source of /home/haseeb/.cache/axon-podjob/resumeexcl-d1cdf3688a38 (delta vs 4 earlier upload(s) there)
+
+sent 7,720,337 bytes  received 113 bytes  3,088,180.00 bytes/sec
+total size is 48,943,477  speedup is 6.34
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261106-031717-bash-11624 on pod1 (GPU, 5000 MB)
+[axon-node 03:17:17] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 03:17:17] run bash (57b265cede12a85b8d7ad92a) as /home/haseeb/.cache/axon-podjob/resumeexcl-d1cdf3688a38 on d1de51abc99a, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+== outputs in out-resume-d1de51abc99a
+== bandwidth 03:17:17
+NVIDIA GeForce RTX 4090, 595.91.07, 32, P8
+[axon-run 22:17:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:18:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+device NVIDIA GeForce RTX 4090 (sm_89), slot 25600 positions = 1.367 GiB
+GPU state (start): P0, 2520 MHz, 10501 MHz, 1980 MHz, Disabled, 0x0000000000000000
+BW D2H contiguous                        55.96 ms   26.23 GB/s
+BW H2D contiguous                        58.43 ms   25.12 GB/s
+BW D2H one 2D copy                       55.86 ms   26.28 GB/s
+BW H2D one 2D copy                       58.53 ms   25.08 GB/s
+BW D2H 2D per 16-pos page                58.66 ms   25.03 GB/s
+BW H2D 2D per 16-pos page                61.50 ms   23.87 GB/s
+BW D2H 2D per 64-pos page                56.59 ms   25.94 GB/s
+BW H2D 2D per 64-pos page                59.64 ms   24.61 GB/s
+BW D2H 2D per 256-pos page               56.46 ms   26.00 GB/s
+BW H2D 2D per 256-pos page               59.18 ms   24.81 GB/s
+BW D2H 56 x 1D per 64-pos page           83.19 ms   17.65 GB/s  (enqueue   79.42 ms)
+BW D2H 56 x 1D, one page                  0.19 ms   18.88 GB/s  (enqueue    0.10 ms)
+BW H2D 56 x 1D per 64-pos page           93.55 ms   15.69 GB/s  (enqueue   89.29 ms)
+BW H2D 56 x 1D, one page                  0.22 ms   16.37 GB/s  (enqueue    0.11 ms)
+BW D2H 1D per page, scattered host       56.47 ms   26.00 GB/s  (enqueue    0.74 ms)
+BW H2D 1D per page, scattered host       59.84 ms   24.53 GB/s  (enqueue    0.78 ms)
+BW D2D 2D per page (gather)               3.43 ms  428.03 GB/s  (enqueue    0.98 ms)
+BW D2D 56 x 1D per page (gather)         59.27 ms   24.77 GB/s  (enqueue   59.27 ms)
+BW D2D 2D per page (scatter)              3.38 ms  434.89 GB/s  (enqueue    0.95 ms)
+BW D2D 56 x 1D per page (scatter)        58.35 ms   25.16 GB/s  (enqueue   58.35 ms)
+BW D2H gather path (2D D2D + 1D)         60.25 ms   24.37 GB/s  (enqueue    1.66 ms)
+BW D2H gather path, one page              0.15 ms   23.68 GB/s  (enqueue    0.00 ms)
+BW H2D scatter path (2D D2D + 1D)        63.38 ms   23.16 GB/s  (enqueue    1.75 ms)
+BW H2D scatter path, one page             0.15 ms   24.36 GB/s  (enqueue    0.00 ms)
+GPU state (after the copies, idle): P2, 2730 MHz, 10251 MHz, 2100 MHz, Disabled, 0x0000000000000000
+GPU state (busy): P2, 2730 MHz, 10251 MHz, 2100 MHz, Disabled, 0x0000000000000000
+BW D2H 2D per 64-pos page (busy)         56.35 ms   26.05 GB/s
+BW H2D 2D per 64-pos page (busy)         59.11 ms   24.84 GB/s
+BW D2H 56 x 1D per 64-pos page (busy)    82.41 ms   17.81 GB/s  (enqueue   78.62 ms)
+BW D2H 56 x 1D, one page (busy)           0.19 ms   19.04 GB/s  (enqueue    0.10 ms)
+BW H2D 56 x 1D per 64-pos page (busy)    93.95 ms   15.63 GB/s  (enqueue   89.64 ms)
+BW H2D 56 x 1D, one page (busy)           0.22 ms   16.33 GB/s  (enqueue    0.11 ms)
+BW D2H 1D per page, scattered host (busy)    56.55 ms   25.96 GB/s  (enqueue    0.74 ms)
+BW H2D 1D per page, scattered host (busy)    59.34 ms   24.74 GB/s  (enqueue    0.79 ms)
+BW D2D 2D per page (gather) (busy)        3.43 ms  427.72 GB/s  (enqueue    0.98 ms)
+BW D2D 56 x 1D per page (gather) (busy)    59.21 ms   24.79 GB/s  (enqueue   59.20 ms)
+BW D2D 2D per page (scatter) (busy)       3.38 ms  434.85 GB/s  (enqueue    0.95 ms)
+BW D2D 56 x 1D per page (scatter) (busy)    59.10 ms   24.84 GB/s  (enqueue   59.10 ms)
+BW D2H gather path (2D D2D + 1D) (busy)    60.32 ms   24.34 GB/s  (enqueue    1.71 ms)
+BW D2H gather path, one page (busy)       0.16 ms   23.63 GB/s  (enqueue    0.00 ms)
+BW H2D scatter path (2D D2D + 1D) (busy)    63.03 ms   23.29 GB/s  (enqueue    1.75 ms)
+BW H2D scatter path, one page (busy)      0.15 ms   24.51 GB/s  (enqueue    0.00 ms)
+GPU state (busy, at the end): P2, 2730 MHz, 10251 MHz, 2100 MHz, Disabled, 0x0000000000000000
+BW host_alloc   64 MiB (+ free)             57.77 ms
+BW host_alloc_uninit   64 MiB (+ free)      57.39 ms
+BW HostAllocator   64 MiB (+ free)         59.71 ms
+BW host_alloc  256 MiB (+ free)            224.87 ms
+BW host_alloc_uninit  256 MiB (+ free)     209.64 ms
+BW HostAllocator  256 MiB (+ free)        209.04 ms
+BW D2H one 64-pos page (3.50 MiB)          0.146 ms   25.18 GB/s
+BW H2D one 64-pos page                     0.146 ms   25.21 GB/s
+BW save() to RAM (staged)               382.59 ms    3.84 GB/s
+BW load() from RAM (staged)             194.54 ms    7.55 GB/s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 876 filtered out; finished in 80.57s
+== TTFT-resume micro-bench 03:18:38
+03:18:38 ## base: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-base-7a2c9cf serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 {}
+[axon-run 22:18:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:19:18] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:19:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:20:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:20:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:21:26] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:21:30 RESULT {"bin": "base", "startup_s": 2.007, "itl0_p50_ms": 6.5255556255578995, "itl0_p99_ms": 7.003867067396641, "itl0_max_ms": 35.54459661245346, "pool_pages": 5288, "a1_s": 3.067125597037375, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 2.713433383964002, "resume_prompt": 26692, "resume_cached": 0, "resume_restored": null, "void": null, "itl_p50_ms": 6.602955050766468, "itl_p99_ms": 88.26745767146349, "itl_n": 1020, "itl_top8_ms": [94.4, 94.8, 95.3, 95.3, 98.7, 99.2, 99.4, 99.5], "restored_tokens": null, "pinned_bytes": null, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.13, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.1, 0.1, 0.1, 0.1, 0.1], "trace_step_p99_ms": 83.35, "trace_step_max_ms": 98.89, "tier_lines": []}
+03:21:30 ## cand: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-9829783 serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --cache-ram 6G {}
+[axon-run 22:21:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:22:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:23:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:23:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:24:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:24:24 RESULT {"bin": "cand", "startup_s": 1.007, "itl0_p50_ms": 6.585325114428997, "itl0_p99_ms": 7.185637019574642, "itl0_max_ms": 31.007478944957256, "pool_pages": 5288, "a1_s": 3.0766210118308663, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 0.14051696751266718, "resume_prompt": 26692, "resume_cached": 26496, "resume_restored": 26496.0, "void": null, "itl_p50_ms": 6.5491050481796265, "itl_p99_ms": 88.57990708202124, "itl_n": 1020, "itl_top8_ms": [97.4, 97.9, 97.9, 98.1, 99.1, 99.1, 99.1, 99.4], "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.25, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.1, 0.2, 0.2, 0.2, 0.3], "trace_step_p99_ms": 83.07, "trace_step_max_ms": 99.03, "tier_lines": ["axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, every layer on the GPU, KV: 5288 pages x 64 = 338432 tokens (10 sequences of the full 32768 at once) over up to 16 slots (cap 32768), KV RAM tier 6.00 GiB (pinned by a thread from start)) on http://127.0.0.1:18571/v1", "axon serve: KV RAM tier: 6.00 GiB pinned in 3.8 s (a thread, from start)"]}
+03:24:24 ## cand: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-9829783 serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --cache-ram 6G {}
+[axon-run 22:24:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:25:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:25:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:26:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:26:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:27:19 RESULT {"bin": "cand", "startup_s": 1.031, "itl0_p50_ms": 6.573984399437904, "itl0_p99_ms": 7.108566351234913, "itl0_max_ms": 36.435688845813274, "pool_pages": 5288, "a1_s": 3.064886967651546, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 0.1416036607697606, "resume_prompt": 26692, "resume_cached": 26496, "resume_restored": 26496.0, "void": null, "itl_p50_ms": 6.572934798896313, "itl_p99_ms": 89.27901089191437, "itl_n": 1020, "itl_top8_ms": [93.4, 93.8, 94.1, 94.4, 99.4, 99.4, 99.5, 99.9], "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.25, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.2, 0.2, 0.2, 0.2, 0.2], "trace_step_p99_ms": 84.07, "trace_step_max_ms": 3557.2, "tier_lines": ["axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, every layer on the GPU, KV: 5288 pages x 64 = 338432 tokens (10 sequences of the full 32768 at once) over up to 16 slots (cap 32768), KV RAM tier 6.00 GiB (pinned by a thread from start)) on http://127.0.0.1:18571/v1", "axon serve: KV RAM tier: 6.00 GiB pinned in 3.8 s (a thread, from start)"]}
+03:27:19 ## base: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-base-7a2c9cf serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 {}
+[axon-run 22:27:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:28:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:28:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:29:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:29:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:30:10 RESULT {"bin": "base", "startup_s": 1.003, "itl0_p50_ms": 6.518784910440445, "itl0_p99_ms": 6.796226836740971, "itl0_max_ms": 25.447816587984562, "pool_pages": 5288, "a1_s": 3.0649521173909307, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 2.7169312480837107, "resume_prompt": 26692, "resume_cached": 0, "resume_restored": null, "void": null, "itl_p50_ms": 6.545184180140495, "itl_p99_ms": 86.0439371317625, "itl_n": 1020, "itl_top8_ms": [91.8, 92.0, 92.0, 92.2, 98.5, 98.5, 98.6, 98.7], "restored_tokens": null, "pinned_bytes": null, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.1, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.1, 0.1, 0.1, 0.1, 0.1], "trace_step_p99_ms": 82.95, "trace_step_max_ms": 98.43, "tier_lines": []}
+03:30:10 ## base: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-base-7a2c9cf serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 {}
+[axon-run 22:30:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:31:01] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:31:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:32:05] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:32:37] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:33:01 RESULT {"bin": "base", "startup_s": 1.003, "itl0_p50_ms": 6.533345207571983, "itl0_p99_ms": 6.745436228811741, "itl0_max_ms": 26.375561021268368, "pool_pages": 5288, "a1_s": 3.0671919751912355, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 2.7098354902118444, "resume_prompt": 26692, "resume_cached": 0, "resume_restored": null, "void": null, "itl_p50_ms": 6.555015221238136, "itl_p99_ms": 89.10172153264284, "itl_n": 1020, "itl_top8_ms": [90.2, 90.3, 90.5, 90.5, 98.8, 99.1, 99.2, 99.2], "restored_tokens": null, "pinned_bytes": null, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.13, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.1, 0.1, 0.1, 0.1, 0.1], "trace_step_p99_ms": 82.8, "trace_step_max_ms": 98.88, "tier_lines": []}
+03:33:01 ## cand: /root/axon-node/store/57b265cede12a85b8d7ad92a/tree/axon-9829783 serve /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --cache-ram 6G {}
+[axon-run 22:33:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:33:41] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:34:13] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:34:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:35:18] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:35:50] FOREIGN_GPU sample max=0% mean=0.0% n=1
+03:35:56 RESULT {"bin": "cand", "startup_s": 2.033, "itl0_p50_ms": 6.550275720655918, "itl0_p99_ms": 6.938316859304905, "itl0_max_ms": 36.15817800164223, "pool_pages": 5288, "a1_s": 3.077011873945594, "a_tokens": 26481, "pressure_extra": 9, "pressure_pages": 5371, "ttft_resume": 0.14027682598680258, "resume_prompt": 26692, "resume_cached": 26496, "resume_restored": 26496.0, "void": null, "itl_p50_ms": 6.566065363585949, "itl_p99_ms": 85.83891857415438, "itl_n": 1020, "itl_top8_ms": [90.2, 90.4, 90.4, 90.6, 99.7, 99.7, 99.8, 99.9], "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "78722066e051607cbe0cecce705ee567", "trace_steps": 513, "trace_gap_max_ms": 0.2, "trace_gaps_over_20ms": 0, "trace_gap_top5_ms": [0.1, 0.1, 0.1, 0.1, 0.2], "trace_step_p99_ms": 84.06, "trace_step_max_ms": 3055.47, "tier_lines": ["axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, every layer on the GPU, KV: 5288 pages x 64 = 338432 tokens (10 sequences of the full 32768 at once) over up to 16 slots (cap 32768), KV RAM tier 6.00 GiB (pinned by a thread from start)) on http://127.0.0.1:18571/v1", "axon serve: KV RAM tier: 6.00 GiB pinned in 4.0 s (a thread, from start)"]}
+03:35:56 
+03:35:56 ## eviction check (a VOID round is left out of every median below)
+03:35:56 OK   base r0: pool 5288 pages, pressure +9 (5371 pages kept), cached 0, restored None, ttft 2.713433383964002
+03:35:56 OK   cand r0: pool 5288 pages, pressure +9 (5371 pages kept), cached 26496, restored 26496.0, ttft 0.14051696751266718
+03:35:56 OK   cand r1: pool 5288 pages, pressure +9 (5371 pages kept), cached 26496, restored 26496.0, ttft 0.1416036607697606
+03:35:56 OK   base r1: pool 5288 pages, pressure +9 (5371 pages kept), cached 0, restored None, ttft 2.7169312480837107
+03:35:56 OK   base r2: pool 5288 pages, pressure +9 (5371 pages kept), cached 0, restored None, ttft 2.7098354902118444
+03:35:56 OK   cand r2: pool 5288 pages, pressure +9 (5371 pages kept), cached 26496, restored 26496.0, ttft 0.14027682598680258
+03:35:56 
+03:35:56 ## summary (medians over valid rounds, raw per valid round)
+03:35:56 VALID base: 3 of 3 rounds
+03:35:56 SUMMARY base: startup_s 1.003 [2.007, 1.003, 1.003]; itl0_p50_ms 6.526 [6.526, 6.519, 6.533]; itl0_p99_ms 6.796 [7.004, 6.796, 6.745]; itl0_max_ms 26.376 [35.545, 25.448, 26.376]; ttft_resume 2.713 [2.713, 2.717, 2.71]; resume_cached 0 [0, 0, 0]; itl_p50_ms 6.555 [6.603, 6.545, 6.555]; itl_p99_ms 88.267 [88.267, 86.044, 89.102]; trace_gap_max_ms 0.13 [0.13, 0.1, 0.13]; trace_gaps_over_20ms 0 [0, 0, 0]; trace_step_p99_ms 82.95 [83.35, 82.95, 82.8]; pool_pages 5288 [5288, 5288, 5288]; pressure_extra 9 [9, 9, 9]; md5 ['78722066e051607cbe0cecce705ee567']
+03:35:56 VALID cand: 3 of 3 rounds
+03:35:56 SUMMARY cand: startup_s 1.031 [1.007, 1.031, 2.033]; itl0_p50_ms 6.574 [6.585, 6.574, 6.55]; itl0_p99_ms 7.109 [7.186, 7.109, 6.938]; itl0_max_ms 36.158 [31.007, 36.436, 36.158]; ttft_resume 0.141 [0.141, 0.142, 0.14]; resume_cached 26496 [26496, 26496, 26496]; resume_restored 26496.0 [26496.0, 26496.0, 26496.0]; itl_p50_ms 6.566 [6.549, 6.573, 6.566]; itl_p99_ms 88.58 [88.58, 89.279, 85.839]; trace_gap_max_ms 0.25 [0.25, 0.25, 0.2]; trace_gaps_over_20ms 0 [0, 0, 0]; trace_step_p99_ms 84.06 [83.07, 84.07, 84.06]; pinned_bytes 6440878080.0 [6440878080.0, 6440878080.0, 6440878080.0]; pool_pages 5288 [5288, 5288, 5288]; pressure_extra 9 [9, 9, 9]; md5 ['78722066e051607cbe0cecce705ee567']
+03:35:56 MD5 SAME
+== the candidate's restores (step trace; restore_ms = enqueue; rate ESTIMATED = pages x 3.5 MiB / (ms - feed_ms - dec_ms))
+kv_resume_excl.cand.r0.trace.jsonl: 513 steps, 1 with a restore; spilled 0 pages in 0 ms
+  RESTORE 414 pages: enqueue 1.2 ms; step 33.2 ms, outside feed/decode 0.0 ms = nan GB/s ESTIMATED (n/a: other copies on the line) (step at 166717 ms; spilled 0, wb 1739 on the same line)
+kv_resume_excl.cand.r1.trace.jsonl: 513 steps, 1 with a restore; spilled 0 pages in 0 ms
+  RESTORE 414 pages: enqueue 2.1 ms; step 33.2 ms, outside feed/decode 0.1 ms = nan GB/s ESTIMATED (n/a: other copies on the line) (step at 166608 ms; spilled 0, wb 1739 on the same line)
+kv_resume_excl.cand.r2.trace.jsonl: 513 steps, 1 with a restore; spilled 0 pages in 0 ms
+  RESTORE 414 pages: enqueue 1.7 ms; step 33.2 ms, outside feed/decode 0.1 ms = nan GB/s ESTIMATED (n/a: other copies on the line) (step at 166915 ms; spilled 0, wb 1739 on the same line)
+== foreign GPU (pmon -o T: time gpu pid type sm ... command; samples over 25 % SM by others than axon / t-*)
+  0 foreign samples over 25 % of 106 process samples
+RESUMEEXCL DONE rc 0
+[axon-node 03:35:56] exit 0 after 1118.6s
+[axon-node 03:35:56] peak RSS 6413 MB (job process tree PSS, 2 s samples x547)
+[axon-run 22:35:56] exit 0 after 1125.7s (host pod1)
+[axon-run 22:36:00] EXPECT ok: output matches /RESUMEEXCL DONE/
+[axon-run 22:36:00] FOREIGN_GPU max=0% mean=0.0% samples=34
