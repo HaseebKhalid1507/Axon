@@ -1,0 +1,175 @@
+[axon-run 17:08:37] submitted 1106-170837-edc9 by /home/haseeb/.cache/axon-sharec31: /usr/bin/bash wsysshare.sh ./axon-base-2aec1e5 ./axon-c167272 ./agent_replay-ad0c65e.py ./wsys-128.json 3
+[axon-run 17:11:02] job 1106-170837-edc9 -> pod1 [RTX 4090 sm_89 secure] (pod dyok9hsdcndl9z): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 11000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/wsysshare-5306f76a06fe /usr/bin/bash wsysshare.sh ./axon-base-2aec1e5 ./axon-c167272 ./agent_replay-ad0c65e.py ./wsys-128.json 3
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (528d56ce3f8b3f9283cb4c45) + source of /home/haseeb/.cache/axon-podjob/wsysshare-5306f76a06fe (delta vs 3 earlier upload(s) there)
+
+sent 7,634,429 bytes  received 144 bytes  2,181,306.57 bytes/sec
+total size is 24,802,111  speedup is 3.25
+
+sent 186 bytes  received 31,098 bytes  12,513.60 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261106-221116-bash-2301 on pod1 (GPU, 11000 MB)
+[axon-node 22:11:16] GPU EXCLUSIVE taken; job wants 11000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 22:11:16] run bash (528d56ce3f8b3f9283cb4c45) as /home/haseeb/.cache/axon-podjob/wsysshare-5306f76a06fe on b8b4dac727b7, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+== wsysshare (cell W-sys, #210) speed 1, 3 rounds, 64 sessions: base ./axon-base-2aec1e5, cand ./axon-c167272, both --cache-ram 6G
+NVIDIA GeForce RTX 4090, 595.91.07, 30, P8
+               total        used        free      shared  buff/cache   available
+Mem:             503          36          84           9         396         467
+trace sha256 87b8e8c8a89f4e22  replay sha256 34b1910bc52539b7
+## base-r0 22:11:16: AXON_KV_PAGES=1722  ./axon-base-2aec1e5 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:11:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:12:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:12:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:13:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:13:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:14:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:15:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:15:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:16:08] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:16:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:17:18] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:17:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:18:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:18:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:19:31] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:20:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:20:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=571.2 prime_s=0.0 ttft_new_p50=22.09 ttft_resume_p50=None ttft_turn_p50=33.061 goodput_tok_s=11.54 itl_p99_ms=91.96 warm_per_gb=0.078 reprefill_share=0.2218 reprefill_net_share=0.2217 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 2727122 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 230 axon_kv_ram_written_pages_total 31976 axon_kv_ram_spilled_pages_total 30221 axon_kv_ram_restored_tokens_total 1039149 axon_kv_ram_hits_total 139
+## cand-r0 22:20:58: AXON_KV_PAGES=1722 AXON_SHARE_KV=1 ./axon-c167272 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:21:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:21:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:22:22] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:22:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:23:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:24:05] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:24:39] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:25:13] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:25:47] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:26:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:26:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:27:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:28:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=437.2 prime_s=0.0 ttft_new_p50=3.614 ttft_resume_p50=None ttft_turn_p50=16.293 goodput_tok_s=50.57 itl_p99_ms=93.3 warm_per_gb=0.235 reprefill_share=0.1376 reprefill_net_share=0.1375 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 3111683 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 607 axon_kv_ram_written_pages_total 16308 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 496968 axon_kv_ram_hits_total 156 axon_kv_pages_warm 23 axon_kv_pages_shared 116 axon_prompt_shared_tokens_total 777408 axon_pages_evicted_total 12591
+ROUND r0 clean
+## cand-r1 22:28:26: AXON_KV_PAGES=1722 AXON_SHARE_KV=1 ./axon-c167272 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:28:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:29:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:29:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:30:20] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:30:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:31:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:32:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:32:37] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:33:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:33:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:34:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:34:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:35:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=440.6 prime_s=0.0 ttft_new_p50=5.6 ttft_resume_p50=None ttft_turn_p50=14.814 goodput_tok_s=50.19 itl_p99_ms=93.78 warm_per_gb=0.235 reprefill_share=0.1398 reprefill_net_share=0.1396 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 3102003 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 315 axon_kv_ram_written_pages_total 17192 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 474008 axon_kv_ram_hits_total 149 axon_kv_pages_warm 218 axon_kv_pages_shared 116 axon_prompt_shared_tokens_total 725696 axon_pages_evicted_total 12429
+## base-r1 22:35:57: AXON_KV_PAGES=1722  ./axon-base-2aec1e5 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+[axon-run 17:36:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:36:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:37:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:37:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:38:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:38:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:39:26] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:40:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:40:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:41:08] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:41:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:42:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:42:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:43:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:43:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:44:32] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:45:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=568.1 prime_s=0.0 ttft_new_p50=22.848 ttft_resume_p50=None ttft_turn_p50=33.048 goodput_tok_s=9.22 itl_p99_ms=92.12 warm_per_gb=0.078 reprefill_share=0.2189 reprefill_net_share=0.2188 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 2740468 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 116 axon_kv_ram_written_pages_total 31509 axon_kv_ram_spilled_pages_total 29754 axon_kv_ram_restored_tokens_total 1046373 axon_kv_ram_hits_total 147
+ROUND r1 clean
+## base-r2 22:45:33: AXON_KV_PAGES=1722  ./axon-base-2aec1e5 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:45:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:46:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:46:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:47:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:47:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:48:32] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:49:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:49:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:50:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:50:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:51:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:51:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:52:28] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:53:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:53:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:54:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:54:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=563.9 prime_s=0.0 ttft_new_p50=20.055 ttft_resume_p50=None ttft_turn_p50=33.334 goodput_tok_s=11.16 itl_p99_ms=91.24 warm_per_gb=0.078 reprefill_share=0.2106 reprefill_net_share=0.2105 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 2778170 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 399 axon_kv_ram_written_pages_total 31593 axon_kv_ram_spilled_pages_total 29838 axon_kv_ram_restored_tokens_total 1064926 axon_kv_ram_hits_total 145
+## cand-r2 22:55:07: AXON_KV_PAGES=1722 AXON_SHARE_KV=1 ./axon-c167272 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+[axon-run 17:55:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:55:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:56:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:57:01] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:57:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:58:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:58:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:59:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 17:59:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 18:00:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 18:01:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 18:01:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 18:02:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+requests=320 errors=0 first_error=None wall_s=433.1 prime_s=0.0 ttft_new_p50=1.799 ttft_resume_p50=None ttft_turn_p50=18.401 goodput_tok_s=46.69 itl_p99_ms=92.75 warm_per_gb=0.313 reprefill_share=0.132 reprefill_net_share=0.1319 out_tokens_short=0 prompt_mismatch=0 prompt_checked=320 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 4568097 axon_prompt_cached_tokens_total 3137307 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 568 axon_kv_ram_written_pages_total 17273 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 547387 axon_kv_ram_hits_total 159 axon_kv_pages_warm 226 axon_kv_pages_shared 116 axon_prompt_shared_tokens_total 683008 axon_pages_evicted_total 12244
+ROUND r2 clean
+RUN base r0: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 230.18 itl_p99 91.96 reprefill 0.2218 ttft_resume_p50 None ttft_turn_p50 33.061 goodput 11.54 preempted 0 wall 571.2
+RUN base r1: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 231.42 itl_p99 92.12 reprefill 0.2189 ttft_resume_p50 None ttft_turn_p50 33.048 goodput 9.22 preempted 0 wall 568.1
+RUN base r2: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 233.16 itl_p99 91.24 reprefill 0.2106 ttft_resume_p50 None ttft_turn_p50 33.334 goodput 11.16 preempted 0 wall 563.9
+RUN cand r0: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 300.7 itl_p99 93.3 reprefill 0.1376 ttft_resume_p50 None ttft_turn_p50 16.293 goodput 50.57 preempted 0 wall 437.2
+RUN cand r1: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 298.37 itl_p99 93.78 reprefill 0.1398 ttft_resume_p50 None ttft_turn_p50 14.814 goodput 50.19 preempted 0 wall 440.6
+RUN cand r2: md5 780179c89416 tainted False foreign 0/0 errors 0 out_tok_s 303.57 itl_p99 92.75 reprefill 0.132 ttft_resume_p50 None ttft_turn_p50 18.401 goodput 46.69 preempted 0 wall 433.1
+CLEAN ROUNDS 3 of 3 wanted: ['r0', 'r1', 'r2']
+MD5 SAME
+MEDIAN itl_p99_ms: base 91.96 cand 93.3 raw base [91.96, 92.12, 91.24] cand [93.3, 93.78, 92.75]
+MEDIAN output_tok_s: base 231.42 cand 300.7 raw base [230.18, 231.42, 233.16] cand [300.7, 298.37, 303.57]
+MEDIAN reprefill_share: base 0.2189 cand 0.1376 raw base [0.2218, 0.2189, 0.2106] cand [0.1376, 0.1398, 0.132]
+MEDIAN reprefill_tokens: base 999925 cand 628704 raw base [1013275, 999925, 962200] cand [628704, 638451, 603216]
+MEDIAN ttft_resume_p50: base None cand None raw base [None, None, None] cand [None, None, None]
+MEDIAN ttft_turn_p50: base 33.061 cand 16.293 raw base [33.061, 33.048, 33.334] cand [16.293, 14.814, 18.401]
+MEDIAN ttft_new_p50: base 22.09 cand 3.614 raw base [22.09, 22.848, 20.055] cand [3.614, 5.6, 1.799]
+MEDIAN goodput_tok_s: base 11.16 cand 50.19 raw base [11.54, 9.22, 11.16] cand [50.57, 50.19, 46.69]
+MEDIAN warm_sessions: base 1 cand 3 raw base [1, 1, 1] cand [3, 3, 4]
+MEDIAN kv_gb: base 12.762 cand 12.762 raw base [12.762, 12.762, 12.762] cand [12.762, 12.762, 12.762]
+MEDIAN warm_per_gb: base 0.078 cand 0.235 raw base [0.078, 0.078, 0.078] cand [0.235, 0.235, 0.313]
+MEDIAN kv_used_gb: base 12.067 cand 12.761 raw base [12.067, 12.228, 11.99] cand [12.761, 12.761, 12.761]
+MEDIAN warm_per_used_gb: base 0.083 cand 0.235 raw base [0.083, 0.082, 0.083] cand [0.235, 0.235, 0.313]
+MEDIAN preempted: base 0 cand 0 raw base [0, 0, 0] cand [0, 0, 0]
+BASE r0: warm 1 of 64 turn-sessions (0.016)
+BASE r1: warm 1 of 64 turn-sessions (0.016)
+BASE r2: warm 1 of 64 turn-sessions (0.016)
+CLAUSE W0 validity: main's median warm fraction 0.015625 (<= 0.60): PASS
+CLAUSE W1 warm/GB (the harness's: --kv-gb) cand/main 3.013 (>= 1.4): PASS (0.078, 0.235)
+CLAUSE W2 md5: PASS (1 distinct over 3 clean rounds)
+WSYSSHARE CLAUSES: W0 PASS, W1 PASS, W2 PASS, 3 clean rounds (3 registered): ALL PASS
+INFO warm_per_used_gb cand/main 2.831 (0.083, 0.235)
+INFO itl_p99_ms cand/main 1.015 (91.96, 93.3)
+INFO goodput_tok_s cand/main 4.497 (11.16, 50.19)
+INFO ttft_turn_p50 cand/main 0.493 (33.061, 16.293)
+INFO reprefill_tokens cand/main 0.629 (999925, 628704)
+WSYSSHARE OK
+WSYSSHARE DONE rc 0
+[axon-node 23:02:31] exit 0 after 3075.1s
+[axon-node 23:02:31] peak RSS 6560 MB (job process tree PSS, 2 s samples x1450)
+[axon-run 18:02:33] exit 0 after 3091.0s (host pod1)
+[axon-run 18:02:35] FOREIGN_GPU max=0% mean=0.0% samples=90

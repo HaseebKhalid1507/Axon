@@ -1,0 +1,29 @@
+{
+ "label": "sharec31-c167272-wsys",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1106-170837-edc9",
+   "name": "sharec31-c167272-wsys",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-06_17:10.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "c167272",
+   "binary": "bash",
+   "started": 1794003058.8750756,
+   "ended": 1794006155.6716866,
+   "attempts": 1,
+   "remote_job": "20261106-221116-bash-2301",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b0c3942804e02506b94fca5b182d4b85dd7b881d9a73d66cec7b798d746fd3e8",
+   "log_bytes": 16499
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 18:02:36 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
