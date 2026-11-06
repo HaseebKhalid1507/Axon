@@ -7331,8 +7331,10 @@ fn serve_share_fanout_idle() {
 /// running requests are preempted and prompts unfed while others map their
 /// pages and the index's warm pages are evicted for room; with the KV RAM
 /// tier and without (an evicted page goes to RAM first). Every reply is
-/// the one it gets with sharing off. Debug builds check the pool, the
-/// index and their holds against each other after every step.
+/// the one it gets with sharing off. Run again, every request reports the
+/// prefix cached but those preempted or unfed meanwhile (fed from 0
+/// again). Debug builds check the pool, the index and their holds against
+/// each other after every step.
 #[test]
 fn serve_share_pressure() {
     let Some(_) = crate::testutil::gpu() else {
@@ -7391,12 +7393,31 @@ fn serve_share_pressure() {
             assert_eq!(&t.0, r, "{what}: request {i} under pressure, sharing on");
         }
         wait_idle(a);
-        // Again, its prefix now in the index (warm or held).
-        for (i, (t, r)) in together(a).iter().zip(&refs).enumerate() {
+        // Requests preempted or unfed so far.
+        let victims = |a: SocketAddr| {
+            let sl = call(a, "GET", "/slots", "").json();
+            sl["preempted"].as_u64().unwrap() + sl["prefills_unfed"].as_u64().unwrap()
+        };
+        let v0 = victims(a);
+        // Again, its prefix now in the index (warm or held): each request
+        // maps it when admitted. One preempted or unfed after that is fed
+        // from 0 again and reports none cached (`preempt`, `unfeed`: in C3
+        // it doesn't claim its pages again), so at most the round's
+        // victims fall short; the oldest request never gives way, so one
+        // at least reports the prefix.
+        let again = together(a);
+        for (i, (t, r)) in again.iter().zip(&refs).enumerate() {
             assert_eq!(&t.0, r, "{what}: request {i} again");
-            assert!(t.1 >= 192, "{what}: request {i} again: {} cached", t.1);
         }
         wait_idle(a);
+        let v = victims(a) - v0;
+        let cached: Vec<u64> = again.iter().map(|t| t.1).collect();
+        let short = cached.iter().filter(|&&c| c < 192).count() as u64;
+        eprintln!("{what}: again: cached {cached:?}, {v} preempted or unfed");
+        assert!(
+            short < 6 && short <= v,
+            "{what}: again: cached {cached:?}, {v} preempted or unfed"
+        );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;
         assert!(

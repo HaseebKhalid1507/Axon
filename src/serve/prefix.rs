@@ -503,25 +503,40 @@ mod tests {
 
     /// `peek` is `walk` without the touch: the same blocks, and the
     /// eviction order as it was (a request that waits doesn't make its
-    /// prefix younger).
+    /// prefix younger). Two copies of one index, A (2 blocks) indexed
+    /// before B (1 block): one only peeked at, the other walked.
     #[test]
     fn peek_is_walk_without_the_touch() {
-        let mut x = PrefixIndex::default();
         let (a, b) = (toks(1, 2 * PAGE), toks(2, PAGE));
-        put(&mut x, &a, 0);
-        put(&mut x, &b, 2);
+        let fresh = || {
+            let mut x = PrefixIndex::default();
+            put(&mut x, &a, 0);
+            put(&mut x, &b, 2);
+            x
+        };
         let mut c = a.clone();
         c.extend(toks(3, 10));
+        let pages = |w: &[(Key, u32)]| w.iter().map(|&(_, p)| p).collect::<Vec<_>>();
+        // Peeked, however often: B is still the most recent, so A's leaf
+        // goes first.
+        let mut x = fresh();
         let w = x.peek(&c);
-        assert_eq!(w, x.walk(&c));
-        assert_eq!(x.peek(&c).len(), 2);
+        assert_eq!(pages(&w), [0, 1]);
         assert!(x.peek(&toks(9, PAGE)).is_empty());
-        // B is the most recent: A's leaf goes first, peeked or not.
         x.peek(&a);
+        assert_eq!(x.peek(&c), w);
         assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(1));
-        // A walk touches: A's first block is younger than B's now.
-        x.walk(&a);
+        // Walked: the same blocks, and the walk touches them, so A is
+        // younger than B now and B's leaf goes first.
+        let mut y = fresh();
+        assert_eq!(y.walk(&c), w);
+        assert_eq!(y.pop_lru_leaf().map(|e| e.page), Some(2));
+        assert_eq!(y.pop_lru_leaf().map(|e| e.page), Some(1));
+        // On the peeked copy, a walk of A's first block alone makes it
+        // younger than B (A's leaf is gone: the block is a leaf now).
+        x.walk(&a[..PAGE]);
         assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(2));
+        assert_eq!(x.pop_lru_leaf().map(|e| e.page), Some(0));
     }
 
     /// The warm and shared counts follow the holds (hold, release, evict,
