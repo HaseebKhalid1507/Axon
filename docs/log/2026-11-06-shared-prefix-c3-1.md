@@ -56,8 +56,20 @@ Round 2, head `2ce5d12` (product code `c167272`), bella (RTX 5070 Ti Laptop, sm_
   tier 17 / 60; at 192: 1 / 10, 1 / 9, 1 / 22, 1 / 22, 1 / 22. Qwen3-0.6B q8 at 128: 3 / 15, 5 / 14, 3 / 45, 3 / 45,
   16 / 60; at 192: 1 / 9, 14 / 9, 1 / 21, 31 / 21, 1 / 22. Main at its full pool: 0 / 0. Every reply equal to main's.
 - Main and cand-off differ at equal bits (Qwen3 at 192 pages: 1 vs 14 preempted). By the code, sharing off takes
-  main's decisions; the harness's 4 client threads decide arrival order, and so who is preempted. INFO probe, main
-  and cand-off three interleaved runs each (job 1106-165421-dd4c): pending.
+  main's decisions (`refeed_claim` returns at once without the index; `reclaim_victim` with `gives` true for every
+  slot is main's least recently used idle slot). INFO probe 1106-165421-dd4c (`pressvar.sh`, bella, rc 0) says it is
+  the harness's arrival order (4 client threads). Same workload; per round main undersized then cand-off, three
+  rounds interleaved. Preempted / unfed / cached prompt tokens:
+
+  | cell | main A | off A | main B | off B | main C | off C | replies = main full pool |
+  |---|---|---|---|---|---|---|---|
+  | Qwen3-0.6B q8, 192 pages | 1 / 9 / 1308 | 1 / 9 / 1308 | 1 / 9 / 1308 | 1 / 9 / 981 | 14 / 9 / 1308 | 14 / 9 / 981 | 84 / 84 |
+  | qwen2.5-0.5b f16, 128 pages | 25 / 14 / 0 | 25 / 14 / 0 | 25 / 14 / 0 | 20 / 14 / 0 | 25 / 14 / 0 | 26 / 14 / 0 | 84 / 84 |
+
+  Main alone goes from 1 to 14 preempted at 192 pages, and off matches it in each round (1, 1; 1, 1; 14, 14): the
+  md5 run's 1 vs 14 is that spread. At 128 pages main is 25 three times and off 25 / 20 / 26; main didn't move in
+  that cell, so it doesn't show main's spread by itself. Off's 981 cached tokens at 192 pages is main's own count
+  at that cell in the md5 run (e00e). Unfed counts equal in every run of a cell.
 
 Timing: registered on the PR (comment 6693952063) before any timing job, run on a secure RTX 4090 outside the PR's
 merge path; results on #211 (subagent start) and #210 (W-sys warm/GB). A pass makes the default flip a follow-up PR.
@@ -66,6 +78,8 @@ plumbing with the real binaries: pool size, `/metrics`, md5, the verdict lines (
 small sessions fit whole).
 
 ## Lessons
+- A count a harness's client threads can reorder (preemptions, cached tokens) is not a decision gate: compare it
+  against the base's own spread over a few runs before calling a difference a change. The bits are the gate.
 - A bound in a test is a derivation: write it as the exact value with the steps in the message, not an inequality
   picked by eye (the `< 8` was off by the wrap's skipped 0 and the first call).
 - A test whose setup is overwritten by its own first step proves nothing about that setup: check it against a
