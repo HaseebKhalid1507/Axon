@@ -1562,6 +1562,33 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
     }
 }
 
+/// #183 without the checkpoint (CI runs it): the RAM estimate counts the
+/// tiny FP8 model's arena with the repack off too, as the one `Qwen2::
+/// new_layers` builds (`build_skip` gives every F8_E4M3 matrix a slot, its
+/// F8S rows, either way); it used to be 0 then. A CPU half (1 of 2 layers),
+/// the whole model, and more layers than it has.
+#[test]
+fn tiny_fp8_ram_arena_without_repack() {
+    use crate::model::{Qwen2, dense_ram_need_keep};
+    let d = Dir::new("fp8-ram");
+    write_tiny_fp8(&d, |_| {});
+    for repack in [true, false] {
+        for keep in [1, 2, 3] {
+            // A load per build: building releases the tensors it copied.
+            let m = load_dir(&d.0).unwrap();
+            let need = dense_ram_need_keep(&m, repack, 2, keep);
+            let net = Qwen2::new_layers(&m, repack, keep);
+            let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+            assert!(built > 0, "repack {repack} k={keep}: no arena built");
+            assert_eq!(
+                need.arena,
+                built.next_multiple_of(2 << 20),
+                "repack {repack} k={keep}"
+            );
+        }
+    }
+}
+
 /// The fingerprint's `act` on the CPU is the net's, the type its FP8
 /// matrices were built as (`Qwen2::fp8_qt`), as kvsave's is: each net here
 /// is built under the test override (`with_fp8_cpu_qt`, standing in for
