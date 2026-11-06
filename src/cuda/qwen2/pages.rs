@@ -240,6 +240,29 @@ impl PageMap {
             .count()
     }
 
+    /// Pages the slots marked in `busy` hold, each counted once (shared
+    /// ones are in several lists), but those in `mine`: what admission
+    /// can't have while they run (the rest is free, retired, warm, or
+    /// idle slots' to give up). O(pages held), no allocation per page.
+    pub fn busy_pages(&self, busy: &[bool], mine: &[u32]) -> usize {
+        let mut seen = vec![false; self.total];
+        for &p in mine {
+            seen[p as usize] = true;
+        }
+        let mut n = 0;
+        for (s, l) in self.pages.iter().enumerate() {
+            if !busy.get(s).copied().unwrap_or(false) {
+                continue;
+            }
+            for &p in l {
+                let v = &mut seen[p as usize];
+                n += usize::from(!*v);
+                *v = true;
+            }
+        }
+        n
+    }
+
     /// No step is in flight: retired pages are free.
     pub fn flush(&mut self) {
         self.free.append(&mut self.retire);

@@ -279,7 +279,6 @@ pub trait BatchLm: Lm {
 
     /// Slot `slot`'s page ids, in position order (plain: none). Shared
     /// prefixes index them; a RAM tier copies them out.
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn slot_pages(&self, pool: &Self::Pool, slot: usize) -> Vec<u32>;
 
     /// Shared prefixes (docs/design/shared-prefix-pages.md): append `pages`, live
@@ -288,22 +287,18 @@ pub trait BatchLm: Lm {
     /// bytes it would write there (the bit-identity contract), and are read
     /// only to it. Err for a plain pool, a page that isn't live, or past
     /// the slot's cap (nothing changed).
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn map_pages(&self, pool: &mut Self::Pool, slot: usize, pages: &[u32]) -> Result<(), String>;
 
     /// The prefix index holds `page` (a slot's): kept, immutable, after the
     /// last slot releases it, until `unpin_page`.
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn pin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String>;
 
     /// `pin_page` undone: the page frees once no slot holds it.
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn unpin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String>;
 
-    /// Tests and debug builds: whether pages `a` and `b` hold the same bytes
+    /// Debug builds: whether pages `a` and `b` hold the same bytes
     /// (two writers of one prefix block: they must).
-    #[cfg(any(test, debug_assertions))]
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
+    #[cfg(debug_assertions)]
     fn same_page_bytes(&self, pool: &Self::Pool, a: u32, b: u32) -> Result<bool, String>;
 
     /// Tests and debug builds: page `page`'s holders, (slots holding it,
@@ -311,8 +306,24 @@ pub trait BatchLm: Lm {
     /// past it. The leak check C3 runs after each step (the index's holds
     /// of a page == its refs, docs/design/shared-prefix-pages.md §3.6).
     #[cfg(any(test, debug_assertions))]
-    #[allow(dead_code)] // C3's engine takes it (docs/design/shared-prefix-pages.md)
     fn page_state(&self, pool: &Self::Pool, page: u32) -> Option<(u32, bool)>;
+
+    /// Pages the slots marked in `busy` hold, each counted once, but those
+    /// in `mine` (shared prefixes' admission: what it can't have); None for
+    /// a plain pool.
+    fn busy_pages(&self, pool: &Self::Pool, busy: &[bool], mine: &[u32]) -> Option<usize>;
+
+    /// Debug builds: slot `slot` may write positions lo..hi (every page of
+    /// them it holds is its alone, unpinned: the immutability rule, E3);
+    /// panics if not. The S1 path's writes through a slot view are
+    /// checked this way when it gets the slot (`Batch::lend_solo`).
+    #[cfg(debug_assertions)]
+    fn assert_writable(&self, pool: &Self::Pool, slot: usize, lo: usize, hi: usize);
+
+    /// Debug builds: the pool's page bookkeeping is consistent (each page
+    /// in one state, refs == occurrences in slot lists); panics if not.
+    #[cfg(debug_assertions)]
+    fn check_pages(&self, pool: &Self::Pool);
 
     /// Lend the pool's batch scratch to `cache` (its `slot_cache`, which
     /// may have none of its own) for the `Lm` calls on it; the pool's
@@ -1368,7 +1379,7 @@ impl BatchLm for Backend<'_> {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(debug_assertions)]
     fn same_page_bytes(&self, pool: &Self::Pool, a: u32, b: u32) -> Result<bool, String> {
         match &self.0 {
             Inner::Cuda(n) => n.same_page_bytes(pool, a, b),
@@ -1379,6 +1390,20 @@ impl BatchLm for Backend<'_> {
     #[cfg(any(test, debug_assertions))]
     fn page_state(&self, pool: &Self::Pool, page: u32) -> Option<(u32, bool)> {
         pool.page_state(page)
+    }
+
+    fn busy_pages(&self, pool: &Self::Pool, busy: &[bool], mine: &[u32]) -> Option<usize> {
+        pool.busy_pages(busy, mine)
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_writable(&self, pool: &Self::Pool, slot: usize, lo: usize, hi: usize) {
+        pool.assert_writable(slot, lo, hi)
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_pages(&self, pool: &Self::Pool) {
+        pool.check_pages()
     }
 
     fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {

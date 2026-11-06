@@ -191,6 +191,9 @@ pub struct PagesView {
     pub preempted: u64,
     /// Prompts being prefilled that gave their rows up so far.
     pub unfed: u64,
+    /// Shared prefixes (None: off): the index's warm pages (no slot holds
+    /// them) and shared ones (more than one does).
+    pub share: Option<(usize, usize)>,
 }
 
 impl SlotsView {
@@ -261,6 +264,11 @@ pub struct Metrics {
     /// Pages stored that a sequence still holds the rows of (class 0, the
     /// GPU's duplicates: evicted first).
     pub kv_ram_gpu_pages: AtomicU64,
+    /// Prompt tokens admissions mapped from the prefix index (shared
+    /// prefixes; their rows weren't prefilled).
+    pub shared_tokens: AtomicU64,
+    /// Pages the prefix index gave up for room (shared prefixes).
+    pub pages_evicted: AtomicU64,
     /// Pages copied by a spill (a slot giving its rows up), of those
     /// written.
     pub kv_ram_spilled: AtomicU64,
@@ -311,6 +319,8 @@ impl Default for Metrics {
             kv_ram_hits: AtomicU64::new(0),
             kv_ram_pinned: AtomicU64::new(0),
             kv_ram_gpu_pages: AtomicU64::new(0),
+            shared_tokens: AtomicU64::new(0),
+            pages_evicted: AtomicU64::new(0),
             kv_ram_spilled: AtomicU64::new(0),
             #[cfg(test)]
             tier_faults: Default::default(),
@@ -410,6 +420,10 @@ impl Metrics {
             j["page_tokens"] = p.size.into();
             j["preempted"] = p.preempted.into();
             j["prefills_unfed"] = p.unfed.into();
+            if let Some((warm, shared)) = p.share {
+                j["pages_warm"] = warm.into();
+                j["pages_shared"] = shared.into();
+            }
         }
         j.to_string()
     }
@@ -532,6 +546,34 @@ impl Metrics {
                 "axon_kv_ram_hits_total",
                 "Requests that had KV rows copied back from the RAM tier.",
                 &self.kv_ram_hits,
+            );
+        }
+        // Shared prefixes' lines, while they're on.
+        let share = lock(&self.slots).pages.as_ref().and_then(|p| p.share);
+        if let Some((warm, shared)) = share {
+            gauge(
+                &mut o,
+                "axon_kv_pages_warm",
+                "KV pages the prefix index keeps that no request holds (shared prefixes).",
+                warm,
+            );
+            gauge(
+                &mut o,
+                "axon_kv_pages_shared",
+                "KV pages of the prefix index more than one request holds (shared prefixes).",
+                shared,
+            );
+            counter(
+                &mut o,
+                "axon_prompt_shared_tokens_total",
+                "Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.",
+                self.shared_tokens.load(Ordering::Relaxed),
+            );
+            counter(
+                &mut o,
+                "axon_pages_evicted_total",
+                "KV pages the prefix index gave up for room (shared prefixes).",
+                self.pages_evicted.load(Ordering::Relaxed),
             );
         }
         let (total, busy) = lock(&self.slots).counts();
@@ -824,6 +866,7 @@ mod tests {
             size: 64,
             preempted: 2,
             unfed: 1,
+            share: None,
         };
         m.publish_pool(vec![SlotState::default(); 3], Some(pv));
         m.publish_slot(
@@ -846,5 +889,30 @@ mod tests {
         assert_eq!(all["preempted"], 2);
         assert_eq!(all["prefills_unfed"], 1);
         assert_eq!(lock(&m.slots).counts(), (3, 1));
+        // Shared prefixes off: no lines of theirs.
+        assert!(all.get("pages_warm").is_none());
+        assert!(!m.render(0).contains("axon_kv_pages_warm"));
+        // On: their counts in /slots, gauges and counters in /metrics.
+        m.shared_tokens.store(640, Ordering::Relaxed);
+        m.pages_evicted.store(3, Ordering::Relaxed);
+        let share = PagesView {
+            share: Some((4, 2)),
+            ..pv
+        };
+        m.publish_pool(vec![SlotState::default(); 3], Some(share));
+        let all = serde_json::from_str::<serde_json::Value>(&m.slots_json(64)).unwrap();
+        assert_eq!(
+            (all["pages_warm"].clone(), all["pages_shared"].clone()),
+            (4.into(), 2.into())
+        );
+        let text = m.render(0);
+        for line in [
+            "axon_kv_pages_warm 4",
+            "axon_kv_pages_shared 2",
+            "axon_prompt_shared_tokens_total 640",
+            "axon_pages_evicted_total 3",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in\n{text}");
+        }
     }
 }

@@ -32,11 +32,14 @@
 //! rules), so a request's tokens are the same whatever else runs with it.
 
 use super::api::Usage;
+use super::prefix::{Evicted, Ins, PrefixIndex};
 use super::tier::PoolTier;
 use super::{Event, Job, TextOut};
 use crate::kvsave::PAGE;
+use crate::kvstore::{Key, ROOT, chain};
 use crate::lm::{Backend, BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -533,6 +536,103 @@ pub(super) struct Batch<'a, 't> {
     /// take, a key collision): it waits, as with no backlog, until the
     /// batch steps, admits or the tier grows.
     stalled: bool,
+    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV=0, or a plain
+    /// pool, and every path below is main's, decision for decision).
+    share: Option<Share>,
+    /// Prompt tokens admissions mapped from the prefix index so far.
+    pub shared_tokens: u64,
+    /// Pages the prefix index gave up for room so far (`evict_warm`).
+    pub evicted: u64,
+}
+
+/// Shared prefixes (docs/design/shared-prefix-pages.md §3, serve/prefix.rs):
+/// the index of the pool's whole pages, and each slot's place in it.
+struct Share {
+    index: PrefixIndex,
+    /// Each slot's chain keys of its first whole pages, those offered to
+    /// the index so far (`index_pages`): indexed under its page, or left
+    /// its own (a duplicate of an indexed block, or after one).
+    keys: Vec<Vec<Key>>,
+}
+
+/// Page `p`'s use (`plan_claim`) by the slot holding it.
+fn page_use(index: &PrefixIndex, p: u32) -> PageUse {
+    match index.key_of(p) {
+        None => PageUse::Own,
+        Some(k) if index.holds(k) <= 1 => PageUse::Alone,
+        Some(_) => PageUse::Shared,
+    }
+}
+
+/// What a claim does with a slot (`plan_claim`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Claim {
+    /// The slot's page that leaves the index first, its blocks after it
+    /// with it (`unindex_at`): it continues in place mid-page, and holds
+    /// that page alone.
+    unindex: Option<usize>,
+    /// The slot keeps its rows 0..keep.
+    keep: usize,
+    /// Then maps these of the index's pages (`keep / PAGE..`; empty: it
+    /// continues in place).
+    map: Range<usize>,
+    /// The positions it holds after.
+    reuse: usize,
+}
+
+/// A slot's page, for a claim (`plan_claim`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageUse {
+    /// Not indexed: the slot's to write.
+    Own,
+    /// Indexed, and this slot alone holds it.
+    Alone,
+    /// Indexed and held by other slots too.
+    Shared,
+}
+
+/// A claim's plan (design §3.4, phase 1: no copy-on-write). The slot holds
+/// `pages`, the first `own` positions of a prompt among their rows; the
+/// index has `walk`, the pages of the prompt's first whole blocks below its
+/// last token (`last`). If the slot knows as much, it continues in place
+/// (main's path) from `min(own, last)`. Mid-page, it writes the rest of
+/// that page, which must not be indexed (E3): an indexed page it holds
+/// alone leaves the index first (`unindex`); one other slots hold too
+/// isn't written, the slot continues from its start. Else (the index knows
+/// more) it keeps its leading pages that are the walk's and maps the rest.
+fn plan_claim(
+    own: usize,
+    last: usize,
+    pages: &[u32],
+    walk: &[u32],
+    state: impl Fn(u32) -> PageUse,
+) -> Claim {
+    let own = own.min(last);
+    let w = walk.len();
+    if own >= w * PAGE {
+        let i = own / PAGE;
+        let page = pages.get(i).filter(|_| own % PAGE != 0);
+        let (unindex, reuse) = match page.map(|&p| state(p)) {
+            Some(PageUse::Alone) => (Some(i), own),
+            Some(PageUse::Shared) => (None, i * PAGE),
+            Some(PageUse::Own) | None => (None, own),
+        };
+        return Claim {
+            unindex,
+            keep: reuse,
+            map: w..w,
+            reuse,
+        };
+    }
+    let c = (0..w)
+        .take_while(|&i| (i + 1) * PAGE <= own && pages.get(i) == Some(&walk[i]))
+        .count();
+    Claim {
+        unindex: None,
+        keep: c * PAGE,
+        map: c..w,
+        reuse: w * PAGE,
+    }
 }
 
 /// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
@@ -713,7 +813,22 @@ impl<'a, 't> Batch<'a, 't> {
             trace: StepTrace::from_env(),
             tier: None,
             stalled: false,
+            share: None,
+            shared_tokens: 0,
+            evicted: 0,
         }
+    }
+
+    /// Shared prefixes on or off (`AXON_SHARE_KV`), before any request: on
+    /// for a paged pool only (a plain one has no pages to share). Whether
+    /// they are on.
+    pub fn set_share(&mut self, on: bool) -> bool {
+        assert!(self.idle(), "set_share: the batch is running");
+        self.share = (on && self.pages().is_some()).then(|| Share {
+            index: PrefixIndex::new(ROOT),
+            keys: vec![Vec::new(); self.slots],
+        });
+        self.share.is_some()
     }
 
     /// Turn the KV RAM tier on with `cap` bytes (`--cache-ram`), its
@@ -749,6 +864,12 @@ impl<'a, 't> Batch<'a, 't> {
     /// write-behind's free room is for those), and on the request's first
     /// token. A tier error turns the tier off (`tier_failed`), never the
     /// server.
+    ///
+    /// Shared prefixes: the pages the index has stay on the GPU (warm), and
+    /// go to RAM page by page as it evicts them (`evict_warm`), so a slot
+    /// all of whose given-up pages it has copies nothing, and their stored
+    /// copies stay class 0 (`Tier::handover`). One with a page it lacks
+    /// (left the slot's own: a duplicate, or after one) spills as above.
     fn spill(&mut self, s: usize, keep: usize) {
         let Some(t) = self.tier.as_mut() else {
             return;
@@ -757,13 +878,274 @@ impl<'a, 't> Batch<'a, 't> {
             return;
         }
         let t0 = self.trace.as_ref().map(|_| Instant::now());
-        match t.write(self.net, &self.pool, s, &self.held[s], keep) {
-            Ok(n) => {
-                t.t.truncate(s, keep / PAGE);
-                t.check_slot(s, &self.held[s]);
-                self.traced(TierCopy::Spill, n, t0);
+        let copy = match &self.share {
+            Some(sh) => {
+                let ks = &sh.keys[s];
+                ks.len() < self.held[s].len() / PAGE
+                    || ks[keep / PAGE..]
+                        .iter()
+                        .any(|&k| sh.index.page(k).is_none())
             }
-            Err(e) => self.tier_failed("spill", &e),
+            None => true,
+        };
+        let n = match copy {
+            true => match t.write(self.net, &self.pool, s, &self.held[s], keep) {
+                Ok(n) => n,
+                Err(e) => return self.tier_failed("spill", &e),
+            },
+            false => 0,
+        };
+        match &self.share {
+            Some(sh) => t.t.handover(s, keep / PAGE, |k| sh.index.page(k).is_some()),
+            None => t.t.truncate(s, keep / PAGE),
+        }
+        t.check_slot(s, &self.held[s]);
+        self.traced(TierCopy::Spill, n, t0);
+    }
+
+    /// Slot `slot` keeps its rows 0..keep and gives up the rest: the tier
+    /// keeps them first (`spill`), the index's holds of the pages go with
+    /// them (`release_rows`).
+    fn drop_rows(&mut self, slot: usize, keep: usize) -> Result<(), String> {
+        self.spill(slot, keep);
+        self.held[slot].truncate(keep);
+        self.release_rows(slot, keep)
+    }
+
+    /// `BatchLm::release` of slot `slot`'s pages past positions 0..lo, and
+    /// (sharing on) the index's holds of them. A page kept with positions
+    /// past `lo` in it is written next: never an indexed one (a claim
+    /// rounds down to its start, `plan_claim`).
+    fn release_rows(&mut self, slot: usize, lo: usize) -> Result<(), String> {
+        if let Some(sh) = self.share.as_mut() {
+            let pages = self.net.slot_pages(&self.pool, slot);
+            if lo % PAGE != 0
+                && let Some(&p) = pages.get(lo / PAGE)
+            {
+                assert!(
+                    sh.index.key_of(p).is_none(),
+                    "slot {slot} keeps its indexed page {p} to write positions {lo}.. into it"
+                );
+            }
+            for &p in pages.get(pages_for(lo, PAGE)..).unwrap_or(&[]) {
+                if let Some(k) = sh.index.key_of(p) {
+                    sh.index.release(k);
+                }
+            }
+            sh.keys[slot].truncate(lo / PAGE);
+        }
+        self.net.release(&mut self.pool, slot, lo)
+    }
+
+    /// Admission's prefix (`admit`, `lend_solo`): slot `slot` holds `common`
+    /// positions of `prompt`; it gives up the rest of its rows, and maps the
+    /// index's pages of the prompt where the index knows more
+    /// (`plan_claim`, design §3.4). The positions it holds after (`held`
+    /// says so). Sharing off: main's (it keeps `min(common, last)`).
+    fn claim_prefix(
+        &mut self,
+        slot: usize,
+        prompt: &[u32],
+        common: usize,
+    ) -> Result<usize, String> {
+        let last = prompt.len() - 1;
+        let Some(sh) = self.share.as_mut() else {
+            let reuse = common.min(last);
+            self.drop_rows(slot, reuse)?;
+            return Ok(reuse);
+        };
+        let walk = sh.index.walk_prompt(prompt);
+        let wp: Vec<u32> = walk.iter().map(|w| w.1).collect();
+        let pages = self.net.slot_pages(&self.pool, slot);
+        let cl = plan_claim(common, last, &pages, &wp, |p| page_use(&sh.index, p));
+        if let Some(i) = cl.unindex {
+            self.unindex_at(slot, i)?;
+        }
+        self.drop_rows(slot, cl.keep)?;
+        if cl.map.is_empty() {
+            return Ok(cl.reuse);
+        }
+        self.net
+            .map_pages(&mut self.pool, slot, &wp[cl.map.clone()])?;
+        let sh = self.share.as_mut().expect("sharing");
+        for &(k, _) in &walk[cl.map.clone()] {
+            sh.index.hold(k);
+            sh.keys[slot].push(k);
+        }
+        self.held[slot] = prompt[..cl.reuse].to_vec();
+        let n = (cl.map.len() * PAGE) as u64;
+        self.shared_tokens += n;
+        if let Some(m) = &self.metrics {
+            m.shared_tokens.fetch_add(n, Ordering::Relaxed);
+        }
+        Ok(cl.reuse)
+    }
+
+    /// `claim_prefix`'s plan for `prompt` in slot `slot` (holding `common`
+    /// of it), not touching the index (admission's estimates): the
+    /// positions the slot would hold, and its pages then (kept and mapped;
+    /// sharing off: none).
+    fn claim_peek(&self, slot: usize, prompt: &[u32], common: usize) -> (usize, Vec<u32>) {
+        let last = prompt.len() - 1;
+        let Some(sh) = &self.share else {
+            return (common.min(last), Vec::new());
+        };
+        let walk: Vec<u32> = (sh.index.peek(&prompt[..last]).iter())
+            .map(|w| w.1)
+            .collect();
+        let pages = self.net.slot_pages(&self.pool, slot);
+        let cl = plan_claim(common, last, &pages, &walk, |p| page_use(&sh.index, p));
+        let mut mine = pages[..pages_for(cl.keep, PAGE).min(pages.len())].to_vec();
+        mine.extend_from_slice(&walk[cl.map]);
+        (cl.reuse, mine)
+    }
+
+    /// Sharing on: offer slot `slot`'s whole pages past those it offered to
+    /// the index (design §3.3: a page is indexed once all its rows are
+    /// written: fed, decoded, restored, or the S1 path's). A new block is
+    /// indexed under the slot's page, pinned and held; one the index has at
+    /// another page (a duplicate: the same bytes, §2) stays the slot's own,
+    /// and so do its later pages: a page is indexed only under a parent
+    /// page its slot holds, so every slot holding an indexed page holds its
+    /// ancestors' too, a warm block's descendants are all warm, and the
+    /// warm set can always be evicted whole (`evict_warm`).
+    fn index_pages(&mut self, slot: usize) -> Result<(), String> {
+        let Some(sh) = self.share.as_mut() else {
+            return Ok(());
+        };
+        let whole = self.held[slot].len() / PAGE;
+        if sh.keys[slot].len() >= whole {
+            return Ok(());
+        }
+        let pages = self.net.slot_pages(&self.pool, slot);
+        for i in sh.keys[slot].len()..whole {
+            let parent = sh.keys[slot].last().copied().unwrap_or(ROOT);
+            let block = &self.held[slot][i * PAGE..(i + 1) * PAGE];
+            let ok = i == 0 || sh.index.page(parent) == Some(pages[i - 1]);
+            let ins = match ok {
+                true => sh.index.insert(parent, block, pages[i]),
+                false => Ins::No,
+            };
+            match ins {
+                Ins::New(k) => {
+                    sh.index.hold(k);
+                    self.net.pin_page(&mut self.pool, pages[i])?;
+                    sh.keys[slot].push(k);
+                }
+                Ins::Have(k, _other) => {
+                    // Debug builds: the bytes are the same (§2's runtime
+                    // proof; what sharing rests on).
+                    #[cfg(debug_assertions)]
+                    assert!(
+                        self.net.same_page_bytes(&self.pool, pages[i], _other)?,
+                        "slot {slot} page {i} ({}): block {k:#x}'s bytes differ from page {_other}'s",
+                        pages[i]
+                    );
+                    sh.keys[slot].push(k);
+                }
+                Ins::No => sh.keys[slot].push(chain(parent, block)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Sharing on: the index gives up its least recently used warm leaf
+    /// (`pop_lru_leaf`). The tier copies it out first (`spill_page`: the
+    /// page still pinned, so live), lets its device holder go
+    /// (`Tier::drop_resident`), then the page is unpinned (free after the
+    /// work in flight). Whether there was one.
+    fn evict_warm(&mut self) -> Result<bool, String> {
+        let Some(sh) = self.share.as_mut() else {
+            return Ok(false);
+        };
+        let Some(ev) = sh.index.pop_lru_leaf() else {
+            return Ok(false);
+        };
+        self.let_go(&ev)?;
+        self.evicted += 1;
+        if let Some(m) = &self.metrics {
+            m.pages_evicted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(true)
+    }
+
+    /// A block the index gave up (`ev`): the tier stores it first if it
+    /// doesn't yet (`spill_page`, the page still pinned and so live:
+    /// `page_out_id` wants that), lets go of it as the index's device
+    /// holder (`Tier::drop_resident`), then the page is unpinned (free
+    /// after the work in flight, unless a slot holds it).
+    fn let_go(&mut self, ev: &Evicted) -> Result<(), String> {
+        if let Some(t) = self.tier.as_mut() {
+            let t0 = self.trace.as_ref().map(|_| Instant::now());
+            let had = t.t.store.child(ev.parent, &ev.tokens).is_some();
+            match t.spill_page(self.net, &self.pool, ev.parent, &ev.tokens, ev.page) {
+                Ok(stored) => {
+                    t.t.drop_resident(ev.key);
+                    self.traced(TierCopy::Spill, usize::from(stored && !had), t0);
+                }
+                Err(e) => self.tier_failed("evict", &e),
+            }
+        }
+        self.net.unpin_page(&mut self.pool, ev.page)
+    }
+
+    /// Slot `slot` writes into its page `i` next, which it alone holds of
+    /// the slots and the index has (`plan_claim`'s `unindex`): its pages
+    /// after it go (`drop_rows`; the index's blocks there turn warm), then
+    /// the block and every block after it leave the index
+    /// (`unindex_subtree`; none reachable without it), parents first as
+    /// evictions (`let_go`); the page stays the slot's, unpinned.
+    fn unindex_at(&mut self, slot: usize, i: usize) -> Result<(), String> {
+        self.drop_rows(slot, (i + 1) * PAGE)?;
+        let page = self.net.slot_pages(&self.pool, slot)[i];
+        let sh = self.share.as_mut().expect("sharing");
+        let k = sh.index.key_of(page).expect("unindex_at: an indexed page");
+        let evs = sh.index.unindex_subtree(k)?;
+        for ev in evs.iter().rev() {
+            self.let_go(ev)?;
+        }
+        Ok(())
+    }
+
+    /// Debug builds, after each step (design §3.6's leak check): the pool's
+    /// pages each in one state, refs their occurrences in slot lists; the
+    /// index's holds of each page its refs, every indexed page pinned;
+    /// each slot's offered keys its whole rows' chain, and an indexed page
+    /// held only right after its parent's page.
+    #[cfg(debug_assertions)]
+    fn check_share(&self) {
+        let Some(sh) = &self.share else {
+            return;
+        };
+        self.net.check_pages(&self.pool);
+        let state = |p| self.net.page_state(&self.pool, p).expect("a pool page");
+        sh.index.check(|p| state(p).0);
+        for s in 0..self.slots {
+            let held = &self.held[s];
+            let ks = &sh.keys[s];
+            assert_eq!(
+                *ks,
+                crate::kvstore::keys(held),
+                "slot {s}: its offered keys"
+            );
+            let pages = self.net.slot_pages(&self.pool, s);
+            for (i, &p) in pages.iter().enumerate() {
+                let Some(k) = sh.index.key_of(p) else {
+                    continue;
+                };
+                assert!(state(p).1, "slot {s}: indexed page {p} unpinned");
+                assert_eq!(ks.get(i), Some(&k), "slot {s} page {i}: another block's");
+                let up = sh.index.parent(k).expect("indexed");
+                match i {
+                    0 => assert_eq!(up, ROOT, "slot {s}: page 0 not a first block"),
+                    _ => assert_eq!(
+                        sh.index.page(up),
+                        Some(pages[i - 1]),
+                        "slot {s} page {i}: its parent's page isn't its page {}",
+                        i - 1
+                    ),
+                }
+            }
         }
     }
 
@@ -910,6 +1292,7 @@ impl<'a, 't> Batch<'a, 't> {
             size: p.size,
             preempted: self.preempted,
             unfed: self.unfed,
+            share: (self.share.as_ref()).map(|sh| (sh.index.warm(), sh.index.shared())),
         });
         m.publish_pool(self.slot_states(), pages);
         let short = match self.sched.order {
@@ -953,6 +1336,11 @@ impl<'a, 't> Batch<'a, 't> {
     /// being prefilled and the running requests still need on the same
     /// terms; idle slots' prefixes count, they give theirs up (`reclaim`).
     /// Otherwise it waits (never a failure for pages).
+    ///
+    /// Shared prefixes: the prefix is the claim's (`claim_peek`: the slot's
+    /// own, or the index's pages it would map), and the pages it can have
+    /// are every page no running request holds and its claim doesn't (free,
+    /// warm, idle slots'; design §3.6: a shared page counts once).
     pub(super) fn admit_check(&self, job: &Job) -> Admit {
         let prompt = &job.prompt;
         let Some((slot, common)) = self.free_slot(prompt) else {
@@ -961,6 +1349,7 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(pg) = self.pages() else {
             return Admit::Yes;
         };
+        let (claimed, mine) = self.claim_peek(slot, prompt, common);
         let last = prompt.len() - 1;
         let rem: Vec<usize> = (self.pre.iter())
             .map(|f| f.seq.hist.len() - 1 - f.fed)
@@ -975,15 +1364,13 @@ impl<'a, 't> Batch<'a, 't> {
             short,
             passes,
             &rem,
-            last - self.cached_len(prompt, common),
+            last - self.cached_len(prompt, claimed),
         ) {
             return Admit::Lane;
         }
         // Pages a sequence of `at` positions needs to grow `left` more.
         let grow = self.grow_tokens;
         let need = |at: usize, left: usize| pages_for((at + left.min(grow)).min(self.ctx), pg.size);
-        let keep = pages_for(common.min(last), pg.size);
-        let want = need(last, job.n_gen).saturating_sub(keep);
         let others: usize = (self.pre.iter().map(|f| &f.seq))
             .chain(&self.seqs)
             .map(|q| {
@@ -991,7 +1378,20 @@ impl<'a, 't> Batch<'a, 't> {
                 need(q.hist.len(), left).saturating_sub(pg.held[q.slot])
             })
             .sum();
-        let have = pg.free + self.idle_pages(&pg, slot) + pg.held[slot].saturating_sub(keep);
+        let (want, have) = match self.share {
+            None => {
+                let keep = pages_for(common.min(last), pg.size);
+                let want = need(last, job.n_gen).saturating_sub(keep);
+                let have =
+                    pg.free + self.idle_pages(&pg, slot) + pg.held[slot].saturating_sub(keep);
+                (want, have)
+            }
+            Some(_) => {
+                let busy = (self.net.busy_pages(&self.pool, &self.busy, &mine)).unwrap_or(0);
+                let want = need(last, job.n_gen).saturating_sub(mine.len());
+                (want, pg.total.saturating_sub(busy + mine.len()))
+            }
+        };
         match have >= want + others {
             true => Admit::Yes,
             false => Admit::Pages,
@@ -1041,7 +1441,7 @@ impl<'a, 't> Batch<'a, 't> {
     pub fn uncached(&self, prompt: &[u32]) -> Option<usize> {
         let last = prompt.len().checked_sub(1)?;
         self.free_slot(prompt)
-            .map(|(_, c)| last - self.cached_len(prompt, c))
+            .map(|(s, c)| last - self.cached_len(prompt, self.claim_peek(s, prompt, c).0))
     }
 
     /// The pool's pages (None: plain).
@@ -1079,18 +1479,16 @@ impl<'a, 't> Batch<'a, 't> {
     /// its last chunk.
     pub fn admit(&mut self, job: Job, out: TextOut<'t>) -> Result<(), String> {
         let p = &job.prompt;
-        let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
-        let reuse = common.min(last);
         self.busy[slot] = true;
         self.touch(slot);
-        // The tier keeps the slot's pages past the prefix (its last
-        // conversation's).
-        self.spill(slot, reuse);
-        self.held[slot].truncate(reuse);
-        // The rest of the slot's pages are free (a paged pool).
-        self.net.release(&mut self.pool, slot, reuse)?;
+        // The slot's rows past the prefix go (the tier keeps them first,
+        // its last conversation's), its pages free (a paged pool); with
+        // shared prefixes, the index's pages of the prompt are mapped if it
+        // knows more of it.
+        let reuse = self.claim_prefix(slot, p, common)?;
         let reuse = self.restore(slot, p, reuse)?;
+        self.index_pages(slot)?;
         if super::debug() {
             eprintln!(
                 "axon serve: #{} prefill: chunked, slot {slot}, {} tok ({reuse} cached), {} decoding",
@@ -1214,6 +1612,7 @@ impl<'a, 't> Batch<'a, 't> {
         self.held[s].extend_from_slice(toks);
         f.fed += n;
         self.fed_now += n;
+        self.index_pages(s)?;
         Ok(n)
     }
 
@@ -1257,13 +1656,22 @@ impl<'a, 't> Batch<'a, 't> {
         self.net.move_slot_cache(&self.pool, cache, slot)?;
         self.solo = slot;
         self.touch(slot);
-        // The request writes over the slot's rows past the prefix it
-        // shares: the tier keeps them first.
-        let have = common.min(prompt.len() - 1);
-        if self.tier.is_some() {
-            self.spill(slot, have);
-            self.held[slot].truncate(have);
-        }
+        let last = prompt.len() - 1;
+        let have = match self.share {
+            // The request writes over the slot's rows past the prefix it
+            // shares: the tier keeps them first.
+            None => {
+                let have = common.min(last);
+                if self.tier.is_some() {
+                    self.spill(slot, have);
+                    self.held[slot].truncate(have);
+                }
+                have
+            }
+            // As `admit`'s: the index's pages of the prompt mapped if it
+            // knows more of it (the slot then holds no row past them).
+            Some(_) => self.claim_prefix(slot, prompt, common)?,
+        };
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
         let short = self.make_room(slot, want)?;
         if short > 0 {
@@ -1272,6 +1680,18 @@ impl<'a, 't> Batch<'a, 't> {
         // Its pages are there: the stored prefix of its prompt is copied
         // in, the view prefills the rest.
         self.restore(slot, prompt, have)?;
+        self.index_pages(slot)?;
+        // Debug builds: the view writes positions from the prefix it keeps
+        // (as `Engine::job` reckons it) to `want`, into pages only it holds
+        // and the index doesn't (E3; the `Lm` calls on a view check
+        // nothing themselves).
+        #[cfg(debug_assertions)]
+        {
+            let h = &self.held[slot];
+            let from = h.iter().zip(prompt).take_while(|(a, b)| a == b).count();
+            self.net
+                .assert_writable(&self.pool, slot, from.min(last), want);
+        }
         // Its batched passes run on the pool's scratch (a paged pool's view
         // has none of its own), back at `end_solo` / `adopt`.
         self.net.lend_scratch(&mut self.pool, cache)?;
@@ -1280,10 +1700,20 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Free pages for slot `slot`'s positions 0..hi: idle prefixes give
     /// theirs up as needed (`reclaim`). The pages still short (0: held).
+    /// Shared prefixes (design §3.6): the index's warm pages go first,
+    /// least recently used leaves (`evict_warm`), then an idle slot's
+    /// (whose indexed pages turn warm, and go next).
     fn make_room(&mut self, slot: usize, hi: usize) -> Result<usize, String> {
         loop {
             let short = self.net.reserve(&mut self.pool, slot, hi)?;
-            if short == 0 || !self.reclaim(slot)? {
+            if short == 0 {
+                return Ok(0);
+            }
+            let mut evicted = 0;
+            while evicted < short && self.evict_warm()? {
+                evicted += 1;
+            }
+            if evicted == 0 && !self.reclaim(slot)? {
                 return Ok(short);
             }
         }
@@ -1301,10 +1731,9 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(s) = victim else {
             return Ok(false);
         };
-        // Its prefix goes to RAM (the tier on), not away.
-        self.spill(s, 0);
-        self.held[s].clear();
-        self.net.release(&mut self.pool, s, 0)?;
+        // Its prefix goes to RAM (the tier on), not away; shared prefixes:
+        // its indexed pages stay, warm.
+        self.drop_rows(s, 0)?;
         Ok(true)
     }
 
@@ -1322,8 +1751,9 @@ impl<'a, 't> Batch<'a, 't> {
     ) -> Result<(), String> {
         self.net.return_scratch(&mut self.pool, cache)?;
         // Pages past its rows (reserved for what it didn't generate) free.
-        self.net.release(&mut self.pool, self.solo, hist.len())?;
+        self.release_rows(self.solo, hist.len())?;
         self.held[self.solo] = hist;
+        self.index_pages(self.solo)?;
         // Its pages go to the tier as the batch's do: the idle flush copies
         // them while there is room (#170), a spill when the slot gives its
         // rows up.
@@ -1345,9 +1775,10 @@ impl<'a, 't> Batch<'a, 't> {
         assert!(!self.busy[slot], "adopt: the S1 slot is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
         // Its pages past its rows free: the steps take each next one.
-        self.net.release(&mut self.pool, slot, n)?;
+        self.release_rows(slot, n)?;
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
+        self.index_pages(slot)?;
         seq.slot = slot;
         self.seqs.push(seq);
         Ok(())
@@ -1385,6 +1816,8 @@ impl<'a, 't> Batch<'a, 't> {
         // request: `flush_idle`, #170).
         self.stalled = false;
         self.write_behind(super::tier::STEP_BYTES);
+        #[cfg(debug_assertions)]
+        self.check_share();
         Ok(())
     }
 
@@ -1476,10 +1909,15 @@ impl<'a, 't> Batch<'a, 't> {
             Err(StepError::Device(e)) => return Err(e),
         };
         let mut done = Vec::new();
+        // Slots whose rows just filled a page (the index's, sharing on).
+        let mut full = Vec::new();
         for (i, o) in outs.into_iter().enumerate() {
             let s = &mut self.seqs[i];
             let fed = s.hist.len();
             self.held[s.slot].push(s.hist[fed - 1]);
+            if self.share.is_some() && self.held[s.slot].len() % PAGE == 0 {
+                full.push(s.slot);
+            }
             let next = match (o, s.sampler.as_mut()) {
                 (RowOut::Pick(t), None) => t,
                 (RowOut::Cands(c), Some(sm)) => sm.pick(&c),
@@ -1497,6 +1935,9 @@ impl<'a, 't> Batch<'a, 't> {
             } else if s.ids.len() >= s.job.n_gen {
                 done.push((i, End::Length));
             }
+        }
+        for s in full {
+            self.index_pages(s)?;
         }
         // Highest index first: swap_remove keeps the lower ones in place.
         done.sort_by_key(|d| std::cmp::Reverse(d.0));
@@ -1558,12 +1999,10 @@ impl<'a, 't> Batch<'a, 't> {
     /// Prefill `j` gives its rows up: fed from 0 again later.
     fn unfeed(&mut self, j: usize) -> Result<(), String> {
         let s = self.pre[j].seq.slot;
-        self.spill(s, 0);
         let f = &mut self.pre[j];
         f.fed = 0;
         f.seq.cached = 0;
-        self.held[s].clear();
-        self.net.release(&mut self.pool, s, 0)?;
+        self.drop_rows(s, 0)?;
         self.unfed += 1;
         Ok(())
     }
@@ -1584,9 +2023,7 @@ impl<'a, 't> Batch<'a, 't> {
                 seq.ids.len()
             );
         }
-        self.spill(s, 0);
-        self.held[s].clear();
-        self.net.release(&mut self.pool, s, 0)?;
+        self.drop_rows(s, 0)?;
         let at = self.pre.partition_point(|f| f.seq.job.id < seq.job.id);
         self.pre.insert(
             at,
@@ -3026,5 +3463,127 @@ mod trace_tests {
         assert_eq!(v["prefilling"], 1);
         drop(tr);
         std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::{Claim, PAGE, PageUse, plan_claim};
+
+    fn claim(
+        unindex: Option<usize>,
+        keep: usize,
+        map: std::ops::Range<usize>,
+        reuse: usize,
+    ) -> Claim {
+        Claim {
+            unindex,
+            keep,
+            map,
+            reuse,
+        }
+    }
+
+    /// Design §5.1's `claim_prefix_cases`, on the plan: the slot's own
+    /// prefix against the index's, mid-page in an indexed page held alone
+    /// (unindexed, in place) or shared (rounded down), the whole prompt
+    /// cached, its last token on a page boundary.
+    #[test]
+    fn claim_prefix_cases() {
+        let own = |_| PageUse::Own;
+        // Index longer than the slot's prefix: map from the first page the
+        // slot doesn't share (it keeps the walk's own pages it holds).
+        assert_eq!(
+            plan_claim(70, 300, &[10, 11], &[20, 21, 22, 23], own),
+            claim(None, 0, 0..4, 256)
+        );
+        assert_eq!(
+            plan_claim(70, 300, &[20, 11], &[20, 21, 22, 23], own),
+            claim(None, 64, 1..4, 256)
+        );
+        assert_eq!(
+            plan_claim(190, 300, &[20, 30, 22], &[20, 21, 22], own),
+            claim(None, 64, 1..3, 192),
+            "a page past a different one isn't kept"
+        );
+        // The slot knows as much (or more): in place, as main.
+        assert_eq!(
+            plan_claim(200, 300, &[20, 1, 2, 3], &[20], own),
+            claim(None, 200, 1..1, 200)
+        );
+        assert_eq!(
+            plan_claim(192, 300, &[20, 21, 22], &[20, 21, 22], own),
+            claim(None, 192, 3..3, 192)
+        );
+        // Mid-page in an indexed page: held alone, it leaves the index and
+        // the slot goes on in place; shared, the slot starts at its page.
+        let alone = |p| if p == 3 { PageUse::Alone } else { PageUse::Own };
+        assert_eq!(
+            plan_claim(200, 300, &[20, 1, 2, 3], &[20], alone),
+            claim(Some(3), 200, 1..1, 200)
+        );
+        let shared = |p| {
+            if p == 3 {
+                PageUse::Shared
+            } else {
+                PageUse::Own
+            }
+        };
+        assert_eq!(
+            plan_claim(200, 300, &[20, 1, 2, 3], &[20], shared),
+            claim(None, 192, 1..1, 192)
+        );
+        // Its page state matters only mid-page.
+        assert_eq!(
+            plan_claim(192, 300, &[20, 1, 2, 3], &[20], shared),
+            claim(None, 192, 1..1, 192)
+        );
+        // The whole prompt cached: up to its last token, which is fed again.
+        assert_eq!(
+            plan_claim(500, 255, &[0, 1, 2, 3, 4], &[0, 1, 2], own),
+            claim(None, 255, 3..3, 255)
+        );
+        assert_eq!(
+            plan_claim(500, 255, &[0, 1, 2, 3, 4], &[0, 1, 2], shared),
+            claim(None, 192, 3..3, 192)
+        );
+        // The last token on a page boundary: every page below it.
+        assert_eq!(
+            plan_claim(300, 256, &[0, 1, 2, 3, 4], &[0, 1, 2, 3], shared),
+            claim(None, 256, 4..4, 256)
+        );
+        assert_eq!(
+            plan_claim(0, 256, &[], &[7, 8, 9, 6], own),
+            claim(None, 0, 0..4, 256)
+        );
+        // Nothing anywhere: from 0.
+        assert_eq!(plan_claim(0, 40, &[], &[], own), claim(None, 0, 0..0, 0));
+        assert_eq!(
+            plan_claim(0, 40, &[5], &[], shared),
+            claim(None, 0, 0..0, 0)
+        );
+        // Every case keeps a prefix of the slot's rows and maps whole pages
+        // below the last token after it.
+        for own_n in [0usize, 1, 63, 64, 65, 127, 128, 129, 200, 255, 256, 300] {
+            for w in 0..=4usize {
+                let last = 4 * PAGE + 10;
+                let walk: Vec<u32> = (0..w as u32).collect();
+                let pages: Vec<u32> = (0..own_n.div_ceil(PAGE) as u32).map(|p| p + 1).collect();
+                for st in [PageUse::Own, PageUse::Alone, PageUse::Shared] {
+                    let c = plan_claim(own_n, last, &pages, &walk, |_| st);
+                    assert!(c.keep <= own_n.min(last) && c.keep <= c.reuse && c.reuse <= last);
+                    assert_eq!(c.map.end, if c.map.is_empty() { c.map.start } else { w });
+                    if !c.map.is_empty() {
+                        assert_eq!(
+                            (c.keep % PAGE, c.map.start * PAGE, c.reuse),
+                            (0, c.keep, w * PAGE)
+                        );
+                    }
+                    assert!(
+                        c.unindex.is_none() || (st == PageUse::Alone && c.reuse == own_n.min(last))
+                    );
+                }
+            }
+        }
     }
 }
