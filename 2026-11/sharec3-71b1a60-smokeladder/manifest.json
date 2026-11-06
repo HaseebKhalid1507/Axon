@@ -1,0 +1,29 @@
+{
+ "label": "sharec3-71b1a60-smokeladder",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1106-074314-a053",
+   "name": "sharec3-71b1a60-smokeladder",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "NVIDIA GeForce GTX 1050",
+   "driver": "580.159.04",
+   "sha": "71b1a60",
+   "binary": "bash",
+   "started": 1793968994.2322276,
+   "ended": 1793969704.61243,
+   "attempts": 1,
+   "remote_job": "20261106-074319-bash-2215899",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "16074d72264434d94aa508b5ae28dea01a0ea6161d5e6509269eb8f0eda90fa2",
+   "log_bytes": 6211
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 07:55:05 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

@@ -1,0 +1,67 @@
+[axon-run 07:43:14] submitted 1106-074314-a053 by /home/haseeb/.cache/axon-sharec3: /usr/bin/bash smokeladder.sh ./warmladder.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-71b1a60 ./agent_replay-ad0c65e.py ./board-trace-v1.json
+[axon-run 07:43:14] job 1106-074314-a053 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 2500 --src /home/haseeb/.cache/axon-podjob/smokeladder-60ba1063223f /usr/bin/bash smokeladder.sh ./warmladder.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-71b1a60 ./agent_replay-ad0c65e.py ./board-trace-v1.json
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (2d85f3fc3de934a5afc0bccb) + source of /home/haseeb/.cache/axon-podjob/smokeladder-60ba1063223f
+
+sent 8,280,252 bytes  received 182 bytes  16,560,868.00 bytes/sec
+total size is 29,133,684  speedup is 3.52
+
+sent 169 bytes  received 35 bytes  408.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261106-074319-bash-2215899 on jade (GPU, 2500 MB)
+[axon-node 07:43:19] GPU lock taken; job wants 2500 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 53
+[axon-node 07:43:19] run bash (2d85f3fc3de934a5afc0bccb) as /home/haseeb/.cache/axon-podjob/smokeladder-60ba1063223f on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 07:43:19] memory cap (scope MemoryMax) 2943 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 07:43:19] MemAvailable 4479 MB, load ['3.76', '6.24', '9.62']; nice -n 19 ionice -c3 taskset -c 0-7
+== warmladder: rungs 4,8, 1 rounds each, base ./axon-base-ad0c65e (rule: smallest rung with base median warm fraction <= 0.60)
+== replayshare speed 4, 1 rounds, 4 sessions, base only: base ./axon-base-ad0c65e, cand ./axon-71b1a60, both --cache-ram 1G
+## base-r0 07:43:20:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G
+  pool 2807 pages, --kv-gb 3.281
+ROUND r0 clean
+BASEONLY r0: warm 0 of 4 turn-sessions (fraction 0.000), sessions 4, chains 4
+CLEAN ROUNDS 1 of 1 wanted: ['r0']
+RUNG 4: base median warm fraction 0.000 over 1 clean rounds (rule: <= 0.60)
+WARMLADDER RUNG 4: the A/B warm/GB cell, 1 rounds interleaved
+SMOKE
+== replayshare speed 4, 1 rounds, 4 sessions: base ./axon-base-ad0c65e, cand ./axon-71b1a60, both --cache-ram 1G
+NVIDIA GeForce GTX 1050, 580.159.04, 81, P0
+               total        used        free      shared  buff/cache   available
+Mem:               7           3           1           0           3           4
+trace sha256 713285ba54487e17  replay sha256 34b1910bc52539b7
+## base-r0 07:47:40:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G
+  pool 2807 pages, --kv-gb 3.281
+requests=24 errors=0 first_error=None wall_s=76.7 prime_s=128.1 ttft_new_p50=None ttft_resume_p50=None ttft_turn_p50=1.537 goodput_tok_s=2.39 itl_p99_ms=1490.84 warm_per_gb=0.0 reprefill_share=0.0 reprefill_net_share=-0.0011 out_tokens_short=0 prompt_mismatch=0 prompt_checked=24 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 219222 axon_prompt_cached_tokens_total 185118 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 452984832 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 576 axon_kv_ram_gpu_pages 546 axon_kv_ram_written_pages_total 576 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 0 axon_kv_ram_hits_total 0
+## cand-r0 07:51:19:  ./axon-71b1a60 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G
+  pool 2807 pages, --kv-gb 3.281
+requests=24 errors=0 first_error=None wall_s=76.6 prime_s=128.6 ttft_new_p50=None ttft_resume_p50=None ttft_turn_p50=1.537 goodput_tok_s=2.39 itl_p99_ms=1491.01 warm_per_gb=0.0 reprefill_share=0.0 reprefill_net_share=-0.0011 out_tokens_short=0 prompt_mismatch=0 prompt_checked=24 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 219222 axon_prompt_cached_tokens_total 185118 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 452984832 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 576 axon_kv_ram_gpu_pages 546 axon_kv_ram_written_pages_total 576 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 0 axon_kv_ram_hits_total 0 axon_kv_pages_warm 0 axon_kv_pages_shared 0 axon_prompt_shared_tokens_total 0 axon_pages_evicted_total 0
+ROUND r0 clean
+RUN base r0: md5 9e0584ea2425 tainted False foreign 0/0 errors 0 out_tok_s 36.33 itl_p99 1490.84 reprefill 0.0 ttft_resume_p50 None ttft_turn_p50 1.537 goodput 2.39 preempted 0 wall 76.7
+RUN cand r0: md5 9e0584ea2425 tainted False foreign 0/0 errors 0 out_tok_s 36.35 itl_p99 1491.01 reprefill 0.0 ttft_resume_p50 None ttft_turn_p50 1.537 goodput 2.39 preempted 0 wall 76.6
+CLEAN ROUNDS 1 of 1 wanted: ['r0']
+MD5 SAME
+MEDIAN itl_p99_ms: base 1490.84 cand 1491.01 raw base [1490.84] cand [1491.01]
+MEDIAN output_tok_s: base 36.33 cand 36.35 raw base [36.33] cand [36.35]
+MEDIAN reprefill_share: base 0.0 cand 0.0 raw base [0.0] cand [0.0]
+MEDIAN reprefill_tokens: base 0 cand 0 raw base [0] cand [0]
+MEDIAN ttft_resume_p50: base None cand None raw base [None] cand [None]
+MEDIAN ttft_turn_p50: base 1.537 cand 1.537 raw base [1.537] cand [1.537]
+MEDIAN ttft_new_p50: base None cand None raw base [None] cand [None]
+MEDIAN goodput_tok_s: base 2.39 cand 2.39 raw base [2.39] cand [2.39]
+MEDIAN warm_sessions: base 0 cand 0 raw base [0] cand [0]
+MEDIAN kv_gb: base 3.281 cand 3.281 raw base [3.281] cand [3.281]
+MEDIAN warm_per_gb: base 0.0 cand 0.0 raw base [0.0] cand [0.0]
+MEDIAN kv_used_gb: base 0.776 cand 0.767 raw base [0.776] cand [0.767]
+MEDIAN warm_per_used_gb: base 0.0 cand 0.0 raw base [0.0] cand [0.0]
+MEDIAN preempted: base 0 cand 0 raw base [0] cand [0]
+CLAUSE s4 warm/GB (the harness's: --kv-gb): no value ((0.0, 0.0))
+CLAUSE s4 TTFT-new p50: no value ((None, None))
+INFO s4 warm/GB, KV bytes used form: cand/main None (0.0, 0.0)
+INFO s4 ITL p99 cand/main 1.0 (1490.84, 1491.01)
+REPLAYSHARE OK
+REPLAYSHARE DONE speed 4 rc 0
+WARMLADDER DONE rung 4 rc 0
+[axon-node 07:54:59] exit 0 after 700.1s; lowest MemAvailable seen 2955 MB
+[axon-node 07:54:59] peak RSS 1792 MB (job process tree PSS, 2 s samples x345)
+[axon-run 07:55:00] exit 0 after 705.9s (host jade)
