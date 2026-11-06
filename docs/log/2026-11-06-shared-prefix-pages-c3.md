@@ -86,10 +86,10 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
 | md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0); serve every reply == main: 7B f16 147/147, 7B q8 147/147, gemma3-1B f16 84/84, Qwen3-0.6B q8 147/147, CPU 0.5B 42/42, in every variant |
 | replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | **PASS**: MD5 SAME, 174 requests each, 0 errors, the round clean |
 | timing: s4, warm/GB ladder, fan-out, servetime, s1 (4090 pod) | `76b8f0b` | 1106-094454-b75c, 1106-094455-4ac1, 1106-094455-e8ca, 1106-094456-10cf, 1106-094456-7274 | **two clauses FAIL** (table below) |
-| touched modules' tests + `share_kv_is_opt_in`, release (r3) | `afb16be` | 1106-120316-feea | pending |
-| same, debug assertions + overflow checks (r3) | `afb16be` | 1106-120317-e24a | pending |
-| md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | 1106-120317-4cc6 | pending |
-| CI (`check`) | `afb16be`+ | | pending |
+| touched modules' tests + `share_kv_is_opt_in`, release (r3) | `afb16be` | 1106-120316-feea | **PASS** 216 / 0 / 10 |
+| same, debug assertions + overflow checks (r3) | `afb16be` | 1106-120317-e24a | **PASS** 216 / 0 / 10 |
+| md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | 1106-120317-4cc6 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0). Serve, every reply == main's: 7B f16 189/189 and 7B q8 189/189 (9 arms × 21), gemma3-1B f16 84/84 (4 arms), Qwen3-0.6B q8 189/189, CPU 0.5B 42/42 (default and `=1`). The default (off) arm is main's decision for decision too: shared/evicted absent and the same cached-token count as main in every GPU cell (7B 11,118 = 11,118; gemma 11,135; 0.6B 11,118), as is `AXON_SHARE_KV=0`. The `=1` arms share (1,280–10,880 tokens) and evict (48-page pool: 223–272 pages) with the same replies |
+| CI (`check`) | `bcb27f4` (`afb16be` + docs) | Actions run 42258164917 | **PASS** |
 
 ### Timing (RTX 4090 pod, `76b8f0b` vs main `ad0c65e`)
 Pod `pod1` (zmu6vy2elvx0ft): RTX 4090 24 GB, secure RunPod, driver 595.91.07, power limit 450 W. Exclusive (`--timing`:
