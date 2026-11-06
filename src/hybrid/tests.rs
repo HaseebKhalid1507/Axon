@@ -1560,9 +1560,8 @@ fn build_at<'m, 'g>(
 fn assert_half_is_the_estimate(h: &HybridQwen2, m: &Model, ctx: usize, what: &str) {
     let k = h.n_layers - h.gpu_layers;
     let est = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
-    let built = (h.cpu.as_ref())
-        .and_then(|c| c.r8_arena())
-        .map_or(0, |a| a.len() as u64);
+    // Its repacked rows' mapping, or an FP8 half's F8S rows' (`arena_len`).
+    let built = h.cpu.as_ref().map_or(0, |c| c.arena_len());
     assert_eq!(
         est.arena,
         built.next_multiple_of(2 << 20),
@@ -1802,6 +1801,108 @@ fn hybrid_ram_refused_before_the_upload() {
         freed >> 20,
         gpu_bytes >> 20,
         tol >> 20
+    );
+}
+
+/// #206's review: an FP8 checkpoint's split takes the Q8_0 path (native
+/// FP8 runs only the whole model on one GPU), and its upload converts each
+/// GPU-half FP8 matrix, and the head, to Q8_0 on the host after the ring
+/// is gone: one rows x Q8_0 buffer at a time, allocated while its source
+/// is still held, the head's first. On the FP8 0.5B the head is the tied
+/// F16 embedding, 151936 rows of 952 bytes (138 MiB), and the ring 16 MiB.
+/// The staging counted is at least each of those buffers at 1, 12 and 23
+/// GPU layers (#184's first version counted the ring alone, 16 MiB, and
+/// at 23 the need came to about the tolerance: no RAM figure refused it).
+/// At 23, the split is refused a byte under the edge with the head's
+/// conversion counted, and built at it.
+#[test]
+fn hybrid_fp8_staging_counts_the_q8_conversions() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    // The default (non-FP8) module: a split's, whatever the GPU.
+    let km = Kernels::module(&g).unwrap();
+    // A fresh model per build: a build hands back its GPU half's bytes.
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let m = load();
+    assert!(crate::safetensors::is_fp8(&m));
+    let n = block_count(&m).unwrap();
+    let q8 = |t: &Tensor| {
+        let cols = t.dims[0] as usize;
+        (t.n_elements as usize / cols * crate::quant::row_bytes(crate::quant::Q8_0, cols)) as u64
+    };
+    let named = |s: &str| m.tensors.iter().find(|t| t.name == s);
+    let head = named("output.weight")
+        .or_else(|| named("token_embd.weight"))
+        .unwrap();
+    assert_eq!(q8(head), 151936 * 952, "the 0.5B's head as Q8_0");
+    let sb = crate::cuda::qwen2::split_batch(false);
+    for gl in [1, n / 2, n - 1] {
+        let k = n - gl;
+        let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+        let largest = (m.tensors.iter())
+            .filter(|t| gpu_part(&t.name, k, n) && t.qtype.id == crate::quant::fp8::F8_E4M3)
+            .map(q8)
+            .max()
+            .unwrap();
+        eprintln!(
+            "fp8 0.5b {gl}/{n} on the GPU: staging {} KiB, the head's Q8_0 {} KiB, the largest \
+             FP8 matrix's {} KiB",
+            staging >> 10,
+            q8(head) >> 10,
+            largest >> 10
+        );
+        assert!(
+            staging >= q8(head) && staging >= largest,
+            "{gl}/{n}: staging {staging} under a conversion"
+        );
+    }
+    let (gl, ctx) = (n - 1, 512);
+    let k = n - gl;
+    let tol = crate::model::ram_tolerance();
+    let need = half_need(Some((&g, &km)), &m, k, ctx);
+    assert!(need > q8(head), "need {need}");
+    drop(m);
+    let m = load();
+    assert!(
+        build_at(Some((&g, &km)), &m, ctx, gl, need - tol - 1).is_err(),
+        "built a byte under the edge"
+    );
+    drop(m);
+    let m = load();
+    let h = build_at(Some((&g, &km)), &m, ctx, gl, need - tol).expect("at the edge");
+    assert_half_is_the_estimate(&h, &m, ctx, "fp8 0.5b");
+}
+
+/// #206's review: the plan's own refusals, which the staging's plan
+/// (`upload_staging`, before the RAM check) now gives first, keep the
+/// split's wording (`{g}/{n} layers on the GPU: ..., or fewer
+/// --gpu-layers`): the FP8 module (sm_89 and up) refuses a split.
+#[test]
+fn hybrid_split_plan_refusal_keeps_its_wording() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Ok(f8) = Kernels::module_f8(&g) else {
+        eprintln!("skipping: no FP8 module on this GPU");
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let m = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let n = block_count(&m).unwrap();
+    let gl = n - 1;
+    let Err(e) = build_at(Some((&g, &f8)), &m, 512, gl, u64::MAX >> 2) else {
+        panic!("split with the FP8 module");
+    };
+    assert!(
+        e.starts_with(&format!("{gl}/{n} layers on the GPU: FP8 natively runs"))
+            && e.ends_with(", or fewer --gpu-layers"),
+        "{e}"
     );
 }
 

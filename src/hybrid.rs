@@ -387,12 +387,8 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         ram: &dyn Fn() -> Option<Avail>,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
         let margin = if auto { DESKTOP_MARGIN as usize } else { 0 };
-        if m.arch == "gemma3" {
-            return Err(
-                "gemma3 doesn't split across the CPU and GPU yet: the whole model \
-                        goes on the GPU (a smaller --ctx), or --device cpu"
-                    .into(),
-            );
+        if let Some(e) = split_refusal(m) {
+            return Err(e);
         }
         let n = block_count(m)?;
         let g = gpu_layers.min(n);
@@ -427,7 +423,8 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         // before the GPU half's upload (#184; #143's check ran after it, so
         // a cap the upload didn't fit in was an OOM kill, not a refusal).
         // The CUDA context and the module are made by now, so `ram` reads
-        // what they leave. The upload's staging ring is added to the need;
+        // what they leave. The upload's staging (its ring, or the largest
+        // matrix it converts to Q8_0 on the host) is added to the need;
         // on a copy of the file (or the loader's own arena) the GPU half's
         // bytes, handed back as they go up, are credited to the CPU half
         // (`model::GpuHalfHost`). A KV cache too long to fit whole is a
@@ -435,7 +432,9 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         let sb = crate::cuda::qwen2::split_batch(wants_stream);
         let host = match dev {
             Some((gpu, module)) if k > 0 => GpuHalfHost {
-                staging: CudaQwen2::upload_staging(gpu, module, m, k, kv, sb)?,
+                staging: CudaQwen2::upload_staging(gpu, module, m, k, kv, sb).map_err(|e| {
+                    format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
+                })?,
                 freed: m.release_gain(&|t| gpu_part(&t.name, k, n)),
             },
             _ => GpuHalfHost::default(),
@@ -718,6 +717,18 @@ fn pin_verdict_tol(pinned: u64, ctx: usize, tol: u64, avail: Option<Avail>) -> R
         )),
         _ => Ok(()),
     }
+}
+
+/// Why `m` can't be split across the CPU and the GPU (`--gpu-layers` below
+/// its layer count), if it can't: gemma3 (its GPU model runs every layer).
+/// A RAM refusal names --gpu-layers only for a model that splits
+/// (`model::GpuWays`).
+pub(crate) fn split_refusal(m: &Model) -> Option<String> {
+    (m.arch == "gemma3").then(|| {
+        "gemma3 doesn't split across the CPU and GPU yet: the whole model goes on the GPU (a \
+         smaller --ctx), or --device cpu"
+            .to_string()
+    })
 }
 
 /// Whether tensor `name` is the GPU half's alone (with layers k..n): its
