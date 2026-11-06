@@ -363,17 +363,16 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         auto: bool,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
         let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-        let margin = if auto { DESKTOP_MARGIN as usize } else { 0 };
         let ram = crate::gguf::mem::avail;
-        Self::build(
-            dev, m, max_ctx, gpu_layers, kv, stream, repack, margin, &ram,
-        )
+        Self::build(dev, m, max_ctx, gpu_layers, kv, stream, repack, auto, &ram)
     }
 
     /// `new_with_stream`, the CPU's layers repacked or not (`repack`).
-    /// `ram`: the RAM available when the CPU half is about to be built
-    /// (`gguf::mem::avail`; tests pass their own), refused on as
-    /// `model::check_ram_split` says.
+    /// `auto`: the split came from `auto_gpu_layers` (streaming keeps
+    /// `DESKTOP_MARGIN` free; a RAM refusal says the split was picked to
+    /// fit the GPU's memory). `ram`: the RAM available when the CPU half is
+    /// about to be built (`gguf::mem::avail`; tests pass their own), refused
+    /// on as `model::check_ram_split` says.
     #[allow(clippy::too_many_arguments)]
     fn build(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
@@ -383,9 +382,10 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         kv: CacheKv,
         stream: bool,
         repack: bool,
-        margin: usize,
+        auto: bool,
         ram: &dyn Fn() -> Option<Avail>,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
+        let margin = if auto { DESKTOP_MARGIN as usize } else { 0 };
         if m.arch == "gemma3" {
             return Err(
                 "gemma3 doesn't split across the CPU and GPU yet: the whole model \
@@ -446,7 +446,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         // bytes have just gone back, and what the CUDA context holds in
         // host memory is in use. A KV cache too long to fit whole is a
         // note, as on the CPU (`check_ram_dense`).
-        if let Some(note) = crate::model::check_ram_split(m, repack, k, max_ctx, ram)? {
+        if let Some(note) = crate::model::check_ram_split(m, repack, k, max_ctx, auto, ram)? {
             eprintln!("axon: {note}");
         }
         let cpu = (k > 0).then(|| Qwen2::new_layers(m, repack, k));

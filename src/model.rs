@@ -823,7 +823,8 @@ pub(crate) fn dense_tolerance(cpus: u64) -> u64 {
 pub(crate) struct DenseNeed {
     /// The r8 arena: the output head and every layer's `DENSE_MATS` matrix
     /// with an r8/r8q form, laid out as `build` does (64-byte offsets, 2 MB
-    /// pages); 0 without the repack.
+    /// pages). Without the repack, only the FP8 matrices' (their F8S rows:
+    /// `build_skip` gives them a slot either way, #183); 0 for a GGUF.
     pub arena: u64,
     /// The output head's share of it, and whether the head is the tied
     /// embedding (then its copied bytes stay: `embed` reads them).
@@ -839,7 +840,8 @@ pub(crate) struct DenseNeed {
     pub kv_per_pos: u64,
 }
 
-/// `DenseNeed` of `m` (`repack` as `Qwen2::new_with`; `kv_elem`: f16 2,
+/// `DenseNeed` of `m` (`repack` as `Qwen2::new_with`: false still counts
+/// the FP8 matrices, which `build_skip` converts whatever it says; `kv_elem`: f16 2,
 /// f32 4). Only layers below the block count, as `build` (an extra
 /// nextn/MTP block isn't loaded).
 pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed {
@@ -874,10 +876,10 @@ pub(crate) fn dense_ram_need_keep(m: &Model, repack: bool, kv_elem: u64, keep: u
             .map(|t| t.dims[1] * kv_elem)
             .sum(),
     };
-    if !repack {
-        return need;
-    }
-    for t in (m.tensors.iter()).filter(|t| t.dims.len() >= 2) {
+    // `build_skip`'s rule: a matrix gets an arena slot when repacking, and
+    // an FP8 one always (its F8S form; #183: AXON_REPACK=0 counted none).
+    let slot = |t: &&Tensor| t.dims.len() >= 2 && (repack || t.qtype.id == F8_E4M3);
+    for t in m.tensors.iter().filter(slot) {
         let head = has_head && t.name == out;
         let layer = ours(&t)
             && t.name.starts_with("blk.")
@@ -947,12 +949,14 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// only if there is a CPU half) reads the RAM the CPU half has. Ok(None)
 /// with no CPU half (keep 0) and for a MoE model (no layer split: `moe`).
 /// A streamed prefill page-locks the CPU layers' whole cache (no lazy
-/// pages): `hybrid` checks that per cache, as it's made.
+/// pages): `hybrid` checks that per cache, as it's made. `auto`: the split
+/// was picked to fit the GPU's memory (the refusal's ways out, `CpuHalf`).
 pub(crate) fn check_ram_split(
     m: &Model,
     repack: bool,
     keep: usize,
     ctx: usize,
+    auto: bool,
     avail: &dyn Fn() -> Option<crate::gguf::mem::Avail>,
 ) -> Result<Option<String>, String> {
     if keep == 0 || moe::is_moe(m) {
@@ -963,7 +967,11 @@ pub(crate) fn check_ram_split(
     let n = m.n_layers() as usize;
     dense_verdict(
         &m.arch,
-        Some((keep.min(n), n)),
+        Some(CpuHalf {
+            k: keep.min(n),
+            n,
+            auto,
+        }),
         need,
         !m.file_backed(),
         ram_tolerance(),
@@ -1005,14 +1013,64 @@ pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool) -> u64 {
         .min(need.growth + tied + untied.max(need.largest))
 }
 
+/// A split's CPU half, as the RAM check names it (`check_ram_split`): `k`
+/// of the `n` layers on the CPU (k = n with no GPU layers); `auto`: the
+/// split was picked to fit the GPU's memory (`hybrid::auto_gpu_layers`),
+/// not chosen with --gpu-layers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CpuHalf {
+    pub k: usize,
+    pub n: usize,
+    pub auto: bool,
+}
+
+/// The ways out a refusal names (#185), after "only X is available
+/// (bound by ...)". `room`: the RAM available plus the tolerance; `load`,
+/// `kv_per_pos`: the weights' part and the KV a position. When the weights
+/// fit without the cache, the longest `--ctx` whose KV floor fits beside
+/// them (in steps of 256, from 256). Then by placement: the whole CPU model
+/// can go to a GPU; a split chosen with --gpu-layers can put more layers
+/// there, if the GPU has room; an automatic split already put as many there
+/// as fit, so RAM is now the limit, and a smaller --ctx is the way out (a
+/// shorter GPU cache leaves room for more of the layers there too).
+fn ram_remedy(split: Option<CpuHalf>, load: u64, kv_per_pos: u64, room: u64) -> String {
+    let ctx = (room.checked_sub(load))
+        .map(|r| r / kv_per_pos.max(1) / 256 * 256)
+        .filter(|&c| c >= 256);
+    let or_ctx = ctx.map_or(String::new(), |c| {
+        format!(", or --ctx {c} or less (its KV cache then fits)")
+    });
+    match split {
+        None => format!(
+            "; to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N \
+             part of it){or_ctx}"
+        ),
+        Some(h) if h.auto => format!(
+            ". The split was picked to fit the GPU's memory ({} of {} layers there), so RAM is \
+             now the limit; to fit: a smaller --ctx, which also leaves the GPU room for more \
+             layers{}",
+            h.n - h.k,
+            h.n,
+            ctx.map_or(String::new(), |c| format!(
+                " (--ctx {c} or less fits this CPU half as it is)"
+            ))
+        ),
+        Some(h) if h.k < h.n => format!(
+            "; to fit: more --gpu-layers than {} (fewer layers on the CPU), if the GPU has \
+             room{or_ctx}",
+            h.n - h.k
+        ),
+        Some(_) => format!("; to fit: --gpu-layers N (N layers on the GPU){or_ctx}"),
+    }
+}
+
 /// `check_ram_dense`'s decision (pure): Err to refuse, Ok(Some(warning))
 /// when the full `ctx`-token KV cache wouldn't fit beside the weights.
-/// `split`: Some((k, n)) for a split's CPU half of k of the n layers
-/// (`check_ram_split`; k = n with no GPU layers), None for the whole CPU
-/// model.
+/// `split`: a split's CPU half (`check_ram_split`), None for the whole CPU
+/// model. A refusal names its ways out (`ram_remedy`).
 fn dense_verdict(
     arch: &str,
-    split: Option<(usize, usize)>,
+    split: Option<CpuHalf>,
     need: DenseNeed,
     copied: bool,
     tolerance: u64,
@@ -1029,12 +1087,16 @@ fn dense_verdict(
     if avail.bytes + tolerance < load + kv {
         let what = match split {
             None => "the CPU model".to_string(),
-            Some((k, n)) if k < n => format!("the CPU half of the split ({k} of {n} layers)"),
-            Some((_, n)) => format!("the CPU model (--gpu-layers 0: all {n} layers on the CPU)"),
+            Some(CpuHalf { k, n, .. }) if k < n => {
+                format!("the CPU half of the split ({k} of {n} layers)")
+            }
+            Some(CpuHalf { n, .. }) => {
+                format!("the CPU model (--gpu-layers 0: all {n} layers on the CPU)")
+            }
         };
         return Err(format!(
             "{arch}: {what} needs about {:.2} GiB of RAM ({} {:.2} GiB, the KV cache of \
-             {floor} tokens {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
+             {floor} tokens {:.2} GiB) and only {:.2} GiB is available (bound by {avail}){}",
             gib(load + kv),
             match copied {
                 false => "its repacked weights",
@@ -1043,6 +1105,7 @@ fn dense_verdict(
             gib(load),
             gib(kv),
             gib(avail.bytes),
+            ram_remedy(split, load, need.kv_per_pos, avail.bytes + tolerance),
         ));
     }
     let full = need.kv_per_pos * ctx as u64;
@@ -6272,6 +6335,10 @@ mod ram_dense_tests {
             "GiB of RAM (its repacked weights",
             "the KV cache of 1000 tokens",
             "is available (bound by cgroup /app.slice/job.scope memory.max",
+            // #185: the ways out. The weights fit without the cache: 1000
+            // positions of 1 KiB less a byte, 768 in 256s.
+            "memory.max 400 MiB); to fit: a GPU (--device cuda runs the model there, or with \
+             --gpu-layers N part of it), or --ctx 768 or less (its KV cache then fits)",
         ] {
             assert!(e.contains(s), "{s:?} not in {e}");
         }
@@ -6315,6 +6382,12 @@ mod ram_dense_tests {
         // The weights and the floor don't fit: refused.
         let e = dense_verdict("llama", None, L8, false, TOL, 131072, host(5 * GIB)).unwrap_err();
         assert!(e.contains("the KV cache of 8192 tokens 1.00 GiB"), "{e}");
+        // #185: 5 GiB + 38 MiB of room less 4710 MiB of weights is 3584
+        // positions of 128 KiB.
+        assert!(
+            e.ends_with("or --ctx 3584 or less (its KV cache then fits)"),
+            "{e}"
+        );
     }
 
     /// #142 review MUST 2, round 3: a copied model is already in use at the
@@ -6460,6 +6533,48 @@ mod ram_dense_tests {
         }
     }
 
+    /// #183: an FP8 checkpoint's matrices get an arena slot, their F8S rows,
+    /// repack or not (`build_skip`), so the estimate counts them with
+    /// AXON_REPACK=0 too: on the FP8 0.5B it is the arena `Qwen2::new_layers`
+    /// builds for the whole model and a split's CPU half, the repack on and
+    /// off. Without the repack it used to be 0 (the whole arena missed).
+    #[test]
+    fn fp8_arena_counted_without_repack() {
+        let Some(p) = crate::testutil::fp8_model_path() else {
+            return;
+        };
+        let elem = if crate::kv::use_f32() { 4 } else { 2 };
+        // A fresh model per build: a repacking build hands back the norms'
+        // bytes, in the anonymous arena of converted tensors.
+        let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let n = load().n_layers() as usize;
+        for repack in [true, false] {
+            for keep in [1, n / 2, n] {
+                let m = load();
+                let need = dense_ram_need_keep(&m, repack, elem, keep);
+                let net = Qwen2::new_layers(&m, repack, keep);
+                let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+                assert!(built > 0, "repack {repack} k={keep}: no FP8 arena built");
+                assert_eq!(
+                    need.arena,
+                    built.next_multiple_of(2 << 20),
+                    "repack {repack} k={keep}"
+                );
+                assert!(need.largest > 0 && need.growth <= need.arena);
+                if keep == n {
+                    assert_eq!(need, dense_ram_need(&m, repack, elem));
+                }
+                eprintln!(
+                    "fp8 0.5b, repack {repack}, {keep} of {n} layers on the CPU: arena {} MiB \
+                     (largest matrix {} KiB, growth {} KiB)",
+                    need.arena >> 20,
+                    need.largest >> 10,
+                    need.growth >> 10
+                );
+            }
+        }
+    }
+
     /// The split's refusal: worded as the CPU model's with the split named
     /// (k of n layers) and the bound; its long-context note names the CPU
     /// layers' cache. `check_ram_split` judges the CPU half alone: refused
@@ -6467,6 +6582,11 @@ mod ram_dense_tests {
     /// half (k = 0) or a MoE model is never refused, and the RAM isn't read.
     #[test]
     fn split_refusal_wording_and_cap() {
+        let by_hand = CpuHalf {
+            k: 16,
+            n: 32,
+            auto: false,
+        };
         let half = DenseNeed {
             arena: 2400 * MIB,
             head: 0,
@@ -6485,26 +6605,71 @@ mod ram_dense_tests {
                 },
             })
         };
-        let e =
-            dense_verdict("llama", Some((16, 32)), half, false, TOL, 8192, cg(GIB)).unwrap_err();
+        let e = dense_verdict("llama", Some(by_hand), half, false, TOL, 8192, cg(GIB)).unwrap_err();
         for s in [
             "llama: the CPU half of the split (16 of 32 layers) needs about 2.84 GiB of RAM",
             "(its repacked weights 2.34 GiB, the KV cache of 8192 tokens 0.50 GiB)",
             "only 1.00 GiB is available (bound by cgroup /app.slice/split.scope memory.max",
+            // #185: the way out (the weights alone don't fit: no --ctx).
+            "memory.max 3072 MiB); to fit: more --gpu-layers than 16 (fewer layers on the CPU), \
+             if the GPU has room",
         ] {
             assert!(e.contains(s), "{s:?} not in {e}");
         }
-        let w = dense_verdict(
+        assert!(!e.contains("--ctx"), "{e}");
+        // An automatic split already put as many layers on the GPU as fit.
+        let auto = CpuHalf {
+            auto: true,
+            ..by_hand
+        };
+        let e = dense_verdict("llama", Some(auto), half, false, TOL, 8192, cg(GIB)).unwrap_err();
+        assert!(
+            e.ends_with(
+                "memory.max 3072 MiB). The split was picked to fit the GPU's memory (16 of 32 \
+                 layers there), so RAM is now the limit; to fit: a smaller --ctx, which also \
+                 leaves the GPU room for more layers"
+            ),
+            "{e}"
+        );
+        // Weights that fit without the cache: the longest --ctx whose KV
+        // floor fits (806 MiB of room - 512 = 294 MiB = 4704 positions of
+        // 64 KiB, 4608 in 256s; 4864 would need 816).
+        let small = DenseNeed {
+            arena: 512 * MIB,
+            ..half
+        };
+        let e = dense_verdict(
             "llama",
-            Some((16, 32)),
-            half,
+            Some(by_hand),
+            small,
             false,
             TOL,
-            32768,
-            cg(3 * GIB),
+            8192,
+            cg(768 * MIB),
         )
-        .expect("weights and floor fit")
-        .expect("the full cache doesn't");
+        .unwrap_err();
+        assert!(
+            e.ends_with("if the GPU has room, or --ctx 4608 or less (its KV cache then fits)"),
+            "{e}"
+        );
+        let fits = |c: u64| 512 * MIB + c * (64 << 10) <= 768 * MIB + TOL;
+        assert!(fits(4608) && !fits(4608 + 256));
+        let e =
+            dense_verdict("llama", Some(auto), small, false, TOL, 8192, cg(768 * MIB)).unwrap_err();
+        assert!(
+            e.ends_with("for more layers (--ctx 4608 or less fits this CPU half as it is)"),
+            "{e}"
+        );
+        // Every layer on the CPU (--gpu-layers 0, an embedder's split).
+        let all = CpuHalf { k: 32, ..by_hand };
+        let e = dense_verdict("llama", Some(all), half, false, TOL, 8192, cg(GIB)).unwrap_err();
+        assert!(
+            e.ends_with("memory.max 3072 MiB); to fit: --gpu-layers N (N layers on the GPU)"),
+            "{e}"
+        );
+        let w = dense_verdict("llama", Some(by_hand), half, false, TOL, 32768, cg(3 * GIB))
+            .expect("weights and floor fit")
+            .expect("the full cache doesn't");
         assert!(
             w.contains("note: the CPU layers' KV cache of 32768 tokens takes 2.0 GiB"),
             "{w}"
@@ -6521,7 +6686,7 @@ mod ram_dense_tests {
         let ctx = 4096;
         let want = dense_load_bytes(need, !m.file_backed()) + need.kv_per_pos * ctx as u64;
         let tol = ram_tolerance();
-        let at = |bytes: u64| check_ram_split(&m, true, k, ctx, &|| host(bytes));
+        let at = |bytes: u64| check_ram_split(&m, true, k, ctx, false, &|| host(bytes));
         let short = want
             .checked_sub(tol + 1)
             .expect("the half past the tolerance");
@@ -6541,9 +6706,9 @@ mod ram_dense_tests {
             read.set(true);
             host(0)
         };
-        assert_eq!(check_ram_split(&m, true, 0, ctx, &probe), Ok(None));
+        assert_eq!(check_ram_split(&m, true, 0, ctx, false, &probe), Ok(None));
         let (moe, _) = tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
-        assert_eq!(check_ram_split(&moe, true, 1, ctx, &probe), Ok(None));
+        assert_eq!(check_ram_split(&moe, true, 1, ctx, false, &probe), Ok(None));
         assert!(!read.get(), "the RAM was read with nothing to check");
         // Every layer on the CPU is the whole CPU model's estimate.
         let all = dense_ram_need_keep(&m, true, elem, n);
@@ -6551,14 +6716,17 @@ mod ram_dense_tests {
         let short = whole
             .checked_sub(tol + 1)
             .expect("the model past the tolerance");
-        let e = check_ram_split(&m, true, n, ctx, &|| host(short)).unwrap_err();
+        let e = check_ram_split(&m, true, n, ctx, false, &|| host(short)).unwrap_err();
         assert!(
             e.contains(&format!(
                 "the CPU model (--gpu-layers 0: all {n} layers on the CPU) needs"
             )),
             "{e}"
         );
-        assert_eq!(check_ram_split(&m, true, n, ctx, &|| host(whole)), Ok(None));
+        assert_eq!(
+            check_ram_split(&m, true, n, ctx, false, &|| host(whole)),
+            Ok(None)
+        );
         assert_eq!(
             dense_ram_need_keep(&m, true, elem, n),
             dense_ram_need(&m, true, elem)

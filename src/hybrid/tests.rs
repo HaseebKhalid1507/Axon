@@ -887,7 +887,7 @@ fn stream_prefill_bits(rel: &str, name: &str) {
         CacheKv::F16,
         true,
         false,
-        0,
+        false,
         &crate::gguf::mem::avail,
     )
     .unwrap();
@@ -1539,7 +1539,7 @@ fn build_at<'m, 'g>(
         CacheKv::F16,
         false,
         true,
-        0,
+        false,
         &|| host(ram),
     )
 }
@@ -1673,7 +1673,7 @@ fn hybrid_ram_check_on_real_splits() {
             CacheKv::F16,
             false,
             true,
-            0,
+            false,
             &|| -> Option<Avail> { panic!("read the RAM with no CPU half") },
         )
         .unwrap();
