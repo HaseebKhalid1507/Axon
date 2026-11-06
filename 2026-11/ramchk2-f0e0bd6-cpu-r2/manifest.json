@@ -1,0 +1,49 @@
+{
+ "label": "ramchk2-f0e0bd6-cpu-r2",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1106-142323-2192",
+   "name": "ramchk2-f0e0bd6-cpu-rel-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "f0e0bd6",
+   "binary": "axon-test-f0e0bd6",
+   "started": 1793997977.9341245,
+   "ended": 1793998159.1463308,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "984c0a48b2654324cf71cdbcd553643095f411a727f282abe04700e0c201884c",
+   "log_bytes": 12757
+  },
+  {
+   "job": "1106-142323-68c4",
+   "name": "ramchk2-f0e0bd6-cpu-dbg-r2",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "f0e0bd6",
+   "binary": "axon-test-dbg-f0e0bd6",
+   "started": 1793998159.1463308,
+   "ended": 1793998356.5422218,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "0d55b7fa954bc8ee49e9fb7c550827656d021142899261358e928f8ea21ccba9",
+   "log_bytes": 12922
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 15:52:37 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
