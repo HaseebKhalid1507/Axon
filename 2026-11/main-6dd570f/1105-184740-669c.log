@@ -1,0 +1,77 @@
+[axon-run 18:47:40] submitted 1105-184740-669c by /home/haseeb/.cache/axon-main: /usr/bin/bash md5-main-52513f8a.sh ./axon-c54a730 ./axon-6dd570f /home/haseeb/.cache/axon-main/md5-c54a730-vs-6dd570f
+[axon-run 20:33:56] job 1105-184740-669c -> pod1 [RTX 4090 sm_89 secure] (pod 1rlr7fm852zjts): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 8722 --src /home/haseeb/.cache/axon-podjob/md5-main-52513f8a-7837444091ab /usr/bin/bash md5-main-52513f8a.sh ./axon-c54a730 ./axon-6dd570f /home/haseeb/.cache/axon-main/md5-c54a730-vs-6dd570f
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (ed6506ef425051577d766181) + source of /home/haseeb/.cache/axon-podjob/md5-main-52513f8a-7837444091ab (delta vs 3 earlier upload(s) there)
+
+sent 7,484,442 bytes  received 113 bytes  2,993,822.00 bytes/sec
+total size is 24,335,029  speedup is 3.25
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261106-013404-bash-16023 on pod1 (GPU, 8722 MB)
+[axon-node 01:34:04] GPU slot taken; job wants 8722 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 01:34:04] run bash (ed6506ef425051577d766181) as /home/haseeb/.cache/axon-podjob/md5-main-52513f8a-7837444091ab on ec87b2a3fbc9, AXON_THREADS=5 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+base	qwen2.5-0.5b-q4_k_m	p1	22703eeab624	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p1	22703eeab624	rc=0
+base	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+base	qwen2.5-0.5b-q4_k_m	p3	73e02ab67347	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p3	73e02ab67347	rc=0
+base	qwen2.5-0.5b-q4_k_m	p4	545dd4eb4460	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p4	545dd4eb4460	rc=0
+base	qwen2.5-0.5b-q4_k_m	p5	535a77a61566	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p5	535a77a61566	rc=0
+base	Qwen3-0.6B-Q8_0	p1	d41d8cd98f00	rc=2
+cand	Qwen3-0.6B-Q8_0	p1	d41d8cd98f00	rc=2
+base	Qwen3-0.6B-Q8_0	p2	d41d8cd98f00	rc=2
+cand	Qwen3-0.6B-Q8_0	p2	d41d8cd98f00	rc=2
+base	Qwen3-0.6B-Q8_0	p3	d41d8cd98f00	rc=2
+cand	Qwen3-0.6B-Q8_0	p3	d41d8cd98f00	rc=2
+base	Qwen3-0.6B-Q8_0	p4	d41d8cd98f00	rc=2
+cand	Qwen3-0.6B-Q8_0	p4	d41d8cd98f00	rc=2
+base	Qwen3-0.6B-Q8_0	p5	d41d8cd98f00	rc=2
+cand	Qwen3-0.6B-Q8_0	p5	d41d8cd98f00	rc=2
+base	Llama-3.2-1B-Instruct-Q4_K_M	p1	d41d8cd98f00	rc=2
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p1	d41d8cd98f00	rc=2
+base	Llama-3.2-1B-Instruct-Q4_K_M	p2	d41d8cd98f00	rc=2
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p2	d41d8cd98f00	rc=2
+base	Llama-3.2-1B-Instruct-Q4_K_M	p3	d41d8cd98f00	rc=2
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p3	d41d8cd98f00	rc=2
+base	Llama-3.2-1B-Instruct-Q4_K_M	p4	d41d8cd98f00	rc=2
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p4	d41d8cd98f00	rc=2
+base	Llama-3.2-1B-Instruct-Q4_K_M	p5	d41d8cd98f00	rc=2
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p5	d41d8cd98f00	rc=2
+base	qwen2.5-1.5b-instruct-q4_k_m	p1	d41d8cd98f00	rc=2
+cand	qwen2.5-1.5b-instruct-q4_k_m	p1	d41d8cd98f00	rc=2
+base	qwen2.5-1.5b-instruct-q4_k_m	p2	d41d8cd98f00	rc=2
+cand	qwen2.5-1.5b-instruct-q4_k_m	p2	d41d8cd98f00	rc=2
+base	qwen2.5-1.5b-instruct-q4_k_m	p3	d41d8cd98f00	rc=2
+cand	qwen2.5-1.5b-instruct-q4_k_m	p3	d41d8cd98f00	rc=2
+base	qwen2.5-1.5b-instruct-q4_k_m	p4	d41d8cd98f00	rc=2
+cand	qwen2.5-1.5b-instruct-q4_k_m	p4	d41d8cd98f00	rc=2
+base	qwen2.5-1.5b-instruct-q4_k_m	p5	d41d8cd98f00	rc=2
+cand	qwen2.5-1.5b-instruct-q4_k_m	p5	d41d8cd98f00	rc=2
+base	Qwen2.5-7B-Instruct-Q4_K_M	p1	02b667ba5ddc	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p1	02b667ba5ddc	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p2	e8fa94e8d0bf	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p2	e8fa94e8d0bf	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p3	a0a829819411	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p3	a0a829819411	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p5	8926c8b9f605	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p5	8926c8b9f605	rc=0
+base	Qwen3-8B-Q4_K_M	p1	d41d8cd98f00	rc=2
+cand	Qwen3-8B-Q4_K_M	p1	d41d8cd98f00	rc=2
+base	Qwen3-8B-Q4_K_M	p2	d41d8cd98f00	rc=2
+cand	Qwen3-8B-Q4_K_M	p2	d41d8cd98f00	rc=2
+base	Qwen3-8B-Q4_K_M	p3	d41d8cd98f00	rc=2
+cand	Qwen3-8B-Q4_K_M	p3	d41d8cd98f00	rc=2
+base	Qwen3-8B-Q4_K_M	p4	d41d8cd98f00	rc=2
+cand	Qwen3-8B-Q4_K_M	p4	d41d8cd98f00	rc=2
+base	Qwen3-8B-Q4_K_M	p5	d41d8cd98f00	rc=2
+cand	Qwen3-8B-Q4_K_M	p5	d41d8cd98f00	rc=2
+0 of 30 differ; 40 nonzero rc
+[axon-node 01:37:20] exit 1 after 195.4s
+[axon-node 01:37:20] peak RSS 748 MB (job process tree PSS, 2 s samples x96)
+[axon-run 20:37:21] exit 1 after 204.7s (host pod1)
