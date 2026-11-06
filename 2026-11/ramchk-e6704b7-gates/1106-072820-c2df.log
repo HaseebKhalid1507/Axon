@@ -1,0 +1,1158 @@
+[axon-run 07:28:20] submitted 1106-072820-c2df by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --nocapture
+[axon-run 07:32:43] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 07:32:43] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 07:32:43] scope axon-job-1106-072820-c2df-1793968363.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 07:32:43] job 1106-072820-c2df -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-072820-c2df-1793968363 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --nocapture --test-threads 6
+axon-q 07:32:43 start slot 16-23: /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --nocapture --test-threads 6
+
+running 168 tests
+test cuda::qwen2::stream::tests::unpermute_bench ... ignored, benchmark: unpermute_bench -- --ignored --nocapture
+mem avail: 7021 MB (cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/app-axonjobs.slice/axon-job-1106-072820-c2df-1793968363.scope memory.max 7024 MiB)
+test cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps ... ok
+test gguf::mem::tests::mountinfo_escapes ... ok
+test gguf::mem::tests::host_only_without_cgroupfs ... ok
+test gguf::mem::tests::real_avail_is_found ... ok
+test gguf::mem::tests::v1_memory_controller ... ok
+test gguf::mem::tests::v2_cgroupns_private_root ... ok
+test gguf::mem::tests::v2_picks_the_mount_above_the_cgroup ... ok
+test gguf::tests::bad_magic_and_version ... ok
+test gguf::tests::bad_tensors ... ok
+test gguf::mem::tests::v2_mount_root_and_default_mount ... ok
+test gguf::mem::tests::v2_saturates_and_tolerates_missing_files ... ok
+test gguf::mem::tests::v2_tightest_level_wins ... ok
+test gguf::tests::honours_general_alignment ... ok
+test gguf::tests::huge_lengths_and_counts ... ok
+test gguf::tests::overlapping_tensors_refused ... ok
+test gguf::tests::parses_a_valid_file ... ok
+test gguf::tests::load_to_run_map_only_never_copies ... ok
+test gguf::tests::release_span_unaligned_base ... ok
+test gguf::tests::release_small_anonymous_model ... ok
+test gguf::tests::truncated_files ... ok
+test gguf::tests::unpermute_rows_undoes_the_converter ... ok
+test gguf::tests::unsized_types_are_named_not_sized ... ok
+test gguf::tests::resident_fraction_of_a_read_file ... ok
+test gguf::tests::metadata_element_budget ... ok
+test gguf::tests::parses_a_long_string_array ... ok
+test gguf::tests::release_gain_is_what_release_drops ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+1.5B ctx 580635: auto split f16 15/28, q8 28/28
+test hybrid::tests::hybrid_auto_split_q8_fits_more_layers ... ok
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor output.weight was released after repacking; load the model again to read it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.0.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.1.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.10.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.11.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.12.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.13.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.14.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.15.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.16.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.17.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.18.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.19.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.2.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.20.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.21.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.22.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.23.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.3.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.4.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.5.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.6.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.7.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.8.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.ffn_gate.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.ffn_up.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.ffn_norm.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_k.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_k.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_output.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_q.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_q.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_v.bias was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor blk.9.attn_v.weight was released after repacking; load the model again to read it
+
+thread 'hybrid::tests::hybrid_halves_own_their_weights' (4085505) panicked at src/gguf.rs:610:13:
+tensor output_norm.weight was released after repacking; load the model again to read it
+test hybrid::tests::hybrid_halves_own_their_weights ... ok
+0.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 2.75e-3 max 2.97e-2 (> 0.5: []), max |dlogit| 1.505 (top-20 1.222), flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+0.5B hybrid k=1 vs cpu: top-1 192/198 (97.0%), KL mean 2.59e-3 max 3.36e-2 (> 0.5: []), max |dlogit| 1.879 (top-20 1.221), flip margins [0.062402725, 0.017389297, 0.12930107, 0.028792381, 0.011672974, 0.01058197]
+0.5B hybrid k=12 vs cpu: top-1 194/198 (98.0%), KL mean 1.37e-3 max 1.57e-2 (> 0.5: []), max |dlogit| 1.000 (top-20 0.530), flip margins [0.062402725, 0.017389297, 0.028792381, 0.019294739]
+0.5B hybrid k=23 vs cpu: top-1 195/198 (98.5%), KL mean 1.46e-4 max 1.02e-3 (> 0.5: []), max |dlogit| 0.280 (top-20 0.118), flip margins [0.028792381, 0.019294739, 0.036661148]
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+1.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 7.84e-3 max 3.39e-1 (> 0.5: []), max |dlogit| 3.466 (top-20 2.674), flip margins [0.05035782, 0.36210823, 0.13531494, 0.40297508, 0.3193283, 0.15048599]
+1.5B hybrid k=1 vs cpu: top-1 189/198 (95.5%), KL mean 1.21e-2 max 1.22e0 (> 0.5: [(189, 1.2191284598167198, 0.3193283, 0.0003365128936702944)]), max |dlogit| 3.876 (top-20 3.139), flip margins [0.05035782, 0.0422287, 0.31292725, 0.024425507, 0.0812912, 0.053325653, 0.40297508, 0.3193283, 0.15048599]
+1.5B hybrid k=14 vs cpu: top-1 190/198 (96.0%), KL mean 3.62e-3 max 3.66e-2 (> 0.5: []), max |dlogit| 2.076 (top-20 1.354), flip margins [0.05035782, 0.16342735, 0.024425507, 0.1509018, 0.12843132, 0.40297508, 0.3193283, 0.15048599]
+1.5B hybrid k=27 vs cpu: top-1 198/198 (100.0%), KL mean 3.03e-4 max 3.24e-3 (> 0.5: []), max |dlogit| 0.490 (top-20 0.222), flip margins []
+test hybrid::tests::hybrid_logits_match_cpu_1_5b ... ok
+llama 1B cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 2.77e-3 max 1.33e-1 (> 0.5: []), max |dlogit| 1.984 (top-20 1.581), flip margins [0.07985115, 0.33208656]
+llama 1B hybrid k=1 vs cpu: top-1 195/198 (98.5%), KL mean 2.99e-3 max 7.93e-2 (> 0.5: []), max |dlogit| 1.722 (top-20 1.428), flip margins [0.07985115, 0.23312569, 0.33208656]
+llama 1B hybrid k=8 vs cpu: top-1 197/198 (99.5%), KL mean 1.34e-3 max 2.70e-2 (> 0.5: []), max |dlogit| 0.895 (top-20 0.749), flip margins [0.07985115]
+llama 1B hybrid k=15 vs cpu: top-1 198/198 (100.0%), KL mean 1.16e-4 max 9.85e-4 (> 0.5: []), max |dlogit| 0.280 (top-20 0.107), flip margins []
+test hybrid::tests::hybrid_logits_match_cpu_llama ... ok
+qwen3 0.6B cpu rows vs cpu: top-1 193/198 (97.5%), KL mean 1.04e-3 max 1.31e-2 (> 0.5: []), max |dlogit| 1.177 (top-20 0.726), flip margins [0.0036525726, 0.0056381226, 0.09848404, 0.010463715, 0.059230804]
+qwen3 0.6B hybrid k=1 vs cpu: top-1 195/198 (98.5%), KL mean 1.24e-3 max 3.21e-2 (> 0.5: []), max |dlogit| 1.432 (top-20 0.880), flip margins [0.0056381226, 0.09848404, 0.010463715]
+qwen3 0.6B hybrid k=14 vs cpu: top-1 195/198 (98.5%), KL mean 3.80e-4 max 6.44e-3 (> 0.5: []), max |dlogit| 0.773 (top-20 0.463), flip margins [0.0036525726, 0.010463715, 0.059230804]
+qwen3 0.6B hybrid k=27 vs cpu: top-1 197/198 (99.5%), KL mean 3.20e-5 max 6.60e-4 (> 0.5: []), max |dlogit| 0.183 (top-20 0.088), flip margins [0.0036525726]
+test hybrid::tests::hybrid_logits_match_cpu_qwen3 ... ok
+test cuda::qwen2::stream::tests::unpermute_inverts_repack ... ok
+test hybrid::tests::all_gpu_layers_is_the_cuda_backend ... ok
+test hybrid::tests::hybrid_auto_split_is_the_most_that_fit has been running for over 60 seconds
+test hybrid::tests::hybrid_bad_drafter_output_unchanged has been running for over 60 seconds
+test hybrid::tests::hybrid_ends_are_the_backends_bits has been running for over 60 seconds
+llama 1B k=8 F16: prefill bit-identical over 6 batchings of 700 tokens
+llama 1B k=8 Q8 { group: 0 }: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+0.5B k=12 Q8 { group: 0 }: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b has been running for over 60 seconds
+1.5B k=14 Q8 { group: 0 }: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b ... ok
+0.5B: hybrid g = n / g = 0 == GPU / CPU bits, 102 positions
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+test hybrid::tests::hybrid_bad_drafter_output_unchanged ... ok
+0.5B k=1 hybrid q8 vs f16 prompts: top-1 194/198 (98.0%), KL mean 3.29e-3 max 6.61e-2 (> 0.5: []), max |dlogit| 2.037 (top-20 1.107), flip margins [0.022968292, 0.020371437, 0.20260048, 0.21687698]
+0.5B k=1 hybrid q8 vs f16 text 0..300: top-1 288/300 (96.0%), KL mean 3.86e-3 max 2.91e-2 (> 0.5: []), max |dlogit| 1.198 (top-20 0.889), flip margins [0.02748394, 0.13824272, 0.009324074, 0.1124382, 0.013249397, 0.057310104, 0.05373192, 0.14589691, 0.11735153, 0.16177845, 0.00525856, 0.0984478]
+0.5B k=1 hybrid q8 vs f16 text 1024+128: top-1 126/128 (98.4%), KL mean 3.10e-3 max 1.41e-2 (> 0.5: []), max |dlogit| 0.943 (top-20 0.646), flip margins [0.04540634, 0.0946846]
+0.5B k=12 hybrid q8 vs f16 prompts: top-1 190/198 (96.0%), KL mean 1.58e-3 max 2.31e-2 (> 0.5: []), max |dlogit| 1.256 (top-20 0.714), flip margins [0.11463928, 0.057196617, 0.11846161, 0.05956459, 0.0002593994, 0.3145485, 0.0138549805, 0.21549416]
+0.5B k=12 hybrid q8 vs f16 text 0..300: top-1 291/300 (97.0%), KL mean 2.24e-3 max 2.13e-2 (> 0.5: []), max |dlogit| 0.731 (top-20 0.463), flip margins [0.09842396, 0.12566757, 0.08778858, 0.051700592, 0.032913208, 0.03853798, 0.047543526, 0.23964596, 0.080542564]
+0.5B k=12 hybrid q8 vs f16 text 1024+128: top-1 125/128 (97.7%), KL mean 2.11e-3 max 1.18e-2 (> 0.5: []), max |dlogit| 0.739 (top-20 0.447), flip margins [0.004234314, 0.017129898, 0.13923359]
+test hybrid::tests::hybrid_q8_close_to_f16_0_5b ... ok
+1.5B k=1 hybrid q8 vs f16 prompts: top-1 190/198 (96.0%), KL mean 1.15e-2 max 1.05e0 (> 0.5: [(128, 1.0452529326491418, 1.9653702, 1.8724164211349735e-6)]), max |dlogit| 4.025 (top-20 4.025), flip margins [0.010477066, 1.9653702, 0.076488495, 0.02443695, 0.16437149, 0.2885933, 0.32629967, 0.050945282]
+1.5B k=1 hybrid q8 vs f16 text 0..300: top-1 285/300 (95.0%), KL mean 9.02e-3 max 3.30e-2 (> 0.5: []), max |dlogit| 1.414 (top-20 0.789), flip margins [0.2227478, 0.056964874, 0.09856033, 0.0890789, 0.2005291, 0.02550888, 0.18061256, 0.23636818, 0.029188156, 0.029298782, 0.15843964, 0.06999779, 0.050382614, 0.074718475, 0.020210266]
+1.5B k=1 hybrid q8 vs f16 text 1024+128: top-1 118/128 (92.2%), KL mean 8.42e-3 max 4.53e-2 (> 0.5: []), max |dlogit| 1.201 (top-20 0.667), flip margins [0.05001259, 0.23807526, 0.14978981, 0.0033779144, 0.146801, 0.0176754, 0.009634018, 0.28556252, 0.029445648, 0.3054657]
+1.5B k=14 hybrid q8 vs f16 prompts: top-1 193/198 (97.5%), KL mean 4.77e-3 max 1.09e-1 (> 0.5: []), max |dlogit| 2.562 (top-20 1.927), flip margins [0.09541321, 0.123817444, 0.08867073, 0.52339935, 0.07189751]
+1.5B k=14 hybrid q8 vs f16 text 0..300: top-1 289/300 (96.3%), KL mean 7.29e-3 max 3.67e-2 (> 0.5: []), max |dlogit| 1.235 (top-20 0.613), flip margins [0.01709938, 0.017791748, 0.15342712, 0.053886414, 0.33723068, 0.22084427, 0.012775421, 0.00044441223, 0.08177948, 0.07833099, 0.070913315]
+1.5B k=14 hybrid q8 vs f16 text 1024+128: top-1 120/128 (93.8%), KL mean 6.19e-3 max 3.32e-2 (> 0.5: []), max |dlogit| 1.109 (top-20 0.587), flip margins [0.16972733, 0.21299744, 0.05519104, 0.1638031, 0.09300041, 0.17513275, 0.041294098, 0.11269379]
+test hybrid::tests::hybrid_q8_close_to_f16_1_5b ... ok
+test hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu ... ok
+0.5B k=12 F16: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b ... ok
+
+thread 'hybrid::tests::hybrid_ram_refused_before_the_upload' (4157150) panicked at src/hybrid/tests.rs:1766:10:
+the half past the tolerance
+test hybrid::tests::hybrid_ram_refused_before_the_upload ... FAILED
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 has been running for over 60 seconds
+test hybrid::tests::hybrid_q8_all_on_gpu_is_the_q8_model has been running for over 60 seconds
+test hybrid::tests::hybrid_ram_check_on_real_splits has been running for over 60 seconds
+test hybrid::tests::hybrid_real_model_sampling ... ok
+test hybrid::tests::hybrid_verify_cands_matches_forward_cands ... ok
+0.5B k=1 F16: 17 verify passes == per-token picks
+0.5B k=12 F16: 17 verify passes == per-token picks
+0.5B k=23 F16: 17 verify passes == per-token picks
+test hybrid::tests::hybrid_verify_matches_forward_argmax ... ok
+1.5B k=14 F16: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::pin_verdict_keeps_the_tolerance_free ... ok
+test hybrid::tests::placement_full_ctx_fits_whole_gpu ... ok
+test hybrid::tests::placement_long_enough_ctx_stays_on_gpu ... ok
+test hybrid::tests::placement_q8_changes_the_decision ... ok
+test hybrid::tests::placement_split_counts_streaming ... ok
+test hybrid::tests::placement_stream_changes_the_decision ... ok
+test hybrid::tests::placement_tiny_ctx_splits_at_full_ctx ... ok
+test hybrid::tests::placement_weights_dont_fit_splits ... ok
+test hybrid::tests::hybrid_q8_all_on_gpu_is_the_q8_model ... ok
+1.5B ctx 580103: auto split 15/28 of 10.92 GiB free
+1.5B ctx 580103: streaming auto split 12/28
+test hybrid::tests::hybrid_auto_split_is_the_most_that_fit ... ok
+llama 1B cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 2.77e-3 max 1.33e-1 (> 0.5: []), max |dlogit| 1.984 (top-20 1.581), flip margins [0.07985115, 0.33208656]
+llama 1B streamed k=1 vs cpu: top-1 197/198 (99.5%), KL mean 3.30e-3 max 1.10e-1 (> 0.5: []), max |dlogit| 1.660 (top-20 1.105), flip margins [0.33208656]
+llama 1B streamed k=8 vs cpu: top-1 196/198 (99.0%), KL mean 2.95e-3 max 1.04e-1 (> 0.5: []), max |dlogit| 1.455 (top-20 0.908), flip margins [0.07985115, 0.33208656]
+llama 1B streamed k=15 vs cpu: top-1 195/198 (98.5%), KL mean 3.50e-3 max 1.13e-1 (> 0.5: []), max |dlogit| 1.369 (top-20 0.959), flip margins [0.18720436, 0.178442, 0.33208656]
+test hybrid::tests::stream_logits_match_cpu_llama ... ok
+test hybrid::tests::hybrid_verify_matches_forward_argmax_q8 has been running for over 60 seconds
+qwen3 0.6B k=14 F16: prefill bit-identical over 6 batchings of 700 tokens
+qwen3 0.6B k=14 Q8 { group: 0 }: prefill bit-identical over 6 batchings of 700 tokens
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 ... ok
+test hybrid::tests::stream_logits_match_cpu_0_5b has been running for over 60 seconds
+test hybrid::tests::stream_logits_match_cpu_1_5b has been running for over 60 seconds
+0.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 2.75e-3 max 2.97e-2 (> 0.5: []), max |dlogit| 1.505 (top-20 1.222), flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+0.5B streamed k=1 vs cpu: top-1 190/198 (96.0%), KL mean 3.13e-3 max 7.26e-2 (> 0.5: []), max |dlogit| 2.414 (top-20 1.541), flip margins [0.062402725, 0.028792381, 0.019294739, 0.036661148, 0.016563416, 0.011672974, 0.15567684, 0.01058197]
+0.5B streamed k=12 vs cpu: top-1 189/198 (95.5%), KL mean 2.97e-3 max 5.79e-2 (> 0.5: []), max |dlogit| 2.228 (top-20 1.975), flip margins [0.062402725, 0.07403946, 0.017389297, 0.12930107, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+0.5B streamed k=23 vs cpu: top-1 192/198 (97.0%), KL mean 2.95e-3 max 6.06e-2 (> 0.5: []), max |dlogit| 2.409 (top-20 2.353), flip margins [0.062402725, 0.017389297, 0.12930107, 0.016563416, 0.011672974, 0.01058197]
+test hybrid::tests::stream_logits_match_cpu_0_5b ... ok
+1.5B: streamed prefill KV == all-GPU bits (k = 1, n/2, n-1; 2 batchings of 699 tokens; and not repacked)
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_qwen3 has been running for over 60 seconds
+llama 1B: streamed prefill KV == all-GPU bits (k = 1, n/2, n-1; 2 batchings of 699 tokens; and not repacked)
+llama 1B k=1: streamed q8 prefill bit contracts hold
+llama 1B k=8: streamed q8 prefill bit contracts hold
+test hybrid::tests::stream_prefill_is_gpu_bits_llama ... ok
+qwen3 0.6B: streamed prefill KV == all-GPU bits (k = 1, n/2, n-1; 2 batchings of 699 tokens; and not repacked)
+qwen3 0.6B k=1: streamed q8 prefill bit contracts hold
+qwen3 0.6B k=14: streamed q8 prefill bit contracts hold
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 ... ok
+0.5B k=1: streamed q8 prefill bit contracts hold
+0.5B k=12: streamed q8 prefill bit contracts hold
+test hybrid::tests::stream_q8_prefill_bits_0_5b ... ok
+1.5B k=1: streamed q8 prefill bit contracts hold
+1.5B k=14: streamed q8 prefill bit contracts hold
+test hybrid::tests::stream_q8_prefill_bits_1_5b ... ok
+0.5B streamed k=1: 5 verify passes == per-token picks
+0.5B streamed k=12: 5 verify passes == per-token picks
+test hybrid::tests::stream_verify_matches_forward_argmax ... ok
+note: this cache won't stream: page-locking the CPU layers' KV cache of 2048 tokens takes 0.01 GiB of RAM and only 0.04 GiB is available (bound by host MemAvailable)
+0.5b k=12 ctx=2048: 3072 pages (12 MiB) pinned at the cache's creation
+test hybrid::tests::streamed_cache_pins_its_cpu_kv_whole ... ok
+test lm::paged_place_tests::paged_placement_14b ... ok
+test lm::paged_place_tests::paged_placement_all_gpu_kept ... ok
+test lm::paged_place_tests::paged_placement_matches_main_with_ctx ... ok
+test lm::paged_place_tests::paged_placement_squeezed_splits_rather_than_shrinks ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_cache_is_k_only ... ok
+test model::deepseek2_tests::deepseek2_check_supported ... ok
+test model::deepseek2_tests::deepseek2_fixture_vocab_is_whole ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+Opt { q_lora: false, yarn: false }: reference with RopeWrongPart: max |dlogit| 3.3270
+Opt { q_lora: false, yarn: false }: reference with ScaleOfKeyRow: max |dlogit| 1.7258
+Opt { q_lora: false, yarn: false }: reference with BiasInWeights: max |dlogit| 0.7400
+Opt { q_lora: false, yarn: false }: reference with ScaleBeforeRenorm: max |dlogit| 1.9923
+Opt { q_lora: false, yarn: false }: reference with NormOverRow: max |dlogit| 1.3078
+Opt { q_lora: false, yarn: false } cpu (repack true, f32 cache true) vs reference: 9.18e-6, after prefill 3.21e-6
+Opt { q_lora: false, yarn: false } cpu (repack false, f32 cache true) vs reference: 9.18e-6, after prefill 3.21e-6
+Opt { q_lora: false, yarn: false } cpu (repack true, f32 cache false) vs reference: 5.05e-3, after prefill 3.50e-3
+Opt { q_lora: false, yarn: false } Q8_0 fixture (r8q): max |dlogit| 0.3318 vs the reference on this run's routes (0.3318 on its own), bound 0.7; top-1 flips at gaps [0.073399425]; 4/14 positions gated; expert flips (pos, moe layer, ref margin) []; reference gaps [0.406, 1.433, 0.455, 0.430, 1.022, 1.620, 0.405, 0.073, 0.895, 0.238, 0.182, 0.427, 0.022, 0.030]
+Opt { q_lora: false, yarn: true }: reference with RopeWrongPart: max |dlogit| 3.3859
+Opt { q_lora: false, yarn: true }: reference with ScaleOfKeyRow: max |dlogit| 1.9897
+Opt { q_lora: false, yarn: true }: reference with BiasInWeights: max |dlogit| 0.8355
+Opt { q_lora: false, yarn: true }: reference with ScaleBeforeRenorm: max |dlogit| 2.0073
+Opt { q_lora: false, yarn: true }: reference with NormOverRow: max |dlogit| 1.3789
+Opt { q_lora: false, yarn: true }: reference with NoYarn: max |dlogit| 1.7686
+Opt { q_lora: false, yarn: true }: reference with MscaleOnTable: max |dlogit| 2.8625
+Opt { q_lora: false, yarn: true }: reference with NoMscale: max |dlogit| 1.3076
+Opt { q_lora: false, yarn: true } cpu (repack true, f32 cache true) vs reference: 9.33e-6, after prefill 2.64e-6
+Opt { q_lora: false, yarn: true } cpu (repack false, f32 cache true) vs reference: 9.33e-6, after prefill 2.64e-6
+Opt { q_lora: false, yarn: true } cpu (repack true, f32 cache false) vs reference: 7.35e-3, after prefill 7.35e-3
+Opt { q_lora: false, yarn: true } Q8_0 fixture (r8q): max |dlogit| 0.1773 vs the reference on this run's routes (0.1773 on its own), bound 0.7; top-1 flips at gaps [0.10831702, 0.021380901]; 4/14 positions gated; expert flips (pos, moe layer, ref margin) []; reference gaps [0.406, 1.358, 0.251, 0.603, 0.917, 1.698, 0.340, 0.004, 0.871, 0.334, 0.108, 0.094, 0.149, 0.021]
+Opt { q_lora: true, yarn: false }: reference with RopeWrongPart: max |dlogit| 4.0115
+Opt { q_lora: true, yarn: false }: reference with ScaleOfKeyRow: max |dlogit| 1.6562
+Opt { q_lora: true, yarn: false }: reference with BiasInWeights: max |dlogit| 0.9182
+Opt { q_lora: true, yarn: false }: reference with ScaleBeforeRenorm: max |dlogit| 1.5899
+Opt { q_lora: true, yarn: false }: reference with NormOverRow: max |dlogit| 1.2550
+Opt { q_lora: true, yarn: false } cpu (repack true, f32 cache true) vs reference: 4.98e-6, after prefill 1.91e-6
+Opt { q_lora: true, yarn: false } cpu (repack false, f32 cache true) vs reference: 4.98e-6, after prefill 1.91e-6
+Opt { q_lora: true, yarn: false } cpu (repack true, f32 cache false) vs reference: 1.25e-2, after prefill 2.39e-3
+Opt { q_lora: true, yarn: false } Q8_0 fixture (r8q): max |dlogit| 0.3208 vs the reference on this run's routes (1.4457 on its own), bound 0.7; top-1 flips at gaps [0.021529675, 0.02259612, 0.17824578]; 4/14 positions gated; expert flips (pos, moe layer, ref margin) [(6, 1, 0.009193001993822003), (9, 0, 0.005249083281616995), (11, 1, 0.04461377246457432)]; reference gaps [0.150, 0.323, 0.639, 0.062, 0.022, 0.783, 0.954, 0.710, 0.023, 0.178, 0.196, 0.008, 1.332, 0.161]
+Opt { q_lora: true, yarn: true }: reference with RopeWrongPart: max |dlogit| 3.6860
+Opt { q_lora: true, yarn: true }: reference with ScaleOfKeyRow: max |dlogit| 2.7821
+Opt { q_lora: true, yarn: true }: reference with BiasInWeights: max |dlogit| 0.9154
+Opt { q_lora: true, yarn: true }: reference with ScaleBeforeRenorm: max |dlogit| 1.5899
+Opt { q_lora: true, yarn: true }: reference with NormOverRow: max |dlogit| 1.5986
+Opt { q_lora: true, yarn: true }: reference with NoYarn: max |dlogit| 3.7793
+Opt { q_lora: true, yarn: true }: reference with MscaleOnTable: max |dlogit| 3.3067
+Opt { q_lora: true, yarn: true }: reference with NoMscale: max |dlogit| 1.6137
+Opt { q_lora: true, yarn: true } cpu (repack true, f32 cache true) vs reference: 9.66e-6, after prefill 3.34e-6
+Opt { q_lora: true, yarn: true } cpu (repack false, f32 cache true) vs reference: 9.66e-6, after prefill 3.34e-6
+Opt { q_lora: true, yarn: true } cpu (repack true, f32 cache false) vs reference: 7.54e-3, after prefill 2.01e-3
+Opt { q_lora: true, yarn: true } Q8_0 fixture (r8q): max |dlogit| 0.4230 vs the reference on this run's routes (0.4230 on its own), bound 0.7; top-1 flips at gaps [0.005176544]; 5/14 positions gated; expert flips (pos, moe layer, ref margin) []; reference gaps [0.150, 0.220, 0.738, 0.123, 0.025, 0.663, 0.707, 0.711, 0.059, 0.055, 0.005, 1.124, 0.730, 0.291]
+test model::deepseek2_tests::deepseek2_matches_expanded_reference ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::deepseek2_tests::deepseek2_router_rule ... ok
+test model::deepseek2_tests::deepseek2_write_fixture ... ignored, writes a file; run with AXON_DS2_FIXTURE_OUT=path
+skipping: AXON_TEST_DS3_HEADER not set (optional)
+test model::deepseek2_tests::deepseek3_tokenizer_matches_hf ... ok
+test model::deepseek2_tests::kimi_tokenizer_matches_hf ... ok
+0.5B: streamed prefill KV == all-GPU bits (k = 1, n/2, n-1; 2 batchings of 699 tokens; and not repacked)
+test hybrid::tests::stream_prefill_is_gpu_bits_0_5b ... ok
+test model::gemma3_tests::gemma3_ref_probe ... ignored
+test model::gptoss_tests::check_supported_gpt_oss ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+gpt-oss fixture vs f64 reference: max |dlogit| 0.31569743
+  NoSinks: 3.8233643
+  NoWindow: 5.4004564
+  NoRouterBias: 1.0046791
+  PlainSwiglu: 3.1783214
+  NoYarn: 3.3500862
+test model::gptoss_tests::gpt_oss_matches_reference_forward ... ok
+test model::gemma3_tests::gemma3_matches_reference_forward has been running for over 60 seconds
+test model::gptoss_tests::gpt_oss_model_bits has been running for over 60 seconds
+0.5B k=1 Q8 { group: 0 }: 17 verify passes == per-token picks
+window None, repack false, pos 3: max |dlogit| 0.5127, top 506 vs 506, reference top-2 gap 1.8206
+window None, repack false, pos 5: max |dlogit| 0.5642, top 9079 vs 9079, reference top-2 gap 3.0238
+window None, repack false, pos 6: max |dlogit| 0.4447, top 236761 vs 236761, reference top-2 gap 4.8510
+window None, repack false, pos 7: max |dlogit| 0.5511, top 108 vs 108, reference top-2 gap 1.6007
+window None, repack false, pos 8: max |dlogit| 0.6468, top 3207 vs 3207, reference top-2 gap 0.4004
+window None, repack false, pos 9: max |dlogit| 0.4233, top 529 vs 529, reference top-2 gap 4.2473
+window None, repack false, pos 10: max |dlogit| 0.6324, top 9405 vs 9405, reference top-2 gap 0.4147
+window None, repack true, pos 3: max |dlogit| 0.5159, top 506 vs 506, reference top-2 gap 1.8206
+window None, repack true, pos 5: max |dlogit| 0.4971, top 9079 vs 9079, reference top-2 gap 3.0238
+window None, repack true, pos 6: max |dlogit| 0.4792, top 236761 vs 236761, reference top-2 gap 4.8510
+window None, repack true, pos 7: max |dlogit| 0.4539, top 108 vs 108, reference top-2 gap 1.6007
+window None, repack true, pos 8: max |dlogit| 0.4576, top 3207 vs 3207, reference top-2 gap 0.4004
+window None, repack true, pos 9: max |dlogit| 0.5556, top 529 vs 529, reference top-2 gap 4.2473
+window None, repack true, pos 10: max |dlogit| 0.5346, top 9405 vs 9405, reference top-2 gap 0.4147
+window Some(6), repack false, pos 3: max |dlogit| 0.5127, top 506 vs 506, reference top-2 gap 1.8206
+window Some(6), repack false, pos 5: max |dlogit| 0.5642, top 9079 vs 9079, reference top-2 gap 3.0238
+window Some(6), repack false, pos 5: max |dlogit| vs window 5 reference 5.3128
+window Some(6), repack false, pos 6: max |dlogit| 0.4259, top 236761 vs 236761, reference top-2 gap 4.2514
+window Some(6), repack false, pos 6: max |dlogit| vs window 5 reference 4.9550
+window Some(6), repack false, pos 6: max |dlogit| vs window 7 reference 6.6682
+window Some(6), repack false, pos 7: max |dlogit| 0.5213, top 107 vs 107, reference top-2 gap 0.1222
+window Some(6), repack false, pos 7: max |dlogit| vs window 5 reference 4.1034
+window Some(6), repack false, pos 7: max |dlogit| vs window 7 reference 4.6012
+window Some(6), repack false, pos 8: max |dlogit| 0.6481, top 5499 vs 5499, reference top-2 gap 0.4552
+window Some(6), repack false, pos 8: max |dlogit| vs window 5 reference 4.5736
+window Some(6), repack false, pos 8: max |dlogit| vs window 7 reference 7.5422
+window Some(6), repack false, pos 9: max |dlogit| 0.4174, top 529 vs 529, reference top-2 gap 5.1070
+window Some(6), repack false, pos 9: max |dlogit| vs window 5 reference 3.0318
+window Some(6), repack false, pos 9: max |dlogit| vs window 7 reference 3.9950
+window Some(6), repack false, pos 10: max |dlogit| 0.8846, top 506 vs 7001, reference top-2 gap 0.3476
+window Some(6), repack false, pos 10: max |dlogit| vs window 5 reference 3.4957
+window Some(6), repack false, pos 10: max |dlogit| vs window 7 reference 7.5605
+
+thread 'hybrid::tests::stream_logits_match_cpu_1_5b' (4167812) panicked at src/testutil.rs:471:13:
+the GPU test lock has been held by thread 'hybrid::tests::hybrid_verify_matches_forward_argmax_q8' for over 2700 s (AXON_TEST_GPU_LOCK_TIMEOUT): a thread spawned by a GPU test calling testutil::gpu() while its parent holds the lock? (that never returns)
+
+thread 'hybrid::tests::stream_logits_match_cpu_qwen3' (4175060) panicked at src/testutil.rs:471:13:
+the GPU test lock has been held by thread 'hybrid::tests::hybrid_verify_matches_forward_argmax_q8' for over 2700 s (AXON_TEST_GPU_LOCK_TIMEOUT): a thread spawned by a GPU test calling testutil::gpu() while its parent holds the lock? (that never returns)
+
+thread 'hybrid::tests::hybrid_ram_check_on_real_splits' (4156335) panicked at src/testutil.rs:471:13:
+the GPU test lock has been held by thread 'hybrid::tests::hybrid_verify_matches_forward_argmax_q8' for over 2700 s (AXON_TEST_GPU_LOCK_TIMEOUT): a thread spawned by a GPU test calling testutil::gpu() while its parent holds the lock? (that never returns)
+test hybrid::tests::stream_logits_match_cpu_1_5b ... FAILED
+test hybrid::tests::stream_logits_match_cpu_qwen3 ... FAILED
+test hybrid::tests::hybrid_ram_check_on_real_splits ... FAILED
+test model::moe::tests::chunk_dividing_divides ... ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+test model::moe::tests::ram_refusal_names_the_bound ... ok
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test model::moe_tests::check_supported_qwen3moe ... ok
+test model::moe_tests::moe_feed_batch_matches_feed_fixture has been running for over 60 seconds
+test model::moe_tests::moe_feed_batch_matches_feed_pruned has been running for over 60 seconds
+test model::moe_tests::moe_feed_batch_matches_feed_small has been running for over 60 seconds
+[axon-run 08:48:30] signal 15: stopping the job
+[axon-run 08:48:30] exit 143 after 4546.9s (host bella)

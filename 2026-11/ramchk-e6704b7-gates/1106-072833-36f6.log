@@ -1,0 +1,129 @@
+[axon-run 07:28:33] submitted 1106-072833-36f6 by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload
+[axon-run 07:34:13] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 07:34:13] scope axon-job-1106-072833-36f6-1793968453.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 07:34:13] job 1106-072833-36f6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-072833-36f6-1793968453 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --test-threads 6
+axon-q 07:34:13 start slot 8-15: /home/haseeb/.cache/axon-ramchk/bin/axon-test-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --test-threads 6
+
+running 168 tests
+test cuda::qwen2::stream::tests::unpermute_bench ... ignored, benchmark: unpermute_bench -- --ignored --nocapture
+test gguf::mem::tests::mountinfo_escapes ... ok
+test cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps ... ok
+test gguf::mem::tests::host_only_without_cgroupfs ... ok
+test gguf::mem::tests::v1_memory_controller ... ok
+test gguf::mem::tests::real_avail_is_found ... ok
+test gguf::mem::tests::v2_cgroupns_private_root ... ok
+test gguf::mem::tests::v2_picks_the_mount_above_the_cgroup ... ok
+test gguf::tests::bad_magic_and_version ... ok
+test gguf::mem::tests::v2_saturates_and_tolerates_missing_files ... ok
+test gguf::mem::tests::v2_mount_root_and_default_mount ... ok
+test gguf::tests::huge_lengths_and_counts ... ok
+test gguf::tests::bad_tensors ... ok
+test gguf::tests::honours_general_alignment ... ok
+test gguf::mem::tests::v2_tightest_level_wins ... ok
+test gguf::tests::overlapping_tensors_refused ... ok
+test gguf::tests::parses_a_valid_file ... ok
+test gguf::tests::release_small_anonymous_model ... ok
+test gguf::tests::release_span_unaligned_base ... ok
+test gguf::tests::load_to_run_map_only_never_copies ... ok
+test gguf::tests::truncated_files ... ok
+test gguf::tests::unpermute_rows_undoes_the_converter ... ok
+test gguf::tests::unsized_types_are_named_not_sized ... ok
+test gguf::tests::resident_fraction_of_a_read_file ... ok
+test gguf::tests::metadata_element_budget ... ok
+test gguf::tests::parses_a_long_string_array ... ok
+test cuda::qwen2::stream::tests::unpermute_inverts_repack ... ok
+test hybrid::tests::hybrid_bad_drafter_output_unchanged ... ok
+test hybrid::tests::all_gpu_layers_is_the_cuda_backend ... ok
+test hybrid::tests::hybrid_auto_split_is_the_most_that_fit ... ok
+test hybrid::tests::hybrid_auto_split_q8_fits_more_layers ... ok
+test gguf::tests::release_gain_is_what_release_drops ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+test hybrid::tests::hybrid_logits_match_cpu_1_5b ... ok
+test hybrid::tests::hybrid_logits_match_cpu_llama ... ok
+test hybrid::tests::hybrid_halves_own_their_weights ... ok
+test hybrid::tests::hybrid_logits_match_cpu_qwen3 ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 ... ok
+test hybrid::tests::hybrid_q8_all_on_gpu_is_the_q8_model ... ok
+test hybrid::tests::hybrid_q8_close_to_f16_0_5b ... ok
+test hybrid::tests::hybrid_q8_close_to_f16_1_5b ... ok
+test hybrid::tests::hybrid_ram_check_on_real_splits ... ok
+test hybrid::tests::hybrid_ram_refused_before_the_upload ... ok
+test hybrid::tests::hybrid_real_model_sampling ... ok
+test hybrid::tests::hybrid_verify_cands_matches_forward_cands ... ok
+test hybrid::tests::hybrid_verify_matches_forward_argmax ... ok
+test hybrid::tests::hybrid_verify_matches_forward_argmax_q8 ... ok
+test hybrid::tests::pin_verdict_keeps_the_tolerance_free ... ok
+test hybrid::tests::placement_full_ctx_fits_whole_gpu ... ok
+test hybrid::tests::placement_long_enough_ctx_stays_on_gpu ... ok
+test hybrid::tests::placement_q8_changes_the_decision ... ok
+test hybrid::tests::placement_split_counts_streaming ... ok
+test hybrid::tests::placement_stream_changes_the_decision ... ok
+test hybrid::tests::placement_tiny_ctx_splits_at_full_ctx ... ok
+test hybrid::tests::placement_weights_dont_fit_splits ... ok
+test hybrid::tests::stream_logits_match_cpu_0_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_1_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_llama ... ok
+test hybrid::tests::stream_logits_match_cpu_qwen3 ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_0_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_llama ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 ... ok
+test hybrid::tests::stream_q8_prefill_bits_0_5b ... ok
+test hybrid::tests::stream_q8_prefill_bits_1_5b ... ok
+test hybrid::tests::stream_verify_matches_forward_argmax ... ok
+test hybrid::tests::streamed_cache_pins_its_cpu_kv_whole ... ok
+test lm::paged_place_tests::paged_placement_14b ... ok
+test lm::paged_place_tests::paged_placement_all_gpu_kept ... ok
+test lm::paged_place_tests::paged_placement_matches_main_with_ctx ... ok
+test lm::paged_place_tests::paged_placement_squeezed_splits_rather_than_shrinks ... ok
+test model::deepseek2_tests::deepseek2_fixture_vocab_is_whole ... ok
+test model::deepseek2_tests::deepseek2_cache_is_k_only ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::deepseek2_tests::deepseek2_router_rule ... ok
+test model::deepseek2_tests::deepseek2_write_fixture ... ignored, writes a file; run with AXON_DS2_FIXTURE_OUT=path
+test model::deepseek2_tests::deepseek3_tokenizer_matches_hf ... ok
+test model::deepseek2_tests::deepseek2_check_supported ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+test model::gemma3_tests::gemma3_ref_probe ... ignored
+test model::gptoss_tests::check_supported_gpt_oss ... ok
+test hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::gptoss_tests::gpt_oss_matches_reference_forward ... ok
+test model::moe::tests::chunk_dividing_divides ... ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test model::deepseek2_tests::deepseek2_matches_expanded_reference ... ok
+test model::moe_tests::check_supported_qwen3moe ... ok
+test model::moe::tests::ram_refusal_names_the_bound ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+test model::deepseek2_tests::kimi_tokenizer_matches_hf ... ok
+test model::moe_tests::moe_info_counts ... ok
+test model::moe_tests::moe_layout ... ok
+test model::moe_tests::moe_matches_reference_forward ... ok
+test model::moe_tests::moe_feed_batch_matches_feed_fixture ... ok
+test model::moe_tests::moe_verify_matches_forward_pruned ... ok
+test model::moe_tests::moe_repack_logit_deltas ... ok
+test model::moe_tests::route_top_k_ties_and_renorm ... ok
+test model::ram_dense_tests::affinity_cpus_counts_the_mask ... ok
+test model::ram_dense_tests::copied_load_commits_what_every_schedule_holds ... ok
+test model::ram_dense_tests::copy_estimate_independent_of_threads ... ok
+test model::ram_dense_tests::dense_arena_matches_the_built_arena ... ok
+test model::ram_dense_tests::dense_need_and_refusal_wording ... ok
+test model::ram_dense_tests::dense_need_head_and_growth ... ok
+test model::ram_dense_tests::fp8_arena_counted_without_repack ... ok
+test model::ram_dense_tests::long_ctx_warns_not_refuses ... ok
+test model::gemma3_tests::gemma3_matches_reference_forward has been running for over 60 seconds
+test model::gptoss_tests::gpt_oss_model_bits has been running for over 60 seconds
+test model::moe_tests::moe_feed_batch_matches_feed_pruned has been running for over 60 seconds
+test model::moe_tests::moe_feed_batch_matches_feed_small has been running for over 60 seconds
+test model::moe_tests::moe_verify_matches_forward_small has been running for over 60 seconds
+test model::ram_dense_tests::split_need_matches_the_built_cpu_half has been running for over 60 seconds
+[axon-run 07:41:43] THROTTLED: job 1106-072833-36f6 (ramchk-e6704b7-cpu-rel) throttled at MemoryHigh: claim too low -- scope MemoryHigh 6321 MB, using 6415 MB, scope PSI full avg60 53 % for 5m; RAM claim 4000 MB from filtered-default (wt:ramchk|filtered [cpu]@small from another host class is lower). It runs on (not killed) but crawls toward its end; kill + resubmit with a bigger --ram (e.g. --ram 9622) if it matters
+[axon-run 07:41:56] signal 15: stopping the job
+[axon-run 07:41:56] exit 143 after 462.9s (host bella)
