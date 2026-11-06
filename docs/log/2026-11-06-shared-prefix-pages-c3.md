@@ -77,11 +77,11 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
 | touched modules' tests, release | `71b1a60` | 1106-073530-3f6b | **FAIL** 213 / 2 / 10: two test bugs (below) |
 | same, debug assertions + overflow checks | `71b1a60` | 1106-073715-f411 | not run: dropped from the queue (its binary had both tests) |
 | CI (`check`) | `71b1a60`..`d01c249` | runs 42219303641, 42219322630, 42220176786 | **FAIL**: `peek_is_walk_without_the_touch` (host-only) |
-| touched modules' tests, release (r2) | `76b8f0b` | 1106-090453-76cf | pending |
-| same, debug assertions + overflow checks (r2) | `76b8f0b` | 1106-090603-c6bb | pending |
-| `serve_share_pressure` ×3, `--nocapture`, `AXON_SERVE_DEBUG=1` (diagnostic, jade GTX 1050) | `76b8f0b` | 1106-090454-2e5f | pending |
-| md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | pending |
-| replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | pending |
+| touched modules' tests, release (r2) | `76b8f0b` | 1106-090453-76cf | **PASS** 215 / 0 / 10 |
+| same, debug assertions + overflow checks (r2) | `76b8f0b` | 1106-090603-c6bb | **PASS** 215 / 0 / 10 |
+| `serve_share_pressure` ×3, `--nocapture`, `AXON_SERVE_DEBUG=1` (diagnostic, jade GTX 1050) | `76b8f0b` | 1106-090454-2e5f | **PASS** 3 / 3 runs. Every chunked admission of round 2 claimed the prefix (256, 266 or 284 of 285 tokens cached); after the round 3 requests a server report 0 cached, against 4–5 preemptions + unfeeds in that round (every server of every run): the zeros are victims reset after admission, as diagnosed |
+| md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0); serve every reply == main: 7B f16 147/147, 7B q8 147/147, gemma3-1B f16 84/84, Qwen3-0.6B q8 147/147, CPU 0.5B 42/42, in every variant |
+| replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | **PASS**: MD5 SAME, 174 requests each, 0 errors, the round clean |
 | timing (4090 pod) | | not yet submitted | after the correctness gates |
 
 ### r1's two failures (3f6b): both test bugs, fixed in `76b8f0b` (tests only)
@@ -98,6 +98,10 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   allows at most its `preempted` + `prefills_unfed` (from `/slots`, before and after) short of the prefix, and at
   least one at it: the oldest request never gives way (`victim`). Its replies were == sharing off (that assert, the
   one before, passed). The diagnostic job prints each run's cached counts, victims and admissions.
+  It bore this out (2e5f, jade, 3 runs × 2 servers): `AXON_SERVE_DEBUG`'s admission lines show every chunked
+  admission of round 2 with the prefix claimed (256, 266 or 284 of 285 tokens cached); the test's line after the
+  round shows 3 requests at 0 cached and 4–5 preemptions + unfeeds in every one, e.g. run 1 without the tier:
+  admissions #7–#12 cached 266, 266, 284, 256, 256, 256; after, `[0, 0, 266, 0, 284, 266]`, 4 preempted or unfed.
 - **md5 and replay md5 stay at `71b1a60`.** `76b8f0b` changes `#[cfg(test)]` code only (`git diff 71b1a60 76b8f0b
   -- src`: prefix.rs's `mod tests` and tests.rs). The two release binaries' `.text`, `.rodata`, `.data`,
   `.data.rel.ro`, `.eh_frame`, `.gcc_except_table` and `.init_array` are byte-identical (sha256 of each section);
