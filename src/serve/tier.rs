@@ -41,6 +41,12 @@ const SLAB_BYTES: usize = 64 << 20;
 /// ~0.6 ms at 25 GB/s (ESTIMATED), about 1 % of a 60 ms step.
 pub const STEP_BYTES: usize = 16 << 20;
 
+/// Bytes the idle flush copies per piece (#170: the engine loop checks for
+/// a new request between pieces, so one waits for at most one): 19 pages
+/// of a 7B f16, ≈ 2.5 ms at 28 GB/s, ≈ 10 ms at bella's slow 2D copy
+/// (ESTIMATED, docs/design/kv-ram-tier-exclusive.md §2.5).
+pub const IDLE_BYTES: usize = 64 << 20;
+
 /// `--cache-ram BYTES|auto`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheRam {
@@ -142,6 +148,29 @@ pub struct Faults {
     said: Mutex<Vec<(String, Counters)>>,
     /// Times the engine waited for a request with nothing to do (`idle`).
     idles: std::sync::atomic::AtomicU64,
+    /// #170: the idle flush's piece, in bytes (0: `IDLE_BYTES`).
+    idle_bytes: std::sync::atomic::AtomicUsize,
+    /// #170: what the engine loop did while its batch was idle (`Ev`).
+    events: Mutex<Vec<Ev>>,
+    /// #170: the idle piece (counted from the start) after which the
+    /// engine waits for `unpark` (0: none).
+    park_at: std::sync::atomic::AtomicUsize,
+    /// Whether the engine waits (`park_at`), and its wake-up.
+    parked: Mutex<bool>,
+    unparked: std::sync::Condvar,
+    /// #170: the write-behind finds no free page slot in the arena.
+    starve: std::sync::atomic::AtomicBool,
+}
+
+/// Tests (#170): what the engine loop did while its batch was idle, in
+/// order (`Faults::events`).
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ev {
+    /// A piece of the idle flush ran; the tier's pages written after it.
+    Piece(u64),
+    /// It took a request off the channel.
+    Job,
 }
 
 /// Tests: what a tier copy is made for, as the off line names it (`off`'s
@@ -174,9 +203,9 @@ impl Op {
 }
 
 /// Tests: the KV RAM tier's /metrics counters (pages written, tokens
-/// restored, hits).
+/// restored, hits, pages spilled).
 #[cfg(test)]
-pub type Counters = [u64; 3];
+pub type Counters = [u64; 4];
 
 #[cfg(test)]
 impl Faults {
@@ -193,15 +222,98 @@ impl Faults {
 
     /// Times the engine waited for a request with nothing to do (every
     /// 100 ms while it waits): once it is past the count a test read after
-    /// a reply, what the engine does after a reply (a pool's `end_solo`
-    /// spill, the one cache's write, a batch's last write-behind) is done.
+    /// a reply, what the engine does after a reply (a pool's idle flush,
+    /// the one cache's write, a batch's last write-behind) is done.
+    /// Acquire, against `idle`'s Release: what the engine wrote before it
+    /// waited (its metrics, `said`) is visible to a test that saw the count
+    /// move, by the memory model rather than x86's ordering.
     pub fn idles(&self) -> u64 {
-        self.idles.load(Relaxed)
+        self.idles.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The idle flush's pieces are `bytes` from now (a page: a few pages
+    /// of backlog are as many pieces).
+    pub fn set_idle_bytes(&self, bytes: usize) {
+        self.idle_bytes.store(bytes, Relaxed);
+    }
+
+    /// The idle flush's piece (`set_idle_bytes`, else `IDLE_BYTES`).
+    pub(super) fn idle_bytes(&self) -> usize {
+        match self.idle_bytes.load(Relaxed) {
+            0 => IDLE_BYTES,
+            n => n,
+        }
+    }
+
+    /// What the engine loop did while idle so far.
+    pub fn events(&self) -> Vec<Ev> {
+        self.events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The engine waits after the `n`-th piece of the idle flush (counted
+    /// from the start) until `unpark` (30 s at most: a failed test still
+    /// stops).
+    pub fn park_after(&self, n: usize) {
+        self.park_at.store(n, Relaxed);
+    }
+
+    /// Wait until the engine is parked (`park_after`); panics after 30 s.
+    pub fn wait_parked(&self) {
+        let p = self.parked.lock().unwrap_or_else(|p| p.into_inner());
+        let (p, _) = self
+            .unparked
+            .wait_timeout_while(p, std::time::Duration::from_secs(30), |p| !*p)
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(*p, "the engine never parked: {:?}", self.events());
+    }
+
+    /// The parked engine goes on.
+    pub fn unpark(&self) {
+        *self.parked.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        self.unparked.notify_all();
+    }
+
+    /// A piece of the idle flush ran (`m`: the tier's counters now); the
+    /// one to park after waits here.
+    pub(super) fn piece(&self, m: &Metrics) {
+        let n = {
+            let mut e = self.events.lock().unwrap_or_else(|p| p.into_inner());
+            e.push(Ev::Piece(m.kv_ram_written.load(Relaxed)));
+            e.iter().filter(|e| matches!(e, Ev::Piece(_))).count()
+        };
+        if n == self.park_at.load(Relaxed) {
+            let mut p = self.parked.lock().unwrap_or_else(|p| p.into_inner());
+            *p = true;
+            self.unparked.notify_all();
+            let (mut p, _) = self
+                .unparked
+                .wait_timeout_while(p, std::time::Duration::from_secs(30), |p| *p)
+                .unwrap_or_else(|p| p.into_inner());
+            *p = false;
+        }
+    }
+
+    /// The engine loop, idle, took a request off the channel.
+    pub(super) fn job(&self) {
+        self.events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Ev::Job);
+    }
+
+    /// The write-behind finds no free page slot in the arena while `on`
+    /// (it copies nothing: the idle flush can't progress).
+    pub fn starve(&self, on: bool) {
+        self.starve.store(on, Relaxed);
     }
 
     /// The engine waits for a request with nothing to do (`idles`).
     pub(super) fn idle(&self) {
-        self.idles.fetch_add(1, Relaxed);
+        self.idles
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// What `off` said so far, each line with the counters then.
@@ -211,7 +323,13 @@ impl Faults {
 
     /// `off` said `line`; `m`: the counters now.
     fn said(&self, line: String, m: &Metrics) {
-        let c = [&m.kv_ram_written, &m.kv_ram_restored, &m.kv_ram_hits].map(|c| c.load(Relaxed));
+        let c = [
+            &m.kv_ram_written,
+            &m.kv_ram_restored,
+            &m.kv_ram_hits,
+            &m.kv_ram_spilled,
+        ]
+        .map(|c| c.load(Relaxed));
         self.said
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -239,9 +357,12 @@ impl Faults {
 }
 
 /// The page store and, per sequence (a pool slot, or the one cache), the
-/// keys of the whole pages of what it holds that are stored, in order. A
-/// sequence's last stored page is held in the store (so a chain a slot is
-/// still writing never loses its leaf, and so none of its prefix).
+/// keys of the whole pages of what it holds that are stored, in order (a
+/// chain from ROOT). While a sequence holds their rows those pages are
+/// class 0 in the store (`resident`: the GPU has their bytes), so the store
+/// evicts them first; the sequence then lets go of the evicted ones
+/// (`drain`), and its rows stay. A page whose rows no sequence holds any
+/// more is class 1, RAM's own (docs/design/kv-ram-tier-exclusive.md §2).
 pub(super) struct Tier<P> {
     pub store: PageStore<P>,
     /// Image bytes of a page.
@@ -275,31 +396,122 @@ impl<P> Tier<P> {
         self.store.peek_len(head)
     }
 
-    /// Sequence `s`'s stored pages are `keys` now (the hold moves to its
-    /// last one).
+    /// Sequence `s`'s stored pages are `keys` now (a stored chain from
+    /// ROOT): those it no longer names lose it as a device holder, the new
+    /// ones gain it.
     fn set_keys(&mut self, s: usize, keys: Vec<Key>) {
-        if let Some(&k) = keys.last() {
-            self.store.hold(k);
+        let old = &self.keys[s];
+        let c = old.iter().zip(&keys).take_while(|(a, b)| a == b).count();
+        for &k in &old[c..] {
+            self.store.resident(k, false);
         }
-        if let Some(&k) = self.keys[s].last() {
-            self.store.release(k);
+        for &k in &keys[c..] {
+            self.store.resident(k, true);
         }
         self.keys[s] = keys;
     }
 
-    /// Sequence `s` keeps the first `pages` of its stored pages.
+    /// Sequence `s` keeps the first `pages` of its stored pages: the rest
+    /// are RAM's own now, unless another sequence holds them too.
     pub fn truncate(&mut self, s: usize, pages: usize) {
         if pages < self.keys[s].len() {
-            let k = self.keys[s][..pages].to_vec();
-            self.set_keys(s, k);
+            for &k in &self.keys[s][pages..] {
+                self.store.resident(k, false);
+            }
+            self.keys[s].truncate(pages);
+            if let Some(m) = &self.metrics {
+                m.kv_ram_gpu_pages.store(self.store.dups() as u64, Relaxed);
+            }
         }
+    }
+
+    /// Whether the whole pages sequence `s` gives up past `keep` (of
+    /// `held`, the tokens whose rows it holds) are orphans: the page before
+    /// the first of them is stored neither in its keys nor by another
+    /// sequence. A stored page needs its stored parent, so storing them
+    /// would first copy pages the sequence keeps: a spill drops them
+    /// instead, as with no tier. No LRU change.
+    fn orphans(&self, s: usize, held: &[u32], keep: usize) -> bool {
+        let first = (keep / PAGE).min(held.len() / PAGE);
+        first > self.stored(s) && self.store.peek_len(&held[..first * PAGE]) < first * PAGE
     }
 
     /// Sequence `s` gains the stored page `key` (the next of its pages).
     fn push(&mut self, s: usize, key: Key) {
-        let mut k = self.keys[s].clone();
-        k.push(key);
-        self.set_keys(s, k);
+        self.store.resident(key, true);
+        self.keys[s].push(key);
+    }
+
+    /// The pages the store evicted since the last call (their memory goes
+    /// back to its owner). An evicted page is a leaf, so it is the last of
+    /// each sequence's keys that names it (a `make_room` that took a leaf
+    /// and then its parent took the last two): those let go of it. Their
+    /// rows stay; the write-behind or their spill copies it again.
+    fn drain(&mut self) -> Vec<P> {
+        let ev = self.store.take_evicted();
+        if ev.is_empty() {
+            return Vec::new();
+        }
+        let gone: std::collections::HashSet<Key> = ev.iter().map(|e| e.0).collect();
+        for ks in &mut self.keys {
+            while ks.last().is_some_and(|k| gone.contains(k)) {
+                ks.pop();
+            }
+        }
+        ev.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Sequence `s`'s keys before they are extended: its last stored page
+    /// still the child of the one before it (`drain` keeps it so; else, a
+    /// bug, they are cut to their longest stored chain).
+    fn revalidate(&mut self, s: usize) {
+        let ks = &self.keys[s];
+        let link = |i: usize| match i {
+            0 => ROOT,
+            _ => ks[i - 1],
+        };
+        let n = ks.len();
+        if n == 0 || self.store.parent_of(ks[n - 1]) == Some(link(n - 1)) {
+            return;
+        }
+        if cfg!(debug_assertions) {
+            panic!("sequence {s}: its keys name an unstored page");
+        }
+        let v = (0..n)
+            .take_while(|&i| self.store.parent_of(ks[i]) == Some(link(i)))
+            .count();
+        let cut = self.keys[s].split_off(v);
+        for k in cut {
+            if self.store.parent_of(k).is_some() {
+                self.store.resident(k, false);
+            }
+        }
+    }
+
+    /// Debug builds: the sequences' keys are stored chains from ROOT, and
+    /// each page's device holders are the sequences naming it (none for
+    /// any other page).
+    fn check(&self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let mut holders: std::collections::HashMap<Key, u32> = Default::default();
+        for (s, ks) in self.keys.iter().enumerate() {
+            let mut parent = ROOT;
+            for &k in ks {
+                assert_eq!(
+                    self.store.parent_of(k),
+                    Some(parent),
+                    "sequence {s}: its keys aren't a stored chain"
+                );
+                *holders.entry(k).or_default() += 1;
+                parent = k;
+            }
+        }
+        for (&k, &n) in &holders {
+            assert_eq!(self.store.gpu(k), n, "{k:x}: device holders");
+        }
+        assert_eq!(self.store.dups(), holders.len(), "class-0 pages");
     }
 
     /// Sequence `s`, whose first `have` positions hold `head`'s, takes the
@@ -309,6 +521,12 @@ impl<P> Tier<P> {
         if n > self.keys[s].len() {
             self.set_keys(s, ks[..n].to_vec());
         }
+    }
+
+    /// Tests: the write-behind is starved (`Faults::starve`).
+    #[cfg(test)]
+    fn starved(&self) -> bool {
+        (self.metrics.as_ref()).is_some_and(|m| m.tier_faults.starve.load(Relaxed))
     }
 
     /// Tests: a copy for `op` (of slot `slot`) is to be made; Err instead
@@ -324,6 +542,7 @@ impl<P> Tier<P> {
         if let Some(m) = &self.metrics {
             m.kv_ram_bytes.store(self.store.used() as u64, Relaxed);
             m.kv_ram_pages.store(self.store.len() as u64, Relaxed);
+            m.kv_ram_gpu_pages.store(self.store.dups() as u64, Relaxed);
             m.kv_ram_written.fetch_add(written as u64, Relaxed);
             m.kv_ram_restored.fetch_add(restored as u64, Relaxed);
             if restored > 0 {
@@ -556,8 +775,6 @@ impl Drop for Arena {
 pub(super) struct PoolTier {
     pub t: Tier<u32>,
     arena: Arena,
-    /// The slot the write-behind looks at first next (round robin).
-    next: usize,
     /// Tests: what `write`'s copies are for (`Faults`): a spill, unless
     /// `write_some` (the write-behind) set it for the call.
     #[cfg(test)]
@@ -593,7 +810,6 @@ impl PoolTier {
         let p = PoolTier {
             t,
             arena,
-            next: 0,
             #[cfg(test)]
             op: Op::Spill,
         };
@@ -611,12 +827,15 @@ impl PoolTier {
 
     /// Adopt the slabs the allocator thread has pinned (`Alloc::Thread`)
     /// and show them in /metrics: the engine calls it every iteration, so
-    /// pinning shows (and finishes) on an idle server too.
-    pub fn poll(&mut self, net: &Backend) {
-        if self.arena.pinning.is_some() {
-            self.arena.poll(net);
-            self.publish_pinned();
+    /// pinning shows (and finishes) on an idle server too. Whether it grew.
+    pub fn poll(&mut self, net: &Backend) -> bool {
+        if self.arena.pinning.is_none() {
+            return false;
         }
+        let had = self.arena.bytes();
+        self.arena.poll(net);
+        self.publish_pinned();
+        self.arena.bytes() > had
     }
 
     fn publish_pinned(&self) {
@@ -625,21 +844,53 @@ impl PoolTier {
         }
     }
 
-    /// Store up to `most` of slot `s`'s pages not yet stored (whole pages
-    /// of `held`, the tokens whose rows it holds), in order; a page some
-    /// other sequence stored already costs no copy (and no budget). The
-    /// pages copied (stops early when the store has no room).
+    /// The spill of slot `s`, whose rows past `keep` are about to go
+    /// (`held`: the tokens whose rows it holds): store the whole pages it
+    /// gives up that aren't stored yet, in order, evicting to make room
+    /// (class 0 first: other slots' duplicates); a page some other sequence
+    /// stored already costs no copy. Only if the page before them is
+    /// stored (`Tier::orphans`), else none: storing them would copy the
+    /// pages the slot keeps first, its whole chain for a next turn that
+    /// gives up its reply's tail page once other spills have evicted the
+    /// chain's copies (#201's s1 cell: 0.85-1.10x a whole-chain copy before
+    /// the first token). Those pages go, as with no tier. The pages copied
+    /// (stops early when the store has no room).
     pub fn write(
         &mut self,
         net: &Backend,
         pool: &<Backend<'_> as BatchLm>::Pool,
         s: usize,
         held: &[u32],
+        keep: usize,
+    ) -> Result<usize, String> {
+        if self.t.orphans(s, held, keep) {
+            return Ok(0);
+        }
+        let r = self.write_pages(net, pool, s, held, usize::MAX, true);
+        if let (Ok(n), Some(m)) = (&r, &self.t.metrics) {
+            m.kv_ram_spilled.fetch_add(*n as u64, Relaxed);
+        }
+        self.t.check();
+        r
+    }
+
+    /// Store up to `most` of slot `s`'s pages not yet stored, in order,
+    /// `evict`ing to make room (a spill) or into free room only (the
+    /// write-behind: it stops at a full store, before copying). The pages
+    /// copied; a page found stored (another sequence's) costs none.
+    fn write_pages(
+        &mut self,
+        net: &Backend,
+        pool: &<Backend<'_> as BatchLm>::Pool,
+        s: usize,
+        held: &[u32],
         most: usize,
+        evict: bool,
     ) -> Result<usize, String> {
         // Tests: what its copies are for (a spill, but in `write_some`).
         #[cfg(test)]
         let op = std::mem::replace(&mut self.op, Op::Spill);
+        self.t.revalidate(s);
         let mut copied = 0;
         let whole = held.len() / PAGE;
         while self.t.stored(s) < whole && copied < most {
@@ -650,9 +901,18 @@ impl PoolTier {
                 self.t.push(s, k);
                 continue;
             }
-            let room = self.t.store.room(parent, self.t.page);
-            self.arena.free.extend(self.t.store.take_evicted());
+            let room = match evict {
+                true => self.t.store.room(parent, self.t.page),
+                false => self.t.store.has_room(self.t.page),
+            };
+            let freed = self.t.drain();
+            self.arena.free.extend(freed);
             if !room {
+                break;
+            }
+            // Tests: no page slot free to the write-behind (`Faults::starve`).
+            #[cfg(test)]
+            if op == Op::WriteBehind && self.t.starved() {
                 break;
             }
             let Some(a) = self.arena.take(net) else {
@@ -669,7 +929,11 @@ impl PoolTier {
                 self.arena.free.push(a);
                 return Err(e);
             }
-            match self.t.store.insert(parent, toks, a, self.t.page) {
+            let k = match evict {
+                true => self.t.store.insert(parent, toks, a, self.t.page),
+                false => self.t.store.insert_behind(parent, toks, a, self.t.page),
+            };
+            match k {
                 Some(k) => self.t.push(s, k),
                 // A hash collision with another prefix: keep what's there.
                 None => {
@@ -679,9 +943,7 @@ impl PoolTier {
             }
             copied += 1;
         }
-        if copied > 0 {
-            self.t.publish(copied, 0);
-        }
+        self.t.publish(copied, 0);
         self.publish_pinned();
         Ok(copied)
     }
@@ -707,7 +969,8 @@ impl PoolTier {
             return Ok(true);
         }
         let room = self.t.store.room(parent, self.t.page);
-        self.arena.free.extend(self.t.store.take_evicted());
+        let freed = self.t.drain();
+        self.arena.free.extend(freed);
         if !room {
             return Ok(false);
         }
@@ -736,31 +999,61 @@ impl PoolTier {
         }
     }
 
-    /// The write-behind of an engine step: up to `bytes` of copies over
-    /// every slot's unstored pages, round robin from where the last one
-    /// stopped. `held`: each slot's tokens.
+    /// The write-behind (an engine step's, or a piece of the idle flush):
+    /// up to `bytes` of copies of the slots' unstored pages, slots in
+    /// `order` (the next to give their rows up first), into the store's
+    /// free room only: a full store copies nothing. `held`: each slot's
+    /// tokens. Its progress: the pages slots now name that they didn't
+    /// (copied, or found stored), 0 if it could do nothing.
     pub fn write_some(
         &mut self,
         net: &Backend,
         pool: &<Backend<'_> as BatchLm>::Pool,
         held: &[Vec<u32>],
+        order: &[usize],
         bytes: usize,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         let mut left = bytes.div_ceil(self.t.page).max(1);
-        let n = held.len();
-        for k in 0..n {
-            let s = (self.next + k) % n;
+        let mut progress = 0;
+        for &s in order {
             #[cfg(test)]
             {
                 self.op = Op::WriteBehind;
             }
-            left -= self.write(net, pool, s, &held[s], left)?;
+            let had = self.t.stored(s);
+            let r = self.write_pages(net, pool, s, &held[s], left, false);
+            progress += self.t.stored(s).saturating_sub(had);
+            left -= r?;
             if left == 0 {
-                self.next = s;
-                return Ok(());
+                break;
             }
         }
-        Ok(())
+        self.t.check();
+        Ok(progress)
+    }
+
+    /// Whether the write-behind has work: a slot holds a whole page not
+    /// stored, and the store has free room for a page (#170's idle flush;
+    /// a full store has none). `held`: each slot's tokens.
+    pub fn backlog(&self, held: &[Vec<u32>]) -> bool {
+        self.t.store.has_room(self.t.page)
+            && held
+                .iter()
+                .enumerate()
+                .any(|(s, h)| self.t.stored(s) < h.len() / PAGE)
+    }
+
+    /// Debug builds: slot `s`'s keys are the keys of its rows' first pages
+    /// (`held`: its tokens), the invariant the bytes rest on (§2.2).
+    pub fn check_slot(&self, s: usize, held: &[u32]) {
+        if cfg!(debug_assertions) {
+            let ks = &self.t.keys[s];
+            let want = crate::kvstore::keys(&held[..(ks.len() * PAGE).min(held.len())]);
+            assert!(
+                *ks == want,
+                "slot {s}: its stored pages aren't its rows' pages"
+            );
+        }
     }
 
     /// The pages of `head`'s longest stored prefix (held: nothing evicts
@@ -813,6 +1106,7 @@ impl PoolTier {
         for &k in &keys {
             self.t.store.release(k);
         }
+        self.t.check();
         res
     }
 }
@@ -857,10 +1151,11 @@ impl CacheTier {
                 self.t.push(0, k);
                 continue;
             }
-            if !self.t.store.room(parent, self.t.page) {
+            let room = self.t.store.room(parent, self.t.page);
+            drop(self.t.drain());
+            if !room {
                 break;
             }
-            drop(self.t.store.take_evicted());
             match self.t.store.insert(parent, toks, b.into(), self.t.page) {
                 Some(k) => self.t.push(0, k),
                 None => break,
@@ -967,27 +1262,321 @@ mod tests {
         assert_eq!(out, [1, 2, 3, 4, 5]);
     }
 
-    /// Holds follow a sequence's last stored page: a chain being written
-    /// never loses its leaf, and truncating lets the old leaf go.
-    #[test]
-    fn keys_hold_the_leaf() {
-        let mut t: Tier<u8> = Tier::new(3, 1, 2, None);
-        let a: Vec<u32> = (0..3 * PAGE as u32).collect();
-        let mut parent = ROOT;
-        for b in a.chunks_exact(PAGE) {
-            parent = t.store.insert(parent, b, 0, 1).unwrap();
-            t.push(0, parent);
+    thread_local! {
+        /// Pages `store_seq` saw evicted on this thread (the fuzz's count).
+        static EVICTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// `n` pages of tokens from `seed`.
+    fn toks(seed: u32, n: usize) -> Vec<u32> {
+        (0..(n * PAGE) as u32).map(|i| seed * 100_000 + i).collect()
+    }
+
+    /// Store `t`'s pages after what sequence `s` names (as a spill does:
+    /// `room`, `drain`, `insert`, `push`); the pages it now names.
+    fn store_seq(t: &mut Tier<u8>, s: usize, toks: &[u32]) -> usize {
+        while t.stored(s) < toks.len() / PAGE {
+            let i = t.stored(s);
+            let b = &toks[i * PAGE..(i + 1) * PAGE];
+            let parent = t.keys[s].last().copied().unwrap_or(ROOT);
+            if let Some(k) = t.store.child(parent, b) {
+                t.push(s, k);
+                continue;
+            }
+            let room = t.store.room(parent, 1);
+            let n = t.drain().len();
+            EVICTED.with(|e| e.set(e.get() + n));
+            if !room {
+                break;
+            }
+            let k = t.store.insert(parent, b, 0, 1).expect("room made");
+            t.push(s, k);
+            t.check();
         }
-        // Full; the leaf is held: nothing can go.
-        let other: Vec<u32> = (1000..1000 + PAGE as u32).collect();
-        assert!(!t.store.room(ROOT, 1));
-        t.truncate(0, 1);
-        // The old leaf goes, then the middle page; the first is held.
-        assert!(t.store.room(ROOT, 1));
-        t.store.insert(ROOT, &other, 0, 1).unwrap();
-        assert_eq!(t.store.take_evicted().len(), 1);
+        t.check();
+        t.stored(s)
+    }
+
+    /// What a spill gives up past `keep` is stored only under a stored
+    /// parent (`orphans`): a next turn that gives up its reply's tail page
+    /// after its chain's copies were evicted copies nothing (it would have
+    /// copied the whole chain first); a parent another sequence stored
+    /// counts; giving up everything (a reclaim) always stores.
+    #[test]
+    fn spill_orphans() {
+        let mut t: Tier<u8> = Tier::new(8, 1, 3, None);
+        let a = toks(1, 5);
+        let pg = |n: usize| n * PAGE;
+        // Sequence 0 holds a's 5 pages, the first 3 stored.
+        assert_eq!(store_seq(&mut t, 0, &a[..pg(3)]), 3);
+        for (keep, orphans) in [
+            (0, false),
+            (pg(2), false),
+            (pg(3), false),
+            (pg(3) + 10, false),
+            (pg(4), true),
+            (pg(4) + 63, true),
+        ] {
+            assert_eq!(t.orphans(0, &a, keep), orphans, "keep {keep}");
+        }
+        // Partial pages: only whole ones count.
+        assert!(!t.orphans(0, &a[..pg(4) - 1], pg(4)));
+        // Another sequence's stored page is a parent too (no LRU change,
+        // sequence 0's keys as they were).
+        assert_eq!(store_seq(&mut t, 1, &a[..pg(4)]), 4);
+        assert!(!t.orphans(0, &a, pg(4)));
+        assert_eq!(t.stored(0), 3);
+        t.truncate(1, 0);
+        // The tier fills with others' pages; sequence 0's copies (class 0)
+        // go first, a leaf at a time, and it lets go of them.
+        let b = toks(2, 8);
+        store_seq(&mut t, 2, &b);
+        t.check();
+        assert!(t.stored(0) < 3, "sequence 0's copies evicted");
+        assert!(t.orphans(0, &a, pg(4)), "a 1-page give-up: orphans");
+        assert!(t.orphans(0, &a, pg(1)) == (t.peek(&a[..pg(1)]) == 0));
+        assert!(!t.orphans(0, &a, 0), "a reclaim always stores");
+    }
+
+    /// A sequence's pages are class 0 while it names them: evicted first
+    /// (newest first, a leaf at a time), and it lets go of them (`drain`);
+    /// truncated, they are class 1.
+    #[test]
+    fn keys_are_class0_and_drain_pops_them() {
+        let mut t: Tier<u8> = Tier::new(5, 1, 2, None);
+        let (a, b) = (toks(1, 3), toks(2, 2));
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        assert_eq!(t.store.dups(), 3);
+        // Sequence 1's rows go (a spill, then truncate): its pages are RAM's.
+        assert_eq!(store_seq(&mut t, 1, &b), 2);
+        t.truncate(1, 0);
+        assert_eq!((t.store.dups(), t.stored(1)), (3, 0));
+        t.check();
+        // Full. A new page evicts sequence 0's leaf (class 0) before b's
+        // older class-1 pages, and sequence 0 lets go of it.
+        let c = toks(3, 1);
+        assert_eq!(store_seq(&mut t, 1, &c), 1);
+        assert_eq!(t.stored(0), 2, "the evicted leaf popped");
         assert_eq!(t.peek(&a), 2 * PAGE);
+        assert_eq!(t.peek(&b), 2 * PAGE, "class 1 kept");
+        // Re-storing sequence 0's page evicts sequence 1's (class 0,
+        // newest) rather than b.
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        assert_eq!(t.stored(1), 0);
+        assert_eq!(t.peek(&b), 2 * PAGE);
+        t.check();
+        // Truncated: sequence 0's tail is class 1.
+        t.truncate(0, 1);
+        assert_eq!(t.store.dups(), 1);
+        t.check();
+    }
+
+    /// Two sequences naming one page: it has two device holders, and is
+    /// class 1 only once neither names it; a `make_room` that takes a
+    /// chain's leaf and then its parent pops both.
+    #[test]
+    fn shared_pages_and_a_two_page_eviction() {
+        let mut t: Tier<u8> = Tier::new(4, 1, 3, None);
+        let shared = toks(1, 2);
+        let mut a = shared.clone();
+        a.extend(toks(2, 1));
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        assert_eq!(store_seq(&mut t, 1, &shared), 2, "found stored: no copy");
+        assert_eq!(t.store.used(), 3);
+        let k0 = t.keys[1][0];
+        assert_eq!(t.store.gpu(k0), 2);
         t.truncate(0, 0);
-        assert!(t.store.room(ROOT, 1));
+        assert_eq!(t.store.gpu(k0), 1);
+        t.truncate(1, 0);
+        assert_eq!((t.store.gpu(k0), t.store.dups()), (0, 0));
+        t.check();
+        // Sequence 2 names a's chain again, then 3 pages of room are made
+        // in a 4-page store: one make_room takes a's leaf, then its parent
+        // (a leaf by then); both popped, the first page stays.
+        assert_eq!(store_seq(&mut t, 2, &a), 3);
+        assert!(t.store.room(ROOT, 3));
+        assert_eq!(t.drain().len(), 2);
+        assert_eq!(t.stored(2), 1, "both evicted pages popped");
+        t.check();
+    }
+
+    /// A restore (`lookup`, held, then `adopt_held`) makes the pages it
+    /// moved class 0, the slot's again: a second spill of the slot copies
+    /// nothing, and they are the first evicted when room is needed.
+    #[test]
+    fn a_restore_down_classes() {
+        let mut t: Tier<u8> = Tier::new(3, 1, 2, None);
+        let a = toks(1, 3);
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        t.truncate(0, 0);
+        assert_eq!(t.store.dups(), 0, "RAM's own");
+        let ks = t.store.lookup(&a);
+        for &k in &ks {
+            t.store.hold(k);
+        }
+        t.adopt_held(1, &ks, ks.len() * PAGE);
+        for &k in &ks {
+            t.store.release(k);
+        }
+        assert_eq!(t.store.dups(), 3);
+        t.check();
+        let used = t.store.used();
+        assert_eq!(store_seq(&mut t, 1, &a), 3);
+        assert_eq!(t.store.used(), used, "the second spill copied nothing");
+        // Full: a new page evicts the restored chain's leaf (class 0).
+        let b = toks(2, 1);
+        assert_eq!(store_seq(&mut t, 0, &b), 1);
+        assert_eq!(t.stored(1), 2, "its leaf evicted and popped");
+        t.check();
+    }
+
+    /// Fable's case: a slot restoring its own chain holds the pages it
+    /// looked up; another slot's spill that needs room meanwhile can't
+    /// evict them, class 0 though they are, and the restore failing
+    /// (nothing adopted, the holds let go) leaves the books balanced.
+    #[test]
+    fn a_restores_holds_beat_class0_eviction() {
+        let mut t: Tier<u8> = Tier::new(3, 1, 2, None);
+        let a = toks(1, 3);
+        assert_eq!(store_seq(&mut t, 0, &a), 3);
+        t.truncate(0, 1);
+        let ks = t.store.lookup(&a);
+        assert_eq!(ks.len(), 3);
+        for &k in &ks {
+            t.store.hold(k);
+        }
+        // Sequence 1's spill: no page is evictable, so nothing is stored.
+        assert_eq!(store_seq(&mut t, 1, &toks(2, 1)), 0);
+        assert_eq!(t.stored(0), 1);
+        t.check();
+        // The restore failed: the holds go, the slot keeps what it had.
+        for &k in &ks {
+            t.store.release(k);
+        }
+        assert_eq!(t.stored(0), 1);
+        t.check();
+        // Then room is made from a's class-1 tail, not its class-0 head.
+        assert_eq!(store_seq(&mut t, 1, &toks(2, 1)), 1);
+        assert_eq!((t.stored(0), t.peek(&a)), (1, 2 * PAGE));
+        t.check();
+    }
+
+    /// A seeded Tier fuzz (docs/design/kv-ram-tier-exclusive.md §3): 3
+    /// sequences on 4 conversations sharing prefixes, at a capacity that
+    /// evicts several leaves of one chain in one go. Random stores (spill
+    /// style), truncates, adoptions of a lookup's prefix and write-behind
+    /// style stores into free room; after each, `check` (stored chains,
+    /// device holders), and no sequence names an unstored page.
+    #[test]
+    fn fuzz() {
+        let mut evicted = 0;
+        for seed in 1..=64u64 {
+            match std::panic::catch_unwind(|| fuzz_one(seed)) {
+                Ok(n) => evicted += n,
+                Err(e) => {
+                    let m = e
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    panic!("tier fuzz, seed {seed}: {m}");
+                }
+            }
+        }
+        eprintln!("tier fuzz: {evicted} pages evicted");
+        assert!(evicted > 0);
+    }
+
+    fn fuzz_one(seed: u64) -> usize {
+        let mut st = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut rnd = move |n: usize| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            (st % n as u64) as usize
+        };
+        let conv = |c: usize| -> Vec<u32> {
+            let mut t = toks(if c < 2 { 1 } else { 10 + c as u32 }, 2);
+            t.extend(toks(20 + c as u32, 4));
+            t
+        };
+        let mut t: Tier<u8> = Tier::new(7, 1, 3, None);
+        // What each sequence holds the rows of (tokens).
+        let mut held: Vec<Vec<u32>> = vec![Vec::new(); 3];
+        EVICTED.with(|e| e.set(0));
+        for _ in 0..500 {
+            let s = rnd(3);
+            match rnd(6) {
+                0 => {
+                    // New rows: a conversation's first n pages, as admit
+                    // spills: what the rows give up past the prefix they
+                    // share is stored under a stored parent (else
+                    // dropped), the keys cut to what still matches.
+                    let n = 1 + rnd(6);
+                    let c = conv(rnd(4))[..n * PAGE].to_vec();
+                    let common = held[s].iter().zip(&c).take_while(|(a, b)| a == b).count();
+                    let first = common / PAGE;
+                    if first < held[s].len() / PAGE && !t.orphans(s, &held[s], common) {
+                        // The pages it keeps are stored: none is copied.
+                        assert_eq!(t.peek(&held[s][..first * PAGE]), first * PAGE);
+                        store_seq(&mut t, s, &held[s]);
+                    }
+                    t.truncate(s, common / PAGE);
+                    held[s] = c;
+                }
+                1 | 2 => {
+                    store_seq(&mut t, s, &held[s]);
+                }
+                3 => {
+                    // The write-behind: free room only.
+                    while t.stored(s) < held[s].len() / PAGE {
+                        let i = t.stored(s);
+                        let b = &held[s][i * PAGE..(i + 1) * PAGE];
+                        let parent = t.keys[s].last().copied().unwrap_or(ROOT);
+                        if let Some(k) = t.store.child(parent, b) {
+                            t.push(s, k);
+                            continue;
+                        }
+                        let Some(k) = t.store.insert_behind(parent, b, 0, 1) else {
+                            break;
+                        };
+                        t.push(s, k);
+                    }
+                    assert!(
+                        t.store.take_evicted().is_empty(),
+                        "the write-behind evicted"
+                    );
+                }
+                4 => {
+                    // A restore: the stored prefix of the rows, held while
+                    // looked up, adopted.
+                    let ks = t.store.lookup(&held[s]);
+                    for &k in &ks {
+                        t.store.hold(k);
+                    }
+                    t.adopt_held(s, &ks, ks.len() * PAGE);
+                    for &k in &ks {
+                        t.store.release(k);
+                    }
+                }
+                _ => {
+                    // The rows go (a reclaim: spill, then forget them).
+                    store_seq(&mut t, s, &held[s]);
+                    t.truncate(s, 0);
+                    held[s].clear();
+                }
+            }
+            assert!(t.drain().is_empty(), "an eviction not drained");
+            t.check();
+            for (s, h) in held.iter().enumerate() {
+                let ks = &t.keys[s];
+                assert_eq!(
+                    *ks,
+                    crate::kvstore::keys(&h[..ks.len() * PAGE]),
+                    "sequence {s}: its keys aren't its rows' pages"
+                );
+            }
+        }
+        EVICTED.with(|e| e.get())
     }
 }

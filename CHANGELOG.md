@@ -6,6 +6,28 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### KV RAM tier: exclusive, and an idle server's backlog in pieces (#201, follows #166; #170)
+- **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
+  free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least
+  recently used. `--cache-ram`'s useful capacity is now about its size, where #166's inclusive tier held the GPU
+  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Its gate's five clauses pass at the PR's code
+  (9829783, design note §6 and §14), all three timing cells read on an RTX 4090, not bella (the lead's reroute): a 25k
+  session evicted from the GPU resumes in 0.141 s against main's 2.713 s (1105-211420-0618). On bella that resume
+  likely misses the clause's 0.3 s: two TAINTED reads, medians 0.513 s (1105-211421-8e35) and 0.358 s
+  (1106-051210-8062), against main's 8.83 and 8.58 s. The lead waived bella's resume cell as a gate of this PR. Still
+  opt-in, default off: the `auto` default is a later change. It waits for the RAM-pinning question (note §7) and a
+  clean bella s4 replay at its own head; for bella's resume it works from the two tainted reads (note §14).
+- **#170: no unbounded flush.** An idle server writes its backlog in 64 MiB pieces and takes a new request between
+  two, instead of one flush of every slot's backlog after a request that ran alone.
+- A conversation's next turn no longer copies the pages its slot keeps before its first token. A spill stores what
+  the slot gives up only under a stored parent, and drops it otherwise, as with no tier. Before, a turn that gave up
+  its reply's tail page copied its whole unstored chain first, ≈ 73 ms per 16k tokens on an RTX 4090
+  (docs/log/2026-11-05-kvtier-exclusive.md).
+- `/metrics`: `axon_kv_ram_gpu_pages`, `axon_kv_ram_spilled_pages_total`. `AXON_SERVE_TRACE`'s step lines carry the
+  tier's copies (`spilled`/`spill_ms`, `restored`/`restore_ms`, `wb`/`wb_ms`).
+- Default flags reach none of it: md5 vs main at default flags is unchanged (gen and serve), and the tier's own
+  replies are main's bits.
+
 ### A GPU session's identity names the split-attention count and the code target (#203)
 - **A `chat --session` file saved on the GPU now records the two parts of the fingerprint's `gpu` field that change
   the cache's bits on one architecture**, where the fingerprint names them: the split attention's count, which the SM

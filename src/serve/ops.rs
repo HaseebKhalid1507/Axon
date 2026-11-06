@@ -258,6 +258,12 @@ pub struct Metrics {
     /// Page-locked host memory the tier has taken (a pool's; the CPU's
     /// pages are ordinary memory: 0).
     pub kv_ram_pinned: AtomicU64,
+    /// Pages stored that a sequence still holds the rows of (class 0, the
+    /// GPU's duplicates: evicted first).
+    pub kv_ram_gpu_pages: AtomicU64,
+    /// Pages copied by a spill (a slot giving its rows up), of those
+    /// written.
+    pub kv_ram_spilled: AtomicU64,
     /// Tests: the KV RAM tier's fault hook (#172). Not a metric: it rides
     /// here because this is the one handle a test's server and the
     /// engine's tier share.
@@ -274,6 +280,7 @@ impl Metrics {
             &self.kv_ram_bytes,
             &self.kv_ram_pages,
             &self.kv_ram_pinned,
+            &self.kv_ram_gpu_pages,
         ] {
             g.store(0, Ordering::Relaxed);
         }
@@ -303,6 +310,8 @@ impl Default for Metrics {
             kv_ram_restored: AtomicU64::new(0),
             kv_ram_hits: AtomicU64::new(0),
             kv_ram_pinned: AtomicU64::new(0),
+            kv_ram_gpu_pages: AtomicU64::new(0),
+            kv_ram_spilled: AtomicU64::new(0),
             #[cfg(test)]
             tier_faults: Default::default(),
             sched: Mutex::default(),
@@ -491,6 +500,12 @@ impl Metrics {
                 "KV pages stored in the RAM tier.",
                 &self.kv_ram_pages,
             );
+            g(
+                &mut o,
+                "axon_kv_ram_gpu_pages",
+                "KV pages in the RAM tier whose rows a sequence still holds on the device (copies, evicted first).",
+                &self.kv_ram_gpu_pages,
+            );
             let c = |o: &mut String, name: &str, help: &str, v: &AtomicU64| {
                 counter(o, name, help, v.load(Ordering::Relaxed))
             };
@@ -499,6 +514,12 @@ impl Metrics {
                 "axon_kv_ram_written_pages_total",
                 "KV pages copied into the RAM tier.",
                 &self.kv_ram_written,
+            );
+            c(
+                &mut o,
+                "axon_kv_ram_spilled_pages_total",
+                "KV pages copied into the RAM tier as a slot gave its rows up (of those written).",
+                &self.kv_ram_spilled,
             );
             c(
                 &mut o,

@@ -529,6 +529,10 @@ pub(super) struct Batch<'a, 't> {
     /// The KV RAM tier (`--cache-ram`, tier.rs; None: off, the default,
     /// and then nothing of it runs).
     tier: Option<PoolTier>,
+    /// The idle flush's last piece got nowhere (#170: no pinned page to
+    /// take, a key collision): it waits, as with no backlog, until the
+    /// batch steps, admits or the tier grows.
+    stalled: bool,
 }
 
 /// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
@@ -548,6 +552,23 @@ struct StepTrace {
     feed_ms: f64,
     /// This step's decode pass: rows, the sum of their positions, ms.
     dec: Option<(usize, usize, f64)>,
+    /// The KV RAM tier's copies since the last line, pages and ms each, by
+    /// `TierCopy`. An admission's (its spill and restore) run between two
+    /// steps, so they go on the next step's line, and its ms explain that
+    /// line's gap after the one before.
+    tier: [(usize, f64); 3],
+}
+
+/// What a KV RAM tier copy was, on a step trace's line (`StepTrace::tier`).
+#[derive(Clone, Copy)]
+enum TierCopy {
+    /// A slot's pages before it gives its rows up (`Batch::spill`).
+    Spill,
+    /// Stored pages into a slot (`Batch::restore`).
+    Restore,
+    /// The write-behind (a step's, or a piece of the idle flush): the pages
+    /// slots now name that they didn't, copied or found stored.
+    Behind,
 }
 
 impl StepTrace {
@@ -569,6 +590,7 @@ impl StepTrace {
                     fed: 0,
                     feed_ms: 0.0,
                     dec: None,
+                    tier: [(0, 0.0); 3],
                 })
             }
             Err(e) => {
@@ -591,8 +613,9 @@ impl StepTrace {
             ),
             None => "\"rows\":0,\"depth\":null,\"dec_ms\":null".into(),
         };
+        let [(sp, sp_ms), (re, re_ms), (wb, wb_ms)] = self.tier;
         format!(
-            "{{\"t_ms\":{t_ms:.3},\"ms\":{ms:.3},\"feeds\":{},\"fed\":{},\"feed_ms\":{:.3},{dec},\"prefilling\":{prefilling},\"running\":{running}}}",
+            "{{\"t_ms\":{t_ms:.3},\"ms\":{ms:.3},\"feeds\":{},\"fed\":{},\"feed_ms\":{:.3},{dec},\"prefilling\":{prefilling},\"running\":{running},\"spilled\":{sp},\"spill_ms\":{sp_ms:.3},\"restored\":{re},\"restore_ms\":{re_ms:.3},\"wb\":{wb},\"wb_ms\":{wb_ms:.3}}}",
             self.feeds, self.fed, self.feed_ms
         )
     }
@@ -689,6 +712,7 @@ impl<'a, 't> Batch<'a, 't> {
             metrics: None,
             trace: StepTrace::from_env(),
             tier: None,
+            stalled: false,
         }
     }
 
@@ -715,17 +739,41 @@ impl<'a, 't> Batch<'a, 't> {
     }
 
     /// Slot `s` is about to give up its rows past `keep`: the tier stores
-    /// its whole pages first (all of them: those below `keep` stay, the
-    /// rest are its conversation's, and go to RAM instead of away), and
-    /// forgets the stored pages past `keep`. A tier error turns the tier
-    /// off (`tier_failed`), never the server.
+    /// the whole pages it gives up first (its conversation's: they go to
+    /// RAM instead of away), and forgets the stored pages past `keep`. It
+    /// copies none of the pages the slot keeps: a slot that keeps every
+    /// whole page (a conversation's next turn) gives nothing up and copies
+    /// nothing, and one whose kept pages aren't all stored drops what it
+    /// gives up, as with no tier (`PoolTier::write`). A copy of rows the
+    /// device keeps would only take RAM from pages it doesn't (the
+    /// write-behind's free room is for those), and on the request's first
+    /// token. A tier error turns the tier off (`tier_failed`), never the
+    /// server.
     fn spill(&mut self, s: usize, keep: usize) {
         let Some(t) = self.tier.as_mut() else {
             return;
         };
-        match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
-            Ok(_) => t.t.truncate(s, keep / PAGE),
+        if keep / PAGE >= self.held[s].len() / PAGE {
+            return;
+        }
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
+        match t.write(self.net, &self.pool, s, &self.held[s], keep) {
+            Ok(n) => {
+                t.t.truncate(s, keep / PAGE);
+                t.check_slot(s, &self.held[s]);
+                self.traced(TierCopy::Spill, n, t0);
+            }
             Err(e) => self.tier_failed("spill", &e),
+        }
+    }
+
+    /// With a `StepTrace`: a tier copy of `pages` that started at `t0`
+    /// (`Some` only when tracing) goes on the next step's line.
+    fn traced(&mut self, what: TierCopy, pages: usize, t0: Option<Instant>) {
+        if let (Some(tr), Some(t0)) = (self.trace.as_mut(), t0) {
+            let c = &mut tr.tier[what as usize];
+            c.0 += pages;
+            c.1 += t0.elapsed().as_secs_f64() * 1e3;
         }
     }
 
@@ -743,22 +791,54 @@ impl<'a, 't> Batch<'a, 't> {
         super::tier::off(what, e, self.metrics.as_deref());
     }
 
-    /// The tier's write-behind: `bytes` of copies of the slots' unstored
-    /// pages (usize::MAX: all of them).
-    pub fn write_behind(&mut self, bytes: usize) {
+    /// The tier's write-behind: up to `bytes` of copies of the slots'
+    /// unstored pages into its free room, slots in reclaim order (idle ones
+    /// least recently used first, so the next to give its rows up first,
+    /// then busy ones). Its progress (`PoolTier::write_some`).
+    pub fn write_behind(&mut self, bytes: usize) -> usize {
         let Some(t) = self.tier.as_mut() else {
-            return;
+            return 0;
         };
-        if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
-            self.tier_failed("write-behind", &e);
+        let mut order: Vec<usize> = (0..self.slots).collect();
+        order.sort_by_key(|&s| (self.busy[s], self.used[s]));
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
+        match t.write_some(self.net, &self.pool, &self.held, &order, bytes) {
+            Ok(n) => {
+                for s in 0..self.slots {
+                    t.check_slot(s, &self.held[s]);
+                }
+                self.traced(TierCopy::Behind, n, t0);
+                n
+            }
+            Err(e) => {
+                self.tier_failed("write-behind", &e);
+                0
+            }
+        }
+    }
+
+    /// Whether the idle flush has a piece to run (#170): the tier's backlog
+    /// (`PoolTier::backlog`), unless its last piece got nowhere.
+    pub fn backlog(&self) -> bool {
+        !self.stalled && self.tier.as_ref().is_some_and(|t| t.backlog(&self.held))
+    }
+
+    /// One piece of the idle flush (#170): up to `bytes` of the write-behind
+    /// (`IDLE_BYTES`). One that got nowhere stalls the flush (`backlog`).
+    pub fn flush_idle(&mut self, bytes: usize) {
+        if self.write_behind(bytes) == 0 {
+            self.stalled = true;
         }
     }
 
     /// The engine loop's tick: the tier adopts the slabs its allocator
-    /// thread has pinned (and shows them in /metrics).
+    /// thread has pinned (and shows them in /metrics); a stalled idle flush
+    /// tries again if it grew.
     pub fn poll_tier(&mut self) {
-        if let Some(t) = self.tier.as_mut() {
-            t.poll(self.net);
+        if let Some(t) = self.tier.as_mut()
+            && t.poll(self.net)
+        {
+            self.stalled = false;
         }
     }
 
@@ -800,15 +880,20 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(t) = self.tier.as_mut() else {
             return Ok(have);
         };
+        let t0 = self.trace.as_ref().map(|_| Instant::now());
         if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
             // The slot keeps `have` (its rows past it are fed again).
             self.tier_failed("restore", &e);
             return Ok(have);
         }
+        self.traced(TierCopy::Restore, to.saturating_sub(have / PAGE), t0);
         if to * PAGE <= have {
             return Ok(have);
         }
         self.held[slot] = prompt[..to * PAGE].to_vec();
+        if let Some(t) = &self.tier {
+            t.check_slot(slot, &self.held[slot]);
+        }
         Ok(to * PAGE)
     }
 
@@ -1239,8 +1324,10 @@ impl<'a, 't> Batch<'a, 't> {
         // Pages past its rows (reserved for what it didn't generate) free.
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
-        // The batch is idle: the tier takes the request's pages now.
-        self.spill(self.solo, usize::MAX);
+        // Its pages go to the tier as the batch's do: the idle flush copies
+        // them while there is room (#170), a spill when the slot gives its
+        // rows up.
+        self.stalled = false;
         Ok(())
     }
 
@@ -1293,13 +1380,11 @@ impl<'a, 't> Batch<'a, 't> {
     /// line about it once it did any work.
     pub fn step(&mut self) -> Result<(), String> {
         self.step_traced()?;
-        // The tier's write-behind: a budget while requests run, the rest
-        // once none do.
-        let bytes = match self.idle() {
-            true => usize::MAX,
-            false => super::tier::STEP_BYTES,
-        };
-        self.write_behind(bytes);
+        // The tier's write-behind: a budget a step (an idle batch's backlog
+        // goes in pieces, between which the engine loop looks for a new
+        // request: `flush_idle`, #170).
+        self.stalled = false;
+        self.write_behind(super::tier::STEP_BYTES);
         Ok(())
     }
 
@@ -1323,6 +1408,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
         if let Some(tr) = self.trace.as_mut() {
             (tr.feeds, tr.fed, tr.feed_ms, tr.dec) = (0, 0, 0.0, None);
+            tr.tier = [(0, 0.0); 3];
         }
         res
     }
@@ -2913,6 +2999,7 @@ mod trace_tests {
             fed: 700,
             feed_ms: 31.25,
             dec: Some((128, 128 * 790 + 64, 18.6)),
+            tier: [(414, 57.25), (0, 0.0), (5, 0.5)],
         };
         let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 52.5, 2, 128)).unwrap();
         assert_eq!(v["fed"], 700);
@@ -2922,6 +3009,16 @@ mod trace_tests {
         assert_eq!(v["dec_ms"], 18.6);
         assert_eq!(v["ms"], 52.5);
         assert_eq!(v["running"], 128);
+        assert_eq!(v["spilled"], 414);
+        assert_eq!(v["spill_ms"], 57.25);
+        assert_eq!(
+            (v["restored"].clone(), v["restore_ms"].clone()),
+            (0.into(), 0.0.into())
+        );
+        assert_eq!(
+            (v["wb"].clone(), v["wb_ms"].clone()),
+            (5.into(), 0.5.into())
+        );
         tr.dec = None;
         let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 30.0, 1, 0)).unwrap();
         assert_eq!(v["rows"], 0);

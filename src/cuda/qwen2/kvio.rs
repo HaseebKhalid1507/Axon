@@ -299,6 +299,297 @@ mod tests {
         t[n / 2]
     }
 
+    /// Median seconds of `f` over `n` runs (after one warm-up): (to enqueue
+    /// its copies, until they are done).
+    fn time_enq(gpu: &Gpu, n: usize, mut f: impl FnMut()) -> (f64, f64) {
+        f();
+        gpu.sync().unwrap();
+        let (mut e, mut t): (Vec<f64>, Vec<f64>) = (0..n)
+            .map(|_| {
+                let t0 = Instant::now();
+                f();
+                let e = t0.elapsed().as_secs_f64();
+                gpu.sync().unwrap();
+                (e, t0.elapsed().as_secs_f64())
+            })
+            .unzip();
+        e.sort_by(f64::total_cmp);
+        t.sort_by(f64::total_cmp);
+        (e[n / 2], t[n / 2])
+    }
+
+    /// One 1D copy of `n` bytes between `host` + `at` and `dev` + `off`
+    /// (`to_dev`: host to device), enqueued on the stream.
+    fn copy_1d(host: &HostBuf, to_dev: bool, at: usize, dev: &DevBuf, off: usize, n: usize) {
+        assert!(
+            at + n <= host.len && off + n <= dev.len,
+            "1D copy out of bounds"
+        );
+        let g = host.gpu;
+        g.bind().unwrap();
+        host.pending.set(true);
+        let (h, d) = (host.p as usize + at, dev.ptr + off as u64);
+        // SAFETY: in bounds of both (asserted); pinned and device memory
+        // outlive the copy (the caller syncs before either is dropped).
+        let r = unsafe {
+            if to_dev {
+                (g.d.cuMemcpyHtoDAsync_v2)(d, h as *const _, n, g.stream)
+            } else {
+                (g.d.cuMemcpyDtoHAsync_v2)(h as *mut _, d, n, g.stream)
+            }
+        };
+        crate::cuda::ffi::check(g.d, r, "1D copy").unwrap();
+    }
+
+    /// One 2D device-to-device copy of `height` rows of `width` bytes, row i
+    /// from `src` + `off` + i * `pitch` to `dst` + `at` + i * `dpitch`.
+    fn copy_2d_dd(
+        src: &DevBuf,
+        (off, pitch): (usize, usize),
+        dst: &DevBuf,
+        (at, dpitch): (usize, usize),
+        (width, height): (usize, usize),
+    ) {
+        let end = |o: usize, p: usize| o + (height - 1) * p + width;
+        assert!(
+            end(off, pitch) <= src.len && end(at, dpitch) <= dst.len,
+            "2D D2D out of bounds"
+        );
+        let g = src.gpu;
+        g.bind().unwrap();
+        use crate::cuda::ffi;
+        let c = ffi::Memcpy2D {
+            src_type: ffi::CU_MEMORYTYPE_DEVICE,
+            src_dev: src.ptr + off as u64,
+            src_pitch: pitch,
+            dst_type: ffi::CU_MEMORYTYPE_DEVICE,
+            dst_dev: dst.ptr + at as u64,
+            dst_pitch: dpitch,
+            width,
+            height,
+            ..Default::default()
+        };
+        // SAFETY: every row in bounds of both (asserted); both outlive it.
+        let r = unsafe { (g.d.cuMemcpy2DAsync_v2)(&c, g.stream) };
+        ffi::check(g.d, r, "2D D2D copy").unwrap();
+    }
+
+    /// WP2 checkpoint 1 (docs/design/kv-ram-tier-exclusive.md §5.1): other
+    /// shapes for a 64-position page's copy than `Rows::page`'s one 2D copy
+    /// (`arrays` rows of 64 * `row` bytes, `ctx * row` apart on the device).
+    /// `host` gets the image layout (a page's arrays back to back). Per row:
+    /// the time to enqueue the copies, and until they are done.
+    /// - 56 x 1D: one 1D copy per array row (a loop in `Rows::page`).
+    /// - 1D per page, scattered: one 3.5 MiB copy per page between a
+    ///   contiguous device buffer and host slots in a stride permutation
+    ///   (the RAM tier's arena slots: a session's pages aren't contiguous).
+    /// - D2D: a page's rows gathered into (scattered from) a 64 MiB device
+    ///   staging buffer, by one 2D copy or 56 1D copies per page, no kernel.
+    /// - gather / scatter path: D2D per page and 1D per page through the
+    ///   staging buffer, 18 pages a fill (everything on the one stream).
+    fn copy_paths(
+        g: &Gpu,
+        dev: &DevBuf,
+        host: &HostBuf,
+        (ctx, arrays, row): (usize, usize, usize),
+        tag: &str,
+    ) {
+        let w = 64 * row;
+        let pb = w * arrays;
+        let np = ctx / 64;
+        let bytes = np * pb;
+        let report = |what: &str, (e, s): (f64, f64), b: usize| {
+            let what = format!("{what}{tag}");
+            eprintln!(
+                "BW {what:<34} {:8.2} ms {:7.2} GB/s  (enqueue {:7.2} ms)",
+                s * 1e3,
+                b as f64 / s / 1e9,
+                e * 1e3
+            )
+        };
+        let n = 7;
+        // A page's array a: `a * ctx * row + p * w` on the device.
+        let arr = |p: usize, a: usize| a * ctx * row + p * w;
+        for to_dev in [false, true] {
+            let d = if to_dev { "H2D" } else { "D2H" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    for a in 0..arrays {
+                        copy_1d(host, to_dev, p * pb + a * w, dev, arr(p, a), w);
+                    }
+                }
+            });
+            report(&format!("{d} 56 x 1D per 64-pos page"), s, bytes);
+            let s = time_enq(g, 31, || {
+                for a in 0..arrays {
+                    copy_1d(host, to_dev, a * w, dev, arr(0, a), w);
+                }
+            });
+            report(&format!("{d} 56 x 1D, one page"), s, pb);
+        }
+        // Host slot of page p: a stride permutation of 0..np.
+        let k = (np / 3 + 1..).find(|&k| gcd(k, np) == 1).unwrap();
+        let slot = |p: usize| (p * k) % np * pb;
+        for to_dev in [false, true] {
+            let d = if to_dev { "H2D" } else { "D2H" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    copy_1d(host, to_dev, slot(p), dev, p * pb, pb);
+                }
+            });
+            report(&format!("{d} 1D per page, scattered host"), s, bytes);
+        }
+        let stage = g.alloc(64 << 20).unwrap();
+        let fill = (64 << 20) / pb;
+        let st = |p: usize| p % fill * pb;
+        for gather in [true, false] {
+            let d = if gather { "gather" } else { "scatter" };
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    if gather {
+                        copy_2d_dd(dev, (arr(p, 0), ctx * row), &stage, (st(p), w), (w, arrays));
+                    } else {
+                        copy_2d_dd(&stage, (st(p), w), dev, (arr(p, 0), ctx * row), (w, arrays));
+                    }
+                }
+            });
+            report(&format!("D2D 2D per page ({d})"), s, bytes);
+            let s = time_enq(g, n, || {
+                for p in 0..np {
+                    for a in 0..arrays {
+                        if gather {
+                            dev.copy_into(arr(p, a), &stage, st(p) + a * w, w).unwrap();
+                        } else {
+                            stage.copy_into(st(p) + a * w, dev, arr(p, a), w).unwrap();
+                        }
+                    }
+                }
+            });
+            report(&format!("D2D 56 x 1D per page ({d})"), s, bytes);
+        }
+        // The whole path, a fill at a time: out = gather then D2H per page
+        // to its host slot; in = H2D per page from its slot, then scatter.
+        for out in [true, false] {
+            let path = |pages: usize| {
+                for f0 in (0..pages).step_by(fill) {
+                    let ps = f0..(f0 + fill).min(pages);
+                    for p in ps.clone() {
+                        if out {
+                            copy_2d_dd(
+                                dev,
+                                (arr(p, 0), ctx * row),
+                                &stage,
+                                (st(p), w),
+                                (w, arrays),
+                            );
+                        } else {
+                            copy_1d(host, true, slot(p), &stage, st(p), pb);
+                        }
+                    }
+                    for p in ps {
+                        if out {
+                            copy_1d(host, false, slot(p), &stage, st(p), pb);
+                        } else {
+                            copy_2d_dd(
+                                &stage,
+                                (st(p), w),
+                                dev,
+                                (arr(p, 0), ctx * row),
+                                (w, arrays),
+                            );
+                        }
+                    }
+                }
+            };
+            let d = if out {
+                "D2H gather path"
+            } else {
+                "H2D scatter path"
+            };
+            report(
+                &format!("{d} (2D D2D + 1D)"),
+                time_enq(g, n, || path(np)),
+                bytes,
+            );
+            report(&format!("{d}, one page"), time_enq(g, 31, || path(1)), pb);
+        }
+        g.sync().unwrap();
+    }
+
+    /// The GPU's performance state, clocks and display (nvidia-smi), for
+    /// the log: bella's 2D copies ran at 7.1 GB/s in some runs and at 28 in
+    /// others, the same binary (docs/design/kv-ram-tier-exclusive.md §5.1).
+    fn gpu_state(when: &str) {
+        let q = "--query-gpu=pstate,clocks.gr,clocks.mem,clocks.video,display_active,\
+                 clocks_event_reasons.active";
+        match std::process::Command::new("nvidia-smi")
+            .args([q, "--format=csv,noheader"])
+            .output()
+        {
+            Ok(o) => eprintln!(
+                "GPU state ({when}): {}",
+                String::from_utf8_lossy(if o.status.success() {
+                    &o.stdout
+                } else {
+                    &o.stderr
+                })
+                .trim()
+            ),
+            Err(e) => eprintln!("GPU state ({when}): nvidia-smi: {e}"),
+        }
+    }
+
+    /// A one-block kernel spinning on a stream of its own until `stop` is
+    /// set (or `most_ns` pass): the GPU busy, as it is while serving, for
+    /// copies timed on the main stream meanwhile (`Spin`).
+    const SPIN: &str = r#"
+extern "C" __global__ void bw_spin(const volatile unsigned int* stop, unsigned long long most_ns) {
+    unsigned long long t0, t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+    do {
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+    } while (*stop == 0 && t - t0 < most_ns);
+}
+"#;
+
+    /// `SPIN` running (`Spin::start`) until `stop`.
+    struct Spin<'g> {
+        s: crate::cuda::Stream<'g>,
+        flag: DevBuf<'g>,
+        _m: crate::cuda::Module<'g>,
+    }
+
+    impl<'g> Spin<'g> {
+        fn start(gpu: &'g Gpu) -> Spin<'g> {
+            let m = crate::cuda::Module::load(gpu, SPIN, &crate::cuda::KERNEL_OPTS)
+                .unwrap()
+                .0;
+            let flag = gpu.alloc(4).unwrap();
+            flag.write(&[0u32]).unwrap();
+            let s = gpu.new_stream().unwrap();
+            let k = m.function("bw_spin").unwrap();
+            // SAFETY: bw_spin's two parameters; it reads flag's 4 bytes,
+            // which live until `stop` has waited for it.
+            let args = [flag.arg(), crate::cuda::Arg::U64(60_000_000_000)];
+            unsafe { gpu.launch_on(&s, &k, (1, 1, 1), (32, 1, 1), 0, &args) }.unwrap();
+            drop(k);
+            // Clocks follow load with a lag.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Spin { s, flag, _m: m }
+        }
+
+        /// Stop it, and wait until it has.
+        fn stop(self) {
+            // The main stream's copy runs beside the kernel on `s`.
+            self.flag.write(&[1u32]).unwrap();
+            self.s.sync().unwrap();
+        }
+    }
+
+    fn gcd(a: usize, b: usize) -> usize {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+
     /// `Rows`: unaligned lo..hi at a nonzero base, two regions (q8's
     /// shape), an image over STAGE (several staging rounds): the image is
     /// kvsave's layout, and a load puts back exactly those rows, nothing
@@ -366,7 +657,8 @@ mod tests {
     /// D2H and H2D bandwidth for a 7B-shaped slot (28 layers, kv_dim 512,
     /// f16: 1 KiB rows, 56 arrays) of `AXON_BW_CTX` (default 32768)
     /// positions: contiguous, one 2D copy for the slot, one per 64-position
-    /// page. `cargo test kvio::tests::bandwidth -- --ignored --nocapture`.
+    /// page, and the other page copy shapes of `copy_paths`.
+    /// `cargo test kvio::tests::bandwidth -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn bandwidth() {
@@ -386,6 +678,7 @@ mod tests {
             info.arch(),
             bytes as f64 / (1u64 << 30) as f64
         );
+        gpu_state("start");
         let dev = g.alloc(bytes).unwrap();
         let mut host = g.host_alloc(bytes).unwrap();
         let gbs = |s: f64| bytes as f64 / s / 1e9;
@@ -447,6 +740,30 @@ mod tests {
             });
             report(&format!("H2D 2D per {page}-pos page"), s);
         }
+        copy_paths(&g, &dev, &host, (ctx, arrays, row), "");
+        gpu_state("after the copies, idle");
+        // Again with the GPU busy (`Spin`): today's 2D page copy and the
+        // other shapes.
+        let spin = Spin::start(&g);
+        gpu_state("busy");
+        for to_dev in [false, true] {
+            let s = time(&g, n, || {
+                for p in 0..ctx / 64 {
+                    let (at, off, w) = (p * 64 * row * arrays, p * 64 * row, 64 * row);
+                    if to_dev {
+                        host.copy_2d_to(at, w, &dev, off, ctx * row, (w, arrays))
+                    } else {
+                        host.copy_2d_from(at, w, &dev, off, ctx * row, (w, arrays))
+                    }
+                    .unwrap();
+                }
+            });
+            let d = if to_dev { "H2D" } else { "D2H" };
+            report(&format!("{d} 2D per 64-pos page (busy)"), s);
+        }
+        copy_paths(&g, &dev, &host, (ctx, arrays, row), " (busy)");
+        gpu_state("busy, at the end");
+        spin.stop();
         // The RAM tier's costs (serve --cache-ram): a pinned slab's
         // allocation (cuMemHostAlloc + zeroing), and one page's D2H / H2D
         // alone (the write-behind's unit), each a median of n.

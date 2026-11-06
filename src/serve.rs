@@ -1508,13 +1508,41 @@ fn engine(
             b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
-            // Tests: nothing to do, a request's tail included (#172).
-            #[cfg(test)]
-            e.metrics.tier_faults.idle();
-            match jobs.recv_timeout(Duration::from_millis(100)) {
-                Ok(job) => waiting.push_back(job),
-                Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => continue,
-                Err(_) => return,
+            // #170: an idle batch's backlog goes to the KV RAM tier a piece
+            // at a time, and a new request waits for one piece at most.
+            if let Some(b) = batch.as_mut().filter(|b| b.backlog()) {
+                // Tests: smaller pieces, and what the loop did (#170).
+                #[cfg(test)]
+                let piece = e.metrics.tier_faults.idle_bytes();
+                #[cfg(not(test))]
+                let piece = tier::IDLE_BYTES;
+                b.flush_idle(piece);
+                #[cfg(test)]
+                e.metrics.tier_faults.piece(&e.metrics);
+                match jobs.try_recv() {
+                    Ok(job) => {
+                        #[cfg(test)]
+                        e.metrics.tier_faults.job();
+                        waiting.push_back(job);
+                    }
+                    Err(mpsc::TryRecvError::Empty) if !stop.load(Ordering::Relaxed) => continue,
+                    Err(_) => return,
+                }
+            } else {
+                // Tests: nothing to do, a request's tail included (#172).
+                #[cfg(test)]
+                e.metrics.tier_faults.idle();
+                match jobs.recv_timeout(Duration::from_millis(100)) {
+                    Ok(job) => {
+                        #[cfg(test)]
+                        e.metrics.tier_faults.job();
+                        waiting.push_back(job);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => {
+                        continue;
+                    }
+                    Err(_) => return,
+                }
             }
         }
         let Some(b) = batch.as_mut() else {

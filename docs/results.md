@@ -327,7 +327,14 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 - The KV RAM tier (`serve --cache-ram`, #166) is opt-in, default off: it missed rule B's TTFT-resume clause on bella
   (7B f16, 6G, 1031-063509-f763: 6,592 of 26,496 tokens restored, 7.05 s vs 8.68 s, TAINTED). It is written as pages
   fill, so it holds about its own size, the GPU pool's included; it helps only when the work written during the gap
-  fits between the pool's size and the tier's (≈ 11–185 pages on bella at 6G). An exclusive tier is next
-  ([design](design/agent-workload.md) §6, row B's result).
+  fits between the pool's size and the tier's (≈ 11–185 pages on bella at 6G). #201 made it exclusive (RAM keeps
+  what the GPU doesn't; [note](design/kv-ram-tier-exclusive.md)). A next turn that gave up its reply's tail re-copied
+  its whole chain first (≈ 73 ms per 16k tokens on the 4090); fixed in the PR (e1df27a), then the gate's round 2 at
+  9829783 ([log](log/2026-11-05-kvtier-exclusive.md)): its five clauses pass, all three timing cells read on an RTX
+  4090 rather than bella (the lead's reroute). A 25k session evicted from the GPU resumes in 0.141 s vs main's
+  2.713 s (1105-211420-0618); s4 ITL p99 0.981× main, re-prefill 0.06 % vs 0.68 % (1106-051153-a1f3). On bella the
+  resume likely misses the clause's 0.3 s: two TAINTED reads, medians 0.513 s (1105-211421-8e35) and 0.358 s
+  (1106-051210-8062), 6 of 6 rounds over 0.3 s, against main's 8.83 and 8.58 s; the lead waived bella's resume cell
+  as a gate of #201. Still opt-in: `auto` waits for the RAM-pinning question and a clean bella s4 replay at its head.
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).
