@@ -1566,7 +1566,8 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
 /// tiny FP8 model's arena with the repack off too, as the one `Qwen2::
 /// new_layers` builds (`build_skip` gives every F8_E4M3 matrix a slot, its
 /// F8S rows, either way); it used to be 0 then. A CPU half (1 of 2 layers),
-/// the whole model, and more layers than it has.
+/// the whole model, and more layers than it has. A CPU half's growth is its
+/// arena (#209).
 #[test]
 fn tiny_fp8_ram_arena_without_repack() {
     use crate::model::{Qwen2, dense_ram_need_keep};
@@ -1585,6 +1586,21 @@ fn tiny_fp8_ram_arena_without_repack() {
                 built.next_multiple_of(2 << 20),
                 "repack {repack} k={keep}"
             );
+            // #209: the F8S rows are all new memory (their source is the
+            // file's page cache, which nothing hands back): a CPU half's
+            // (no head) growth is at least its e4m3 bytes. It was their
+            // scales alone.
+            if keep == 1 {
+                let e4m3: u64 = (m.tensors.iter())
+                    .filter(|t| t.layer == 0 && t.qtype.id == crate::quant::fp8::F8_E4M3)
+                    .map(|t| t.n_bytes)
+                    .sum();
+                assert!(
+                    e4m3 > 0 && need.growth >= e4m3 && need.growth <= need.arena,
+                    "repack {repack}: growth {} for {e4m3} e4m3 bytes",
+                    need.growth
+                );
+            }
         }
     }
 }
@@ -1629,7 +1645,8 @@ fn tiny_bf16_ram_refusal_names_no_gpu() {
         GpuWays::of(&m),
         GpuWays {
             whole: false,
-            split: false
+            split: false,
+            exact: false,
         }
     );
     // Room for 999 positions: --ctx 768.
@@ -1654,7 +1671,8 @@ fn tiny_bf16_ram_refusal_names_no_gpu() {
         GpuWays::of(&m),
         GpuWays {
             whole: true,
-            split: true
+            split: true,
+            exact: false,
         }
     );
     assert!(
@@ -1663,6 +1681,214 @@ fn tiny_bf16_ram_refusal_names_no_gpu() {
         ),
         "{}",
         refusal(&m, 0)
+    );
+    // #209: in fast mode an FP8 checkpoint splits only in exact mode
+    // (natively, on sm_89+, every layer or none: `hybrid::f8_split_refusal`),
+    // and the CPU model's refusal says so.
+    use crate::numerics::Numerics;
+    let fast = GpuWays::of_mode(&m, Numerics::Fast);
+    assert_eq!(GpuWays::of_mode(&m, Numerics::Exact), GpuWays::of(&m));
+    assert_eq!(
+        fast,
+        GpuWays {
+            whole: true,
+            split: true,
+            exact: true,
+        }
+    );
+    let need = DenseNeed {
+        arena: 376 * MIB,
+        ..dense_ram_need(&m, true, 2)
+    };
+    let short = Avail {
+        bytes: need.arena - TOL - 1,
+        bound: Bound::Host,
+    };
+    let e = dense_verdict(&m.arch, None, fast, need, false, TOL, 1000, Some(short)).unwrap_err();
+    assert!(
+        e.ends_with(
+            "; to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N and \
+             --numerics exact part of it)"
+        ),
+        "{e}"
+    );
+    // A BF16 checkpoint in fast mode: still no GPU way.
+    let d = Dir::new("bf16-ram-fast");
+    write_tiny(&d, 1);
+    let m = load_dir(&d.0).unwrap();
+    assert_eq!(
+        GpuWays::of_mode(&m, Numerics::Fast),
+        GpuWays {
+            whole: false,
+            split: false,
+            exact: false,
+        }
+    );
+}
+
+/// `load`'s conversion need as `m`'s tensors give it (#208): the arena of
+/// every converted tensor (shard AUX, the computed ones too; 64-byte
+/// offsets, 2 MiB pages) and the threads' read buffers (the largest
+/// piece's source bytes, a thread each, never more than the pieces).
+fn conv_need_of(m: &Model) -> ConvNeed {
+    let aux = m.tensors.iter().filter(|t| t.shard == AUX);
+    let arena: u64 = aux.clone().map(|t| t.n_bytes.next_multiple_of(64)).sum();
+    let read = aux.filter_map(|t| t.hf.as_ref().map(|h| (t.n_elements as usize, h.dtype)));
+    let (mut pieces, mut piece) = (0, 0);
+    for (n, dtype) in read {
+        pieces += n.div_ceil(PIECE);
+        piece = piece.max(n.min(PIECE) * bytes_per(dtype));
+    }
+    ConvNeed {
+        aux: arena.next_multiple_of(2 << 20),
+        tensors: m
+            .tensors
+            .iter()
+            .filter(|t| t.shard == AUX && t.hf.is_some())
+            .count(),
+        buffers: (conv_threads().min(pieces) * piece) as u64,
+    }
+}
+
+/// #208: converting a checkpoint's tensors is refused before any is made
+/// when the RAM available can't hold them and the threads' buffers
+/// (`conv_need_of`): a byte under that less the tolerance; through at it,
+/// and with no RAM figure; `axon info`'s load (no conversion) never asks.
+/// A BF16 checkpoint's refusal names its GGUF, which is read from the file;
+/// an FP8 one's doesn't (no GGUF holds its weights). The tiny checkpoints
+/// need about `model::conv_tolerance` or less (a 2 MiB arena and a few KiB
+/// of buffers, against 256 KiB a CPU), so their edge can be below zero
+/// (with `model::ram_tolerance`, 32 MiB and up, it was: debug builds
+/// trapped the subtraction, release ones wrapped it and wrapped it back in
+/// the check): the test passes half the need as the tolerance, an edge
+/// inside it with the tolerance still added.
+/// `fp8_conversion_need_of_the_checkpoint` has the real tolerance.
+#[test]
+fn conversion_refused_before_it_is_made() {
+    use crate::gguf::mem::{Avail, Bound};
+    use std::cell::Cell;
+    let host = |bytes| {
+        Some(Avail {
+            bytes,
+            bound: Bound::Host,
+        })
+    };
+    let wish = |_: &Model| gguf::CopyWish::MapOnly;
+    let d = Dir::new("conv-ram");
+    write_tiny(&d, 1);
+    let asked = Cell::new(0);
+    let m = load_ram(
+        &d.0,
+        wish,
+        true,
+        &|need| {
+            asked.set(need);
+            None
+        },
+        0,
+    )
+    .unwrap();
+    let need = conv_need_of(&m);
+    assert!(need.tensors > 0 && need.buffers > 0, "{need:?}");
+    assert_eq!(asked.get(), need.total(), "{need:?}");
+    let tol = need.total() / 2;
+    eprintln!(
+        "tiny bf16: need {} KiB, model::conv_tolerance {} KiB, the test's {} KiB",
+        need.total() >> 10,
+        crate::model::conv_tolerance() >> 10,
+        tol >> 10
+    );
+    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1), tol) else {
+        panic!("loaded a byte under the edge");
+    };
+    let e = e.to_string();
+    assert!(
+        e.starts_with(&format!(
+            "qwen2: converting the checkpoint's tensors at load ({} of them, to F16 or F32) needs \
+             about",
+            need.tensors
+        )) && e.ends_with(
+            "(bound by host MemAvailable); to fit: more free RAM (they're converted on every \
+             device), or the model as a GGUF (convert_hf_to_gguf.py --outtype f16), which is read \
+             from its file"
+        ),
+        "{e}"
+    );
+    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol), tol).is_ok());
+    let header = load_ram(
+        &d.0,
+        wish,
+        false,
+        &|_| panic!("asked for a header-only load"),
+        tol,
+    );
+    assert!(header.is_ok());
+    let d = Dir::new("conv-ram-fp8");
+    write_tiny_fp8(&d, |_| {});
+    let m = load_ram(&d.0, wish, true, &|_| None, 0).unwrap();
+    let need = conv_need_of(&m);
+    let tol = need.total() / 2;
+    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1), tol) else {
+        panic!("loaded a byte under the edge");
+    };
+    assert!(
+        e.to_string()
+            .ends_with("; to fit: more free RAM (they're converted on every device)"),
+        "{e}"
+    );
+    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol), tol).is_ok());
+}
+
+/// #208 on the FP8 0.5B: its BF16 embedding and lm_head made F16 (2 x
+/// 151936 x 896 x 2 bytes, 519 MiB) with its vectors, and the threads'
+/// buffers, refused a byte under the edge, loaded at it. The edge is the
+/// need less `model::conv_tolerance` (the charge batches): a figure the
+/// dense tolerance (`model::ram_tolerance`) would let through is refused,
+/// as at b4b3's 719-743 MiB caps, where it was OOM-killed converting.
+#[test]
+fn fp8_conversion_need_of_the_checkpoint() {
+    use crate::gguf::mem::{Avail, Bound};
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let tol = crate::model::conv_tolerance();
+    let host = |bytes| {
+        Some(Avail {
+            bytes,
+            bound: Bound::Host,
+        })
+    };
+    let wish = |_: &Model| gguf::CopyWish::MapOnly;
+    let m = load_ram(&p, wish, true, &|_| None, tol).unwrap();
+    let need = conv_need_of(&m);
+    drop(m);
+    let f16 = 2 * 151936 * 896 * 2;
+    eprintln!(
+        "fp8 0.5b: {} tensors converted, arena {} KiB (the embedding and head as F16 {} KiB), \
+         buffers {} KiB ({} threads), tolerance {} KiB",
+        need.tensors,
+        need.aux >> 10,
+        f16 >> 10,
+        need.buffers >> 10,
+        conv_threads(),
+        tol >> 10
+    );
+    assert!(need.aux >= f16 && need.aux < f16 + (8 << 20), "{need:?}");
+    // Its edge is above zero in every build (the tiny checkpoints' isn't).
+    assert!(need.total() > tol, "{need:?} tolerance {tol}");
+    let Err(e) = load_ram(&p, wish, true, &|_| host(need.total() - tol - 1), tol) else {
+        panic!("loaded a byte under the edge");
+    };
+    assert!(
+        e.to_string()
+            .contains("converting the checkpoint's tensors at load"),
+        "{e}"
+    );
+    assert!(load_ram(&p, wish, true, &|_| host(need.total() - tol), tol).is_ok());
+    let dense = crate::model::ram_tolerance();
+    assert!(
+        load_ram(&p, wish, true, &|_| host(need.total() - dense), tol).is_err(),
+        "loaded at the dense tolerance's edge ({dense} B)"
     );
 }
 

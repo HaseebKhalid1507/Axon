@@ -412,8 +412,13 @@ note: that cache is taken as the context fills. Mixture-of-experts models have t
 The CPU half of a `--gpu-layers` split has it too, for its layers and their KV cache, checked before the GPU
 half's upload, with the upload's own host memory counted: its page-locked staging ring (16 or 64 MiB, or the
 size `AXON_UPLOAD_RING` sets), or, if larger, the biggest matrix it converts to Q8_0 on the host (an FP8
-checkpoint's head: 138 MiB on the 0.5B). When the model's bytes are in RAM (a copied file, or a checkpoint's
-converted tensors), the GPU half's share, which goes back as it's uploaded, is credited. A split that streams
+checkpoint's head: 138 MiB on the 0.5B). The upload is done before the CPU half is built, so the split needs the
+larger of the two. When the model's bytes are in RAM (a copied file, or a checkpoint's
+converted tensors), the GPU half's share, which goes back as it's uploaded, is credited to the CPU half. A
+safetensors checkpoint's tensors that load converts (BF16 made F16 or F32: the BF16 model's, an FP8
+checkpoint's embedding, head and vectors) are checked before they're made, on every device. Not checked yet: the
+CUDA kernels' module, about 25 MiB of host memory loaded after that check and before the split's, and the
+conversion's page tables, about 1 MiB (#217). A split that streams
 prefill through the GPU page-locks the CPU layers' whole KV cache when the cache is made; if the RAM available
 can't hold that, the cache doesn't stream (a note says so) and the run goes on at CPU prefill speed.
 
