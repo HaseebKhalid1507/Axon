@@ -1,0 +1,74 @@
+# Shared-prefix KV pages, C3.1: duplicates swapped, refed prefills claim again, C3's nits  (PR #216)
+
+- Date: 2026-11-06. Branch: feat/shared-prefix-c3.1. Base: main 2aec1e5 (#207, C3, sharing opt-in). Code `c167272`,
+  head `2ce5d12` (tests only). Status: open; sharing stays opt-in (`AXON_SHARE_KV=1`).
+- Pick / design: issues #212, #213, #214 (shady's #207 review follow-ups), design note
+  [docs/design/shared-prefix-pages.md](../design/shared-prefix-pages.md). Timing registered for #210 and #211 on the
+  PR (comment 6693952063) and run outside its merge path (lead's ruling, 11-06): results on #210 / #211.
+
+## What changed
+- **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each write
+  their own copy of a block; the one behind finds it indexed (`Ins::Have`). C3 kept the copy and stopped indexing
+  that slot (a page is indexed only under a parent page its slot holds), so its later pages never entered the
+  index. `Batch::index_pages` now swaps the slot's copy for the index's page (`BatchLm::replace_pages` →
+  `PageMap::replace`; refcounts and holds kept in step, the copy freed) and indexes the rest under it. Debug builds
+  compare the two pages' bytes before the swap (`same_page_bytes`); `check_share` asserts no duplicate is kept.
+- **#212: a preempted or unfed prefill claims the shared prefix again.** C3 refed such a request from 0.
+  `Prefill::refeed` marks it; at its next feed `Batch::refeed_claim` claims the index's pages of its tokens so far
+  through `claim_prefix`, as admission does, and feeds only the rest. A claim maps live pages and takes none from
+  the free list, so it needs no room check.
+- **#214, the five nits:** `share_env`'s doc moved onto its item; `release_rows` returns an `Err` naming the page
+  instead of asserting; `busy_pages` marks with generation stamps (no per-call vector of every page; on the stamp's
+  wrap every mark is cleared and 0 is skipped); admission walks the index with the prompt's block keys computed once
+  (`Job::block_keys`, `PrefixIndex::peek_keyed`); `reclaim` passes over an idle slot whose pages are all shared
+  while another would give a page up (`reclaim_victim`).
+- With sharing off every changed path takes main's decisions.
+
+## Round 1 → 2: two test bugs
+Release 1106-142607-6a44 (`c167272`) failed 219 / 2. Both were the tests':
+- `busy_pages_stamp_wraps` asserted a final stamp `< 8`; from `u32::MAX - 1` twelve calls end at 11 (MAX, the wrap's
+  1, then 2..=11). It also couldn't catch a wrap without the clear: its first call overwrote every held page's
+  stale mark. The rewrite keeps stale marks 0 and 1 (the wrapping call's two possible stamps) on the held pages
+  through a no-busy first call and asserts the marks after the wrap and the exact final stamp (12). A scratch copy
+  of `busy_pages` with three wrong wraps (no clear; no guard; clear but stamp 0): the new test fails all three, the
+  old one passed two.
+- `serve_share_dup_swapped`'s fixture was under its own preconditions: prefix 361 tokens (needs ≥ 448), and the
+  probes' shared whole pages 576 / 512 (needs ≥ prefix + 192 = 553). Prefix ×32 and suffix lines ×18: 481 tokens,
+  768 / 704 (≥ 673), counted with Qwen2.5's `tokenizer.json` (which reproduces the old 361).
+The failing-first run was redone on `bc9d181` with the new fixture, so it fails at the swap / refeed assertions.
+
+## Gates
+Round 2, head `2ce5d12` (product code `c167272`), bella (RTX 5070 Ti Laptop, sm_120):
+
+| gate | result | job |
+|---|---|---|
+| touched modules' tests (`cuda::qwen2::pages:: cuda::qwen2::slots:: serve:: lm:: kvio:: kvsave::`), release | PASS 221 / 0 / 10 ignored | 1106-160457-782d |
+| same, debug assertions + overflow checks (`check_share` leak check and E3 after every step) | PASS 221 / 0 / 10 ignored | 1106-160700-6e64 |
+| failing first: `bc9d181` (tests only) + `2ce5d12`'s fixture | FAILS as intended, 0 / 2, at the targeted assertions | 1106-160902-78aa |
+| md5 v3 vs main `2aec1e5` (axon-podjob) | PASS: gen 0 of 30 cells differ; serve 973 / 973 replies equal | 1106-160457-e00e |
+
+- The failing-first run fails where the fixes act. `serve_share_dup_swapped`: the probes' cached tokens are
+  `[448, 704]` against `[768, 704]`, 0 pages swapped (the first probe gets only the prefix's 7 pages: its suffix
+  pages were never indexed). `serve_share_pressure`: `cache-ram 0: again: cached [0, 256, 284, 0, 0, 266], 3
+  preempted or unfed, 0 refed claims`: the three refed requests prefilled from 0.
+- md5's pressure section preempted in every undersized arm (2,000-token replies, 4 slots), so it gated #212's path:
+  preempted / unfed per arm, qwen2.5-0.5b f16 at 128 pages: main 25 / 14, off 26 / 14, on 9 / 50, shuffle 10 / 51,
+  tier 17 / 60; at 192: 1 / 10, 1 / 9, 1 / 22, 1 / 22, 1 / 22. Qwen3-0.6B q8 at 128: 3 / 15, 5 / 14, 3 / 45, 3 / 45,
+  16 / 60; at 192: 1 / 9, 14 / 9, 1 / 21, 31 / 21, 1 / 22. Main at its full pool: 0 / 0. Every reply equal to main's.
+- Main and cand-off differ at equal bits (Qwen3 at 192 pages: 1 vs 14 preempted). By the code, sharing off takes
+  main's decisions; the harness's 4 client threads decide arrival order, and so who is preempted. INFO probe, main
+  and cand-off three interleaved runs each (job 1106-165421-dd4c): pending.
+
+Timing: registered on the PR (comment 6693952063) before any timing job, run on a secure RTX 4090 outside the PR's
+merge path; results on #211 (subagent start) and #210 (W-sys warm/GB). A pass makes the default flip a follow-up PR.
+The W-sys script's own smoke on bella (job 1106-161219-9c15: 0.5B model, 8 sessions, a 60 s window) checked its
+plumbing with the real binaries: pool size, `/metrics`, md5, the verdict lines (W0 untestable there by design: 8
+small sessions fit whole).
+
+## Lessons
+- A bound in a test is a derivation: write it as the exact value with the steps in the message, not an inequality
+  picked by eye (the `< 8` was off by the wrap's skipped 0 and the first call).
+- A test whose setup is overwritten by its own first step proves nothing about that setup: check it against a
+  mutant of the code it guards before trusting it.
+- Size a fixture against its own asserts before the gate (a tokenizer count costs seconds; the gate costs an hour of
+  queue).

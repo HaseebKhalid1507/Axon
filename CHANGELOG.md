@@ -6,6 +6,21 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
+- Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.
+- **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each wrote
+  their own copy of its blocks, and the one behind stopped indexing its later pages. It now swaps its copy for the
+  index's page (`PageMap::replace`, the copy freed) and indexes the rest under it; debug builds compare the bytes
+  first.
+- **#212: a preempted or unfed prefill claims the shared prefix again** when it is fed next (`refeed_claim`, as
+  admission does), instead of prefilling from token 0.
+- **#214:** `busy_pages` counts with generation stamps (no vector of every page per call); admission walks the index
+  with the prompt's block keys computed once; `reclaim` passes over an idle slot whose pages are all shared (its
+  release frees nothing) while another would give a page up; `release_rows` returns an error naming the page
+  instead of asserting.
+- Same bits: gen and serve md5 vs main, now with a section where requests are preempted
+  (docs/log/2026-11-06-shared-prefix-c3-1.md).
+
 ### Shared prefix KV pages: the engine (#207, closes #187; follows #164)
 - **Opt-in: `AXON_SHARE_KV=1`.** Off by default, so a server without it runs main's admission, eviction and spills,
   decision for decision. #187 ships sharing off by default if any timing clause fails, and two did on the RTX 4090:
