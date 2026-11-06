@@ -739,13 +739,16 @@ impl<'a, 't> Batch<'a, 't> {
     }
 
     /// Slot `s` is about to give up its rows past `keep`: the tier stores
-    /// its whole pages first (all of them: those below `keep` stay, the
-    /// rest are its conversation's, and go to RAM instead of away), and
-    /// forgets the stored pages past `keep`. A slot that keeps every whole
-    /// page (a conversation's next turn) gives nothing up and copies
-    /// nothing: a copy of rows the device keeps would only take RAM from
-    /// pages it doesn't (the write-behind's free room is for those). A tier
-    /// error turns the tier off (`tier_failed`), never the server.
+    /// the whole pages it gives up first (its conversation's: they go to
+    /// RAM instead of away), and forgets the stored pages past `keep`. It
+    /// copies none of the pages the slot keeps: a slot that keeps every
+    /// whole page (a conversation's next turn) gives nothing up and copies
+    /// nothing, and one whose kept pages aren't all stored drops what it
+    /// gives up, as with no tier (`PoolTier::write`). A copy of rows the
+    /// device keeps would only take RAM from pages it doesn't (the
+    /// write-behind's free room is for those), and on the request's first
+    /// token. A tier error turns the tier off (`tier_failed`), never the
+    /// server.
     fn spill(&mut self, s: usize, keep: usize) {
         let Some(t) = self.tier.as_mut() else {
             return;
@@ -754,7 +757,7 @@ impl<'a, 't> Batch<'a, 't> {
             return;
         }
         let t0 = self.trace.as_ref().map(|_| Instant::now());
-        match t.write(self.net, &self.pool, s, &self.held[s]) {
+        match t.write(self.net, &self.pool, s, &self.held[s], keep) {
             Ok(n) => {
                 t.t.truncate(s, keep / PAGE);
                 t.check_slot(s, &self.held[s]);

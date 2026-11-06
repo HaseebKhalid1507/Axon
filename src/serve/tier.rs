@@ -425,6 +425,17 @@ impl<P> Tier<P> {
         }
     }
 
+    /// Whether the whole pages sequence `s` gives up past `keep` (of
+    /// `held`, the tokens whose rows it holds) are orphans: the page before
+    /// the first of them is stored neither in its keys nor by another
+    /// sequence. A stored page needs its stored parent, so storing them
+    /// would first copy pages the sequence keeps: a spill drops them
+    /// instead, as with no tier. No LRU change.
+    fn orphans(&self, s: usize, held: &[u32], keep: usize) -> bool {
+        let first = (keep / PAGE).min(held.len() / PAGE);
+        first > self.stored(s) && self.store.peek_len(&held[..first * PAGE]) < first * PAGE
+    }
+
     /// Sequence `s` gains the stored page `key` (the next of its pages).
     fn push(&mut self, s: usize, key: Key) {
         self.store.resident(key, true);
@@ -833,18 +844,28 @@ impl PoolTier {
         }
     }
 
-    /// The spill of slot `s`, whose rows are about to go: store all its
-    /// pages not yet stored (whole pages of `held`, the tokens whose rows
-    /// it holds), in order, evicting to make room (class 0 first: other
-    /// slots' duplicates); a page some other sequence stored already costs
-    /// no copy. The pages copied (stops early when the store has no room).
+    /// The spill of slot `s`, whose rows past `keep` are about to go
+    /// (`held`: the tokens whose rows it holds): store the whole pages it
+    /// gives up that aren't stored yet, in order, evicting to make room
+    /// (class 0 first: other slots' duplicates); a page some other sequence
+    /// stored already costs no copy. Only if the page before them is
+    /// stored (`Tier::orphans`), else none: storing them would copy the
+    /// pages the slot keeps first, its whole chain for a next turn that
+    /// gives up its reply's tail page once other spills have evicted the
+    /// chain's copies (#201's s1 cell: 0.85-1.10x a whole-chain copy before
+    /// the first token). Those pages go, as with no tier. The pages copied
+    /// (stops early when the store has no room).
     pub fn write(
         &mut self,
         net: &Backend,
         pool: &<Backend<'_> as BatchLm>::Pool,
         s: usize,
         held: &[u32],
+        keep: usize,
     ) -> Result<usize, String> {
+        if self.t.orphans(s, held, keep) {
+            return Ok(0);
+        }
         let r = self.write_pages(net, pool, s, held, usize::MAX, true);
         if let (Ok(n), Some(m)) = (&r, &self.t.metrics) {
             m.kv_ram_spilled.fetch_add(*n as u64, Relaxed);
@@ -1276,6 +1297,47 @@ mod tests {
         t.stored(s)
     }
 
+    /// What a spill gives up past `keep` is stored only under a stored
+    /// parent (`orphans`): a next turn that gives up its reply's tail page
+    /// after its chain's copies were evicted copies nothing (it would have
+    /// copied the whole chain first); a parent another sequence stored
+    /// counts; giving up everything (a reclaim) always stores.
+    #[test]
+    fn spill_orphans() {
+        let mut t: Tier<u8> = Tier::new(8, 1, 3, None);
+        let a = toks(1, 5);
+        let pg = |n: usize| n * PAGE;
+        // Sequence 0 holds a's 5 pages, the first 3 stored.
+        assert_eq!(store_seq(&mut t, 0, &a[..pg(3)]), 3);
+        for (keep, orphans) in [
+            (0, false),
+            (pg(2), false),
+            (pg(3), false),
+            (pg(3) + 10, false),
+            (pg(4), true),
+            (pg(4) + 63, true),
+        ] {
+            assert_eq!(t.orphans(0, &a, keep), orphans, "keep {keep}");
+        }
+        // Partial pages: only whole ones count.
+        assert!(!t.orphans(0, &a[..pg(4) - 1], pg(4)));
+        // Another sequence's stored page is a parent too (no LRU change,
+        // sequence 0's keys as they were).
+        assert_eq!(store_seq(&mut t, 1, &a[..pg(4)]), 4);
+        assert!(!t.orphans(0, &a, pg(4)));
+        assert_eq!(t.stored(0), 3);
+        t.truncate(1, 0);
+        // The tier fills with others' pages; sequence 0's copies (class 0)
+        // go first, a leaf at a time, and it lets go of them.
+        let b = toks(2, 8);
+        store_seq(&mut t, 2, &b);
+        t.check();
+        assert!(t.stored(0) < 3, "sequence 0's copies evicted");
+        assert!(t.orphans(0, &a, pg(4)), "a 1-page give-up: orphans");
+        assert!(t.orphans(0, &a, pg(1)) == (t.peek(&a[..pg(1)]) == 0));
+        assert!(!t.orphans(0, &a, 0), "a reclaim always stores");
+    }
+
     /// A sequence's pages are class 0 while it names them: evicted first
     /// (newest first, a leaf at a time), and it lets go of them (`drain`);
     /// truncated, they are class 1.
@@ -1446,11 +1508,19 @@ mod tests {
             let s = rnd(3);
             match rnd(6) {
                 0 => {
-                    // New rows: a conversation's first n pages (its keys
-                    // cut to what still matches, as admit's spill does).
+                    // New rows: a conversation's first n pages, as admit
+                    // spills: what the rows give up past the prefix they
+                    // share is stored under a stored parent (else
+                    // dropped), the keys cut to what still matches.
                     let n = 1 + rnd(6);
                     let c = conv(rnd(4))[..n * PAGE].to_vec();
                     let common = held[s].iter().zip(&c).take_while(|(a, b)| a == b).count();
+                    let first = common / PAGE;
+                    if first < held[s].len() / PAGE && !t.orphans(s, &held[s], common) {
+                        // The pages it keeps are stored: none is copied.
+                        assert_eq!(t.peek(&held[s][..first * PAGE]), first * PAGE);
+                        store_seq(&mut t, s, &held[s]);
+                    }
                     t.truncate(s, common / PAGE);
                     held[s] = c;
                 }

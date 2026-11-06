@@ -6977,3 +6977,171 @@ fn serve_cuda_cache_ram_off_in_reclaim() {
     assert_tier_off(w, Op::Spill, &said, &m);
     assert_eq!(said[0].1, [5, 0, 0, 0], "{w}");
 }
+
+/// #201's tail spill. A conversation's next turn whose prompt carries other
+/// text than the reply gives up its reply's tail page at admission. With
+/// none of the pages its slot keeps stored (here the write-behind starved;
+/// in s1, other spills evicted the chain's copies), `spill` copied the
+/// slot's whole chain before the turn's first token; it drops the tail
+/// now, as with no tier, and copies nothing. With the kept pages stored,
+/// what a turn gives up is still stored (and only that), and a later turn
+/// on that branch gets it back. Every reply == the `--cache-ram 0` run's.
+/// The S1 path's admission (`lend_solo`); a pool of 2 slots.
+#[test]
+fn serve_cuda_cache_ram_tail_spill() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    const PAGE: usize = super::PAGE_TOKENS;
+    let path = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(path).unwrap());
+    let words = |w: &str, n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "{w} {i} sits by the {} gate. ",
+                    ["north", "south", "east"][i % 3]
+                )
+            })
+            .collect()
+    };
+    let lcp = |a: &[u32], b: &[u32]| a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    // X: k whole pages and r tokens, r well inside a page.
+    let (x, xt) = (30..80)
+        .map(|n| words("Lamp", n))
+        .map(|x| {
+            let t = tok.encode_prompt(&x);
+            (x, t)
+        })
+        .find(|(_, t)| (8..=40).contains(&(t.len() % PAGE)) && t.len() / PAGE >= 3)
+        .expect("an X of k pages and 8..=40 tokens");
+    let (k, r) = (xt.len() / PAGE, xt.len() % PAGE);
+    // P's reply ends 20 tokens into the next page: P's rows hold k + 1
+    // whole pages.
+    let n_gen = PAGE - r + 20;
+    // Q: X, then text that isn't P's reply.
+    let q = format!("{x}Then the reed boat left the harbour at dawn.");
+    let common = lcp(&xt, &tok.encode_prompt(&q));
+    assert_eq!(common / PAGE, k, "Q keeps X's {k} whole pages");
+    type Usage = (Value, u64, u64, u64);
+    let start = |ram: u64| {
+        let s = server_with(path, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.kv_pages = Some(48);
+            o.cache_ram = super::tier::CacheRam::Bytes(ram);
+        });
+        if ram > 0 {
+            wait_tier_pinned(s.addr);
+        }
+        s
+    };
+    let counters = |s: &Server| tier_counters(&call(s.addr, "GET", "/metrics", "").body);
+    let held = |s: &Server| -> Vec<u64> {
+        let sl = call(s.addr, "GET", "/slots", "").json();
+        (sl["slots"].as_array().unwrap().iter())
+            .map(|j| j["held_tokens"].as_u64().unwrap())
+            .collect()
+    };
+    let text = |u: &Usage| u.0.as_str().unwrap().to_string();
+
+    // (a) Nothing stored: Q gives up P's tail page and copies nothing.
+    let case_a = |ram: u64| -> Vec<Usage> {
+        let s = start(ram);
+        if ram > 0 {
+            s.tier_faults().starve(true);
+        }
+        let p1 = completion_usage(s.addr, &x, n_gen);
+        assert_eq!(p1.3 as usize, n_gen, "(a): P generated {} of {n_gen}", p1.3);
+        let h = held(&s).into_iter().max().unwrap() as usize;
+        assert_eq!(h / PAGE, k + 1, "(a): P's rows hold {h} tokens");
+        let q1 = completion_usage(s.addr, &q, 8);
+        if ram > 0 {
+            let [written, restored, _, spilled] = counters(&s);
+            assert_eq!(
+                (written, spilled),
+                (0, 0),
+                "(a): Q gave up 1 page of {}; its spill copied {spilled} (the whole chain: {})",
+                k + 1,
+                k + 1
+            );
+            assert_eq!(restored, 0, "(a)");
+            assert_eq!(
+                q1.1 as usize,
+                common.min(q1.2 as usize - 1),
+                "(a): Q's cached tokens"
+            );
+        }
+        vec![p1, q1]
+    };
+    let off = case_a(0);
+    assert_eq!(case_a(64 << 20), off, "(a): the replies");
+
+    // (b) X stored (P1's, by the idle flush), then the write-behind
+    // starved: P2 (X, then more) fills pages k.. unstored. Q2 (X, then
+    // other text) gives them up under X's stored last page: they are
+    // stored, and no other page; R (P2's next turn) gets them back.
+    let p2 = format!("{x}{}", words("Stone", 12));
+    let p2t = tok.encode_prompt(&p2);
+    assert_eq!(
+        lcp(&p2t, &tok.encode_prompt(&q)) / PAGE,
+        k,
+        "Q keeps P2's first {k} pages"
+    );
+    // R's stored prefix at least: P2's prompt's whole pages.
+    let floor = (p2t.len() - 1) / PAGE * PAGE;
+    assert!(floor > k * PAGE, "P2's prompt: {} tokens", p2t.len());
+    let case_b = |ram: u64| -> Vec<Usage> {
+        let s = start(ram);
+        let p1 = completion_usage(s.addr, &x, 2);
+        if ram > 0 {
+            wait_for("X's pages written behind", || counters(&s)[0] == k as u64);
+            s.tier_faults().starve(true);
+        }
+        let p2r = completion_usage(s.addr, &p2, 24);
+        let w2 = held(&s).into_iter().max().unwrap() as usize / PAGE;
+        assert!(w2 >= k + 2, "(b): P2's rows hold {w2} whole pages");
+        let q2 = completion_usage(s.addr, &q, 8);
+        if ram > 0 {
+            let [written, restored, _, spilled] = counters(&s);
+            assert_eq!(
+                (written, spilled, restored),
+                (w2 as u64, (w2 - k) as u64, 0),
+                "(b): Q2 gave up P2's pages {k}..{w2}: they alone are stored"
+            );
+        }
+        let rp = format!("{p2}{} And then", text(&p2r));
+        let r1 = completion_usage(s.addr, &rp, 8);
+        if ram > 0 {
+            assert!(
+                r1.1 as usize >= floor,
+                "(b): R cached {} (X: {} positions, P2's prompt's whole pages: {floor})",
+                r1.1,
+                k * PAGE
+            );
+            let restored = counters(&s)[1];
+            assert!(
+                restored >= r1.1 - (k * PAGE) as u64,
+                "(b): {restored} restored"
+            );
+        }
+        vec![p1, p2r, q2, r1]
+    };
+    let same = |u: &Usage| (u.0.clone(), u.2, u.3);
+    let off = case_b(0);
+    let on = case_b(64 << 20);
+    assert_eq!(
+        on.iter().map(same).collect::<Vec<_>>(),
+        off.iter().map(same).collect::<Vec<_>>(),
+        "(b): the replies"
+    );
+    assert!(
+        on[3].1 > off[3].1,
+        "(b): R cached {} on, {} off",
+        on[3].1,
+        off[3].1
+    );
+}
