@@ -853,3 +853,11 @@ tier ≈ 170, engine/serve ≈ 80, ops ≈ 20. The tests are most of it (≈ 600
 | The lead's rulings (11-05): §10.1 yes provisionally (then FINAL by (a)); the a41d028 spill fix yes | §2.3, §2.8.1, §10.1 |
 | CP2's gates at a41d028: smoke 1105-115704-823c 6/0, release 1105-115704-aeee and debug 1105-115846-69b9 192/0 (9 ignored, the `#[ignore]` benches), md5 1105-115953-59cd (pod1, RTX 4090): gen 0/30 differ, serve 42/42 × 5 cells, the third arm (`--cache-ram 1G`, 13.6–13.9k tokens restored per cell) included | PR body |
 | §2.7's trace fields, as built: pages and ms per copy kind on every step line | §2.7 |
+
+## 14. The gate's read (2026-11-05; results, not a revision)
+
+| what | where |
+|---|---|
+| The five clauses PASS: s4 28ee (bella), s1 c76b and the resume cell a169 on an RTX 4090 (the lead's reroute; §7 says bella only, so 4090 numbers). The rule's outcome, `auto`, is not this PR's (§7, §10.3: Haseeb's Q2) | log, "Verdict" |
+| Bella's resume cell on the exclusive tier: unmeasured, ESTIMATED 0.21–0.32 s (fast copy mode), 0.37–0.49 s (slow) | log, "Verdict" |
+| §2.3's next-turn spill: a41d028 skips one that gives up nothing; one that gives up a page still copies the slot's whole unstored chain (`write_pages` from `stored(s)`): c76b's s1 resume p50 +26 ms on the 4090 | log, "The s1 TTFT-resume p50" |
