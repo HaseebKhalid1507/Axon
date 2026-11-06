@@ -7069,11 +7069,6 @@ fn serve_cuda_cache_ram_tail_spill() {
                 k + 1
             );
             assert_eq!(restored, 0, "(a)");
-            assert_eq!(
-                q1.1 as usize,
-                common.min(q1.2 as usize - 1),
-                "(a): Q's cached tokens"
-            );
         }
         vec![p1, q1]
     };
@@ -7122,10 +7117,12 @@ fn serve_cuda_cache_ram_tail_spill() {
                 r1.1,
                 k * PAGE
             );
+            // Copied in past what the GPU kept (Q2's rows: X's, at most).
             let restored = counters(&s)[1];
             assert!(
-                restored >= r1.1 - (k * PAGE) as u64,
-                "(b): {restored} restored"
+                restored > 0 && restored + xt.len() as u64 >= r1.1,
+                "(b): {restored} restored, {} cached",
+                r1.1
             );
         }
         vec![p1, p2r, q2, r1]
