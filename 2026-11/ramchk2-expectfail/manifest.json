@@ -1,0 +1,29 @@
+{
+ "label": "ramchk2-expectfail",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1106-141446-b415",
+   "name": "ramchk2-expectfail",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "axon-test-expectfail",
+   "started": 1793993003.988921,
+   "ended": 1793993009.107517,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ba9bd58a22017f30218fbd0a17386b11925e9536b864c24f12f6c59e808c0ccb",
+   "log_bytes": 6074
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 14:23:30 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
