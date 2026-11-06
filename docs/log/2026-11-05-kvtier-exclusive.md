@@ -1,7 +1,8 @@
 # An exclusive KV RAM tier, and #170's idle flush in pieces (WP2)
 
 - Date: 2026-11-05. Branch: feat/kvtier-exclusive. Base: main c54a730 (merged in at 84861fc). Status: draft PR #201;
-  **the gate: s4 PASS, s1 PROVISIONAL (rerun running), the resume cell VOID on a harness bug, rerun queued** (below). Design: [kv-ram-tier-exclusive.md](../design/kv-ram-tier-exclusive.md)
+  **the gate's five clauses PASS: s4 on bella; s1 and the resume cell on an RTX 4090 (the lead's reroute, so 4090
+  numbers)**. `--cache-ram` stays opt-in in this PR (verdict below). Design: [kv-ram-tier-exclusive.md](../design/kv-ram-tier-exclusive.md)
   (revision 3), reviewed at revision 0 by shady (7/10 REVISE) and Fable (BUILD-WITH-CHANGES).
 - Pick: foreman (axon), plan `specs/agent-workload-plan.md` §3 row 2 (Fable). Builder: joestar.
 
@@ -144,10 +145,88 @@ the pool the server logged, but `kv_resume_bench.py` @440fe18 also stopped after
 1,570–1,744-page pools the loop needs 0–1, so the cap never bound. The 4090's pool is 5,288 pages: the session
 (414 pages), its 3 others and 8 pressure sessions keep 4,959, so nothing had to leave and the check voided every
 round, as it should. **Fix (harness only), fe5117d:** the cap follows the pool (pool / a session's pages + 1, 8 at
-least): 13 there. By 68e9's page counts 9 are then sent, 5,372 > 5,288 (ESTIMATED until a169's `pressure_extra`).
+least): 13 there. a169 sent 9 in every round, 5,371 > 5,288 pages kept (MEASURED; 5,372 estimated beforehand).
 With bella's pools the loop sends the same sessions as before.
 `resumeexcl.sh` also stops printing `restored × 3.5 MiB / restore_ms` as a rate (that field is enqueue time, above).
 It prints the step-time estimate instead, on lines whose only copy is the restore. Rerun: **1105-191445-a169**
-(`kv_resume_bench-fe5117d.py`, same binaries, `--timing 4090`), PENDING. 68e9's bandwidth rows (MEASURED, 4090,
+(`kv_resume_bench-fe5117d.py`, same binaries, `--timing 4090`), below. 68e9's bandwidth rows (MEASURED, 4090,
 25.6k): 2D per 64-pos page 12.83 / 13.12 GB/s D2H / H2D, contiguous 12.92 / 13.26: every layout ≈ 13 GB/s, idle
 and busy alike (the pod's own host link; about half of bella's 28 GB/s fast mode).
+
+**s1 rerun, 1105-151540-c76b (pod1, RTX 4090): PASS, 3 clean rounds of 3.** 2026-11-05 19:11–20:14; job
+foreign GPU max 0 %, every run `tainted=False`. Read on its own, as decided before it ran; 2d32 (bella) stays
+PROVISIONAL and is not pooled with it. Medians of 3 (raw in brackets):
+
+| s1, 4090 | main | cand | |
+|---|---|---|---|
+| ITL p99 (ms) | 11.24 (11.24, 11.24, 11.19) | 11.52 (11.68, 11.52, 11.45) | **1.025 × main (≤ 1.05): PASS** |
+| md5, all 6 runs | 2aee881bcf75 | 2aee881bcf75 | **SAME** (per host: bella's runs give afec23b4a89f) |
+| re-prefilled tokens / share | 21,291 / 0.0073 | 7,359 / 0.0025 | INFO |
+| TTFT resume p50 (s) | 0.066 (0.071, 0.066, 0.064) | 0.092 (0.102, 0.092, 0.091) | INFO: +26 ms, below |
+| TTFT turn / new p50 (s) | 0.063 / 1.463 | 0.068 / 1.402 | INFO |
+| goodput / output tok/s | 33.1 / 33.15 | 32.95 / 33.15 | INFO |
+
+Per cand run (identical in all 3): 1,755 pages pinned (6,440,878,080 bytes), 9,780 written (1,755 by the write-behind,
+the tier's size, then 8,025 by spills), 15,724 tokens restored in 21 hits.
+
+**Resume cell rerun, 1105-191445-a169 (pod1, RTX 4090): PASS, 3 of 3 rounds valid.** 2026-11-05 20:14–20:33, foreign
+GPU 0 of 111 samples over 25 %. Every round: pool 5,288 pages, pressure +9 (5,371 pages kept), main's
+resume found 0 tokens cached (a full re-prefill), the candidate's restored all 26,496.
+
+| resume, 4090 (25k session evicted, `--gap 120`) | main | cand | |
+|---|---|---|---|
+| TTFT resume (s) | 2.834 (2.834, 2.834, 2.836) | **0.204** (0.204, 0.203, 0.209) | **≤ 0.3 s: PASS**; 13.9× |
+| tokens cached / restored | 0 / – | 26,496 / 26,496 | |
+| ITL p99 while a 25k prompt prefills (ms) | 89.23 | 90.77 | INFO: +1.7 % (the bench's write-behind cell) |
+| ITL p50 / p99, decode only (ms) | 6.638 / 7.633 | 6.651 / 7.757 | INFO |
+| startup (s) | 2.007 | 2.062 | INFO: 6 GiB pinned at start |
+| md5 | 78722066e051 | 78722066e051 | SAME |
+
+Each restore (414 pages) was enqueued in 1.6–2.7 ms. Its step line also carries the idle flush's 1,739 write-behind
+pages from the gap, so the trace gives no rate. At the 4090's MEASURED 0.280 ms per page (H2D), the copies are
+≈ 116 ms of the 204 (ESTIMATED).
+
+**The s1 TTFT-resume p50 on the 4090 (+26 ms; INFO, not a clause): the tail spill.** Each request paired across the
+binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_request.py` in the gate scripts):
+- Resumes: 14 of 34 are slower by > 10 ms (+14 to +135 ms), 1 is faster; per-request median +4.6 ms. Every slow
+  resume computed the same tokens as main's, so none of it is re-prefill. Turns: 21 of 127 slower, 7 faster.
+  New requests computed 4.4 % fewer tokens (169,085 → 161,661: shared prefixes restored) and got 52.6 ms faster.
+- 26 of the 105 requests that give up ≥ 1 page at admission are slower by > 10 ms. Only 1 of the 35 that give up
+  nothing is. A request gives up a page when its previous turn's generated tail crossed a page boundary: the replay's
+  next prompt carries the trace's text, not the model's reply, so the slot keeps only the previous prompt.
+- 15 of those 26 cost 0.85–1.10× (median 0.90) a D2H copy of their **whole chain** at the 4090's 0.286 ms per page
+  (254–255 pages: 72.6–72.9 ms against +64 to +77 measured; 485 pages, #143: 138.7 ms against +135). The rest are partial.
+- The code agrees. `spill` → `PoolTier::write` copies every unstored whole page from the first unstored one
+  (`write_pages`: `stored(s)..held.len()/PAGE`), the pages the slot keeps included, because the tree stores a page
+  only under its stored parent. With the tier full, a chain's class-0 copies are the first evicted by other spills,
+  so its next tail spill copies the whole chain again, before the request's first token. 8,025 spilled pages a run is
+  ≈ 2.3 s of copies at 0.286 ms (ESTIMATED), to restore ≈ 246 pages' worth of tokens.
+- This is the rest of a41d028's defect. That fix skips a spill that gives up nothing; a spill that gives up one page
+  still copies the chain. A possible fix, not built: a spill copies the pages it gives up only when their parent is
+  stored, and otherwise drops them as main does (a reclaim keeps nothing, so it still copies the whole chain). It
+  would need the s1 and s4 cells again.
+- Against the resume cell's 13.9×: the win comes when the session was evicted (a169), the cost when it wasn't. On a
+  24 GB card at s1 almost nothing is evicted (main re-prefills 21,291 tokens in 10 min), so the copies are mostly
+  cost. On bella the pool is short and restores dominate (2d32: resume p50 0.746 → 0.267 s). Bella pays the same
+  copies at 28 GB/s: ≈ 33 ms per 254-page chain (ESTIMATED).
+
+## Verdict: the rule, and `--cache-ram auto`
+- **The five clauses, as read: all PASS.** ≤ 0.3 s: 0.204 s (a169, 4090). Re-prefill ≤ 5 %: 3.72 % (28ee, bella).
+  s1 ITL p99 ≤ 1.05×: 1.025 (c76b, 4090; bella's PROVISIONAL 2d32 read 0.970). s4 ITL p99 ≤ 1.25×: 0.980 (28ee,
+  bella). Replay md5 == main: same in every clean run of every job.
+- **The rule's outcome is "Pass → default `auto` (≤ 8 GiB), paged GPU pool only". This PR does not flip it.**
+  Note §7 and §10.3: the flip needs Haseeb's answer to the plan's Q2 (pinning 8 GiB of bella's RAM) and is not part
+  of this PR's gate. `--cache-ram` stays opt-in here.
+- **Open for the flip (the lead's calls, not re-reading the rule):**
+  - Two clauses were read on a 4090. Note §7 says "bella only (the gate is bella's cell)", and the lead rerouted them.
+    Bella's resume cell is ESTIMATED at 0.21–0.32 s in its fast copy mode and 0.37–0.49 s in its slow one: a169's
+    88 ms outside the copies, scaled by bella / 4090 (1.73× the decode step, 3.06× the full prefill, f763 vs a169),
+    plus 414 pages at 28 or 7 GB/s. So the 4090 does not settle bella's ≤ 0.3 s. Rerunning the cell on bella takes
+    ≈ 20 min.
+  - The tail spill (above): `auto` would put it on every large-VRAM server, where it is mostly cost.
+
+## What didn't work
+- 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
+  rounds were VOID; fixed in fe5117d.
+- 2d32: Xorg load on bella tainted 3 candidate runs. SHORT, 2 clean rounds of 3; rerun as c76b.
+- a41d028 fixed only half of the next-turn spill: one given-up page still copies the whole chain (above).
