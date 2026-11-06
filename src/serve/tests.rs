@@ -7643,11 +7643,13 @@ fn serve_share_dup_swapped() {
     };
     let p = p.to_str().unwrap();
     let tok = Tokenizer::from_gguf(&crate::gguf::load(p).unwrap());
+    // With qwen2.5-0.5b's tokenizer: the prefix 481 tokens (7.5 pages),
+    // the probes share 768 and 704 tokens of whole pages with A and B.
     let prefix =
-        "The surveyors mapped each valley, ridge and stream of the northern range. ".repeat(24);
+        "The surveyors mapped each valley, ridge and stream of the northern range. ".repeat(32);
     let suffix = |who: &str, what: &str| {
         let line = format!("{who} walked the {what} trail, counting cairns and fallen pines. ");
-        format!("Notes of {who}: {}", line.repeat(14))
+        format!("Notes of {who}: {}", line.repeat(18))
     };
     let (sa, sb) = (suffix("Alder", "east"), suffix("Birch", "west"));
     let a_text = format!("{prefix}{sa}What did Alder count?");

@@ -553,23 +553,46 @@ mod tests {
 
     /// `busy_pages`' stamps (#214) across their wrap: marks left from long
     /// ago that equal the new stamp are cleared, not read as this call's.
+    /// The stamp starts at u32::MAX - 1. Call 1 (no slot busy, no mark
+    /// written) takes u32::MAX, call 2 wraps: every mark is cleared and the
+    /// stamp skips 0 for 1, then calls 3..=13 take 2..=12. The held pages'
+    /// marks before the wrap are 0 and 1 by turns, the two stamps the
+    /// wrapping call could take, so a wrap that doesn't clear (stamp 1 reads
+    /// the 1s as counted), or that takes stamp 0 (reads the 0s, or every
+    /// page after a clear), counts fewer than 5.
     #[test]
     fn busy_pages_stamp_wraps() {
         let mut m = PageMap::new(2, 4, 8, None);
+        // Slot 0 holds pages 0, 1, 2; slot 1 pages 3, 4 and 0 (shared);
+        // 5, 6, 7 are free.
         m.ensure(0, 3 * PAGE).unwrap();
         m.ensure(1, 2 * PAGE).unwrap();
         m.map(1, &[0]);
         {
             let mut g = m.seen.borrow_mut();
             g.0 = u32::MAX - 1;
-            g.1.fill(1);
+            for (p, v) in g.1.iter_mut().enumerate() {
+                *v = p as u32 % 2;
+            }
         }
-        for _ in 0..4 {
-            assert_eq!(m.busy_pages(&[true, true], &[]), 5);
-            assert_eq!(m.busy_pages(&[true, false], &[0]), 2);
-            assert_eq!(m.busy_pages(&[false, true], &[]), 3);
+        assert_eq!(m.busy_pages(&[false, false], &[]), 0);
+        assert_eq!(*m.seen.borrow(), (u32::MAX, vec![0, 1, 0, 1, 0, 1, 0, 1]));
+        for i in 0..4 {
+            assert_eq!(m.busy_pages(&[true, true], &[]), 5, "round {i}");
+            if i == 0 {
+                // The wrap: the held pages marked 1, the free ones' stale
+                // marks (5 and 7 equal to this stamp) cleared.
+                assert_eq!(*m.seen.borrow(), (1, vec![1, 1, 1, 1, 1, 0, 0, 0]));
+            }
+            assert_eq!(m.busy_pages(&[true, false], &[0]), 2, "round {i}");
+            assert_eq!(m.busy_pages(&[false, true], &[]), 3, "round {i}");
         }
-        assert!(m.seen.borrow().0 < 8, "wrapped");
+        assert_eq!(m.seen.borrow().0, 12, "the wrap's stamp 1, then 11 calls");
+        assert_eq!(
+            m.seen.borrow().1[5..],
+            [0, 0, 0],
+            "free pages never marked again"
+        );
     }
 
     /// A pinned page outlives its last slot (warm) and can be mapped again;
