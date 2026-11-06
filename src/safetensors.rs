@@ -1479,16 +1479,24 @@ pub fn load(
     check: impl FnOnce(&Model) -> crate::gguf::CopyWish,
     fill: bool,
 ) -> io::Result<Model> {
-    load_ram(dir, check, fill, &avail_settled)
+    load_ram(
+        dir,
+        check,
+        fill,
+        &avail_settled,
+        crate::model::ram_tolerance(),
+    )
 }
 
 /// `load`, with the RAM available for a conversion of the bytes given
-/// read by `ram` (`avail_settled`; tests pass their own).
+/// read by `ram` (`avail_settled`) and the check's tolerance `tol`
+/// (`model::ram_tolerance`); tests pass their own.
 pub(crate) fn load_ram(
     dir: &Path,
     check: impl FnOnce(&Model) -> crate::gguf::CopyWish,
     fill: bool,
     ram: &dyn Fn(u64) -> Option<crate::gguf::mem::Avail>,
+    tol: u64,
 ) -> io::Result<Model> {
     let (cfg, meta) = checkpoint_metadata(dir)?;
     let Meta {
@@ -1647,7 +1655,6 @@ pub(crate) fn load_ram(
         // Refused before any of it is made (#208: the FP8 0.5B's 520 MiB
         // were OOM-killed under a cap before any check ran).
         let need = conv_need(&jobs, aux_len, conv_threads());
-        let tol = crate::model::ram_tolerance();
         conv_verdict(&m.arch, fp8, need, tol, ram(need.total())).map_err(bad)?;
         let mut aux = memmap2::MmapMut::map_anon(aux_len.next_multiple_of(2 << 20))?;
         #[cfg(target_os = "linux")]

@@ -1755,12 +1755,17 @@ fn conv_need_of(m: &Model) -> ConvNeed {
 /// (`conv_need_of`): a byte under that less the tolerance; through at it,
 /// and with no RAM figure; `axon info`'s load (no conversion) never asks.
 /// A BF16 checkpoint's refusal names its GGUF, which is read from the file;
-/// an FP8 one's doesn't (no GGUF holds its weights).
+/// an FP8 one's doesn't (no GGUF holds its weights). The tiny checkpoints
+/// need less than `model::ram_tolerance` (a 2 MiB arena and a few KiB of
+/// buffers, against 32 MiB and up), so their edge would be below zero
+/// (debug builds trapped the subtraction, release ones wrapped it and
+/// wrapped it back in the check): the test passes half the need as the
+/// tolerance, an edge inside it with the tolerance still added.
+/// `fp8_conversion_need_of_the_checkpoint` has the real tolerance.
 #[test]
 fn conversion_refused_before_it_is_made() {
     use crate::gguf::mem::{Avail, Bound};
     use std::cell::Cell;
-    let tol = crate::model::ram_tolerance();
     let host = |bytes| {
         Some(Avail {
             bytes,
@@ -1771,15 +1776,28 @@ fn conversion_refused_before_it_is_made() {
     let d = Dir::new("conv-ram");
     write_tiny(&d, 1);
     let asked = Cell::new(0);
-    let m = load_ram(&d.0, wish, true, &|need| {
-        asked.set(need);
-        None
-    })
+    let m = load_ram(
+        &d.0,
+        wish,
+        true,
+        &|need| {
+            asked.set(need);
+            None
+        },
+        0,
+    )
     .unwrap();
     let need = conv_need_of(&m);
     assert!(need.tensors > 0 && need.buffers > 0, "{need:?}");
     assert_eq!(asked.get(), need.total(), "{need:?}");
-    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1)) else {
+    let tol = need.total() / 2;
+    eprintln!(
+        "tiny bf16: need {} KiB, model::ram_tolerance {} KiB, the test's {} KiB",
+        need.total() >> 10,
+        crate::model::ram_tolerance() >> 10,
+        tol >> 10
+    );
+    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1), tol) else {
         panic!("loaded a byte under the edge");
     };
     let e = e.to_string();
@@ -1795,16 +1813,21 @@ fn conversion_refused_before_it_is_made() {
         ),
         "{e}"
     );
-    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol)).is_ok());
-    let header = load_ram(&d.0, wish, false, &|_| {
-        panic!("asked for a header-only load")
-    });
+    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol), tol).is_ok());
+    let header = load_ram(
+        &d.0,
+        wish,
+        false,
+        &|_| panic!("asked for a header-only load"),
+        tol,
+    );
     assert!(header.is_ok());
     let d = Dir::new("conv-ram-fp8");
     write_tiny_fp8(&d, |_| {});
-    let m = load_ram(&d.0, wish, true, &|_| None).unwrap();
+    let m = load_ram(&d.0, wish, true, &|_| None, 0).unwrap();
     let need = conv_need_of(&m);
-    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1)) else {
+    let tol = need.total() / 2;
+    let Err(e) = load_ram(&d.0, wish, true, &|_| host(need.total() - tol - 1), tol) else {
         panic!("loaded a byte under the edge");
     };
     assert!(
@@ -1812,7 +1835,7 @@ fn conversion_refused_before_it_is_made() {
             .ends_with("; to fit: more free RAM (they're converted on every device)"),
         "{e}"
     );
-    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol)).is_ok());
+    assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol), tol).is_ok());
 }
 
 /// #208 on the FP8 0.5B: its BF16 embedding and lm_head made F16 (2 x
@@ -1832,7 +1855,7 @@ fn fp8_conversion_need_of_the_checkpoint() {
         })
     };
     let wish = |_: &Model| gguf::CopyWish::MapOnly;
-    let m = load_ram(&p, wish, true, &|_| None).unwrap();
+    let m = load_ram(&p, wish, true, &|_| None, tol).unwrap();
     let need = conv_need_of(&m);
     drop(m);
     let f16 = 2 * 151936 * 896 * 2;
@@ -1847,7 +1870,9 @@ fn fp8_conversion_need_of_the_checkpoint() {
         tol >> 10
     );
     assert!(need.aux >= f16 && need.aux < f16 + (8 << 20), "{need:?}");
-    let Err(e) = load_ram(&p, wish, true, &|_| host(need.total() - tol - 1)) else {
+    // Its edge is above zero in every build (the tiny checkpoints' isn't).
+    assert!(need.total() > tol, "{need:?} tolerance {tol}");
+    let Err(e) = load_ram(&p, wish, true, &|_| host(need.total() - tol - 1), tol) else {
         panic!("loaded a byte under the edge");
     };
     assert!(
@@ -1855,7 +1880,7 @@ fn fp8_conversion_need_of_the_checkpoint() {
             .contains("converting the checkpoint's tensors at load"),
         "{e}"
     );
-    assert!(load_ram(&p, wish, true, &|_| host(need.total() - tol)).is_ok());
+    assert!(load_ram(&p, wish, true, &|_| host(need.total() - tol), tol).is_ok());
 }
 
 /// The fingerprint's `act` on the CPU is the net's, the type its FP8
