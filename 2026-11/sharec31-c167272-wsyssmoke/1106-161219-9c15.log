@@ -1,0 +1,51 @@
+[axon-run 16:12:19] submitted 1106-161219-9c15 by /home/haseeb/.cache/axon-sharec31: /usr/bin/bash smokewrap.sh ./wsysshare.sh ./axon-base-2aec1e5 ./axon-c167272 ./agent_replay-ad0c65e.py ./wsys-128.json
+[axon-run 16:52:53] scope axon-job-1106-161219-9c15-1794001973.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 16:52:53] job 1106-161219-9c15 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-161219-9c15-1794001973 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash smokewrap.sh ./wsysshare.sh ./axon-base-2aec1e5 ./axon-c167272 ./agent_replay-ad0c65e.py ./wsys-128.json
+axon-q 16:52:53 waiting: stagger
+axon-q 16:53:03 start slot 16-23: /usr/bin/bash smokewrap.sh ./wsysshare.sh ./axon-base-2aec1e5 ./axon-c167272 ./agent_replay-ad0c65e.py ./wsys-128.json
+SMOKE
+== wsysshare (cell W-sys, #210) speed 1, 1 rounds, 8 sessions: base ./axon-base-2aec1e5, cand ./axon-c167272, both --cache-ram 1G
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, 58, P4
+               total        used        free      shared  buff/cache   available
+Mem:              30          11           9           0          10          19
+trace sha256 87b8e8c8a89f4e22  replay sha256 34b1910bc52539b7
+## base-r0 16:53:03: AXON_KV_PAGES=1722  ./axon-base-2aec1e5 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G
+  pool 1722 pages, --kv-gb 2.428
+requests=34 errors=0 first_error=None wall_s=46.8 prime_s=0.6 ttft_new_p50=0.041 ttft_resume_p50=None ttft_turn_p50=0.13 goodput_tok_s=385.33 itl_p99_ms=5.09 warm_per_gb=3.295 reprefill_share=0.0008 reprefill_net_share=0.0005 out_tokens_short=0 prompt_mismatch=0 prompt_checked=34 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 515134 axon_prompt_cached_tokens_total 413757 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 1073479680 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 1365 axon_kv_ram_gpu_pages 479 axon_kv_ram_written_pages_total 1461 axon_kv_ram_spilled_pages_total 96 axon_kv_ram_restored_tokens_total 83675 axon_kv_ram_hits_total 17
+## cand-r0 16:53:53: AXON_KV_PAGES=1722 AXON_SHARE_KV=1 ./axon-c167272 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 1G
+  pool 1722 pages, --kv-gb 2.428
+requests=34 errors=0 first_error=None wall_s=46.8 prime_s=0.6 ttft_new_p50=0.038 ttft_resume_p50=None ttft_turn_p50=0.116 goodput_tok_s=385.92 itl_p99_ms=4.55 warm_per_gb=3.295 reprefill_share=0.0008 reprefill_net_share=0.0005 out_tokens_short=0 prompt_mismatch=0 prompt_checked=34 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 515134 axon_prompt_cached_tokens_total 413757 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 1073479680 axon_kv_ram_bytes 1073479680 axon_kv_ram_pinned_bytes 1073479680 axon_kv_ram_pages 1365 axon_kv_ram_gpu_pages 479 axon_kv_ram_written_pages_total 1460 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 53979 axon_kv_ram_hits_total 16 axon_kv_pages_warm 0 axon_kv_pages_shared 116 axon_prompt_shared_tokens_total 29696 axon_pages_evicted_total 0
+ROUND r0 clean
+RUN base r0: md5 e1699ebe9a33 tainted False foreign 3.2/9 errors 0 out_tok_s 385.33 itl_p99 5.09 reprefill 0.0008 ttft_resume_p50 None ttft_turn_p50 0.13 goodput 385.33 preempted 0 wall 46.8
+RUN cand r0: md5 e1699ebe9a33 tainted False foreign 2.8/14 errors 0 out_tok_s 385.92 itl_p99 4.55 reprefill 0.0008 ttft_resume_p50 None ttft_turn_p50 0.116 goodput 385.92 preempted 0 wall 46.8
+CLEAN ROUNDS 1 of 1 wanted: ['r0']
+MD5 SAME
+MEDIAN itl_p99_ms: base 5.09 cand 4.55 raw base [5.09] cand [4.55]
+MEDIAN output_tok_s: base 385.33 cand 385.92 raw base [385.33] cand [385.92]
+MEDIAN reprefill_share: base 0.0008 cand 0.0008 raw base [0.0008] cand [0.0008]
+MEDIAN reprefill_tokens: base 368 cand 368 raw base [368] cand [368]
+MEDIAN ttft_resume_p50: base None cand None raw base [None] cand [None]
+MEDIAN ttft_turn_p50: base 0.13 cand 0.116 raw base [0.13] cand [0.116]
+MEDIAN ttft_new_p50: base 0.041 cand 0.038 raw base [0.041] cand [0.038]
+MEDIAN goodput_tok_s: base 385.33 cand 385.92 raw base [385.33] cand [385.92]
+MEDIAN warm_sessions: base 8 cand 8 raw base [8] cand [8]
+MEDIAN kv_gb: base 2.428 cand 2.428 raw base [2.428] cand [2.428]
+MEDIAN warm_per_gb: base 3.295 cand 3.295 raw base [3.295] cand [3.295]
+MEDIAN kv_used_gb: base 2.129 cand 1.764 raw base [2.129] cand [1.764]
+MEDIAN warm_per_used_gb: base 3.758 cand 4.535 raw base [3.758] cand [4.535]
+MEDIAN preempted: base 0 cand 0 raw base [0] cand [0]
+BASE r0: warm 8 of 8 turn-sessions (1.000)
+CLAUSE W0 validity: main's median warm fraction 1.0 (<= 0.60): UNTESTABLE
+CLAUSE W1 warm/GB: UNTESTABLE (W0)
+CLAUSE W2 md5: PASS (1 distinct over 1 clean rounds)
+WSYSSHARE CLAUSES: W0 UNTESTABLE, W1 NOT PASSED, W2 PASS, 1 clean rounds (3 registered): NOT ALL PASS
+INFO warm_per_used_gb cand/main 1.207 (3.758, 4.535)
+INFO itl_p99_ms cand/main 0.894 (5.09, 4.55)
+INFO goodput_tok_s cand/main 1.002 (385.33, 385.92)
+INFO ttft_turn_p50 cand/main 0.892 (0.13, 0.116)
+INFO reprefill_tokens cand/main 1.0 (368, 368)
+WSYSSHARE OK
+WSYSSHARE DONE rc 0
+[axon-run 16:54:43] exit 0 after 110.3s (host bella)

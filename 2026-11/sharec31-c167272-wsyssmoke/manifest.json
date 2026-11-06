@@ -1,0 +1,29 @@
+{
+ "label": "sharec31-c167272-wsyssmoke",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1106-161219-9c15",
+   "name": "sharec31-c167272-wsyssmoke",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "c167272",
+   "binary": "bash",
+   "started": 1794001972.9302585,
+   "ended": 1794002087.1114345,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "175d5d830c140756075bc39ece8bc834352ac4a1059518915c4ed678f6e7ac19",
+   "log_bytes": 5391
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 16:54:47 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
