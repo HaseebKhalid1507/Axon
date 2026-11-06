@@ -10,8 +10,9 @@ measurements behind them.
 - **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
   free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least
   recently used. `--cache-ram`'s useful capacity is now about its size, where #166's inclusive tier held the GPU
-  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Still opt-in, default off, until bella's gate
-  (docs/design/kv-ram-tier-exclusive.md §6) says otherwise.
+  pool's pages too (useful ≈ `--cache-ram` − the pool's KV bytes). Its gate's clauses pass (design note §6; two read
+  on an RTX 4090, not bella): a 25k session evicted from the GPU resumes in 0.204 s against main's 2.834 s. Still
+  opt-in, default off: the `auto` default waits for the RAM-pinning question (note §7) and is a later change.
 - **#170: no unbounded flush.** An idle server writes its backlog in 64 MiB pieces and takes a new request between
   two, instead of one flush of every slot's backlog after a request that ran alone.
 - A slot's next turn in its own slot no longer copies its unstored pages before its first token (it gives nothing up).
