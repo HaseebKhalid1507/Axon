@@ -13,7 +13,8 @@ measurements behind them.
   index's page (`PageMap::replace`, the copy freed) and indexes the rest under it; debug builds compare the bytes
   first.
 - **#212: a preempted or unfed prefill claims the shared prefix again** when it is fed next (`refeed_claim`, as
-  admission does), instead of prefilling from token 0.
+  admission does), instead of prefilling from token 0. Those pages count in `axon_prompt_shared_tokens_total`
+  too, so with preemption it is no longer prompt tokens only (#219).
 - **#214:** `busy_pages` counts with generation stamps (no vector of every page per call); admission walks the index
   with the prompt's block keys computed once; `reclaim` passes over an idle slot whose pages are all shared (its
   release frees nothing) while another would give a page up; `release_rows` returns an error naming the page

@@ -621,7 +621,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   until room is needed: then the least recently used warm leaf goes first (with `--cache-ram`, to
   the RAM tier), before an idle slot's pages. `GET /slots` adds `pages_warm` and `pages_shared`;
   `/metrics` `axon_kv_pages_warm`, `axon_kv_pages_shared`, `axon_prompt_shared_tokens_total`
-  (prompt tokens mapped from the index) and `axon_pages_evicted_total` (warm pages given up for
+  (tokens mapped from the index: admissions' prompts, and since #216 a preempted request's tokens so far,
+  generated ones included, when it is fed again; #219) and `axon_pages_evicted_total` (warm pages given up for
   room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server under
   memory pressure.
 - `--cache-ram BYTES|auto` (default 0: off): a KV RAM tier. A conversation's KV pages (64

@@ -48,9 +48,10 @@ Round 2, head `2ce5d12` (product code `c167272`), bella (RTX 5070 Ti Laptop, sm_
 | md5 v3 vs main `2aec1e5` (axon-podjob) | PASS: gen 0 of 30 cells differ; serve 973 / 973 replies equal | 1106-160457-e00e |
 
 - The failing-first run fails where the fixes act. `serve_share_dup_swapped`: the probes' cached tokens are
-  `[448, 704]` against `[768, 704]`, 0 pages swapped (the first probe gets only the prefix's 7 pages: its suffix
-  pages were never indexed). `serve_share_pressure`: `cache-ram 0: again: cached [0, 256, 284, 0, 0, 266], 3
-  preempted or unfed, 0 refed claims`: the three refed requests prefilled from 0.
+  `[448, 704]` against `[768, 704]` (the first probe gets only the prefix's 7 pages: its suffix pages were never
+  indexed). `serve_share_pressure`: `cache-ram 0: again: cached [0, 256, 284, 0, 0, 266], 3 preempted or unfed`:
+  the three refed requests prefilled from 0. The "0 pages swapped" / "0 refed claims" in those messages prove
+  nothing: the counters aren't wired at `bc9d181`. The cached tokens carry the proof (shady).
 - md5's pressure section preempted in every undersized arm (2,000-token replies, 4 slots), so it gated #212's path:
   preempted / unfed per arm, qwen2.5-0.5b f16 at 128 pages: main 25 / 14, off 26 / 14, on 9 / 50, shuffle 10 / 51,
   tier 17 / 60; at 192: 1 / 10, 1 / 9, 1 / 22, 1 / 22, 1 / 22. Qwen3-0.6B q8 at 128: 3 / 15, 5 / 14, 3 / 45, 3 / 45,
@@ -76,6 +77,24 @@ merge path; results on #211 (subagent start) and #210 (W-sys warm/GB). A pass ma
 The W-sys script's own smoke on bella (job 1106-161219-9c15: 0.5B model, 8 sessions, a 60 s window) checked its
 plumbing with the real binaries: pool size, `/metrics`, md5, the verdict lines (W0 untestable there by design: 8
 small sessions fit whole).
+
+## Review
+- shady 8/10 SHIP-AFTER-FIXES at `bfa311e` (PR comment 6697783054): no code bug. Checked hunk by hunk against
+  `2aec1e5` that sharing off takes main's decisions (the proof dd4c is consistent with, not a proof of).
+- MUST, done: the timing handoff on the issues, since after the merge only they are read. #210 comment 6697951310,
+  #211 comment 6697951572: the registration, the lead's 19:49 UTC W-sys approval, the lead's ruling (the default
+  flip is a separate PR, clauses unchanged; in the PR body from 21:13 UTC, before the round's first timing job at
+  22:08 UTC), the candidate `c167272` with `AXON_SHARE_KV=1`, the job ids.
+- SHOULDs:
+  - `index_pages` holds index pages before `replace_pages` applies the swap; an `Err` between leaves holds the
+    slot's table doesn't map (fatal today, so nothing lingers). #218, with the nit that a refeed-only step counts
+    as `moved` (skips `unfeed_youngest` for one step).
+  - `axon_prompt_shared_tokens_total` now counts refeed claims, generated tokens included. README and CHANGELOG
+    fixed here; the field's doc comment and the HELP text are code: #219 (reword, or count refeeds apart).
+  - The failing-first messages' "0 pages swapped" / "0 refed claims" counters aren't wired at `bc9d181`: no longer
+    cited (above).
+  - Debug runs with sharing on cover only the 8 `serve_share_*` tests and the unit fuzzers: the flip PR's gate list
+    gets the debug suite with `AXON_SHARE_KV=1` (in the #210 / #211 comments).
 
 ## Lessons
 - A count a harness's client threads can reorder (preemptions, cached tokens) is not a decision gate: compare it
