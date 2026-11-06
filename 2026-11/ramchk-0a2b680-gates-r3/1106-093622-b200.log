@@ -1,0 +1,82 @@
+[axon-run 09:36:22] submitted 1106-093622-b200 by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail6 hybrid::tests::hybrid_ram_refused_before_the_upload hybrid::tests::hybrid_ram_check_on_real_splits hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu gguf::tests::release_gain model::ram_dense_tests safetensors::tests::tiny_fp8_ram --nocapture
+[axon-run 09:59:05] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 09:59:05] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 09:59:05] scope axon-job-1106-093622-b200-1793977145.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20000 MB): an OOM here kills only this job
+[axon-run 09:59:05] job 1106-093622-b200 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-093622-b200-1793977145 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail6 hybrid::tests::hybrid_ram_refused_before_the_upload hybrid::tests::hybrid_ram_check_on_real_splits hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu gguf::tests::release_gain model::ram_dense_tests safetensors::tests::tiny_fp8_ram --nocapture --test-threads 6
+axon-q 09:59:06 start slot 16-23: /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail6 hybrid::tests::hybrid_ram_refused_before_the_upload hybrid::tests::hybrid_ram_check_on_real_splits hybrid::tests::hybrid_ram_check_every_layer
+
+running 15 tests
+test model::ram_dense_tests::affinity_cpus_counts_the_mask ... ok
+test model::ram_dense_tests::copy_estimate_independent_of_threads ... ok
+test model::ram_dense_tests::copied_load_commits_what_every_schedule_holds ... ok
+qwen3: r8 arena 2 MiB (head 0 MiB tied, largest layer matrix 0 MiB, growth 0 MiB), KV 1 KiB a position, file 0 MiB
+
+thread 'model::ram_dense_tests::dense_need_and_refusal_wording' (1051761) panicked at src/model.rs:6404:13:
+"memory.max 400 MiB); to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N part of it), or --ctx 768 or less (its KV cache then fits)" not in qwen3: the CPU model needs about 0.37 GiB of RAM (its repacked weights 0.37 GiB, the KV cache of 1000 tokens 0.00 GiB) and only 0.33 GiB is available (bound by cgroup /app.slice/job.scope memory.max 400 MiB)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test model::ram_dense_tests::dense_need_and_refusal_wording ... FAILED
+llama: r8 arena 2 MiB (head 0 MiB tied, largest layer matrix 0 MiB, growth 0 MiB), KV 1 KiB a position, file 0 MiB
+test model::ram_dense_tests::dense_need_head_and_growth ... ok
+test gguf::tests::release_gain_is_what_release_drops ... ok
+
+thread 'model::ram_dense_tests::long_ctx_warns_not_refuses' (1051784) panicked at src/model.rs:6448:9:
+llama: the CPU model needs about 5.60 GiB of RAM (its repacked weights 4.60 GiB, the KV cache of 8192 tokens 1.00 GiB) and only 5.00 GiB is available (bound by host MemAvailable)
+test model::ram_dense_tests::long_ctx_warns_not_refuses ... FAILED
+qwen3: 2 layers, half (k=1) arena 2 MiB of 2 MiB, KV 512 of 1024 B a position
+llama: 2 layers, half (k=1) arena 2 MiB of 2 MiB, KV 512 of 1024 B a position
+test hybrid::tests::hybrid_ram_check_every_layer_on_the_cpu ... ok
+
+thread 'model::ram_dense_tests::split_refusal_wording_and_cap' (1051883) panicked at src/model.rs:6679:13:
+"memory.max 3072 MiB); to fit: more --gpu-layers than 16 (fewer layers on the CPU), if the GPU has room" not in llama: the CPU half of the split (16 of 32 layers) needs about 2.84 GiB of RAM (its repacked weights 2.34 GiB, the KV cache of 8192 tokens 0.50 GiB) and only 1.00 GiB is available (bound by cgroup /app.slice/split.scope memory.max 3072 MiB)
+test model::ram_dense_tests::split_refusal_wording_and_cap ... FAILED
+
+thread 'safetensors::tests::tiny_fp8_ram_arena_without_repack' (1051884) panicked at src/safetensors_tests.rs:1583:13:
+assertion `left == right` failed: repack false k=1
+  left: 0
+ right: 2097152
+test safetensors::tests::tiny_fp8_ram_arena_without_repack ... FAILED
+qwen2.5-0.5b: r8 arena 376 MiB (head 137 MiB, largest layer matrix 3 MiB, growth 0 MiB), KV 12 KiB a position, file 468 MiB
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+qwen3-0.6b: r8 arena 604 MiB (head 157 MiB tied, largest layer matrix 3 MiB, growth 0 MiB), KV 112 KiB a position, file 609 MiB
+
+thread 'hybrid::tests::hybrid_ram_refused_before_the_upload' (1051756) panicked at src/hybrid/tests.rs:1744:5:
+assertion `left == right` failed: tensors released when the RAM was read
+  left: Some(146)
+ right: Some(0)
+test hybrid::tests::hybrid_ram_refused_before_the_upload ... FAILED
+qwen2.5-0.5b: 24 layers, half (k=12) arena 122 MiB of 376 MiB, KV 6144 of 12288 B a position
+fp8 0.5b, repack true, 1 of 24 layers on the CPU: arena 16 MiB (largest matrix 4389 KiB, growth 455 KiB)
+llama-3.2-1b: r8 arena 776 MiB (head 205 MiB tied, largest layer matrix 13 MiB, growth 12 MiB), KV 32 KiB a position, file 770 MiB
+
+thread 'hybrid::tests::hybrid_ram_check_on_real_splits' (1051755) panicked at src/hybrid/tests.rs:1645:34:
+models/qwen2.5-0.5b-q4_k_m.gguf k=23: built 35651585 bytes short
+test hybrid::tests::hybrid_ram_check_on_real_splits ... FAILED
+gemma3-1b: r8 arena 1014 MiB (head 306 MiB tied, largest layer matrix 8 MiB, growth 0 MiB), KV 26 KiB a position, file 1019 MiB
+fp8 0.5b, repack true, 12 of 24 layers on the CPU: arena 176 MiB (largest matrix 4389 KiB, growth 5460 KiB)
+test model::ram_dense_tests::dense_arena_matches_the_built_arena ... ok
+fp8 0.5b, repack true, 24 of 24 layers on the CPU: arena 352 MiB (largest matrix 4389 KiB, growth 10920 KiB)
+qwen3-0.6b: 28 layers, half (k=14) arena 224 MiB of 604 MiB, KV 57344 of 114688 B a position
+
+thread 'model::ram_dense_tests::fp8_arena_counted_without_repack' (1051779) panicked at src/model.rs:6619:17:
+assertion `left == right` failed: repack false k=1
+  left: 0
+ right: 16777216
+test model::ram_dense_tests::fp8_arena_counted_without_repack ... FAILED
+llama-3.2-1b: 16 layers, half (k=8) arena 286 MiB of 776 MiB, KV 16384 of 32768 B a position
+gemma3-1b: 26 layers, half (k=13) arena 354 MiB of 1014 MiB, KV 13312 of 26624 B a position
+test model::ram_dense_tests::split_need_matches_the_built_cpu_half ... ok
+
+failures:
+
+failures:
+    hybrid::tests::hybrid_ram_check_on_real_splits
+    hybrid::tests::hybrid_ram_refused_before_the_upload
+    model::ram_dense_tests::dense_need_and_refusal_wording
+    model::ram_dense_tests::fp8_arena_counted_without_repack
+    model::ram_dense_tests::long_ctx_warns_not_refuses
+    model::ram_dense_tests::split_refusal_wording_and_cap
+    safetensors::tests::tiny_fp8_ram_arena_without_repack
+
+test result: FAILED. 8 passed; 7 failed; 0 ignored; 0 measured; 866 filtered out; finished in 3.51s
+
+[axon-run 09:59:09] exit 101 after 3.7s (host bella)

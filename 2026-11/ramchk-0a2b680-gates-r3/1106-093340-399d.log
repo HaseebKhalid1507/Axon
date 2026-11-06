@@ -1,0 +1,23 @@
+[axon-run 09:33:40] submitted 1106-093340-399d by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-nocredit2 hybrid::tests::hybrid_ram_refused_before_the_upload --nocapture
+[axon-run 09:48:27] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 09:48:27] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 09:48:27] scope axon-job-1106-093340-399d-1793976507.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 19991 MB): an OOM here kills only this job
+[axon-run 09:48:27] job 1106-093340-399d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-093340-399d-1793976507 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-nocredit2 hybrid::tests::hybrid_ram_refused_before_the_upload --nocapture --test-threads 6
+axon-q 09:48:27 start slot 16-23: /home/haseeb/.cache/axon-ramchk/bin/axon-test-nocredit2 hybrid::tests::hybrid_ram_refused_before_the_upload --nocapture --test-threads 6
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'hybrid::tests::hybrid_ram_refused_before_the_upload' (939351) panicked at src/hybrid/tests.rs:1794:64:
+at the edge: "qwen3: the CPU half of the split (27 of 28 layers) needs about 0.23 GiB of RAM (repacking the copy 0.00 GiB, the KV cache of 2048 tokens 0.21 GiB, the GPU half's upload staging 0.02 GiB) and only 0.18 GiB is available (bound by host MemAvailable); to fit: more --gpu-layers than 1 (fewer layers on the CPU), if the GPU has room, or --ctx 1792 or less (its KV cache then fits)"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hybrid::tests::hybrid_ram_refused_before_the_upload ... FAILED
+
+failures:
+
+failures:
+    hybrid::tests::hybrid_ram_refused_before_the_upload
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 880 filtered out; finished in 0.67s
+
+[axon-run 09:48:28] exit 101 after 0.8s (host bella)
