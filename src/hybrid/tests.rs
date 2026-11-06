@@ -1617,9 +1617,10 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
 /// split) and goes ahead at the edge, the tolerance under its need. One
 /// that needs less (the 0.5B's last layer, 12 MiB and the 16 MiB ring
 /// against 34 MiB on 8 CPUs) is refused by no RAM figure, so it's built
-/// with 0 bytes available: the check doesn't refuse it. The largest half (one GPU layer) must be past the tolerance on every
-/// model, so the refusal is shown on each, whatever the CPU count. All of
-/// it on the GPU (no CPU half) never reads the RAM.
+/// with 0 bytes available: the check doesn't refuse it. The largest half
+/// (one GPU layer) must be past the tolerance on every model, so the
+/// refusal is shown on each, whatever the CPU count. All of it on the GPU
+/// (no CPU half) never reads the RAM.
 #[test]
 fn hybrid_ram_check_on_real_splits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1699,7 +1700,15 @@ fn hybrid_ram_check_on_real_splits() {
 /// n/2). Its need counts the upload's staging ring (16 MiB for the 0.5B's
 /// GPU half). On a copy of the file the GPU half's bytes, which go back as
 /// they go up, are credited: refused a byte under the edge and built at
-/// it, the credit no more than those bytes.
+/// it, the credit no more than those bytes. A copy's CPU half commits only
+/// its growth, one matrix in flight and its KV (`dense_load_bytes`), so the
+/// credit must stay under that for the edge to exist: not the 0.5B, whose
+/// untied 138 MiB head goes up with any GPU half (at 12/24 and ctx 512, ~6
+/// MiB against ~250 MiB: the need is the ring alone, under the tolerance,
+/// and nothing can refuse it; bella 1106-084830-8699). Qwen3-0.6B (tied
+/// head) at one GPU layer and ctx 2048: a 16 MiB credit against ~220 MiB
+/// (its KV, 4 KiB a layer a position), so the edge moves with both terms:
+/// without the credit the build at the edge is refused.
 #[test]
 fn hybrid_ram_refused_before_the_upload() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1747,10 +1756,18 @@ fn hybrid_ram_refused_before_the_upload() {
     let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
     assert_eq!(staging, 16 << 20);
     // A copy: a fresh one per build (a build hands its bytes back).
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(M05);
+    let Some(q) = mapped(Q3) else {
+        return;
+    };
+    let n = block_count(&q).unwrap();
+    drop(q);
+    let (gl, ctx) = (1, 2048);
+    let k = n - gl;
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(Q3);
     let copy = || crate::gguf::load_with(p.to_str().unwrap(), Some(true)).unwrap();
     let c = copy();
     assert!(!c.file_backed());
+    let staging = CudaQwen2::upload_staging(&g, &km, &c, k, CacheKv::F16, sb).unwrap();
     let freed = c.release_gain(&|t| gpu_part(&t.name, k, n));
     let gpu_bytes: u64 = (c.tensors.iter())
         .filter(|t| gpu_part(&t.name, k, n))
@@ -1761,21 +1778,30 @@ fn hybrid_ram_refused_before_the_upload() {
         "credit {freed} of {gpu_bytes}"
     );
     let need = half_need(Some((&g, &km)), &c, k, ctx);
-    let short = need
-        .checked_sub(tol + 1)
-        .expect("the half past the tolerance");
-    assert!(build_at(Some((&g, &km)), &c, ctx, gl, short).is_err());
+    let cpu = half_need(None, &c, k, ctx);
+    assert!(
+        staging > 0 && freed < cpu && need > tol,
+        "{k}-layer CPU half, a copy: need {need} (the CPU half {cpu}, staging {staging}, \
+         credit {freed}), tolerance {tol}"
+    );
+    let short = need - tol - 1;
+    assert!(
+        build_at(Some((&g, &km)), &c, ctx, gl, short).is_err(),
+        "built a byte under the edge"
+    );
     drop(c);
     let c = copy();
     let h = build_at(Some((&g, &km)), &c, ctx, gl, need - tol).expect("at the edge");
-    assert_half_is_the_estimate(&h, &c, ctx, "0.5b copy");
+    assert_half_is_the_estimate(&h, &c, ctx, "qwen3-0.6b copy");
     eprintln!(
-        "0.5b {gl}/{n} on the GPU, a copy: need {} MiB (staging {} MiB, the copy's credit {} \
-         MiB of the GPU half's {} MiB)",
+        "qwen3-0.6b {gl}/{n} on the GPU, a copy, ctx {ctx}: need {} MiB (the CPU half {} MiB, \
+         staging {} MiB, the copy's credit {} MiB of the GPU half's {} MiB), tolerance {} MiB",
         need >> 20,
+        cpu >> 20,
         staging >> 20,
         freed >> 20,
-        gpu_bytes >> 20
+        gpu_bytes >> 20,
+        tol >> 20
     );
 }
 
