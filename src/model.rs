@@ -833,8 +833,10 @@ pub(crate) struct DenseNeed {
     /// The largest layer matrix's share.
     pub largest: u64,
     /// What the repacked forms take beyond the bytes they replace, summed
-    /// (a copy hands the replaced bytes back), a tied head's left out (it
-    /// is counted whole: its replaced bytes stay).
+    /// (a copy hands the replaced bytes back; a file mapping's are page
+    /// cache, so a matrix read from one, an FP8 checkpoint's, counts whole),
+    /// a tied head's left out (it is counted whole: its replaced bytes
+    /// stay).
     pub growth: u64,
     /// KV cache bytes a position (K and V rows of every layer).
     pub kv_per_pos: u64,
@@ -893,8 +895,13 @@ pub(crate) fn dense_ram_need_keep(m: &Model, repack: bool, kv_elem: u64, keep: u
             true => need.head = len,
             false => need.largest = need.largest.max(len),
         }
+        // What the build adds: the slot, less the source's bytes when
+        // they're anonymous (`release` hands them back). A file mapping's
+        // (an FP8 checkpoint's matrices, #209) are page cache: the whole
+        // slot is new.
         if !(head && tied) {
-            need.growth += len.saturating_sub(t.n_bytes);
+            let freed = if m.anonymous(t) { t.n_bytes } else { 0 };
+            need.growth += len.saturating_sub(freed);
         }
     }
     need.arena = need.arena.next_multiple_of(2 << 20);

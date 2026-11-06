@@ -1566,7 +1566,8 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
 /// tiny FP8 model's arena with the repack off too, as the one `Qwen2::
 /// new_layers` builds (`build_skip` gives every F8_E4M3 matrix a slot, its
 /// F8S rows, either way); it used to be 0 then. A CPU half (1 of 2 layers),
-/// the whole model, and more layers than it has.
+/// the whole model, and more layers than it has. A CPU half's growth is its
+/// arena (#209).
 #[test]
 fn tiny_fp8_ram_arena_without_repack() {
     use crate::model::{Qwen2, dense_ram_need_keep};
@@ -1585,6 +1586,21 @@ fn tiny_fp8_ram_arena_without_repack() {
                 built.next_multiple_of(2 << 20),
                 "repack {repack} k={keep}"
             );
+            // #209: the F8S rows are all new memory (their source is the
+            // file's page cache, which nothing hands back): a CPU half's
+            // (no head) growth is at least its e4m3 bytes. It was their
+            // scales alone.
+            if keep == 1 {
+                let e4m3: u64 = (m.tensors.iter())
+                    .filter(|t| t.layer == 0 && t.qtype.id == crate::quant::fp8::F8_E4M3)
+                    .map(|t| t.n_bytes)
+                    .sum();
+                assert!(
+                    e4m3 > 0 && need.growth >= e4m3 && need.growth <= need.arena,
+                    "repack {repack}: growth {} for {e4m3} e4m3 bytes",
+                    need.growth
+                );
+            }
         }
     }
 }
