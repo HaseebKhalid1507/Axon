@@ -282,6 +282,16 @@ pub struct Metrics {
     /// either: it rides here as `tier_faults` does.
     #[cfg(test)]
     pub unindexed: AtomicU64,
+    /// Tests: duplicate pages a slot gave up for the index's page of the
+    /// same block (`Batch::index_pages`, #213). As `unindexed`.
+    #[cfg(test)]
+    pub swapped: AtomicU64,
+    /// Tests: refed prefills (preempted or unfed) that claimed a prefix
+    /// again, and its tokens (`Batch::refeed_claim`, #212). As `unindexed`.
+    #[cfg(test)]
+    pub refeed_claims: AtomicU64,
+    #[cfg(test)]
+    pub refeed_tokens: AtomicU64,
 }
 
 impl Metrics {
@@ -331,6 +341,12 @@ impl Default for Metrics {
             tier_faults: Default::default(),
             #[cfg(test)]
             unindexed: AtomicU64::new(0),
+            #[cfg(test)]
+            swapped: AtomicU64::new(0),
+            #[cfg(test)]
+            refeed_claims: AtomicU64::new(0),
+            #[cfg(test)]
+            refeed_tokens: AtomicU64::new(0),
             sched: Mutex::default(),
         }
     }

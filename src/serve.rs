@@ -2239,6 +2239,21 @@ impl Server {
     pub fn unindexed(&self) -> u64 {
         self.sh.metrics.unindexed.load(Ordering::Relaxed)
     }
+
+    /// Duplicate pages swapped for the index's so far (`Metrics::swapped`).
+    pub fn swapped(&self) -> u64 {
+        self.sh.metrics.swapped.load(Ordering::Relaxed)
+    }
+
+    /// Refed prefills that claimed a prefix again, and its tokens
+    /// (`Metrics::refeed_claims`, `refeed_tokens`).
+    pub fn refeed_claims(&self) -> (u64, u64) {
+        let m = &self.sh.metrics;
+        (
+            m.refeed_claims.load(Ordering::Relaxed),
+            m.refeed_tokens.load(Ordering::Relaxed),
+        )
+    }
 }
 
 impl Server {
