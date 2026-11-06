@@ -60,8 +60,19 @@ the upload with no GPU-half terms (main's order).
   at it. A credit larger than the CPU half doesn't pay for the ring.
 - `hybrid::tests::hybrid_ram_refused_before_the_upload` (GPU, the 0.5B at 12/24): refused with no RAM. When the RAM
   is read, 0 tensors have been released (each goes back right after its upload), and none after the refusal. At main's
-  order, 12 layers' worth are. The message names the 16 MiB ring. On a copy, the credit is positive and at most the
-  GPU half's bytes, refused a byte under the edge and built at it.
+  order, 12 layers' worth are. The message names the 16 MiB ring. Then a copy of Qwen3-0.6B at one GPU layer and ctx
+  2048: the credit is positive and at most the GPU half's bytes, and the half is refused a byte under the edge and
+  built at it. The credit (one layer, ~16 MiB) is less than the CPU half's need (~220 MiB, mostly its KV floor), so
+  the edge moves with both terms. A mutant with no credit (`freed: 0`) is refused at the edge; without the ring the
+  message check above fails.
+  - The first version did the copy on the 0.5B at 12/24 and ctx 512, and failed on bella (1106-084830-8699, "the
+    half past the tolerance"). The test was wrong, not the check. On a copy, a CPU half commits only its growth, one
+    matrix in flight and its KV (`dense_load_bytes`): ~6 MiB there. The credit was ~250 MiB: 12 layers plus the
+    0.5B's untied 138 MiB head, which goes up with any GPU half. That left the 16 MiB ring, under bella's 38 MiB
+    tolerance (32 MiB + 24 CPUs x 256 KiB), so no RAM figure could refuse that half. By the same figures no split of a
+    copied 0.5B (f16 KV) can be refused: its largest CPU half (one GPU layer, the KV floor at 8192) is ~95 MiB against
+    a ~147 MiB credit, and both are real (the head's copy goes back as it's uploaded). The test now checks its premise (ring > 0, credit < the CPU half, need > tolerance) and prints the
+    figures.
 - `gguf::tests::release_gain_is_what_release_drops` (Linux, mincore): on an anonymous model, the resident bytes that
   releasing a run of four 1.5 MiB tensors and one apart drops equal `release_gain`, and it's 0 on a file mapping.
 - `hybrid::tests::hybrid_ram_check_on_real_splits`: the edge now includes the ring. At main's order it builds one
