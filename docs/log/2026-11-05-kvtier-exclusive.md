@@ -202,9 +202,7 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
   so its next tail spill copies the whole chain again, before the request's first token. 8,025 spilled pages a run is
   ≈ 2.3 s of copies at 0.286 ms (ESTIMATED), to restore ≈ 246 pages' worth of tokens.
 - This is the rest of a41d028's defect. That fix skips a spill that gives up nothing; a spill that gives up one page
-  still copies the chain. A possible fix, not built: a spill copies the pages it gives up only when their parent is
-  stored, and otherwise drops them as main does (a reclaim keeps nothing, so it still copies the whole chain). It
-  would need the s1 and s4 cells again.
+  still copies the chain. Fixed in e1df27a (below), the s1 and s4 cells rerun.
 - Against the resume cell's 13.9×: the win comes when the session was evicted (a169), the cost when it wasn't. On a
   24 GB card at s1 almost nothing is evicted (main re-prefills 21,291 tokens in 10 min), so the copies are mostly
   cost. On bella the pool is short and restores dominate (2d32: resume p50 0.746 → 0.267 s). Bella pays the same
@@ -223,10 +221,36 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     88 ms outside the copies, scaled by bella / 4090 (1.73× the decode step, 3.06× the full prefill, f763 vs a169),
     plus 414 pages at 28 or 7 GB/s. So the 4090 does not settle bella's ≤ 0.3 s. Rerunning the cell on bella takes
     ≈ 20 min.
-  - The tail spill (above): `auto` would put it on every large-VRAM server, where it is mostly cost.
+  - The tail spill (above): `auto` would have put it on every large-VRAM server, where it is mostly cost. Fixed in
+    e1df27a, gates rerun (below).
+
+## The tail-spill fix (e1df27a) and one more gate round (the lead's ruling, 11-05 ~21:00)
+- **The rule.** A spill stores the pages a slot gives up only if the page before them is stored, in the slot's keys
+  or by another sequence (`Tier::orphans`, a `peek_len` walk with no LRU change). Otherwise it drops them, as with
+  no tier. It never copies a page the slot keeps. A reclaim (`keep` 0) gives up everything, so it still stores the
+  whole chain; a41d028's give-nothing-up case is the same rule's limit.
+- **Bits.** A dropped page is just not stored, and restores read stored pages only, so replies stay main's bits (the
+  serve test below compares; the md5 gates check).
+- **What dropping can cost.** With the kept prefix unstored, everything the slot gives up is dropped, not only a
+  reply's tail: a different conversation admitted to a slot that shares only a system prompt with the old one loses
+  the old one's pages, unless that prompt is stored. Shared pages usually are: a stored page with children is
+  evicted only after them. The rerun's s1 / s4 re-prefill tokens measure it; the resume cell's session is evicted by
+  reclaims (`keep` 0), which still store everything.
+- **Tests.** `tier::tests::spill_orphans` (the rule: kept pages stored, another sequence's parent, the s1 case after
+  eviction, a reclaim), and the fuzz's admissions now spill by it, `check` after each.
+  `serve::tests::serve_cuda_cache_ram_tail_spill`: (a) the write-behind starved, P's reply ends a page past X, and Q
+  (X, then other text) gives up 1 page. It must copy nothing; fc7bb13 copies the whole chain. (b) X stored by the
+  idle flush, then starved: Q2 gives up P2's pages under X's stored last page, which alone are stored, and R (P2's
+  next turn) restores them. Every reply == `--cache-ram 0`'s.
+- **Before / after (bella):** the test on fc7bb13 + the test alone, 1105-205357-b9a0 (expected FAIL at (a)); at
+  e1df27a with every `cache_ram` serve test, 1105-205358-67e4. PENDING.
+- **The gate round** at the head with main merged: release + debug suites, md5 vs main, s4 (bella), s1 and the resume
+  cell (4090), and bella's resume cell (`--timing bella`, no fallback: the number the `auto` flip needs). The bar
+  for the fix (the lead's): s1 resume p50 ≤ ≈ 1.10× main with re-prefill tokens still well below main's, and the
+  resume cell's 13.9× unchanged. PENDING.
 
 ## What didn't work
 - 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
   rounds were VOID; fixed in fe5117d.
 - 2d32: Xorg load on bella tainted 3 candidate runs. SHORT, 2 clean rounds of 3; rerun as c76b.
-- a41d028 fixed only half of the next-turn spill: one given-up page still copies the whole chain (above).
+- a41d028 fixed only half of the next-turn spill: one given-up page still copied the whole chain (above; e1df27a).

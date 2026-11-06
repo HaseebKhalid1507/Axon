@@ -199,6 +199,12 @@ price of a tree store, and the plan's fallback has it too. A gauge exposes it (�
   987 MB: ≈ 35 ms at 28 GB/s, ≈ 0.14 s in the slow mode's 7.1 GB/s) before its first token, evicting class 0 and
   then class 1 to hold duplicates of rows the GPU keeps. A partial give-up still copies the kept parents, because a stored page needs its stored parent.
   (DECISION, the lead, 11-05: yes, in scope; fixed in a41d028, not stopped for.)
+  **The gate's change (e1df27a, the lead's ruling after §14's read):** the partial give-up was the larger half. A
+  next turn whose prompt doesn't carry its reply gives up the reply's tail page, and with the tier full its chain's
+  class-0 copies are the first that other spills evict, so that spill copied the whole chain again (c76b on a 4090:
+  s1 resume p50 +26 ms). Now a spill stores the pages it gives up only if the page before them is stored (in the
+  slot's keys or another sequence's: `Tier::orphans`), else drops them, as with no tier: it never copies a page the
+  slot keeps. A reclaim (`keep` 0) gives up everything and still stores the whole chain.
 - **Steady state (Fable's H1, shady's M4).** These are the facts the design has to live with:
   1. **The tier fills early.** The working set (5,164 pages) is ≫ the tier (1,755). A page is copied the first time
      the GPU holds it, so the tier fills once ≈ 1,755 / 5,164 = 34 % of the distinct pages have been computed, about
@@ -861,3 +867,4 @@ tier ≈ 170, engine/serve ≈ 80, ops ≈ 20. The tests are most of it (≈ 600
 | The five clauses PASS: s4 28ee (bella), s1 c76b and the resume cell a169 on an RTX 4090 (the lead's reroute; §7 says bella only, so 4090 numbers). The rule's outcome, `auto`, is not this PR's (§7, §10.3: Haseeb's Q2) | log, "Verdict" |
 | Bella's resume cell on the exclusive tier: unmeasured, ESTIMATED 0.21–0.32 s (fast copy mode), 0.37–0.49 s (slow) | log, "Verdict" |
 | §2.3's next-turn spill: a41d028 skips one that gives up nothing; one that gives up a page still copies the slot's whole unstored chain (`write_pages` from `stored(s)`): c76b's s1 resume p50 +26 ms on the 4090 | log, "The s1 TTFT-resume p50" |
+| The lead's ruling: fix it in this PR (e1df27a: a spill stores what it gives up only under a stored parent, §2.3), merge main, then one gate round at the new head, bella's resume cell included (`--timing bella`, no fallback) | log, "The tail-spill fix" |

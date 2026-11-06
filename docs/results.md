@@ -331,7 +331,7 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   what the GPU doesn't; [note](design/kv-ram-tier-exclusive.md)): its gate's clauses pass, two of them read on an
   RTX 4090 rather than bella (a 25k session evicted from the GPU resumes in 0.204 s vs main's 2.834 s, 1105-191445-a169).
   Still opt-in: `auto` waits for the RAM-pinning question, and bella's resume cell is unmeasured on the exclusive
-  tier (ESTIMATED 0.21–0.32 s). Known cost: a next turn that gives up its reply's tail re-copies its whole chain
-  first (≈ 73 ms per 16k tokens on the 4090; [log](log/2026-11-05-kvtier-exclusive.md)).
+  tier (ESTIMATED 0.21–0.32 s). A next turn that gave up its reply's tail re-copied its whole chain first (≈ 73 ms
+  per 16k tokens on the 4090); fixed in the PR, its gates rerun ([log](log/2026-11-05-kvtier-exclusive.md)).
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

@@ -15,9 +15,10 @@ measurements behind them.
   opt-in, default off: the `auto` default waits for the RAM-pinning question (note §7) and is a later change.
 - **#170: no unbounded flush.** An idle server writes its backlog in 64 MiB pieces and takes a new request between
   two, instead of one flush of every slot's backlog after a request that ran alone.
-- A slot's next turn in its own slot no longer copies its unstored pages before its first token when it gives nothing
-  up. Known: one that gives up a page (its reply's tail, when the next prompt doesn't carry the reply) still copies
-  its whole unstored chain first, ≈ 73 ms per 16k tokens on an RTX 4090 (docs/log/2026-11-05-kvtier-exclusive.md).
+- A conversation's next turn no longer copies the pages its slot keeps before its first token. A spill stores what
+  the slot gives up only under a stored parent, and drops it otherwise, as with no tier. Before, a turn that gave up
+  its reply's tail page copied its whole unstored chain first, ≈ 73 ms per 16k tokens on an RTX 4090
+  (docs/log/2026-11-05-kvtier-exclusive.md).
 - `/metrics`: `axon_kv_ram_gpu_pages`, `axon_kv_ram_spilled_pages_total`. `AXON_SERVE_TRACE`'s step lines carry the
   tier's copies (`spilled`/`spill_ms`, `restored`/`restore_ms`, `wb`/`wb_ms`).
 - Default flags reach none of it: md5 vs main at default flags is unchanged (gen and serve), and the tier's own
