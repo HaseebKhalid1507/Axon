@@ -406,12 +406,14 @@ reasoning can loop.
 **Memory limits (CPU).** Before a model is built for the CPU, its repacked weights and the KV cache of the
 first 8192 tokens (or `--ctx`, if shorter) are checked against the RAM available: the host's `MemAvailable`,
 or the room under the tightest cgroup memory limit (a container, a systemd scope). A model that can't fit is
-refused with a message naming the binding limit, instead of being OOM-killed. A longer `--ctx` whose full KV
-cache wouldn't fit only prints a note: that cache is taken as the context fills. Mixture-of-experts models
-have the same check for their experts. The CPU half of a `--gpu-layers` split has it too, for its layers and
-their KV cache, checked after the GPU half has loaded. A split that streams prefill through the GPU page-locks
-the CPU layers' whole KV cache when the cache is made; if the RAM available can't hold that, the cache doesn't
-stream (a note says so) and the run goes on at CPU prefill speed.
+refused with a message naming the binding limit and the ways out (a GPU, more `--gpu-layers`, or the longest
+`--ctx` that fits), instead of being OOM-killed. A longer `--ctx` whose full KV cache wouldn't fit only prints a
+note: that cache is taken as the context fills. Mixture-of-experts models have the same check for their experts.
+The CPU half of a `--gpu-layers` split has it too, for its layers and their KV cache, checked before the GPU
+half's upload, with the upload's page-locked staging (up to 64 MiB) counted; when the model file was copied
+into RAM, the GPU half's share of the copy, which goes back as it's uploaded, is credited. A split that streams
+prefill through the GPU page-locks the CPU layers' whole KV cache when the cache is made; if the RAM available
+can't hold that, the cache doesn't stream (a note says so) and the run goes on at CPU prefill speed.
 
 ### Serving: `axon serve`
 
