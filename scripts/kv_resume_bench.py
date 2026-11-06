@@ -22,7 +22,9 @@ pages; above that nothing pushed it out, and "resume" timed a prefix-cache hit
 - Pressure: after the `--others` sessions (hashed, as before), unhashed
   pressure sessions (seeds 200+) are sent until the floor page counts of the
   session and everything after it exceed the pool the server logged
-  ("KV: N pages x P"), so the LRU must have pushed the session out.
+  ("KV: N pages x P"), so the LRU must have pushed the session out (at most
+  pool / a session's pages + 1 of them, 8 at least: a fixed 8 was short of
+  a 24 GB card's pool, 1105-124636-68e9).
 - Check: the GPU's own prefix-cache hit on the resume, `resume_cached` minus
   the tier's restored tokens over that request, must be 0, and a resume with
   nothing cached must take at least half the first turn's time (a cold
@@ -281,8 +283,13 @@ def one_round(name, path, extra, env, a, port, rnd):
                 md5.update(r.encode())
             # Pressure: more sessions (not hashed: their count follows the
             # pool) until the session and what came after it can't all fit.
-            extra = 0
-            while pool and kept <= pool[0] and extra < 8:
+            # Their cap follows the pool too: each keeps about a session's
+            # pages, so the pool never needs more than pool / that + 1 of
+            # them (8 at least, as before). A fixed 8 stopped short on a
+            # 24 GB card: 5,288 pages, 12 sessions kept 4,959, nothing was
+            # evicted and every round was VOID (1105-124636-68e9, RTX 4090).
+            extra, most = 0, max(8, pool[0] // max(1, kept_pages(ua, page)) + 1) if pool else 0
+            while pool and kept <= pool[0] and extra < most:
                 _, u = complete(port, text(200 + extra, nw), 64)
                 kept += kept_pages(u, page)
                 extra += 1
