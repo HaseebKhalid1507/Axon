@@ -1,0 +1,29 @@
+{
+ "label": "kvexcl-9829783-resume-bella-r4",
+ "verdict": "ALL PASS; TAINTED timing",
+ "jobs": [
+  {
+   "job": "1106-051210-8062",
+   "name": "kvexcl-9829783-resume-bella-r4",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=99% mean=9.0%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1793960050.5405347,
+   "ended": 1793961298.3155344,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=99% mean=9.0%",
+   "redactions": {},
+   "log_sha256": "56af8b85ba86c5b387f55042d4f3328563be0f0eb15cf79a6ee2493951bbd14e",
+   "log_bytes": 19562
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 05:35:00 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
