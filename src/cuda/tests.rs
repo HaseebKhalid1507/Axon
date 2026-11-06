@@ -395,9 +395,8 @@ fn fast_define_in_the_options() {
 }
 
 /// A fast module is its own NVRTC cache entry (the define is in the key):
-/// exact and fast each miss once, then hit, and each knows its mode;
-/// kvsave's `numerics_tag` tells them apart, and exact's is main's
-/// (KERNELS and KERNEL_OPTS, nothing added).
+/// exact and fast each miss once, then hit, and each knows its mode and
+/// its own `src_hash` (kvsave's `numerics_tag` tells them apart).
 #[test]
 fn gpu_fast_module_own_cache_entry() {
     use crate::numerics::Numerics;
@@ -410,20 +409,64 @@ fn gpu_fast_module_own_cache_entry() {
         let (m, st) = Module::load_in(&g, IOTA, &opts, Some(&dir.0)).unwrap();
         run_iota(&g, &m);
         assert_eq!(m.fast(), n == Numerics::Fast);
-        st
+        assert_eq!(m.src_hash(), super::module_hash(IOTA, &opts));
+        (st, m.src_hash())
     };
-    assert_eq!(load(Numerics::Exact), CacheStatus::Miss);
-    assert_eq!(load(Numerics::Fast), CacheStatus::Miss, "fast: its own key");
-    assert_eq!(load(Numerics::Exact), CacheStatus::Hit);
-    assert_eq!(load(Numerics::Fast), CacheStatus::Hit);
-    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
-    let (e, f) = (
-        super::numerics_tag(&g, false).unwrap(),
-        super::numerics_tag(&g, true).unwrap(),
+    let (e, f) = (load(Numerics::Exact), load(Numerics::Fast));
+    assert_eq!(
+        (e.0, f.0),
+        (CacheStatus::Miss, CacheStatus::Miss),
+        "fast: its own key"
     );
-    assert_ne!(e, f);
-    let main = super::fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
-    assert!(e.starts_with(&format!("kernels {main:032x} ")), "{e}");
+    assert_eq!(load(Numerics::Exact), (CacheStatus::Hit, e.1));
+    assert_eq!(load(Numerics::Fast), (CacheStatus::Hit, f.1));
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
+    let tag = |h| super::numerics_tag(&g, h).unwrap();
+    assert_ne!(tag(e.1), tag(f.1));
+}
+
+/// #196: kvsave's GPU identity is the module the net runs, every source
+/// and option of it (`module_spec`'s, as `module_for_mode` loads it). The
+/// plain module's, every dense GGUF without an extra type, is main's tag
+/// before #196 in both modes (`numerics_tag_pre196`: KERNELS and
+/// KERNEL_OPTS whatever ran), so their saved sessions restore as bytes.
+/// Every other module has its own: the extra types' (KERNEL_OPTS_EXT),
+/// fp8.cu's (KERNELS_F8, F8_DEFINE), oss.cu's (KERNELS_OSS), which main
+/// tagged as the plain module's; a byte of source or an option more moves
+/// it. No GPU: the hashes are what the tag prints.
+#[test]
+fn numerics_tag_hashes_the_module() {
+    use super::{module_hash, module_spec};
+    use crate::numerics::Numerics::{self, Exact, Fast};
+    let main = |n: Numerics| {
+        let o = super::mode_opts(&KERNEL_OPTS, n);
+        super::fnv128(&[KERNELS.as_bytes(), o.join("\n").as_bytes()])
+    };
+    let mut seen = std::collections::HashMap::new();
+    for oss in [false, true] {
+        for f8 in [false, true] {
+            for ext in [false, true] {
+                for n in [Exact, Fast] {
+                    let (src, o) = module_spec(oss, f8, ext, n);
+                    let h = module_hash(src, &o);
+                    let what = format!("oss {oss} f8 {f8} ext {ext} {n}");
+                    if !oss && !f8 && !ext {
+                        assert_eq!(h, main(n), "{what}: main's tag");
+                    } else {
+                        assert!(h != main(Exact) && h != main(Fast), "{what}");
+                    }
+                    let more = format!("{src}\n");
+                    assert_ne!(module_hash(&more, &o), h, "{what}: a byte of source");
+                    let mut o2 = o.clone();
+                    o2.push("-DX");
+                    assert_ne!(module_hash(src, &o2), h, "{what}: an option");
+                    if let Some(w) = seen.insert(h, what.clone()) {
+                        panic!("{what} has {w}'s hash");
+                    }
+                }
+            }
+        }
+    }
 }
 
 const IOTA: &str = "extern \"C\" __global__ void iota(float* p, float s, unsigned n) \

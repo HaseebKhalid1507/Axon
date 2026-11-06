@@ -71,6 +71,11 @@ use std::path::Path;
 /// `fast/<this>.<NUMERICS_VERSION_FAST>` (`Numerics::tag`), never a
 /// counter that has to be remembered. (Before 2026-10-29 the tuple's line
 /// was `numerics=1`: the same kernels as `exact/1`, another fingerprint.)
+/// It is saved sessions' version too (`kvsave::NUMERICS` is this counter,
+/// #196): a bump restores every older session file as tokens, once. Saved
+/// sessions also see a GPU kernel's source or options change without it
+/// (the module's hash, `cuda::numerics_tag`); fingerprints don't, so the
+/// rule stands for CUDA kernels as for the rest.
 pub const NUMERICS_VERSION_EXACT: u32 = 1;
 
 /// Fast mode's own numerics version: the M of `numerics=fast/N.M`, N being
@@ -284,16 +289,21 @@ fn fp8_fields(m: &Model, net: &Backend) -> Option<[String; 3]> {
     if !crate::safetensors::is_fp8(m) {
         return None;
     }
-    // Every FP8 matrix of a CPU net has its F8S slot (`model::build`).
+    // A CPU net of an FP8 checkpoint has FP8 matrices, so `fp8_qt` is Some:
+    // `Qwen2::build` gives every F8_E4M3 weight an F8S slot (its plan
+    // always has one); the loader refuses an FP8 checkpoint any of whose
+    // layer linears isn't F8_E4M3 (`safetensors::check_fp8_tensors`); and
+    // a split builds its CPU half only when it has CPU layers
+    // (`HybridQwen2::build`: k > 0).
     let qt = |n: &Qwen2<'_>| {
         n.fp8_qt()
             .expect("an FP8 checkpoint's CPU net has FP8 matrices")
     };
     let f = |w: &str, a: &str, h: &str| Some([w.into(), a.into(), h.into()]);
     match &net.0 {
-        Inner::Cpu(n) => f("fp8-ref", fp8_cpu_act(qt(n)), "f16"),
-        Inner::Cuda(n) if n.f8_native() => f("fp8-native", "e4m3-tok", "q8"),
-        Inner::Cuda(_) | Inner::Pipeline(_) => f("fp8-q8", "q8", "q8"),
+        Inner::Cpu(n) => Some(fp8_cpu(qt(n))),
+        Inner::Cuda(n) => Some(fp8_gpu(n.f8_native())),
+        Inner::Pipeline(_) => Some(fp8_gpu(false)),
         Inner::Hybrid(n) => {
             let emu = (n.cpu_net().map(qt)).filter(|&q| q != crate::quant::fp8::F8S);
             let act = emu.map_or("q8".into(), |q| {
@@ -303,6 +313,22 @@ fn fp8_fields(m: &Model, net: &Backend) -> Option<[String; 3]> {
         }
         Inner::Moe(_) => f("fp8-q8 (cpu layers fp8-ref)", "q8", "q8"),
     }
+}
+
+/// `fp8_fields` of a CPU net whose FP8 matrices are of type `qt`
+/// (`model::fp8_cpu_qt`).
+fn fp8_cpu(qt: u32) -> [String; 3] {
+    let act = crate::model::fp8_cpu_act(qt);
+    ["fp8-ref".into(), act.into(), "f16".into()]
+}
+
+/// `fp8_fields` of one GPU's net: on fp8.cu (`native`) or the Q8_0 form.
+fn fp8_gpu(native: bool) -> [String; 3] {
+    let f = match native {
+        true => ["fp8-native", "e4m3-tok", "q8"],
+        false => ["fp8-q8", "q8", "q8"],
+    };
+    f.map(String::from)
 }
 
 /// The `rope` field: the model's effective RoPE scaling, read from its
@@ -419,21 +445,38 @@ pub fn serve_field(
     (!v.is_empty()).then(|| v.join(", "))
 }
 
+/// A placement's predicted identities, `[exact, fast]`, or why there are none.
+pub type Prediction = Result<[Identity; 2], String>;
+
 /// The identities `m` (at `path`) would have without loading it (`axon
-/// info`): on the CPU (its cache type as AXON_KV says) and, on CUDA device
-/// 0, with each cache type if the weights fit its free VRAM (else why
-/// not: a split's identity depends on where it's placed), as (label,
-/// identity or why none).
-pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identity, String>)>> {
+/// info`), in each numerics mode (`[exact, fast]`): on the CPU (its cache
+/// type as AXON_KV says) and, on CUDA device 0, with each cache type if
+/// the weights fit its free VRAM (else why not: a split's identity depends
+/// on where it's placed), as (label, identities or why none). An FP8
+/// checkpoint's carry its `weights`, `act` and `head` (`fp8_fields`), read
+/// as a load would: the CPU's activations from AXON_FP8_CPU_ACT, and fast
+/// mode on fp8.cu where `cuda::f8_native_cc` says it runs there.
+pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Prediction)>> {
     let digest = model_digest(Path::new(path), m)?;
     let types = quant_types(m);
     let cpu_kv = if crate::kv::use_f32() { "f32" } else { "f16" };
+    let fp8 = crate::safetensors::is_fp8(m);
+    // A placement's identity in both modes, `fp8` its FP8 fields in each.
+    let modes = |id: Identity, fp8: [Option<[String; 3]>; 2]| {
+        let [e, f] = fp8;
+        let id = id.with_rope(rope_field(m));
+        [
+            id.clone().with_fp8(e),
+            id.with_fp8(f).with_numerics(Numerics::Fast),
+        ]
+    };
+    let cpu_fp8 = fp8.then(|| fp8_cpu(crate::model::fp8_cpu_qt()));
     let mut v = vec![(
         "cpu".to_string(),
-        Ok(
-            Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv)
-                .with_rope(rope_field(m)),
-        ),
+        Ok(modes(
+            Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv),
+            [cpu_fp8.clone(), cpu_fp8],
+        )),
     )];
     if crate::model::is_moe(m) {
         let why = "not predicted here (attention on the GPU, experts on the CPU; it runs): \
@@ -456,6 +499,9 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         v.push(("cuda".to_string(), Err(why)));
         return Ok(v);
     }
+    // `module_for_mode`'s rule: fp8.cu in fast mode where it runs natively.
+    let native = fp8 && crate::cuda::f8_native_cc(&g).unwrap_or(false);
+    let gpu_fp8 = [fp8.then(|| fp8_gpu(false)), fp8.then(|| fp8_gpu(native))];
     // CudaQwen2's rule: tensor-core attention needs mma (sm_80+ code) and
     // a head size other than 256.
     let n_kv = m.n_kv_heads().max(1) as usize;
@@ -468,8 +514,10 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         let id = match kv == "q8" && head == 256 {
             // The q8 cache has no head size 256 kernels: gen refuses it.
             true => Err("no q8 cache at head size 256".to_string()),
-            false => Ok(Identity::new(&digest, &types, "cuda", Some(&gs), None, kv)
-                .with_rope(rope_field(m))),
+            false => Ok(modes(
+                Identity::new(&digest, &types, "cuda", Some(&gs), None, kv),
+                gpu_fp8.clone(),
+            )),
         };
         v.push((format!("cuda --kv {kv}"), id));
     }
@@ -1009,6 +1057,62 @@ mod tests {
         assert_eq!(base("sm_89").unreadable("gpu").fingerprint(), "fp_unknown");
     }
 
+    /// `predicted`'s identities against `of`'s, for every placement it
+    /// predicts (an `Ok`), in both modes: the backend loaded as its label
+    /// says (`cpu`, or `cuda --kv T` on the whole GPU), from a fresh `load`
+    /// each (the CPU model releases what it repacks). Returns the labels.
+    fn assert_predicted_is_of(path: &str, load: &dyn Fn() -> Model) -> Vec<String> {
+        use crate::kv::KvType;
+        use crate::lm::{BackendOptions, Device};
+        let mut seen = Vec::new();
+        for (label, ids) in predicted(path, &load()).unwrap() {
+            let Ok(ids) = ids else { continue };
+            for (n, want) in [Numerics::Exact, Numerics::Fast].into_iter().zip(ids) {
+                let o = BackendOptions::default().max_ctx(256).numerics(n);
+                let o = match label.as_str() {
+                    "cpu" => o.device(Device::Cpu),
+                    "cuda --kv f16" => o.device(Device::Cuda).kv(KvType::F16),
+                    "cuda --kv q8" => o.device(Device::Cuda).kv(KvType::Q8),
+                    l => panic!("a placement this test doesn't know: {l}"),
+                };
+                let m = load();
+                let net = Backend::new(&m, o).unwrap();
+                let got = of(path, &m, &net);
+                assert_eq!(want, got, "{label} {n}: axon info predicts gen's");
+            }
+            seen.push(label);
+        }
+        seen
+    }
+
+    /// `axon info`'s identities are gen's at every placement it predicts,
+    /// in both modes: a dense GGUF; an FP8 checkpoint (its `weights`, `act`
+    /// and `head`; fast mode on fp8.cu where it runs natively), whose
+    /// predictions before #196 had no FP8 fields (fp_6fec... vs gen's
+    /// fp_28bb... on the CPU). The CPU-only FP8 case, under each of the
+    /// CPU's activation types: `safetensors::tests::tiny_fp8_predicted_is_of`.
+    #[test]
+    fn predicted_is_of() {
+        let gpu = crate::testutil::gpu().is_some();
+        let want = |l: &[String]| {
+            let mut w = vec!["cpu"];
+            if gpu {
+                w.extend(["cuda --kv f16", "cuda --kv q8"]);
+            }
+            assert_eq!(l, w);
+        };
+        if let Some(mp) = crate::testutil::model_path() {
+            let path = mp.to_str().unwrap();
+            let load = || crate::gguf::load_with(path, Some(false)).unwrap();
+            want(&assert_predicted_is_of(path, &load));
+        }
+        if let Some(fp) = crate::testutil::fp8_model_path() {
+            let path = fp.to_str().unwrap();
+            let load = || crate::gguf::load_with(path, Some(false)).unwrap();
+            want(&assert_predicted_is_of(path, &load));
+        }
+    }
+
     /// A split of an FP8 checkpoint names its CPU layers' activations in
     /// `act` when they emulate the GPU's rounding (AXON_FP8_CPU_ACT; here
     /// the test override, `model::with_fp8_cpu_qt`, at build), read from
@@ -1150,7 +1254,7 @@ mod tests {
         assert!(gf.ends_with(&format!(", split attention {k}")), "{gf}");
         let p = predicted(path, &m).unwrap();
         let f16 = p.iter().find(|(l, _)| l == "cuda --kv f16").unwrap();
-        assert_eq!(f16.1.as_ref().unwrap().fingerprint(), id.fingerprint());
+        assert_eq!(f16.1.as_ref().unwrap()[0].fingerprint(), id.fingerprint());
         let q8 = p.iter().find(|(l, _)| l == "cuda --kv q8").unwrap();
         assert!(q8.1.is_err());
     }
@@ -1180,7 +1284,7 @@ mod tests {
             let id = of(path, &m, &net);
             let p = predicted(path, &m).unwrap().remove(0);
             assert_eq!(p.0, "cpu");
-            assert_eq!(p.1.unwrap(), id, "axon info predicts gen's");
+            assert_eq!(p.1.unwrap()[0], id, "axon info predicts gen's");
             (id, rope_field(&m))
         };
         let yarn = |f: f64| crate::rope::RopeArgs {

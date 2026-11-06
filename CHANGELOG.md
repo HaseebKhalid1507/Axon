@@ -24,6 +24,48 @@ measurements behind them.
 - Default flags reach none of it: md5 vs main at default flags is unchanged (gen and serve), and the tier's own
   replies are main's bits.
 
+### A GPU session's identity names the split-attention count and the code target (#203)
+- **A `chat --session` file saved on the GPU now records the two parts of the fingerprint's `gpu` field that change
+  the cache's bits on one architecture**, where the fingerprint names them: the split attention's count, which the SM
+  count sets (`sm_89, split attention 40`), and code other than the device's plain cubin (PTX the driver compiles,
+  `[code compute_90 PTX, driver 12.8]`; an older cubin of its major; sm_90a, Hopper's default). Before, the identity
+  had the architecture only, so a Gemma 3 4B session saved on an RTX 4050 Laptop (20 SMs, 40 splits) loaded as bytes on
+  a 4090 (128 SMs, 256), both sm_89, though past 32 × 40 positions the two reduce the attention in another order.
+- **One-time cost:** GPU sessions of Gemma 3 (the split attention on every GPU), of any model below sm_80, and of a
+  build that doesn't run the device's plain cubin restore once as tokens (their conversation prefilled again), then as
+  bytes. Dense models on sm_80 and later with the device's plain cubin keep their identity, so their sessions still
+  restore as bytes. gpt-oss takes the split attention too, but nothing changes for it: it runs as a MoE, which has no
+  GPU session image yet (its sessions are always prefilled again).
+- **Every H100 / H200 GPU session saved before this pays that cost once, by default.** sm_90a is the default code on
+  sm_90 (NVRTC 12 or later; `AXON_HOPPER=0` builds the plain sm_90 cubin), so those identities gain
+  `gpu: "sm_90 [code sm_90a]"`. Their bytes weren't stale: `numerics` already recorded the choice (`hopper true`), and
+  the new key only tells apart the builds where `hopper true` didn't give sm_90a (an NVRTC older than 12). The
+  re-prefill is the price of the session identity using the fingerprint's own definition rather than a second one
+  that could drift from it.
+- **A PTX build re-prefills once per driver CUDA-version update.** Its code names the driver's CUDA version
+  (`compute_90 PTX, driver 12.8`), because the driver compiles that PTX. So after a driver update that changes that
+  version, its sessions restore once as tokens. A cubin build's sessions still load as bytes across driver updates:
+  the identity's `info.driver` (the same version) isn't compared.
+
+### Sessions hash the GPU module the net runs; one session counter; `axon info` predicts FP8 fingerprints (#196)
+- **A saved session's GPU identity now hashes the source and options of the kernel module the net actually runs**
+  (`cuda::numerics_tag`), not the plain kernels' whatever ran. A change to fp8.cu, oss.cu, or the extra types'
+  options can no longer restore stale KV bytes if the version bump is forgotten. GPU choices made in Rust (launch
+  parameters such as `max_split`, which kernel a shape takes) aren't in the hash: they still need the
+  `NUMERICS_VERSION_EXACT` bump, which a session's `host N` carries. A dense GGUF without an extra type
+  runs the plain module, whose tag is unchanged in both modes, so its saved sessions still restore as bytes.
+  **One-time cost:** sessions saved on the GPU by a gpt-oss model, a model with an extra quant type (any of Q2_K,
+  Q3_K, Q4_0, Q4_1, Q5_1, Q5_K, IQ4_NL: e.g. a Q5_K_M or Q3_K_M file) or an FP8 checkpoint in fast mode on sm ≥ 89
+  restore once as tokens (their conversation prefilled again), then as bytes.
+- **One version counter for sessions:** `kvsave::NUMERICS` (the CPU's and the host's part of a session's identity)
+  is now `NUMERICS_VERSION_EXACT` itself, so the two can't drift. Both are 1: no session changes.
+- **`axon info` predicts an FP8 checkpoint's fingerprints right.** Its predictions lacked the `weights`, `act` and
+  `head` fields (`fp_6fec…` predicted vs `gen`'s `fp_28bb…` on the CPU). It now computes them as a load would, and
+  prints fast mode's full tuple where fast runs its own kernels (fp8.cu). A test checks that every predicted
+  placement matches `gen`'s, in both modes.
+- An FP8 split's streaming note names the CPU's FP8 types (`F8S`, ...) instead of `??`.
+- No output bit changes; no reply fingerprint changes (only `axon info`'s FP8 predictions, which were wrong).
+
 ### Identity: an FP8 checkpoint's `act` is the net's, and a split names its CPU layers' emulation (#200, part of #196)
 - The reply fingerprint's `act` for an FP8 checkpoint on the CPU now comes from the net (the type its matrices were
   built as), as the KV identity's does since #199, not from `AXON_FP8_CPU_ACT` read again when the fingerprint is

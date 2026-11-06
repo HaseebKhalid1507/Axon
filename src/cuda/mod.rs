@@ -1608,6 +1608,10 @@ pub struct Module<'g> {
     fast: bool,
     /// Compiled with `F8_DEFINE` (`KERNELS_F8`: FP8 checkpoints' native kernels).
     f8: bool,
+    /// `module_hash` of the source and options it was compiled from (0 for
+    /// a bare image, `from_image`): kvsave's identity of its bits
+    /// (`numerics_tag`).
+    src_hash: u128,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1643,19 +1647,48 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 
 /// What decides the bits this device's kernels compute, as a string
 /// (kvsave's identity: a cache image is only loaded where it was made):
-/// the kernel sources and options (with `FAST_DEFINE` for a `fast`
-/// module: the fast numerics mode), the device's architecture and
+/// `src_hash`, the `module_hash` of the module the net runs (`Module::
+/// src_hash`: its source and options, whichever of `module_for_mode`'s it
+/// is, so fp8.cu, oss.cu, `F8_DEFINE`, `KERNEL_OPTS_EXT` and `FAST_DEFINE`
+/// are in it when that module has them), the device's architecture and
 /// AXON_HOPPER (the sm_90a build). Not the driver or NVRTC version: the
-/// xarch audit measured the same bits across them (`driver_tag`). An exact
-/// module's tag is the one before the numerics modes (same options).
-pub fn numerics_tag(gpu: &Gpu, fast: bool) -> Result<String, String> {
-    let opts = mode_opts(&KERNEL_OPTS, fast_mode(fast));
+/// xarch audit measured the same bits across them (`driver_tag`). The
+/// plain module's (KERNELS and `KERNEL_OPTS`, `FAST_DEFINE` in fast mode:
+/// every dense GGUF without an extra type) is the tag it had before the
+/// hash was the module's, when it was always that pair (#196).
+pub fn numerics_tag(gpu: &Gpu, src_hash: u128) -> Result<String, String> {
+    Ok(format!(
+        "kernels {src_hash:032x} {} hopper {}",
+        gpu.info()?.arch(),
+        hopper_env()
+    ))
+}
+
+/// main's `numerics_tag` before #196, verbatim (tests: the plain module's
+/// tag is the same, so sessions saved before restore as bytes): KERNELS and
+/// `KERNEL_OPTS` (`FAST_DEFINE` added if `fast`), whatever the net ran.
+#[cfg(test)]
+pub(crate) fn numerics_tag_pre196(gpu: &Gpu, fast: bool) -> Result<String, String> {
+    let n = if fast {
+        Numerics::Fast
+    } else {
+        Numerics::Exact
+    };
+    let opts = mode_opts(&KERNEL_OPTS, n);
     let src = fnv128(&[KERNELS.as_bytes(), opts.join("\n").as_bytes()]);
     Ok(format!(
         "kernels {src:032x} {} hopper {}",
         gpu.info()?.arch(),
         hopper_env()
     ))
+}
+
+/// The hash of a module's source and its NVRTC options beyond the
+/// architecture (`Module::src_hash`, `numerics_tag`): any change to either
+/// moves it. The target and NVRTC version aren't in it (the kernel cache's
+/// key adds them).
+pub(crate) fn module_hash(src: &str, opts: &[&str]) -> u128 {
+    fnv128(&[src.as_bytes(), opts.join("\n").as_bytes()])
 }
 
 /// The driver's CUDA version, "13.0" (kvsave records it, for people).
@@ -1977,6 +2010,7 @@ impl<'g> Module<'g> {
         m.hopper = target == Target::Cubin90a && ffi::tensor_map_encoder().is_some();
         m.fast = opts.contains(&FAST_DEFINE);
         m.f8 = opts.contains(&F8_DEFINE);
+        m.src_hash = module_hash(src, opts);
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
         m.arch = arch;
@@ -2079,6 +2113,12 @@ impl<'g> Module<'g> {
         self.fast
     }
 
+    /// `module_hash` of the source and options it was built from
+    /// (`numerics_tag`); 0 for a bare image (`from_image`).
+    pub fn src_hash(&self) -> u128 {
+        self.src_hash
+    }
+
     /// Turn programmatic dependent launch off for this module (tests: PDL
     /// on vs off).
     #[cfg(test)]
@@ -2104,6 +2144,7 @@ impl<'g> Module<'g> {
             hopper: false,
             f8: false,
             fast: false,
+            src_hash: 0,
         })
     }
 
@@ -2187,19 +2228,30 @@ fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
     v
 }
 
+/// `Kernels::module_for_mode`'s source and options: gpt-oss's
+/// (`KERNELS_OSS`), fp8.cu's (`f8`: `KERNELS_F8`, `F8_DEFINE`) or the plain
+/// kernels; with the extra types (`ext`: `KERNEL_OPTS_EXT`); in mode `n`
+/// (`mode_opts`). Their `module_hash` is the net's `numerics_tag` (#196).
+fn module_spec(oss: bool, f8: bool, ext: bool, n: Numerics) -> (&'static str, Vec<&'static str>) {
+    let src = if oss {
+        KERNELS_OSS
+    } else if f8 {
+        KERNELS_F8
+    } else {
+        KERNELS
+    };
+    let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
+    let mut o = mode_opts(opts, n);
+    if f8 {
+        o.push(F8_DEFINE);
+    }
+    (src, o)
+}
+
 /// Whether fast mode runs FP8 natively on `gpu`: sm_89+ (e4m3) and AXON_FP8_NATIVE isn't 0.
 pub(crate) fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
     let cc = gpu.info()?.cc;
     Ok(cc.0 * 10 + cc.1 >= 89 && std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"))
-}
-
-/// `Numerics::Fast` if `fast`, else `Numerics::Exact`.
-fn fast_mode(fast: bool) -> Numerics {
-    if fast {
-        Numerics::Fast
-    } else {
-        Numerics::Exact
-    }
 }
 
 /// The MoE router module's options (`Kernels::moe_module`): debug builds
@@ -2231,9 +2283,8 @@ impl<'m> Kernels<'m> {
     /// The FP8 module (`KERNELS_F8`, fast, `F8_DEFINE`): fp8.cu's kernels.
     #[cfg(test)]
     pub fn module_f8(gpu: &Gpu) -> Result<Module<'_>, String> {
-        let mut o = mode_opts(&KERNEL_OPTS, Numerics::Fast);
-        o.push(F8_DEFINE);
-        let mut m = Module::load(gpu, KERNELS_F8, &o)?.0;
+        let (src, o) = module_spec(false, true, false, Numerics::Fast);
+        let mut m = Module::load(gpu, src, &o)?.0;
         m.f8 = true;
         Ok(m)
     }
@@ -2313,18 +2364,7 @@ impl<'m> Kernels<'m> {
         // e4m3 mma.sync on sm_120+, f16 mmas below, #190); else
         // the plain module, which runs the Q8_0 form (D1, ruling 4).
         let f8 = crate::safetensors::is_fp8(m) && n == Numerics::Fast && f8_native_cc(gpu)?;
-        let src = if m.arch == "gpt-oss" {
-            KERNELS_OSS
-        } else if f8 {
-            KERNELS_F8
-        } else {
-            KERNELS
-        };
-        let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
-        let mut o = mode_opts(opts, n);
-        if f8 {
-            o.push(F8_DEFINE);
-        }
+        let (src, o) = module_spec(m.arch == "gpt-oss", f8, ext, n);
         let mut md = Module::load(gpu, src, &o)?.0;
         md.ext = ext;
         Ok(md)

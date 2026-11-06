@@ -2427,6 +2427,271 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// #196: a session's GPU identity is the kernel module its net runs,
+    /// source and options (`Module::src_hash`, `cuda::numerics_tag`). The
+    /// plain module's tag is main's before #196 in both modes
+    /// (`numerics_tag_pre196`), and nothing else in a plain net's identity
+    /// changed, so a file main saved has this file's header: it restores as
+    /// bytes. A file saved under another module (module_ext: the same
+    /// kernels under KERNEL_OPTS_EXT, the same bits for this model's types,
+    /// another hash) restores as tokens, prefilled again, naming `numerics`
+    /// alone as why, and the other way round: the cache a restore leaves is
+    /// a fresh prefill's, and the conversation goes on as a fresh one would.
+    #[test]
+    fn gpu_session_module_hash() {
+        use crate::cuda::qwen2::CudaQwen2;
+        use crate::kvsave::{KvIo, Session};
+        use crate::lm::{Backend, BackendOptions, Device, Lm};
+        use crate::numerics::Numerics;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let kx = crate::cuda::Kernels::module_ext(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let path = crate::testutil::model_path().unwrap();
+        let plain = CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        let ext = CudaQwen2::new(&g, &kx, &m, 2048).unwrap();
+        let ident = crate::kvsave::model_ident(&m, &path, plain.head_dim).unwrap();
+        let host = crate::kvsave::NUMERICS;
+        // A turn on each, saved; it loads back as bytes on its own module.
+        let turn = |net: &CudaQwen2, f: &std::path::Path, what: &str| {
+            let mut x = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            x.max_reply = 16;
+            x.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+            x.save_session(&mut Session::new(f.to_path_buf(), ident.clone()))
+                .unwrap();
+            let image = cache_image(&x);
+            let mut same = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            let r = (same.load_session(&mut Session::new(f.to_path_buf(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(r.from_file, "{what} -> {what}: {r:?}");
+            assert_eq!(cache_image(&same), image, "{what} -> {what}");
+            (
+                net.kv_ident(&x.cache).unwrap(),
+                image,
+                x.hist[..x.fed].to_vec(),
+            )
+        };
+        let (fp, fx) = (session_path("module-plain"), session_path("module-ext"));
+        let (id_p, img_p, toks_p) = turn(&plain, &fp, "plain");
+        let (id_x, img_x, toks_x) = turn(&ext, &fx, "ext");
+        let main = crate::cuda::numerics_tag_pre196(&g, false).unwrap();
+        assert_eq!(
+            id_p["numerics"],
+            format!("{main} host {host}"),
+            "main's tag"
+        );
+        // The same bits, another module: only `numerics` (and `info`) differ.
+        assert_eq!((&img_p, &toks_p), (&img_x, &toks_x), "module_ext's bits");
+        let strip = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            let o = v.as_object_mut().unwrap();
+            o.remove("info");
+            o.remove("numerics");
+            v
+        };
+        assert_ne!(id_p["numerics"], id_x["numerics"]);
+        assert_eq!(strip(&id_p), strip(&id_x));
+        // Across modules: tokens, prefilled again.
+        for (net, f, (file_id, now_id), what) in [
+            (&ext, &fp, (&id_p, &id_x), "plain -> ext"),
+            (&plain, &fx, (&id_x, &id_p), "ext -> plain"),
+        ] {
+            let mut y = Chat::new(net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+            y.max_reply = 16;
+            let r = (y.load_session(&mut Session::new(f.clone(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(!r.from_file, "{what}: {r:?}");
+            let why = format!(
+                "it was made under numerics {} (now {})",
+                file_id["numerics"], now_id["numerics"]
+            );
+            assert_eq!(r.why.as_deref(), Some(why.as_str()), "{what}");
+            assert_eq!(y.hist[..y.fed], toks_p[..], "{what}");
+            let img = cache_image(&y);
+            assert!(
+                img == prefill_image(net, &y.hist[..y.fed]),
+                "{what}: not a fresh prefill"
+            );
+            let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+            let prompt = &y.hist[..y.hist.len() - got.len() - 2];
+            assert_eq!(got, fresh(y.net, prompt, 16, &y.fr.stop), "{what}");
+        }
+        // Fast mode's plain module: main's fast tag too.
+        let o = BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64)
+            .numerics(Numerics::Fast);
+        let f = Backend::new(&m, o).unwrap();
+        let fid = f.kv_ident(&f.new_cache(64)).unwrap();
+        let main_fast = crate::cuda::numerics_tag_pre196(&g, true).unwrap();
+        assert_eq!(
+            fid["numerics"],
+            format!("{main_fast} host {host}"),
+            "main's fast tag"
+        );
+        for f in [fp, fx] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// #203: a GPU session's identity names the split attention's count
+    /// (`gpu`, as the fingerprint does), which the SM count sets: Gemma 3
+    /// runs that attention on every GPU. Two nets of the model on this GPU,
+    /// one told another GPU's count (`set_max_split`; a count can't be faked
+    /// otherwise), make other rows for the same conversation once it splits
+    /// differently (`att_split`: min(count, ceil(positions / 32)) splits;
+    /// 2 here against this GPU's, for a conversation past 64 positions), so
+    /// bytes loaded across would be wrong. A session saved under one count
+    /// restores under the other as tokens, prefilled again, naming `gpu`
+    /// alone as why, and the conversation goes on as a fresh one would; on
+    /// its own count it loads as bytes. A dense Qwen2.5 net's identity has
+    /// `gpu` only if it takes the split attention too (below sm_80, or told
+    /// to: `set_tc_attn`), so its sessions on sm_80+ restore as before.
+    #[test]
+    fn gpu_session_split_count() {
+        use crate::cuda::qwen2::max_split;
+        use crate::kvsave::{KvIo, Session, gpu_extra};
+        use crate::lm::{Backend, BackendOptions, Device, Inner, Lm};
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(gp) = crate::testutil::gemma3_model_path() else {
+            return;
+        };
+        let (info, code) = (g.info().unwrap(), crate::cuda::code_target(&g).unwrap().0);
+        let arch = info.arch();
+        let o = || BackendOptions::default().device(Device::Cuda).max_ctx(2048);
+        let m = crate::gguf::load_with(gp.to_str().unwrap(), Some(false)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let k = max_split(info.sms as usize, m.n_kv_heads() as usize);
+        let k2 = 2;
+        assert!(k > 4, "this GPU's split count {k}");
+        let here = Backend::new(&m, o()).unwrap();
+        let mut there = Backend::new(&m, o()).unwrap();
+        let Inner::Cuda(t) = &mut there.0 else {
+            panic!("not on the GPU")
+        };
+        assert_eq!(t.split_attention(), Some(k));
+        t.set_max_split(k2);
+        let ident = crate::kvsave::model_ident(&m, &gp, KvIo::kv_shape(&here).2).unwrap();
+        // Past 64 positions: here splits 3 or more ways, there 2.
+        let first = format!("Summarize this in one line: {}", [MSGS[0]; 12].join(" "));
+        let turn = |net: &Backend, f: &std::path::Path, what: &str| {
+            let mut x = Chat::new(net, &tok, None, 2048).unwrap();
+            x.max_reply = 16;
+            x.reply(&first, &|| false, &mut |_| Ok(())).unwrap();
+            assert!(x.fed > 64, "{what}: {} positions", x.fed);
+            x.save_session(&mut Session::new(f.to_path_buf(), ident.clone()))
+                .unwrap();
+            let image = cache_image(&x);
+            let mut same = Chat::new(net, &tok, None, 2048).unwrap();
+            let r = (same.load_session(&mut Session::new(f.to_path_buf(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(r.from_file, "{what} -> {what}: {r:?}");
+            assert_eq!(cache_image(&same), image, "{what} -> {what}");
+            (net.kv_ident(&x.cache).unwrap(), x.hist[..x.fed].to_vec())
+        };
+        let (fh, ft) = (session_path("split-here"), session_path("split-there"));
+        let (id_h, toks_h) = turn(&here, &fh, "here");
+        let (id_t, toks_t) = turn(&there, &ft, "there");
+        for (id, k) in [(&id_h, k), (&id_t, k2)] {
+            let want = gpu_extra(&arch, &code, Some(k)).unwrap();
+            assert_eq!(id["gpu"], want, "{id}");
+        }
+        let strip = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            let o = v.as_object_mut().unwrap();
+            o.remove("info");
+            o.remove("gpu");
+            v
+        };
+        assert_eq!(strip(&id_h), strip(&id_t));
+        // Other rows for the same tokens under the two counts.
+        for toks in [&toks_h, &toks_t] {
+            assert!(
+                prefill_image(&here, toks) != prefill_image(&there, toks),
+                "{k} and {k2} splits: the same rows"
+            );
+        }
+        // Across counts: tokens, prefilled again.
+        for (net, f, (file_id, now_id), toks, what) in [
+            (&here, &ft, (&id_t, &id_h), &toks_t, "there -> here"),
+            (&there, &fh, (&id_h, &id_t), &toks_h, "here -> there"),
+        ] {
+            let mut y = Chat::new(net, &tok, None, 2048).unwrap();
+            y.max_reply = 16;
+            let r = (y.load_session(&mut Session::new(f.clone(), ident.clone())))
+                .unwrap()
+                .unwrap();
+            assert!(!r.from_file, "{what}: {r:?}");
+            let why = format!(
+                "it was made under gpu {} (now {})",
+                file_id["gpu"], now_id["gpu"]
+            );
+            assert_eq!(r.why.as_deref(), Some(why.as_str()), "{what}");
+            assert_eq!(y.hist[..y.fed], toks[..], "{what}");
+            assert!(
+                cache_image(&y) == prefill_image(net, &y.hist[..y.fed]),
+                "{what}: not a fresh prefill"
+            );
+            let mut prompt = y.hist.clone();
+            prompt.extend(y.frame_user(MSGS[1], y.turns.is_empty()));
+            let got = y.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+            assert_eq!(got, fresh(y.net, &prompt, 16, &y.fr.stop), "{what}");
+            eprintln!(
+                "split counts {k} / {k2}, {} positions, {what}: prefilled again ({why})",
+                y.fed
+            );
+        }
+        for f in [fh, ft] {
+            let _ = std::fs::remove_file(f);
+        }
+        // A dense Qwen2.5: `gpu` with the split attention only.
+        let Some(mq) = crate::testutil::model() else {
+            return;
+        };
+        for tc in [true, false] {
+            let mut q = Backend::new(&mq, o()).unwrap();
+            let Inner::Cuda(n) = &mut q.0 else {
+                panic!("not on the GPU")
+            };
+            if !tc {
+                n.set_tc_attn(false);
+            }
+            let split = n.split_attention();
+            assert_eq!(split.is_none(), tc && info.cc.0 >= 8, "tc {tc}");
+            let id = q.kv_ident(&q.new_cache(64)).unwrap();
+            let want = gpu_extra(&arch, &code, split);
+            assert_eq!(
+                id.get("gpu").and_then(|g| g.as_str()),
+                want.as_deref(),
+                "tc {tc}: {id}"
+            );
+            if want.is_none() {
+                // #196's identity, nothing added: its sessions load as bytes.
+                let mut keys: Vec<&str> =
+                    id.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                keys.sort();
+                let before = [
+                    "backend", "class", "head_dim", "info", "kv", "kv_dim", "layers",
+                ];
+                assert_eq!(
+                    keys,
+                    [&before[..], &["numerics", "row_bytes"]].concat(),
+                    "{id}"
+                );
+            }
+        }
+    }
+
     /// The numerics mode is in a session file's identity (ADR M5): a file
     /// saved by an exact-mode chat is restored into a fast-mode one as
     /// tokens (prefilled again; `numerics_mode` is named as why), and the
@@ -2586,8 +2851,9 @@ mod tests {
     /// round; within either it loads as bytes. The Q8_0 side is this binary
     /// run again with the variable set (`fp8_session_q8_child`): a test
     /// can't set it in its own process (the engine reads it, and `set_var`
-    /// races the other test threads). Checked: the identities differ in the
-    /// native net's `weights` only, and the restore names that as why; the
+    /// races the other test threads). Checked: the identities differ in
+    /// `numerics` (each net's module: fp8.cu's is its own, #196) and the
+    /// native net's `weights` only, and the restore names those as why; the
     /// rows after a restore are a fresh prefill's (`prefill_image`); each
     /// file holds its conversation's rows (`file_rows`: the bytes a restore
     /// would load), and in each direction they differ from the restore's,
@@ -2685,16 +2951,33 @@ mod tests {
         );
         let q8_back = report["rows"].as_u64().unwrap();
         assert_ne!(q8_back, nat_rows, "native -> Q8_0: the file's rows");
-        // Nothing but the native net's `weights` tells them apart.
+        // Nothing but the module (`numerics`) and the native net's `weights`
+        // tells them apart.
         let strip = |v: &serde_json::Value| {
             let mut v = v.clone();
             let o = v.as_object_mut().unwrap();
             o.remove("info");
+            o.remove("numerics");
             o.remove("weights");
             v
         };
         assert!(id_q8.get("weights").is_none(), "{id_q8}");
+        assert_ne!(id_nat["numerics"], id_q8["numerics"]);
         assert_eq!(strip(&id_nat), strip(id_q8));
+        let num = |a: &serde_json::Value, b: &serde_json::Value| {
+            format!("numerics {} (now {})", a["numerics"], b["numerics"])
+        };
+        assert_eq!(
+            report["why"].as_str(),
+            Some(
+                format!(
+                    r#"it was made under {}, weights "fp8-native" (now -)"#,
+                    num(&id_nat, id_q8)
+                )
+                .as_str()
+            ),
+            "native -> Q8_0"
+        );
         // Q8_0 -> native: tokens, prefilled again.
         let (q8_toks, q8_file) = file_rows(&fq8, &ident, id_q8);
         let q8_rows = Hasher::of(&q8_file);
@@ -2706,7 +2989,13 @@ mod tests {
         assert!(!r.from_file, "Q8_0 -> native: {r:?}");
         assert_eq!(
             r.why.as_deref(),
-            Some(r#"it was made under weights - (now "fp8-native")"#)
+            Some(
+                format!(
+                    r#"it was made under {}, weights - (now "fp8-native")"#,
+                    num(id_q8, &id_nat)
+                )
+                .as_str()
+            )
         );
         assert_eq!(y.hist[..y.fed], q8_toks[..]);
         let img = cache_image(&y);
@@ -2721,7 +3010,7 @@ mod tests {
         assert!(!got.is_empty());
         eprintln!(
             "FP8 sessions across AXON_FP8_NATIVE: native -> Q8_0 and Q8_0 -> native prefilled \
-             again ({}); each loads back as bytes; identities differ in weights only; rows of \
+             again ({}); each loads back as bytes; identities differ in numerics and weights only; rows of \
              the same tokens, the file's vs the restore's: native -> Q8_0 {nat_rows:016x} vs \
              {q8_back:016x}, Q8_0 -> native {q8_rows:016x} vs {nat_back:016x}",
             r.why.unwrap()
@@ -2800,9 +3089,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!r.from_file, "native -> Q8_0: {r:?}");
-        assert_eq!(
-            r.why.as_deref(),
-            Some(r#"it was made under weights "fp8-native" (now -)"#)
+        // The file's module and its `weights` (the parent checks the tags).
+        let why = r.why.clone().unwrap();
+        assert!(
+            why.starts_with("it was made under numerics ")
+                && why.ends_with(r#", weights "fp8-native" (now -)"#),
+            "{why}"
         );
         let img = cache_image(&y);
         assert_eq!(
@@ -2830,7 +3122,7 @@ mod tests {
             .unwrap();
         assert!(r.from_file, "Q8_0 -> Q8_0: {r:?}");
         assert_eq!(cache_image(&same), cache_image(&x), "Q8_0 -> Q8_0");
-        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id});
+        let report = serde_json::json!({"fed": fed, "tokens": tokens, "rows": rows, "ident": id, "why": why});
         std::fs::write(frep, report.to_string()).unwrap();
     }
 

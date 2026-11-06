@@ -547,9 +547,11 @@ pub(crate) struct CudaQwen2<'g> {
     /// The attention runs on the tensor cores (decode.cu "Tensor-core
     /// attention"), decode and batched alike, either cache: sm_80+.
     tc_attn: bool,
-    /// Its module is the fast numerics mode's (`Module::fast`): kvsave's
-    /// identity says so (`cuda::numerics_tag`).
+    /// Its module is the fast numerics mode's (`Module::fast`).
     fast: bool,
+    /// Its module's `Module::src_hash` (source and options): kvsave's
+    /// identity of its kernels' bits (`cuda::numerics_tag`).
+    src_hash: u128,
     /// Launches of fast-set kernels (`fast_launched`): the fast-vs-exact
     /// gate reads it to know a fast kernel ran in the arm it grades.
     fast_launches: std::sync::atomic::AtomicU64,
@@ -1833,6 +1835,7 @@ impl<'g> CudaQwen2<'g> {
             // gpt-oss: the split attention (oss.cu), as gemma3's.
             tc_attn: module.mma() && head_dim != 256 && !oss,
             fast: module.fast(),
+            src_hash: module.src_hash(),
             fast_launches: std::sync::atomic::AtomicU64::new(0),
             f8: module.f8(),
             f8scr: Default::default(),
@@ -1992,6 +1995,16 @@ impl<'g> CudaQwen2<'g> {
             "no tensor-core attention at head size 256"
         );
         self.tc_attn = on;
+    }
+
+    /// Tests: the split attention's count as a GPU of another SM count
+    /// would have it (`max_split`), before making caches (their scratch is
+    /// sized for it). It sets that path's reduction order, so its bits
+    /// (#203).
+    #[cfg(test)]
+    pub(crate) fn set_max_split(&mut self, k: usize) {
+        assert!((1..=MAX_SPLIT).contains(&k), "split count {k}");
+        self.max_split = k;
     }
 
     /// Free VRAM now.

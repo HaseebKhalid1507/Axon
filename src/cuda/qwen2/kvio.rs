@@ -221,6 +221,11 @@ impl<'g> CudaQwen2<'g> {
         self.fast
     }
 
+    /// Its module's source and options hash (`Module::src_hash`).
+    pub(crate) fn src_hash(&self) -> u128 {
+        self.src_hash
+    }
+
     /// Count one launch of a fast-set kernel (`#ifdef AXON_FAST` code, or a
     /// product routed to one in fast mode). Every such launch site calls it,
     /// so the fast-vs-exact gate (`cuda::qwen2::tests::numerics`) can tell

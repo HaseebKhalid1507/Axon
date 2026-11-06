@@ -84,9 +84,17 @@ Every FP8 launch calls `fast_launched()`; decode graphs count at capture (§6 B 
 |---|---|---|---|
 | `--numerics exact` (default) | Q8_0 at load, plain module: `weights=fp8-q8 act=q8 head=q8` | same | `weights=fp8-ref act=f32 head=f16` |
 | `--numerics fast` | native, F8 module: `weights=fp8-native act=e4m3-tok head=q8` | fp8-q8, plain module, FAST_NOTE | fp8-ref plus FAST_NOTE |
-A CPU/GPU split (`--gpu-layers`, either mode: it refuses the F8 module) is `weights=fp8-q8 (cpu layers fp8-ref)
-act=q8 head=q8`, and under D7's emulation `act=q8 (cpu layers e4m3-tok-emu)` (or `e4m3-128-emu`, #200).
-The `weights/act/head` fields appear **only for FP8 checkpoints**, so GGUF tuples gain nothing.
+
+A CPU/GPU split (`--gpu-layers`) runs the plain module, so it exists in exact mode, and in fast mode only where fast
+runs the plain module too (below sm_89, or `AXON_FP8_NATIVE=0`). On sm ≥ 89 a fast split is refused, rc 2: the F8
+module runs every layer of a dense model on one GPU (`cuda/qwen2.rs`, #200's fpdiff `f8-split-fast`). Its tuple is
+`weights=fp8-q8 (cpu layers fp8-ref) act=q8 head=q8`, and under D7's emulation `act=q8 (cpu layers e4m3-tok-emu)`
+(or `e4m3-128-emu`, #200).
+The `weights/act/head` fields appear **only for FP8 checkpoints**, so GGUF tuples gain nothing. `axon info` predicts
+them per placement as a load would (#196): the CPU's `act` from AXON_FP8_CPU_ACT, fast mode's module from the GPU's
+arch and AXON_FP8_NATIVE. A saved session's GPU identity is the module's own hash (`cuda::numerics_tag`, #196), so the
+F8 module's sessions and the plain module's never restore into each other as bytes; `weights=fp8-native` in the
+kvsave identity says why.
 `numerics::fast_kernels(net)` (CODE `numerics.rs:98`) is true only for fp8-native. `NUMERICS_VERSION_FAST` goes 1 → 2
 by the ADR's "a fast kernel bumps it": GGUF fast fingerprints change, their bits don't. (2 → 3 with §13's change
 below sm_120.) `gpu_refusal` stays for BF16
