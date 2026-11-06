@@ -1,6 +1,6 @@
 # RAM pre-load checks: FP8 without the repack, the split checked before its upload, refusals name the way out (#183, #184, #185)
 
-- Date: 2026-11-06. Branch: fix/ram-checks. Base: main ad0c65e. Status: open (PR @@PR@@).
+- Date: 2026-11-06. Branch: fix/ram-checks. Base: main ad0c65e. Status: open (PR #206).
 - Follows #142 (the CPU model's RAM refusal) and #180 (#143, the split's CPU half). Three issues filed from #180's
   review and gates.
 
@@ -48,9 +48,10 @@ output to confirm it. Option A covers what the split itself commits before the c
 with no new measurement. B stays a possible follow-up in #184.
 
 ## How it was verified
-Each new test fails before its fix. The expect-fail tree is the candidate with the fixes reverted and the tests
+Each new test of a fix fails before it. The expect-fail tree is the candidate with the fixes reverted and the tests
 kept: #183's rule back to main's early return, `ram_remedy` returning nothing, and the split's check moved back after
-the upload with no GPU-half terms (main's order).
+the upload with no GPU-half terms (main's order). It keeps the new `release_gain` helper, so that helper's own test
+passes there.
 - `model::ram_dense_tests::fp8_arena_counted_without_repack` (bella, FP8 0.5B): the estimate's arena is the built
   one (`Qwen2::arena_len`, through the r8 or F8S rows) for k = 1, n/2, n, with the repack on and off.
   `safetensors::tests::tiny_fp8_ram_arena_without_repack` does the same on the tiny checkpoint, so CI runs it.
@@ -60,33 +61,37 @@ the upload with no GPU-half terms (main's order).
   at it. A credit larger than the CPU half doesn't pay for the ring.
 - `hybrid::tests::hybrid_ram_refused_before_the_upload` (GPU, the 0.5B at 12/24): refused with no RAM. When the RAM
   is read, 0 tensors have been released (each goes back right after its upload), and none after the refusal. At main's
-  order, 12 layers' worth are. The message names the 16 MiB ring. Then a copy of Qwen3-0.6B at one GPU layer and ctx
-  2048: the credit is positive and at most the GPU half's bytes, and the half is refused a byte under the edge and
-  built at it. The credit (one layer, ~16 MiB) is less than the CPU half's need (~220 MiB, mostly its KV floor), so
-  the edge moves with both terms. A mutant with no credit (`freed: 0`) is refused at the edge; without the ring the
-  message check above fails.
+  order 146 are: the 12 GPU layers and the head. The message names the 16 MiB ring. Then a copy of Qwen3-0.6B at one
+  GPU layer and ctx 2048: the credit is positive and at most the GPU half's bytes, and the half is refused a byte under
+  the edge and built at it. On bella the credit was 12 MiB (of the GPU half's 15 MiB), less than the CPU half's 219 MiB
+  (mostly its KV floor), so the edge moves with both terms. A mutant with no credit (`freed: 0`) is refused at the
+  edge (bella 1106-093340-399d); without the ring the message check above fails.
   - The first version did the copy on the 0.5B at 12/24 and ctx 512, and failed on bella (1106-084830-8699, "the
     half past the tolerance"). The test was wrong, not the check. On a copy, a CPU half commits only its growth, one
     matrix in flight and its KV (`dense_load_bytes`): ~6 MiB there. The credit was ~250 MiB: 12 layers plus the
-    0.5B's untied 138 MiB head, which goes up with any GPU half. That left the 16 MiB ring, under bella's 38 MiB
-    tolerance (32 MiB + 24 CPUs x 256 KiB), so no RAM figure could refuse that half. By the same figures no split of a
-    copied 0.5B (f16 KV) can be refused: its largest CPU half (one GPU layer, the KV floor at 8192) is ~95 MiB against
-    a ~147 MiB credit, and both are real (the head's copy goes back as it's uploaded). The test now checks its premise (ring > 0, credit < the CPU half, need > tolerance) and prints the
-    figures.
+    0.5B's untied 138 MiB head, which goes up with any GPU half. That left the 16 MiB ring, under the job's 34 MiB
+    tolerance on bella (32 MiB + 8 CPUs x 256 KiB), so no RAM figure could refuse that half. By the same figures no
+    split of a copied 0.5B (f16 KV) can be refused: its largest CPU half (one GPU layer, the KV floor at 8192) is
+    ~95 MiB against a ~147 MiB credit, and both are real (the head's copy goes back as it's uploaded). The test now
+    checks its premise (ring > 0, credit < the CPU half, need > tolerance) and prints the figures.
 - `gguf::tests::release_gain_is_what_release_drops` (Linux, mincore): on an anonymous model, the resident bytes that
   releasing a run of four 1.5 MiB tensors and one apart drops equal `release_gain`, and it's 0 on a file mapping.
-- `hybrid::tests::hybrid_ram_check_on_real_splits`: the edge now includes the ring. At main's order it builds one
-  byte short (the ring isn't weighed).
+- `hybrid::tests::hybrid_ram_check_on_real_splits`: the edge now includes the ring. At main's order the 0.5B at one
+  GPU layer is built a byte under the edge (the ring isn't weighed).
 
-### Gates (e6704b7)
+### Gates
+Product code e6704b7; 0a2b680 fixes the copy test (test-only).
 | gate | result | job |
 |---|---|---|
 | the new tests' pure parts, release (jade, CPU) | PASS 40 / 0 / 0 (`gguf:: model::ram_dense_tests safetensors::tests::tiny_fp8`) | 1106-072522-4e45 |
-| tier filter, release, GPU (bella) | pending | 1106-072820-c2df |
-| the same, debug assertions + overflow checks | pending | 1106-072821-c793 |
-| tier filter, release, `--cpu` (bella, GPU hidden) | pending | 1106-072833-36f6 |
-| the same, debug | pending | 1106-072834-211d |
-| the new tests at main's code (expect-fail tree) | pending | 1106-072821-8945 |
+| e6704b7, tier filter, release, GPU (bella) | FAIL 164 / 1 / 3: the copy test's premise (above) | 1106-084830-8699 |
+| e6704b7, the same filter, `--cpu`, release / debug | PASS 165 / 0 / 3 each | 1106-074156-e184, 1106-072834-211d |
+| 0a2b680, tier filter (168 tests), release, GPU (bella) | PASS 165 / 0 / 3 | 1106-093339-ff24 |
+| the same, debug assertions + overflow checks | PASS 165 / 0 / 3 | 1106-093621-9fa8 |
+| the same filter, release, `--cpu` (bella, GPU hidden) | PASS 165 / 0 / 3 | 1106-093622-e79d |
+| the same, debug | PASS 165 / 0 / 3 | 1106-093623-41f8 |
+| the new tests at main's code (expect-fail tree, 15 tests) | FAIL as expected: 7 fail (2 for #183, 2 for #184, 3 for #185); the 8 that pass are older tests and `release_gain`'s, whose helper the tree keeps | 1106-093622-b200 |
+| the copy test with no credit (mutant) | FAIL as expected: refused at the edge | 1106-093340-399d |
 | clippy `-D warnings` (harness, binary), rustfmt | clean | local |
 
 ## What didn't work / notes
