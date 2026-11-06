@@ -7207,6 +7207,20 @@ fn wait_idle(a: SocketAddr) {
     });
 }
 
+/// AXON_SHARE_KV is opt-in (#207's timing clauses failed, so #187 ships
+/// sharing off by default): on for "1" only; unset, "0" or anything else
+/// is off, main's paths.
+#[test]
+fn share_kv_is_opt_in() {
+    use super::share_on;
+    assert!(!share_on(None));
+    for v in ["", "0", "true", "yes", "2", "on"] {
+        assert!(!share_on(Some(v)), "{v:?}");
+    }
+    assert!(share_on(Some("1")));
+    assert!(share_on(Some(" 1\n")));
+}
+
 /// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
 /// §5.3): `identity_checks` (alone, cached, streamed, under load: 8 slots,
 /// a long prompt prefilled in chunks between decode steps) on a server with

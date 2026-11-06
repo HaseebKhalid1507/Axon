@@ -128,8 +128,8 @@ pub struct Opts {
     /// A paged pool's KV pages (None: AXON_KV_PAGES, else as many as fit;
     /// tests squeeze the pool with it).
     pub kv_pages: Option<usize>,
-    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, on unless
-    /// "0"; a paged pool only).
+    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, off unless
+    /// "1": opt-in, #207's timing clauses; a paged pool only).
     pub share: Option<bool>,
     /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
     /// with Some(false)).
@@ -1423,7 +1423,7 @@ fn engine(
         b.metrics = Some(o.metrics.clone());
         // Shared prefixes (a paged pool's): said at start when on.
         if b.set_share(o.share.unwrap_or_else(share_env)) && o.log {
-            eprintln!("axon serve: shared prefix KV pages on (AXON_SHARE_KV=0: off)");
+            eprintln!("axon serve: shared prefix KV pages on (AXON_SHARE_KV=1)");
         }
         b
     });
@@ -1866,9 +1866,16 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
 /// (`paged_env`, read once at serve's start).
-/// AXON_SHARE_KV: shared prefix KV pages, on unless "0".
+/// AXON_SHARE_KV: shared prefix KV pages, off unless "1" (`share_on`).
 fn share_env() -> bool {
-    std::env::var("AXON_SHARE_KV").map_or(true, |v| v.trim() != "0")
+    share_on(std::env::var("AXON_SHARE_KV").ok().as_deref())
+}
+
+/// AXON_SHARE_KV's value read: on for "1" only, opt-in. #187 ships sharing
+/// off by default if any of its timing clauses fails, and #207's did (the
+/// fan-out's siblings and s4's TTFT-new; docs/log/2026-11-06-shared-prefix-pages-c3.md).
+fn share_on(v: Option<&str>) -> bool {
+    v.is_some_and(|v| v.trim() == "1")
 }
 
 /// AXON_KV_PAGES=N: a paged pool of N KV pages at most (None: unset). Not
