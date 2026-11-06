@@ -114,8 +114,49 @@ staging back to the ring alone, `GpuWays` always both, the plan's errors unwrapp
 - `model::ram_dense_tests::split_refusal_wording_and_cap`: + a credit over the CPU half with the staging alone over
   the room: no `--ctx` is named (0a2b680's figure was `--ctx 8960`, past the 8192 refused).
 
+Under a real cap (shady's nit; `fp8cap.sh` through `axon-podjob`, bella 1106-105219-0faf): the FP8 0.5B at
+`--gpu-layers 23 --numerics exact` (the Q8_0 path), `gen -n 8`, each run in its own `systemd-run --user --scope -p
+MemoryMax=… -p MemorySwapMax=0`, for main ad0c65e, 0a2b680 (#206 before the review: the ring alone) and dfbf2a4
+(c5c015e's CLI binary is byte-identical to it: c5c015e changes tests only). The smallest cap that runs, bisected in
+8 MiB steps, was 909 MiB for all three. Then all three at every 16 MiB cap from 589 to 941 MiB:
+
+| cap (MiB) | main | 0a2b680 | dfbf2a4 |
+|---|---|---|---|
+| 589–765 | OOM | OOM | OOM |
+| 781–861 | OOM | OOM | **refused** |
+| 877–893 | OOM | OOM | OOM |
+| 909 | OOM | runs | runs |
+| 925–941 | runs | runs | runs |
+
+- The candidate refuses at six caps where #206's first version is OOM-killed, and nowhere that version runs. Every
+  run's text is the uncapped run's.
+- At 877 and 893 the check passes and the run is OOM-killed: that's the tolerance (34 MiB in that job's 8-CPU slot),
+  which lets a load within it through, as #142's check always has. Both caps are within 32 MiB of the smallest that
+  runs.
+- At 765 and below, all three are killed before the check reads anything. Where the refusals stop (861 refused, 877
+  not, against a need of 138 MiB and a 34 MiB tolerance) puts what's charged to the cgroup when the check runs at
+  757–773 MiB. Before it come the loader's F16 copies of the embedding and the head (anonymous, 2 × 260 MiB), which
+  `safetensors.rs` makes without reading the RAM, and the CUDA context. That's inferred from those figures: the OOM
+  runs' stderr wasn't kept. It's outside #183–#185 (option B would cover the context, not the loader).
+- main ran at 909 in the bisect and was OOM-killed at 909 in the sweep: its peak varies by a few MiB at the edge.
+
 ### Gates
-Product code e6704b7; 0a2b680 fixes the copy test (test-only).
+Product code dfbf2a4 (after shady's review); c5c015e fixes the FP8 staging test (test-only).
+| gate | result | job |
+|---|---|---|
+| c5c015e, tier filter (172 tests), release, GPU (bella), `--nocapture` | PASS 169 / 0 / 3 | 1106-113105-5c70 |
+| the same, debug assertions + overflow checks | PASS 169 / 0 / 3 | 1106-113105-184a |
+| the same filter, release, `--cpu` (bella, GPU hidden) | PASS 169 / 0 / 3 | 1106-113106-4ebe |
+| the same, debug | PASS 169 / 0 / 3 | 1106-113106-47e4 |
+| the pure tests, release (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`, so `fp8_arena_counted_without_repack` skips there) | PASS 37 / 0 / 0 (`model::ram_dense_tests safetensors::tests:: gguf::tests::release_gain`) | 1106-113106-b2a2 |
+| the five new tests on the second expect-fail tree | FAIL as expected: 5 of 5, each for its own reason | 1106-113107-1a3e |
+| a real cap, main vs 0a2b680 vs dfbf2a4 (above) | PASS | 1106-105219-0faf |
+| dfbf2a4, tier filter, release, GPU (r4) | FAIL 168 / 1 / 3: the staging test's strict `>` (above) | 1106-105216-a4d5 |
+| dfbf2a4, the pure tests (jade, r4) | FAIL 36 / 1 / 0: the FP8 checkpoint isn't on jade and the skip variable wasn't set (the job, not the code) | 1106-105330-f46b |
+| r4's debug, `--cpu` and expect-fail jobs: killed or dropped once a4d5's failure was understood | n/a | 1106-105216-703c, 1106-105217-a602, 1106-105217-8f30, 1106-105317-f31c |
+| clippy `-D warnings` (harness at c5c015e, binary at dfbf2a4: c5c015e is test-only), rustfmt | clean | local |
+
+Before the review: product code e6704b7; 0a2b680 fixes the copy test (test-only).
 | gate | result | job |
 |---|---|---|
 | the new tests' pure parts, release (jade, CPU) | PASS 40 / 0 / 0 (`gguf:: model::ram_dense_tests safetensors::tests::tiny_fp8`) | 1106-072522-4e45 |
@@ -133,5 +174,8 @@ Product code e6704b7; 0a2b680 fixes the copy test (test-only).
 - The first run of `fp8_arena_counted_without_repack` (bella `1106-064626-f708`) failed with "no FP8 arena built".
   `Qwen2::r8_arena` finds the shared arena through a repacked matrix, and FP8 layers hold F8S rows instead. The tests
   now read the arena through either (`arena_len`, cfg(test)). `r8_arena`, which the streamer pins, is unchanged.
-- Not covered: a cap below the CUDA context's own host memory (option B above), and a real cgroup run of the new
-  order. The ordering is shown with injected RAM. #180's `splitcap.sh` demo wasn't rerun.
+- Not covered: a cap below what's committed before the check (option B above covers the CUDA context's share; on
+  the FP8 0.5B the loader's F16 copies come first too: the real cap above, 765 MiB and below). #180's `splitcap.sh`
+  demo (a GGUF split) wasn't rerun; the real cap ran the FP8 split, the case shady's review was about.
+- r4's jade job failed on the missing FP8 checkpoint because the job didn't export `AXON_SKIP_FP8_MODEL_TESTS=1`
+  (#193 made a missing checkpoint a failure); r5's did.
