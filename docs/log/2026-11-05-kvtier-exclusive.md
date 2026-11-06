@@ -222,7 +222,7 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     88 ms outside the copies, scaled by bella / 4090 (1.73× the decode step, 3.06× the full prefill, f763 vs a169),
     plus 414 pages at 28 or 7 GB/s. So the 4090 does not settle bella's ≤ 0.3 s. Rerunning the cell on bella takes
     ≈ 20 min. **Round 2 (below):** bella read 0.513 s TAINTED (8e35), with its copies in the fast mode, so the
-    estimate's fast-mode range was low; a clean rerun (r4) is running.
+    estimate's fast-mode range was low; r4 (8062, also TAINTED) read 0.358 s.
   - The tail spill (above): `auto` would have put it on every large-VRAM server, where it is mostly cost. Fixed in
     e1df27a, gates rerun (below).
 
@@ -265,7 +265,7 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
   | replay s4, rerun on a 4090 (the lead's call) | 1106-051153-a1f3 | RTX 4090, secure pod, warmed | PASS, 3 of 3 rounds clean (foreign 0 / 0 %): ITL p99 77.52 vs 79.04 ms (0.981×); re-prefill share 0.0006 vs 0.0068, 1,665 vs 19,743 tokens; resume p50 0.053 vs 0.053 s; turn p50 0.055 vs 0.056 s; ttft_new p50 1.343 vs 1.406 s; output 130.01 tok/s both; goodput 127.15 vs 128.95 tok/s (−1.4 %, not a clause); 0 errors, 0 preempted; one md5 over all 6 runs |
   | resume cell, bella's (the number `auto` needs) | 1105-211421-8e35 | bella | TAINTED, not read (max 98 %, mean 7.7 %: kitty, Xorg): 0.389–0.526 s (median 0.513) vs main 8.77–9.22 s (median 8.83); md5 same |
   | resume cell, bella's, r3 | 1106-030609-30b7 | bella | void: submitted outside the staged dir (no `models/`), the base server exited 2; also TAINTED. Its bandwidth part ran (bulk 2D per page 27.9 / 22.1 GB/s, one page 20.1 / 18.9 GB/s) |
-  | resume cell, bella's, r4 (staged as 8e35) | 1106-051210-8062 | `--timing bella`, no fallback | RUNNING; for the `auto` flip only, not this PR's gate |
+  | resume cell, bella's, r4 (staged as 8e35) | 1106-051210-8062 | bella | TAINTED, directional only (max 99 %, mean 9.0 %: kitty, Xorg): 0.319–0.530 s (median 0.358) vs main 8.58–9.24 s (median 8.58), ≈ 24×; 3 valid rounds each, 414 pages restored each (restore steps 65–105 ms); md5 same. Copies in the fast mode: contiguous 28.38 / 24.66 GB/s, 2D per 64-pos page 27.39 / 21.93, busy 28.35 / 27.89. For the `auto` flip only; no more bella reruns for #201 (the lead) |
 
   Reading it:
   - **The five clauses, round 2: all PASS, all three timing cells on a 4090** (note §7 asks for bella's; the lead
@@ -284,13 +284,14 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     requests), main 108–421 (127.27–129.30); cand is 0.1 % under main's worst round. That is ≈ 2–4 of 174
     requests near the 100 ms line (≈ 115 tokens a request). Not attributed per request: the per-request outputs
     stayed on the pod, which is down.
-  - **Bella's resume likely misses ≤ 0.3 s even clean.** 8e35's copies ran in bella's fast mode (bandwidth rows
-    25–28 GB/s; each restore's step line 36–66 ms), so the excess isn't the slow copy mode: bella / 4090 resume is
-    3.6×, about bella's prefill ratio (first turn 8.9 vs 3.07 s, 2.9×). The time is outside the copies (the
+  - **Bella's resume likely misses ≤ 0.3 s even clean.** Two TAINTED runs agree: 8e35 0.389–0.526 s (median
+    0.513), r4 0.319–0.530 s (median 0.358); 6 of 6 rounds over 0.3 s. Both copied in bella's fast mode (bandwidth
+    rows 25–28 GB/s; restore steps 36–66 ms in 8e35, 65–105 ms in r4), so the excess isn't the slow copy mode:
+    bella / 4090 resume is 2.5–3.6×, about bella's prefill ratio (first turn 8.9 vs 3.07 s, 2.9×). The time is outside the copies (the
     prompt's last 196 tokens prefilled at 26.5k depth, the first step, tokenize and lookup; not attributed line by
     line). So the `auto` flip (a follow-up PR, Haseeb's OK) needs a faster resume path on bella or a bella-aware
-    threshold (main's resume is 8.8 s there; 17× in 8e35). This PR stays opt-in. r4 (8062) is the clean read, for
-    that decision only.
+    threshold (main's resume is 8.6–8.8 s there; 17× in 8e35, 24× in r4). This PR stays opt-in. No clean bella
+    read exists: the lead closed bella reruns for #201, and the flip decision works from these two tainted runs.
 
 ## What didn't work
 - 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
@@ -299,4 +300,5 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
 - a41d028 fixed only half of the next-turn spill: one given-up page still copied the whole chain (above; e1df27a).
 - Round 2 on bella: the desktop (zen, kitty, Xorg) tainted every s4 run (4117, 3 rounds + 2 reruns) and the resume
   cell (8e35); the s4 rerun then waited 3 h behind a kitty window drawing ~10 % all night, so it went to a 4090
-  (a1f3). The resume rerun stays on bella (r3 30b7 was submitted outside the staged dir and is void; r4 8062).
+  (a1f3). The resume rerun stayed on bella: r3 (30b7) was submitted outside the staged dir and is void, and r4
+  (8062) was TAINTED by a kitty window (max 99 %, mean 9.0 %). Bella has no clean resume read for #201.
