@@ -1,0 +1,37 @@
+[axon-run 16:09:02] submitted 1106-160902-78aa by /home/haseeb/.cache/axon-sharec31: /home/haseeb/.cache/axon-sharec31/bin/axon-test-1a22364 serve::tests::serve_share_pressure serve::tests::serve_share_dup_swapped
+[axon-run 16:52:42] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 16:52:42] scope axon-job-1106-160902-78aa-1794001962.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 19188 MB): an OOM here kills only this job
+[axon-run 16:52:42] job 1106-160902-78aa -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-160902-78aa-1794001962 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-sharec31/bin/axon-test-1a22364 serve::tests::serve_share_pressure serve::tests::serve_share_dup_swapped --test-threads 6
+axon-q 16:52:42 start slot 16-23: /home/haseeb/.cache/axon-sharec31/bin/axon-test-1a22364 serve::tests::serve_share_pressure serve::tests::serve_share_dup_swapped --test-threads 6
+
+running 2 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_share_dup_swapped ... FAILED
+test serve::tests::serve_share_pressure ... FAILED
+
+failures:
+
+---- serve::tests::serve_share_dup_swapped stdout ----
+
+thread 'serve::tests::serve_share_dup_swapped' (1273467) panicked at src/serve/tests.rs:7742:5:
+assertion `left == right` failed: the probes' cached tokens (prefix 481 tokens; 0 pages swapped)
+  left: [448, 704]
+ right: [768, 704]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- serve::tests::serve_share_pressure stdout ----
+cache-ram 0: again: cached [0, 256, 284, 0, 0, 266], 3 preempted or unfed, 0 refed claims (0 tokens)
+
+thread 'serve::tests::serve_share_pressure' (1273468) panicked at src/serve/tests.rs:7440:9:
+assertion `left == right` failed: cache-ram 0: again: cached [0, 256, 284, 0, 0, 266], 3 preempted or unfed
+  left: 3
+ right: 0
+
+
+failures:
+    serve::tests::serve_share_dup_swapped
+    serve::tests::serve_share_pressure
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 896 filtered out; finished in 10.13s
+
+[axon-run 16:52:52] exit 101 after 10.4s (host bella)
