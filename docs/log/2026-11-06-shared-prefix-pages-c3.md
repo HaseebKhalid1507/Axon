@@ -72,13 +72,36 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   - `servetime-r2.sh` (#164's): C=1 decode tok/s within 2 %.
 
 ## Results
-| gate | job | result |
-|---|---|---|
-| touched modules' tests, release | 1106-073530-3f6b | pending |
-| same, debug assertions + overflow checks | 1106-073715-f411 | pending |
-| md5: gen + serve | 1106-073531-7cb0 | pending |
-| replay md5 under `AXON_PAGE_SHUFFLE` | 1106-073531-d9e7 | pending |
-| timing (4090 pod) | not yet submitted | after the correctness gates |
+| gate | head | job | result |
+|---|---|---|---|
+| touched modules' tests, release | `71b1a60` | 1106-073530-3f6b | **FAIL** 213 / 2 / 10: two test bugs (below) |
+| same, debug assertions + overflow checks | `71b1a60` | 1106-073715-f411 | not run: dropped from the queue (its binary had both tests) |
+| CI (`check`) | `71b1a60`..`d01c249` | runs 42219303641, 42219322630, 42220176786 | **FAIL**: `peek_is_walk_without_the_touch` (host-only) |
+| touched modules' tests, release (r2) | `76b8f0b` | 1106-090453-76cf | pending |
+| same, debug assertions + overflow checks (r2) | `76b8f0b` | 1106-090603-c6bb | pending |
+| `serve_share_pressure` ×3, `--nocapture`, `AXON_SERVE_DEBUG=1` (diagnostic, jade GTX 1050) | `76b8f0b` | 1106-090454-2e5f | pending |
+| md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | pending |
+| replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | pending |
+| timing (4090 pod) | | not yet submitted | after the correctness gates |
+
+### r1's two failures (3f6b): both test bugs, fixed in `76b8f0b` (tests only)
+- `serve::prefix::tests::peek_is_walk_without_the_touch` (prefix.rs:521, left `Some(2)`, right `Some(1)`;
+  deterministic, also CI's failure). The test checked `peek == walk` with a `walk` on the same index whose LRU order
+  it then asserted, and `walk` touches (as documented): A became younger than B and B's leaf went first. The index
+  does what its docs say; the test now peeks one copy of the index and walks another (and checks both orders).
+  Host-only: it should have run locally before the gate (it does now, with `pages::` and `claim_tests`).
+- `serve::tests::serve_share_pressure` (tests.rs:7397, `cache-ram 0: request 1 again: 0 cached`). The test asserted
+  that every request of its second round reports the prefix cached. The round runs under the pressure the test
+  builds (40 pages, kv_grow 0), so requests are preempted or unfed, and `preempt` / `unfeed` set `seq.cached = 0`:
+  the request is fed from 0 again (as on main; claiming its pages again on refeed is not in C3, design header). The
+  only other writer of `cached` is admission. So a request short of the prefix was a victim. The round now
+  allows at most its `preempted` + `prefills_unfed` (from `/slots`, before and after) short of the prefix, and at
+  least one at it: the oldest request never gives way (`victim`). Its replies were == sharing off (that assert, the
+  one before, passed). The diagnostic job prints each run's cached counts, victims and admissions.
+- **md5 and replay md5 stay at `71b1a60`.** `76b8f0b` changes `#[cfg(test)]` code only (`git diff 71b1a60 76b8f0b
+  -- src`: prefix.rs's `mod tests` and tests.rs). The two release binaries' `.text`, `.rodata`, `.data`,
+  `.data.rel.ro`, `.eh_frame`, `.gcc_except_table` and `.init_array` are byte-identical (sha256 of each section);
+  only `.strtab`, the symbol-name table, differs (134 bytes).
 
 ## Verdict
 Pending the gates. Rule (#187): if a timing clause fails, sharing ships off by default (`AXON_SHARE_KV` opt-in).
