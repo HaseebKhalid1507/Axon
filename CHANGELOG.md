@@ -13,11 +13,16 @@ measurements behind them.
   MiB and below. The conversion's need (the converted tensors, the conversion threads' buffers) is now checked
   first, on every device, worded as the CPU model's refusal (#185). Near the edge it waits for the CUDA context,
   which the CLI makes beside the load, and reads the RAM again. Its tolerance is the memory cgroup's charge batches
-  only (256 KiB a CPU): a conversion gives nothing back and its estimate is exact. The CUDA kernels' module (about
-  25 MiB) is still loaded after this check and before the split's (#217).
+  only (256 KiB a CPU): a conversion gives nothing back, and its estimate is exact in anonymous memory. The cgroup
+  also charges about 1.2 MiB of kernel memory for it (likely the arena's page tables), which the estimate doesn't
+  count, so under a cap a few MiB above the refusals it's still killed converting (on bella about 742–745 MiB for
+  the FP8 0.5B; refused through 735). The CUDA kernels' module (about 25 MiB) is still loaded after this check and
+  before the split's (#217, which also takes the page tables).
 - **#209: a split needs the larger of its two steps, not their sum.** The GPU half's upload staging (#184) is freed
   before the CPU half is built; the need is now the larger, each with its own residents (the GPU half's credit
-  offsets the CPU half only). The refusal says so, and its `--ctx` is the CPU half's.
+  offsets the CPU half only). The refusal says so, and its `--ctx` is the CPU half's. A trade: within the split
+  check's tolerance (about 32 MiB) above the need, a run the sum refused cleanly can now be OOM-killed instead (two
+  caps on a 3B GGUF split, one on the 7B FP8's under a real cap), against 17 caps where the 7B FP8 split now runs.
 - **An FP8 checkpoint's CPU rows are counted whole.** The estimate credited every matrix's source as memory the load
   hands back; an FP8 checkpoint's are read from its file, so its CPU model's and a split's CPU half's need was the
   rows' scales alone (7B at 20 of 28 GPU layers: 1.74 GiB of rows uncounted).
