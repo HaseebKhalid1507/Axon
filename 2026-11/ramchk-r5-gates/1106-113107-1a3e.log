@@ -1,0 +1,48 @@
+[axon-run 11:31:07] submitted 1106-113107-1a3e by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail-r5 hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording model::ram_dense_tests::remedy_names_only_what_the_model_takes model::ram_dense_tests::split_refusal_wording_and_cap safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu --nocapture
+[axon-run 12:21:29] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 12:21:29] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 12:21:29] scope axon-job-1106-113107-1a3e-1793985689.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20000 MB): an OOM here kills only this job
+[axon-run 12:21:29] job 1106-113107-1a3e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-113107-1a3e-1793985689 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail-r5 hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording model::ram_dense_tests::remedy_names_only_what_the_model_takes model::ram_dense_tests::split_refusal_wording_and_cap safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu --nocapture --test-threads 6
+axon-q 12:21:29 start slot 16-23: /home/haseeb/.cache/axon-ramchk/bin/axon-test-expectfail-r5 hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording model::ram_dense_test
+
+running 5 tests
+
+thread 'model::ram_dense_tests::split_refusal_wording_and_cap' (3417866) panicked at src/model.rs:6924:9:
+llama: the CPU half of the split (16 of 32 layers) needs about 0.59 GiB of RAM (its repacked weights 0.10 GiB, the KV cache of 8192 tokens 0.50 GiB, the GPU half's upload staging 0.59 GiB, less the GPU half's 1.00 GiB of the copy, handed back as it goes up) and only 0.20 GiB is available (bound by cgroup /app.slice/split.scope memory.max 3072 MiB); to fit: more --gpu-layers than 16 (fewer layers on the CPU), if the GPU has room, or --ctx 8960 or less (its KV cache then fits)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test model::ram_dense_tests::split_refusal_wording_and_cap ... FAILED
+
+thread 'safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu' (3417867) panicked at src/safetensors_tests.rs:1628:5:
+assertion `left == right` failed
+  left: GpuWays { whole: true, split: true }
+ right: GpuWays { whole: false, split: false }
+test safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu ... FAILED
+
+thread 'model::ram_dense_tests::remedy_names_only_what_the_model_takes' (3417865) panicked at src/model.rs:6693:9:
+assertion `left == right` failed
+  left: GpuWays { whole: true, split: true }
+ right: GpuWays { whole: true, split: false }
+test model::ram_dense_tests::remedy_names_only_what_the_model_takes ... FAILED
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fp8 0.5b 1/24 on the GPU: staging 16384 KiB, the head's Q8_0 141253 KiB, the largest FP8 matrix's 4522 KiB
+
+thread 'hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions' (3417863) panicked at src/hybrid/tests.rs:1862:9:
+1/24: staging 16777216 under a conversion
+test hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions ... FAILED
+
+thread 'hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording' (3417864) panicked at src/hybrid/tests.rs:1925:5:
+FP8 natively runs every layer of a dense model on one GPU; --numerics exact runs its Q8_0 form
+test hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording ... FAILED
+
+failures:
+
+failures:
+    hybrid::tests::hybrid_fp8_staging_counts_the_q8_conversions
+    hybrid::tests::hybrid_split_plan_refusal_keeps_its_wording
+    model::ram_dense_tests::remedy_names_only_what_the_model_takes
+    model::ram_dense_tests::split_refusal_wording_and_cap
+    safetensors::tests::tiny_bf16_ram_refusal_names_no_gpu
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 880 filtered out; finished in 1.03s
+
+[axon-run 12:21:30] exit 101 after 1.2s (host bella)

@@ -1,0 +1,39 @@
+[axon-run 10:52:19] submitted 1106-105219-0faf by /home/haseeb/.cache/axon-ramchk: /usr/bin/bash fp8cap.sh ./axon-ad0c65e ./axon-0a2b680 ./axon-dfbf2a4
+[axon-run 11:27:30] scope axon-job-1106-105219-0faf-1793982450.scope in app-axonjobs.slice: MemoryMax 11524 MB, MemoryHigh 10371 MB, no swap, oomd pressure kill 80% (claim 7000 MB): an OOM here kills only this job
+[axon-run 11:27:30] job 1106-105219-0faf -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-105219-0faf-1793982450 --slice=app-axonjobs.slice -p MemoryMax=11524M -p MemoryHigh=10371M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash fp8cap.sh ./axon-ad0c65e ./axon-0a2b680 ./axon-dfbf2a4
+axon-q 11:27:30 start slot 16-23: /usr/bin/bash fp8cap.sh ./axon-ad0c65e ./axon-0a2b680 ./axon-dfbf2a4
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 888 MiB, 12227 MiB
+               total        used        free      shared  buff/cache   available
+Mem:           31487       10341        4414         177       17363       21145
+split:       gpu layers 23/24, 0.48 GiB on GPU
+The capital of France is Paris. It is the largest city in
+
+FP8CAP smallest cap that runs: main 909 MiB, pre 909 MiB, cand 909 MiB
+fp8cap.sh: line 19: 2304483 Killed                     systemd-run --user --scope --quiet --unit=fp8cap-$$-$RANDOM -p MemoryMax=$2M -p MemorySwapMax=0 -- "$1" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers $GL --numerics exact > out.txt 2> err.txt
+cand at 901 MiB: 
+  589M: main oom | pre oom | cand oom |
+  605M: main oom | pre oom | cand oom |
+  621M: main oom | pre oom | cand oom |
+  637M: main oom | pre oom | cand oom |
+  653M: main oom | pre oom | cand oom |
+  669M: main oom | pre oom | cand oom |
+  685M: main oom | pre oom | cand oom |
+  701M: main oom | pre oom | cand oom |
+  717M: main oom | pre oom | cand oom |
+  733M: main oom | pre oom | cand oom |
+  749M: main oom | pre oom | cand oom |
+  765M: main oom | pre oom | cand oom |
+  781M: main oom | pre oom | cand refused |
+  797M: main oom | pre oom | cand refused |
+  813M: main oom | pre oom | cand refused |
+  829M: main oom | pre oom | cand refused |
+  845M: main oom | pre oom | cand refused |
+  861M: main oom | pre oom | cand refused |
+  877M: main oom | pre oom | cand oom |
+  893M: main oom | pre oom | cand oom |
+  909M: main oom | pre runs | cand runs |
+  925M: main runs | pre runs | cand runs |
+  941M: main runs | pre runs | cand runs |
+FP8CAP caps where cand refuses and pre is OOM-killed: 6; cand refuses where pre runs: 0
+FP8CAP PASS
+[axon-run 11:28:29] exit 0 after 59.4s (host bella)
