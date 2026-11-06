@@ -16,9 +16,10 @@ measurements behind them.
   MiB, 64 MiB for a GPU half of 1 GiB or more, none under 64 MiB, or `AXON_UPLOAD_RING`'s size; or, if larger, the
   biggest matrix it converts to Q8_0 on the host, as an FP8 checkpoint's split does: the 0.5B's head is 138 MiB, a
   7B's 552 MiB), and, when the model's bytes are in RAM (a copied file, a checkpoint's converted tensors), credits
-  the GPU half's share, which goes back as it's uploaded. The refusal names both terms. The CUDA context's own host
-  memory is still taken before any check, so a cap below it (about 0.2 GiB, inferred from #180's caps) is still an
-  OOM kill: a floor before the device is opened is a possible follow-up (#184).
+  the GPU half's share, which goes back as it's uploaded. The refusal names both terms. Memory taken before the
+  check is still an OOM kill under a tight cap: the CUDA context (about 0.2 GiB, inferred from #180's caps; a floor
+  before the device is opened stays open in #184) and the safetensors loader's F16 copies (about 520 MiB on the FP8
+  0.5B, about 2 GiB on a 7B FP8; #208).
 - **#185: the refusal names its ways out.** After the bound: the longest `--ctx` (in steps of 256) whose KV cache fits
   beside the weights, when the weights fit alone (always under the `--ctx` refused); then a GPU for the CPU model
   (whole, or in part with `--gpu-layers`, as far as the model can take it: not a BF16/F16 safetensors checkpoint,
