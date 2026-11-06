@@ -1,0 +1,29 @@
+{
+ "label": "kvexcl-626051c-resume-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1105-191445-a169",
+   "name": "kvexcl-626051c-resume-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-05_20:14.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "626051c",
+   "binary": "bash",
+   "started": 1793927651.4871168,
+   "ended": 1793928830.213544,
+   "attempts": 1,
+   "remote_job": "20261106-011421-bash-13712",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "49943f9787ed1a4ca929ad8496ffec991c30fb256349ebdfc57b0927112ac55a",
+   "log_bytes": 18398
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 20:33:51 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
