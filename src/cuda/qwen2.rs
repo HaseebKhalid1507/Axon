@@ -1433,6 +1433,24 @@ impl<'g> CudaQwen2<'g> {
         Ok(net.vram_want(&plan, max_ctx))
     }
 
+    /// Host bytes `new_layers(.., first, kv, split_batch, _)`'s upload
+    /// page-locks for its staging ring (`upload::Shape::pick` of the
+    /// weights it uploads; 0 below the ring's minimum or with
+    /// AXON_UPLOAD_RING=0), whether or not the upload then takes the ring
+    /// (it doesn't when little of the file is in the page cache): the
+    /// split's RAM check counts them (`hybrid`, #184). Nothing allocated.
+    pub(crate) fn upload_staging(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        first: usize,
+        kv: CacheKv,
+        split_batch: usize,
+    ) -> Result<u64, String> {
+        let (_, plan) = Self::plan(gpu, module, m, first, None, kv, split_batch, false)?;
+        Ok(super::upload::Shape::pick(plan.total).map_or(0, |s| s.bytes() as u64))
+    }
+
     /// `vram_need` of the whole model (first 0) as a function of max_ctx,
     /// planned once: what `Backend::new`'s placement weighs.
     pub(crate) fn vram_curve(

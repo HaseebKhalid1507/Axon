@@ -770,6 +770,40 @@ impl Model {
         self.ahead
     }
 
+    /// The anonymous memory (the copy, the aux arena) that `release` of
+    /// every tensor `pick` selects would hand back, in bytes: as `release`
+    /// drops it, the whole aligned blocks of each run of picked tensors
+    /// joined across bytes no tensor owns. 0 on a file mapping, whose pages
+    /// are page cache the kernel reclaims anyway. Tensors released before
+    /// don't join the runs (an underestimate, never more than `release`
+    /// gives back). A split's RAM check credits the GPU half's (#184).
+    pub(crate) fn release_gain(&self, pick: &dyn Fn(&Tensor) -> bool) -> u64 {
+        let mut rs: Vec<(u16, std::ops::Range<usize>)> = (self.tensors.iter())
+            .filter(|t| pick(t) && t.n_bytes > 0 && !self.region(t.shard).1)
+            .map(|t| (t.shard, self.tensor_range(t)))
+            .collect();
+        rs.sort_by_key(|(s, r)| (*s, r.start));
+        let mut gain = 0;
+        let mut i = 0;
+        while i < rs.len() {
+            let (s, start, mut end) = (rs[i].0, rs[i].1.start, rs[i].1.end);
+            i += 1;
+            while i < rs.len() && rs[i].0 == s && self.unowned(s, end, rs[i].1.start) {
+                end = end.max(rs[i].1.end);
+                i += 1;
+            }
+            let base = self.region(s).0.as_ptr() as usize;
+            gain += release_span(base, start..end, RELEASE_ALIGN_HUGE).map_or(0, |r| r.len());
+        }
+        gain as u64
+    }
+
+    /// How many tensors `release` has handed back.
+    #[cfg(test)]
+    pub(crate) fn released_count(&self) -> usize {
+        self.released.lock().unwrap().len()
+    }
+
     /// Whether `t` was handed back by `release`.
     #[cfg(test)]
     pub(crate) fn is_released(&self, t: &Tensor) -> bool {
@@ -1830,6 +1864,62 @@ mod tests {
             m.release(t);
             assert!(m.is_released(t));
         }
+    }
+
+    /// `release_gain` is what `release` hands back: on an in-memory model
+    /// (anonymous), the resident bytes that releasing the picked tensors
+    /// drops (mincore), for a run of four 1.5 MiB tensors and one apart
+    /// (a split's GPU layers and its head); 0 for none and on a file
+    /// mapping. Each 2 MiB block inside a run, not inside one tensor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn release_gain_is_what_release_drops() {
+        unsafe extern "C" {
+            fn mincore(addr: *mut std::ffi::c_void, len: usize, vec: *mut u8) -> i32;
+        }
+        let resident = |m: &Model| {
+            let page = page_size();
+            let base = m.data.as_ptr() as usize;
+            let (lo, hi) = (base / page * page, base + m.data.len());
+            let mut v = vec![0u8; (hi - lo).div_ceil(page)];
+            // SAFETY: [lo, hi) covers the live mapping, from a page boundary.
+            let r = unsafe { mincore(lo as *mut _, hi - lo, v.as_mut_ptr()) };
+            assert_eq!(r, 0, "mincore: {}", io::Error::last_os_error());
+            v.iter().filter(|&&b| b & 1 != 0).count() * page
+        };
+        let names: Vec<String> = (0..8).map(|i| format!("t{i}")).collect();
+        // F32, 1.5 MiB each.
+        let ts: Vec<(&str, &[u64], u32)> = names
+            .iter()
+            .map(|n| (n.as_str(), &[3u64 << 17][..], 0))
+            .collect();
+        let data: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8 + 1; 3 << 19]).collect();
+        let m = build_for_test_with(
+            &[("general.architecture", Val::Str("x".into()))],
+            &ts,
+            &data,
+        );
+        let pick = |t: &Tensor| matches!(t.name.as_str(), "t2" | "t3" | "t4" | "t5" | "t7");
+        assert_eq!(m.release_gain(&|_| false), 0);
+        let gain = m.release_gain(&pick);
+        // The run t2..t5 is 6 MiB: two whole 2 MiB blocks at least.
+        assert!(gain >= 4 << 20, "{gain}");
+        let before = resident(&m);
+        for t in m.tensors.iter().filter(|t| pick(t)) {
+            m.release(t);
+        }
+        let after = resident(&m);
+        assert_eq!(
+            before - after,
+            gain as usize,
+            "resident {before} -> {after}"
+        );
+        // A file mapping: page cache, nothing to credit.
+        let path = std::env::temp_dir().join(format!("axon-gain-{}.gguf", std::process::id()));
+        std::fs::write(&path, valid().pad_to(32, 64 + (4 << 20))).unwrap();
+        let mapped = load_with(path.to_str().unwrap(), Some(false)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(mapped.release_gain(&|_| true), 0);
     }
 
     /// `resident_fraction`: all of a file just written and read is in the

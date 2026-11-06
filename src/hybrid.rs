@@ -31,7 +31,7 @@ use crate::gguf::mem::Avail;
 use crate::gguf::{Model, Tensor};
 use crate::kv::Half as F16;
 use crate::lm::Lm;
-use crate::model::{KvCache, Qwen2};
+use crate::model::{GpuHalfHost, KvCache, Qwen2};
 
 /// VRAM the automatic split leaves free beyond what `CudaQwen2` plans for
 /// (which keeps 256 MiB for the context's own growth): the desktop's
@@ -330,10 +330,11 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// a `max_ctx`-token cache (the GPU half's of type `kv`; the CPU half's
     /// is f16, or f32 for `KvType::F32`, kv::use_f32). Each half loads only its own weights, and
     /// the GPU's are handed back to `m` once uploaded (`Model::release`;
-    /// on a copy of the file they can't be read again). Err (after the GPU
-    /// half's upload) if the CPU half's weights and KV floor don't fit in
-    /// the RAM available (`model::check_ram_split`, #143). Streaming off (PR
-    /// B's behavior); the CLI uses `new_with_stream`.
+    /// on a copy of the file they can't be read again). Err (before the
+    /// GPU half's upload, #184) if the CPU half's weights and KV floor, with
+    /// the upload's staging, don't fit in the RAM available
+    /// (`model::check_ram_split`, #143). Streaming off (PR B's behavior);
+    /// the CLI uses `new_with_stream`.
     #[cfg_attr(not(test), allow(dead_code))] // tests and PR B's exact path
     pub(crate) fn new(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
@@ -370,9 +371,9 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// `new_with_stream`, the CPU's layers repacked or not (`repack`).
     /// `auto`: the split came from `auto_gpu_layers` (streaming keeps
     /// `DESKTOP_MARGIN` free; a RAM refusal says the split was picked to
-    /// fit the GPU's memory). `ram`: the RAM available when the CPU half is
-    /// about to be built (`gguf::mem::avail`; tests pass their own), refused
-    /// on as `model::check_ram_split` says.
+    /// fit the GPU's memory). `ram`: the RAM available before the GPU
+    /// half's upload, the CUDA context made (`gguf::mem::avail`; tests pass
+    /// their own), refused on as `model::check_ram_split` says.
     #[allow(clippy::too_many_arguments)]
     fn build(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
@@ -396,6 +397,11 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         let n = block_count(m)?;
         let g = gpu_layers.min(n);
         let k = n - g;
+        let dev = match (g, dev) {
+            (0, _) => None,
+            (_, None) => return Err("GPU layers without a GPU".into()),
+            (_, d) => d,
+        };
         // Streaming feeds the GPU half whole prompt chunks: its batch
         // scratch is sized for that, decided up front: if the plan with
         // the bigger scratch and the stream reserve doesn't fit, no
@@ -417,20 +423,38 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
                 wants_stream = false;
             }
         }
+        // The CPU half's RAM, refused on before anything is committed:
+        // before the GPU half's upload (#184; #143's check ran after it, so
+        // a cap the upload didn't fit in was an OOM kill, not a refusal).
+        // The CUDA context and the module are made by now, so `ram` reads
+        // what they leave. The upload's staging ring is added to the need;
+        // on a copy of the file (or the loader's own arena) the GPU half's
+        // bytes, handed back as they go up, are credited to the CPU half
+        // (`model::GpuHalfHost`). A KV cache too long to fit whole is a
+        // note, as on the CPU (`check_ram_dense`).
+        let sb = crate::cuda::qwen2::split_batch(wants_stream);
+        let host = match dev {
+            Some((gpu, module)) if k > 0 => GpuHalfHost {
+                staging: CudaQwen2::upload_staging(gpu, module, m, k, kv, sb)?,
+                freed: m.release_gain(&|t| gpu_part(&t.name, k, n)),
+            },
+            _ => GpuHalfHost::default(),
+        };
+        if let Some(note) = crate::model::check_ram_split(m, repack, k, max_ctx, auto, host, ram)? {
+            eprintln!("axon: {note}");
+        }
         // The GPU first: a VRAM shortfall fails before the CPU's repack.
         // Each matrix's pages go back right after its upload, so the GPU
         // half (~9 GB on 32B) never sits in the page cache all at once; the
         // norms and biases (read into `plan`) after.
-        let gpu = match (g, dev) {
-            (0, _) => None,
-            (_, None) => return Err("GPU layers without a GPU".into()),
-            (_, Some((gpu, module))) => {
+        let gpu = match dev {
+            None => None,
+            Some((gpu, module)) => {
                 let mut uploaded = |t: &Tensor| {
                     if gpu_part(&t.name, k, n) {
                         m.release(t);
                     }
                 };
-                let sb = crate::cuda::qwen2::split_batch(wants_stream);
                 let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, kv, sb, &mut uploaded)
                     .map_err(|e| {
                         format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
@@ -440,14 +464,6 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         };
         if g > 0 {
             release_gpu_part(m, k, n);
-        }
-        // The CPU half's RAM, refused on before it's committed (#143) and
-        // read now, after the GPU half: on a copy of the file the GPU's
-        // bytes have just gone back, and what the CUDA context holds in
-        // host memory is in use. A KV cache too long to fit whole is a
-        // note, as on the CPU (`check_ram_dense`).
-        if let Some(note) = crate::model::check_ram_split(m, repack, k, max_ctx, auto, ram)? {
-            eprintln!("axon: {note}");
         }
         let cpu = (k > 0).then(|| Qwen2::new_layers(m, repack, k));
         let halves = [

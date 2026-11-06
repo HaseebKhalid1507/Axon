@@ -1516,11 +1516,22 @@ fn kv_elem() -> u64 {
 }
 
 /// What `model::check_ram_split` weighs for a k-layer CPU half at ctx:
-/// what its build commits and the KV floor.
-fn half_need(m: &Model, k: usize, ctx: usize) -> u64 {
+/// what its build commits and the KV floor; with a GPU half (on `dev`),
+/// its upload's staging ring added and, on a copy, the bytes it hands back
+/// credited (#184), as `build` counts them (no streaming).
+fn half_need(dev: Option<(&Gpu, &Module)>, m: &Model, k: usize, ctx: usize) -> u64 {
     let need = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
-    crate::model::dense_load_bytes(need, !m.file_backed())
-        + need.kv_per_pos * ctx.min(crate::DEFAULT_CHAT_CTX) as u64
+    let n = block_count(m).unwrap();
+    let cpu = crate::model::dense_load_bytes(need, !m.file_backed())
+        + need.kv_per_pos * ctx.min(crate::DEFAULT_CHAT_CTX) as u64;
+    match dev {
+        Some((g, km)) if k > 0 && k < n => {
+            let sb = crate::cuda::qwen2::split_batch(false);
+            let staging = CudaQwen2::upload_staging(g, km, m, k, CacheKv::F16, sb).unwrap();
+            cpu.saturating_sub(m.release_gain(&|t| gpu_part(&t.name, k, n))) + staging
+        }
+        _ => cpu,
+    }
 }
 
 /// `build` with the RAM available `ram` (repacked, no streaming).
@@ -1577,7 +1588,7 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
     };
     let n = block_count(&m).unwrap();
     let ctx = 256;
-    let need = half_need(&m, n, ctx);
+    let need = half_need(None, &m, n, ctx);
     let tol = crate::model::ram_tolerance();
     let short = need.checked_sub(tol + 1).unwrap_or_else(|| {
         panic!(
@@ -1601,12 +1612,12 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
 
 /// #143 on real splits (GPU): for 1, n/2, n-1 and n GPU layers, the CPU
 /// half's arena and KV are the estimate's (`assert_half_is_the_estimate`).
-/// A half that needs more than the tolerance is refused one byte under it
-/// (after the GPU half: the refusal names the split) and goes ahead at the
-/// edge, the tolerance under its need. One that needs less (the 0.5B's
-/// last layer, 12 MiB against 34 MiB on 8 CPUs) is refused by no RAM
-/// figure, so it's built with 0 bytes available: the check doesn't refuse
-/// it. The largest half (one GPU layer) must be past the tolerance on every
+/// A half that needs more than the tolerance (with the GPU half's upload
+/// staging, #184) is refused one byte under it (the refusal names the
+/// split) and goes ahead at the edge, the tolerance under its need. One
+/// that needs less (the 0.5B's last layer, 12 MiB and the 16 MiB ring
+/// against 34 MiB on 8 CPUs) is refused by no RAM figure, so it's built
+/// with 0 bytes available: the check doesn't refuse it. The largest half (one GPU layer) must be past the tolerance on every
 /// model, so the refusal is shown on each, whatever the CPU count. All of
 /// it on the GPU (no CPU half) never reads the RAM.
 #[test]
@@ -1625,7 +1636,7 @@ fn hybrid_ram_check_on_real_splits() {
         let mut refused = Vec::new();
         for gl in [1, n / 2, n - 1, n] {
             let k = n - gl;
-            let need = half_need(&m, k, ctx);
+            let need = half_need(Some((&g, &km)), &m, k, ctx);
             // The RAM it's built at, and what was shown before.
             let (ram, shown) = match need.checked_sub(tol + 1) {
                 Some(short) if k > 0 => {
@@ -1679,6 +1690,93 @@ fn hybrid_ram_check_on_real_splits() {
         .unwrap();
         assert!(h.cpu.is_none());
     }
+}
+
+/// #184: the split's RAM check runs before the GPU half's upload. Refused
+/// with no RAM, the build reads the RAM before any tensor has gone up
+/// (each is released to `m` right after its upload) and leaves them all
+/// unreleased; at main it read it after (12 layers released, the 0.5B's
+/// n/2). Its need counts the upload's staging ring (16 MiB for the 0.5B's
+/// GPU half). On a copy of the file the GPU half's bytes, which go back as
+/// they go up, are credited: refused a byte under the edge and built at
+/// it, the credit no more than those bytes.
+#[test]
+fn hybrid_ram_refused_before_the_upload() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let (gl, ctx) = (n / 2, 512);
+    let k = n - gl;
+    let tol = crate::model::ram_tolerance();
+    let seen = std::cell::Cell::new(None);
+    let ram = || {
+        seen.set(Some(m.released_count()));
+        host(0)
+    };
+    let e = match HybridQwen2::build(
+        Some((&g, &km)),
+        &m,
+        ctx,
+        gl,
+        CacheKv::F16,
+        false,
+        true,
+        false,
+        &ram,
+    ) {
+        Ok(_) => panic!("built a {k}-layer CPU half with no RAM"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        seen.get(),
+        Some(0),
+        "tensors released when the RAM was read"
+    );
+    assert_eq!(m.released_count(), 0, "uploaded before the refusal");
+    assert!(
+        e.contains(&format!("the CPU half of the split ({k} of {n} layers)"))
+            && e.contains("the GPU half's upload staging 0.02 GiB"),
+        "{e}"
+    );
+    let sb = crate::cuda::qwen2::split_batch(false);
+    let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+    assert_eq!(staging, 16 << 20);
+    // A copy: a fresh one per build (a build hands its bytes back).
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(M05);
+    let copy = || crate::gguf::load_with(p.to_str().unwrap(), Some(true)).unwrap();
+    let c = copy();
+    assert!(!c.file_backed());
+    let freed = c.release_gain(&|t| gpu_part(&t.name, k, n));
+    let gpu_bytes: u64 = (c.tensors.iter())
+        .filter(|t| gpu_part(&t.name, k, n))
+        .map(|t| t.n_bytes)
+        .sum();
+    assert!(
+        freed > 0 && freed <= gpu_bytes,
+        "credit {freed} of {gpu_bytes}"
+    );
+    let need = half_need(Some((&g, &km)), &c, k, ctx);
+    let short = need
+        .checked_sub(tol + 1)
+        .expect("the half past the tolerance");
+    assert!(build_at(Some((&g, &km)), &c, ctx, gl, short).is_err());
+    drop(c);
+    let c = copy();
+    let h = build_at(Some((&g, &km)), &c, ctx, gl, need - tol).expect("at the edge");
+    assert_half_is_the_estimate(&h, &c, ctx, "0.5b copy");
+    eprintln!(
+        "0.5b {gl}/{n} on the GPU, a copy: need {} MiB (staging {} MiB, the copy's credit {} \
+         MiB of the GPU half's {} MiB)",
+        need >> 20,
+        staging >> 20,
+        freed >> 20,
+        gpu_bytes >> 20
+    );
 }
 
 /// The pin check's decision (pure): the tolerance kept free, the bound
