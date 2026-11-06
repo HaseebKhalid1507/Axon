@@ -149,7 +149,7 @@ Product code dfbf2a4 (after shady's review); c5c015e fixes the FP8 staging test 
 | the same filter, release, `--cpu` (bella, GPU hidden) | PASS 169 / 0 / 3 | 1106-113106-4ebe |
 | the same, debug | PASS 169 / 0 / 3 | 1106-113106-47e4 |
 | the pure tests, release (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`, so `fp8_arena_counted_without_repack` skips there) | PASS 37 / 0 / 0 (`model::ram_dense_tests safetensors::tests:: gguf::tests::release_gain`) | 1106-113106-b2a2 |
-| the five new tests on the second expect-fail tree | FAIL as expected: 5 of 5, each for its own reason | 1106-113107-1a3e |
+| the five tests the review added or extended, on the second expect-fail tree | FAIL as expected: 5 of 5, each for its own reason | 1106-113107-1a3e |
 | a real cap, main vs 0a2b680 vs dfbf2a4 (above) | PASS | 1106-105219-0faf |
 | dfbf2a4, tier filter, release, GPU (r4) | FAIL 168 / 1 / 3: the staging test's strict `>` (above) | 1106-105216-a4d5 |
 | dfbf2a4, the pure tests (jade, r4) | FAIL 36 / 1 / 0: the FP8 checkpoint isn't on jade and the skip variable wasn't set (the job, not the code) | 1106-105330-f46b |
