@@ -1,0 +1,29 @@
+{
+ "label": "kvexcl-tailspill-before-expectFAIL",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1105-205357-b9a0",
+   "name": "kvexcl-tailspill-before",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "t-oldtail-rel",
+   "started": 1793931857.0857582,
+   "ended": 1793931862.2086484,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "823505e01666011c845da898d139c4894452b085eb6b23e7236130389cb64683",
+   "log_bytes": 1804
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 21:24:23 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

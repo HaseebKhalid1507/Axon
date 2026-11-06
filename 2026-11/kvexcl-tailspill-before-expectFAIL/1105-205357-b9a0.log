@@ -1,0 +1,24 @@
+[axon-run 20:53:57] submitted 1105-205357-b9a0 by /home/haseeb/.cache/axon-kvexcl: /home/haseeb/.cache/axon-kvexcl/t-oldtail-rel serve_cuda_cache_ram_tail_spill --test-threads 1 --nocapture
+[axon-run 21:24:17] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 21:24:17] scope axon-job-1105-205357-b9a0-1793931857.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18545 MB): an OOM here kills only this job
+[axon-run 21:24:17] job 1105-205357-b9a0 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1105-205357-b9a0-1793931857 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvexcl/t-oldtail-rel serve_cuda_cache_ram_tail_spill --test-threads 1 --nocapture
+axon-q 21:24:17 start slot 16-23: /home/haseeb/.cache/axon-kvexcl/t-oldtail-rel serve_cuda_cache_ram_tail_spill --test-threads 1 --nocapture
+
+running 1 test
+test serve::tests::serve_cuda_cache_ram_tail_spill ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'serve::tests::serve_cuda_cache_ram_tail_spill' (880608) panicked at src/serve/tests.rs:7063:13:
+assertion `left == right` failed: (a): Q gave up 1 page of 5; its spill copied 5 (the whole chain: 5)
+  left: (5, 5)
+ right: (0, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    serve::tests::serve_cuda_cache_ram_tail_spill
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 869 filtered out; finished in 1.60s
+
+[axon-run 21:24:19] exit 101 after 1.9s (host bella)
