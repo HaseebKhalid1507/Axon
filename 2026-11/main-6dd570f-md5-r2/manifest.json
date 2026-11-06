@@ -1,0 +1,29 @@
+{
+ "label": "main-6dd570f-md5-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1105-203736-0192",
+   "name": "main-6dd570f-md5-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "6dd570f",
+   "binary": "bash",
+   "started": 1793933053.4116018,
+   "ended": 1793933183.236538,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "592782dc42c6d363d32eeb67bb9810dbe3cb0771e193385468feb178c79ed20a",
+   "log_bytes": 4031
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-05 21:46:24 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
