@@ -1,0 +1,40 @@
+[axon-run 07:35:31] submitted 1106-073531-d9e7 by /home/haseeb/.cache/axon-sharec3: /usr/bin/bash replaymd5.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-71b1a60 ./agent_replay-ad0c65e.py ./board-trace-v1.json 4 1
+[axon-run 09:04:02] scope axon-job-1106-073531-d9e7-1793973842.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 09:04:02] job 1106-073531-d9e7 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-073531-d9e7-1793973842 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash replaymd5.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-71b1a60 ./agent_replay-ad0c65e.py ./board-trace-v1.json 4 1
+axon-q 09:04:02 start slot 16-23: /usr/bin/bash replaymd5.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-71b1a60 ./agent_replay-ad0c65e.py ./board-trace-v1.json 4 1
+== replayshare speed 4, 1 rounds: base ./axon-base-ad0c65e, cand ./axon-71b1a60, both --cache-ram 6G
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, 58, P8
+               total        used        free      shared  buff/cache   available
+Mem:              30           7           5           0          17          22
+trace sha256 713285ba54487e17  replay sha256 34b1910bc52539b7
+## base-r0 09:04:02:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+requests=174 errors=0 first_error=None wall_s=196.8 prime_s=41.5 ttft_new_p50=6.166 ttft_resume_p50=0.169 ttft_turn_p50=0.17 goodput_tok_s=24.51 itl_p99_ms=141.71 warm_per_gb=1.175 reprefill_share=0.006 reprefill_net_share=0.0057 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 3054696 axon_prompt_cached_tokens_total 2706188 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 971 axon_kv_ram_written_pages_total 7321 axon_kv_ram_spilled_pages_total 5566 axon_kv_ram_restored_tokens_total 661666 axon_kv_ram_hits_total 54
+## cand-r0 09:08:04: AXON_PAGE_SHUFFLE=1 ./axon-71b1a60 serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 1722 pages, --kv-gb 12.762
+requests=174 errors=0 first_error=None wall_s=210.9 prime_s=35.5 ttft_new_p50=5.947 ttft_resume_p50=0.137 ttft_turn_p50=0.133 goodput_tok_s=22.35 itl_p99_ms=137.99 warm_per_gb=1.332 reprefill_share=0.0339 reprefill_net_share=0.0336 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=0 prefills_unfed=0 tainted=False
+  axon_prompt_tokens_total 3054696 axon_prompt_cached_tokens_total 2624797 axon_prompt_refused_total 0 axon_kv_ram_capacity_bytes 6440878080 axon_kv_ram_bytes 6440878080 axon_kv_ram_pinned_bytes 6440878080 axon_kv_ram_pages 1755 axon_kv_ram_gpu_pages 447 axon_kv_ram_written_pages_total 1796 axon_kv_ram_spilled_pages_total 0 axon_kv_ram_restored_tokens_total 186029 axon_kv_ram_hits_total 25 axon_kv_pages_warm 79 axon_kv_pages_shared 31 axon_prompt_shared_tokens_total 163328 axon_pages_evicted_total 7814
+ROUND r0 clean
+RUN base r0: md5 afec23b4a89f tainted False foreign 2.7/19 errors 0 out_tok_s 101.26 itl_p99 141.71 reprefill 0.006 ttft_resume_p50 0.169 ttft_turn_p50 0.17 goodput 24.51 preempted 0 wall 196.8
+RUN cand r0: md5 afec23b4a89f tainted False foreign 0.3/14 errors 0 out_tok_s 94.46 itl_p99 137.99 reprefill 0.0339 ttft_resume_p50 0.137 ttft_turn_p50 0.133 goodput 22.35 preempted 0 wall 210.9
+CLEAN ROUNDS 1 of 1 wanted: ['r0']
+MD5 SAME
+MEDIAN itl_p99_ms: base 141.71 cand 137.99 raw base [141.71] cand [137.99]
+MEDIAN output_tok_s: base 101.26 cand 94.46 raw base [101.26] cand [94.46]
+MEDIAN reprefill_share: base 0.006 cand 0.0339 raw base [0.006] cand [0.0339]
+MEDIAN reprefill_tokens: base 17425 cand 98929 raw base [17425] cand [98929]
+MEDIAN ttft_resume_p50: base 0.169 cand 0.137 raw base [0.169] cand [0.137]
+MEDIAN ttft_turn_p50: base 0.17 cand 0.133 raw base [0.17] cand [0.133]
+MEDIAN ttft_new_p50: base 6.166 cand 5.947 raw base [6.166] cand [5.947]
+MEDIAN goodput_tok_s: base 24.51 cand 22.35 raw base [24.51] cand [22.35]
+MEDIAN warm_sessions: base 15 cand 17 raw base [15] cand [17]
+MEDIAN kv_gb: base 12.762 cand 12.762 raw base [12.762] cand [12.762]
+MEDIAN warm_per_gb: base 1.175 cand 1.332 raw base [1.175] cand [1.332]
+MEDIAN kv_used_gb: base 12.151 cand 12.761 raw base [12.151] cand [12.761]
+MEDIAN warm_per_used_gb: base 1.234 cand 1.332 raw base [1.234] cand [1.332]
+MEDIAN preempted: base 0 cand 0 raw base [0] cand [0]
+MD5ONLY: no clause read (a bit check)
+REPLAYSHARE OK
+REPLAYSHARE DONE speed 4 rc 0
+[axon-run 09:12:15] exit 0 after 493.4s (host bella)

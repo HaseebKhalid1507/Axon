@@ -1,0 +1,124 @@
+[axon-run 09:04:54] submitted 1106-090454-2e5f by /home/haseeb/.cache/axon-sharec3: /usr/bin/bash pressurediag.sh ./axon-test-76b8f0b 3
+[axon-run 09:04:54] job 1106-090454-2e5f -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 2500 --src /home/haseeb/.cache/axon-podjob/pressurediag-610bef943136 /usr/bin/bash pressurediag.sh ./axon-test-76b8f0b 3
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (af5ef0f4fcb83bacb8a2e8ae) + source of /home/haseeb/.cache/axon-podjob/pressurediag-610bef943136
+
+sent 7,737,117 bytes  received 87 bytes  15,474,408.00 bytes/sec
+total size is 24,530,873  speedup is 3.17
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261106-090501-bash-2255389 on jade (GPU, 2500 MB)
+[axon-node 09:05:01] GPU lock taken; job wants 2500 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 48
+[axon-node 09:05:01] run bash (af5ef0f4fcb83bacb8a2e8ae) as /home/haseeb/.cache/axon-podjob/pressurediag-610bef943136 on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 09:05:01] memory cap (scope MemoryMax) 2952 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 09:05:01] MemAvailable 4482 MB, load ['0.80', '0.82', '0.81']; nice -n 19 ionice -c3 taskset -c 0-7
+== run 1 rc 0
+cache-ram 0: again: cached [0, 0, 266, 0, 284, 266], 4 preempted or unfed
+cache-ram 67108864: again: cached [284, 0, 284, 0, 284, 0], 4 preempted or unfed
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 180.37s
+  admissions (job, path, cached at admission), in order:
+    #1 prefill: single-stream
+    #2 prefill: single-stream
+    #3 prefill: single-stream
+    #4 prefill: single-stream
+    #5 prefill: single-stream
+    #6 prefill: single-stream
+    #1 prefill: chunked, slot 0, 285 tok (0 cached)
+    #2 prefill: chunked, slot 1, 285 tok (0 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: chunked, slot 1, 285 tok (266 cached)
+    #8 prefill: chunked, slot 4, 285 tok (266 cached)
+    #9 prefill: chunked, slot 5, 285 tok (284 cached)
+    #10 prefill: chunked, slot 0, 285 tok (256 cached)
+    #11 prefill: chunked, slot 2, 285 tok (256 cached)
+    #12 prefill: chunked, slot 3, 285 tok (256 cached)
+    #1 prefill: single-stream
+    #2 prefill: chunked, slot 1, 285 tok (256 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: single-stream
+    #8 prefill: chunked, slot 3, 285 tok (284 cached)
+    #9 prefill: chunked, slot 4, 285 tok (284 cached)
+    #10 prefill: chunked, slot 0, 285 tok (256 cached)
+    #11 prefill: chunked, slot 1, 285 tok (256 cached)
+    #12 prefill: chunked, slot 2, 285 tok (256 cached)
+== run 2 rc 0
+cache-ram 0: again: cached [0, 284, 0, 266, 284, 0], 4 preempted or unfed
+cache-ram 67108864: again: cached [256, 266, 0, 0, 0, 284], 4 preempted or unfed
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 177.52s
+  admissions (job, path, cached at admission), in order:
+    #1 prefill: single-stream
+    #2 prefill: single-stream
+    #3 prefill: single-stream
+    #4 prefill: single-stream
+    #5 prefill: single-stream
+    #6 prefill: single-stream
+    #1 prefill: single-stream
+    #2 prefill: chunked, slot 1, 285 tok (256 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: single-stream
+    #8 prefill: chunked, slot 4, 285 tok (284 cached)
+    #9 prefill: chunked, slot 5, 285 tok (266 cached)
+    #10 prefill: chunked, slot 0, 285 tok (256 cached)
+    #11 prefill: chunked, slot 1, 285 tok (256 cached)
+    #12 prefill: chunked, slot 2, 285 tok (256 cached)
+    #1 prefill: single-stream
+    #2 prefill: chunked, slot 1, 285 tok (256 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: single-stream
+    #10 prefill: chunked, slot 3, 285 tok (284 cached)
+    #8 prefill: chunked, slot 5, 285 tok (266 cached)
+    #9 prefill: chunked, slot 0, 285 tok (256 cached)
+    #11 prefill: chunked, slot 1, 285 tok (256 cached)
+    #12 prefill: chunked, slot 2, 285 tok (256 cached)
+== run 3 rc 0
+cache-ram 0: again: cached [284, 0, 284, 0, 284, 0], 4 preempted or unfed
+cache-ram 67108864: again: cached [0, 256, 0, 284, 0, 266], 5 preempted or unfed
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 183.58s
+  admissions (job, path, cached at admission), in order:
+    #1 prefill: single-stream
+    #2 prefill: single-stream
+    #3 prefill: single-stream
+    #4 prefill: single-stream
+    #5 prefill: single-stream
+    #6 prefill: single-stream
+    #1 prefill: single-stream
+    #2 prefill: chunked, slot 1, 285 tok (256 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: chunked, slot 3, 285 tok (284 cached)
+    #8 prefill: chunked, slot 4, 285 tok (284 cached)
+    #9 prefill: chunked, slot 5, 285 tok (284 cached)
+    #10 prefill: chunked, slot 0, 285 tok (256 cached)
+    #11 prefill: chunked, slot 1, 285 tok (256 cached)
+    #12 prefill: chunked, slot 2, 285 tok (256 cached)
+    #1 prefill: chunked, slot 0, 285 tok (0 cached)
+    #2 prefill: chunked, slot 1, 285 tok (0 cached)
+    #3 prefill: chunked, slot 2, 285 tok (256 cached)
+    #4 prefill: chunked, slot 3, 285 tok (256 cached)
+    #5 prefill: chunked, slot 4, 285 tok (256 cached)
+    #6 prefill: chunked, slot 5, 285 tok (256 cached)
+    #7 prefill: chunked, slot 5, 285 tok (284 cached)
+    #8 prefill: chunked, slot 1, 285 tok (266 cached)
+    #11 prefill: chunked, slot 4, 285 tok (284 cached)
+    #9 prefill: chunked, slot 0, 285 tok (256 cached)
+    #10 prefill: chunked, slot 2, 285 tok (256 cached)
+    #12 prefill: chunked, slot 3, 285 tok (256 cached)
+PRESSUREDIAG 3 runs, 0 failed
+[axon-node 09:14:04] exit 0 after 542.7s; lowest MemAvailable seen 4006 MB
+[axon-node 09:14:04] peak RSS 413 MB (job process tree PSS, 2 s samples x269)
+[axon-run 09:14:04] exit 0 after 550.4s (host jade)
