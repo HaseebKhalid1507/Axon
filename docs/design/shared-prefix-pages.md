@@ -19,10 +19,13 @@
   - Admission's room with sharing on: every page no running request holds and its claim doesn't (free, warm, idle
     slots'), counted once (`BatchLm::busy_pages`). The warm and shared counts are the index's own O(1) counters, not
     `PoolPages` fields (`BatchLm::pages` runs several times a step).
-  - Not in C3: in-flight dedupe (C4), a preempted or unfed prefill re-claiming its warm pages, copy-on-write.
+  - Not in C3: in-flight dedupe (C4, #188), a preempted or unfed prefill re-claiming its warm pages (#212),
+    copy-on-write. A duplicate block keeps its slot's later pages out of the index (#213).
   - Off by default, opt-in with `AXON_SHARE_KV=1` (open question 4's answer): #207's timing round on an RTX 4090
     failed two of #187's clauses, the fan-out siblings' increment (0.26× idle, 0.49× busy, against ≤ 0.25×) and s4's
     TTFT-new (1.00×, against ≤ 0.6×); warm/GB was untestable there (docs/log/2026-11-06-shared-prefix-pages-c3.md).
+    What leads to a default-on decision: warm/GB measured where the pool fills (#210), and a subagent-start TTFT
+    cell whose ceiling is worked out before it runs (#211).
 - **What C3 inherits from C1 + C2 as landed** (where it differs from the design below):
   - `warm` and `excl` are `PageMap` methods, not `PoolPages` fields (§3.2 had them there): `BatchLm::pages` runs
     several times per engine step and nothing reads them yet. C3 adds them where admission reads them (§3.6) and

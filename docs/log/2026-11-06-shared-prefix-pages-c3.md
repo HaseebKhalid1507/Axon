@@ -1,7 +1,8 @@
 # Shared-prefix KV pages, C3: the engine claims, indexes and evicts shared pages  (PR #207)
 
 - Date: 2026-11-06. Branch: feat/shared-prefix-c3. Base: main ad0c65e (#201's exclusive KV RAM tier and its tail-spill
-  drop rule included). Status: open; sharing opt-in after the timing round (Verdict).
+  drop rule included), merged up to 996a5ac (#206) at `a843282`. Status: open; sharing opt-in after the timing round
+  (Verdict); shady's review 8/10 SHIP-AFTER-FIXES, fixes below (r4).
 - Pick / design: issue #187 (agent workload row C, stage C3), design note
   [docs/design/shared-prefix-pages.md](../design/shared-prefix-pages.md) §3.3–3.7 ("What C3 built" in its header
   lists where the code differs), spec [docs/design/agent-workload.md](../design/agent-workload.md) §6 row C. Builds on
@@ -43,7 +44,11 @@
 - **Tests** (10 new): `serve::engine::claim_tests::claim_prefix_cases`, `serve::prefix::tests::{peek_is_walk_without_the_touch,
   warm_and_shared_counts}`, `serve::tier::tests::the_index_keeps_pages_class0`, `serve::tests::{kv_pages_env_parses,
   serve_share_matches_off, serve_share_fanout_idle, serve_share_pressure, serve_share_solo_handover,
-  serve_share_cancel_frees}`; `afb16be` adds `serve::tests::share_kv_is_opt_in`.
+  serve_share_cancel_frees}`; `afb16be` adds `serve::tests::share_kv_is_opt_in`, and `abb5f97` (shady's SHOULD 2)
+  `serve::tests::serve_share_unindex_in_place`: the claim that takes a page its slot alone holds out of the index
+  and writes the rest of it in place (`unindex_at`) runs (a test-only count, `Metrics::unindexed` under
+  `#[cfg(test)]`, goes 0 → 1 at that claim), the request reports every token it shares cached (in place from
+  mid-page), and every reply, the original prompt's again after it too, is the one with sharing off.
 
 ## How it was verified
 Bella (RTX 5070 Ti Laptop, sm_120) for correctness. Timing on an RTX 4090 secure pod (the lead's allowance, ≤ $2 a
@@ -59,6 +64,12 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   `--cache-ram 1G`, with the shuffle).
 - At `afb16be` (sharing opt-in) the same md5 job as `md5share-v2.sh`: every arm that ran sharing on by default
   sets `AXON_SHARE_KV=1`, and the default (off) and the undersized pool off are arms of their own.
+- **Which gate proves which** (shady's SHOULD 3). The undersized-pool md5 arms (`AXON_KV_PAGES=48`, in 7cb0 and 4cc6)
+  reported `preempted 0, unfed 0` in every model and arm: they gate the index's warm eviction (223–272 pages evicted
+  an arm) and the reclaim of idle slots, not preemption, whatever the script's header meant them to. Reply identity
+  under preemption and unfeed rests on `serve_share_pressure`: a 40-page pool with `kv_grow` 0, every reply == the
+  one with sharing off, and a preemption asserted on each of its servers (with and without the tier). It runs in
+  every release and debug suite here (r2, r3, r4) and ran 3 × on jade (2e5f: 4–5 preemptions + unfeeds a round).
 - Replay md5 under the shuffle (`replayshare.sh` via `replaymd5.sh`, bella): `agent_replay.py run` (main's copy),
   board trace, s4, one round; main vs this head with `AXON_PAGE_SHUFFLE=1`, both `--cache-ram 6G`.
 - Timing (design §6 row C; #187's clauses, read as fixed before any data, in the PR body §4):
@@ -90,6 +101,14 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
 | same, debug assertions + overflow checks (r3) | `afb16be` | 1106-120317-e24a | **PASS** 216 / 0 / 10 |
 | md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | 1106-120317-4cc6 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0). Serve, every reply == main's: 7B f16 189/189 and 7B q8 189/189 (9 arms × 21), gemma3-1B f16 84/84 (4 arms), Qwen3-0.6B q8 189/189, CPU 0.5B 42/42 (default and `=1`). The default (off) arm is main's decision for decision too: shared/evicted absent and the same cached-token count as main in every GPU cell (7B 11,118 = 11,118; gemma 11,135; 0.6B 11,118), as is `AXON_SHARE_KV=0`. The `=1` arms share (1,280–10,880 tokens) and evict (48-page pool: 223–272 pages) with the same replies |
 | CI (`check`) | `bcb27f4` (`afb16be` + docs) | Actions run 42258164917 | **PASS** |
+| touched modules' tests + `serve_share_unindex_in_place` (217), release (r4: main `996a5ac` merged, shady's test) | `abb5f97` | 1106-130147-494d | pending |
+| same, debug assertions + overflow checks (r4) | `abb5f97` | 1106-130338-def1 | pending |
+| md5, replay md5, timing at the merge head | `abb5f97` | | not rerun: waived by the lead (#206 changes only load-time RAM checks, none of serve, pages or slots; `abb5f97` is `#[cfg(test)]` only) |
+
+`abb5f97` changes no release bits: `git diff a843282 abb5f97 -- src` is `#[cfg(test)]` items only (serve.rs, serve/ops.rs,
+serve/engine.rs) and serve/tests.rs. The release binaries of `a843282` (a clean worktree) and `abb5f97`: `.text`,
+`.rodata`, `.data`, `.eh_frame`, `.gcc_except_table`, `.init_array` byte-identical (sha256 each); `.data.rel.ro`
+differs in 91 4-byte words, each a panic location's line number moved by +4, +6 or +7 (the test-only lines above it).
 
 ### Timing (RTX 4090 pod, `76b8f0b` vs main `ad0c65e`)
 Pod `pod1` (zmu6vy2elvx0ft): RTX 4090 24 GB, secure RunPod, driver 595.91.07, power limit 450 W. Exclusive (`--timing`:
@@ -166,6 +185,14 @@ runs main's admission, eviction and spills, decision for decision (the old kill 
 `AXON_SHARE_KV=0` arm and again at `afb16be`). On, it is as measured above: same bits, same decode, 65 % fewer
 re-prefilled tokens at s4, the fan-out's siblings at 0.43× (idle) and 0.66× (busy) main's TTFT.
 
-Follow-ups (not in this PR): a C=8 subagent-start cell whose new sessions share a real system prompt and tool
-catalog (the fan-out has one, s4 doesn't), so a TTFT-new clause can measure a saving; and the fan-out's idle
-increment, 0.261× against 0.25×: where the siblings' remaining 0.49 s goes is not measured here.
+Follow-ups (not in this PR), filed after shady's review:
+- #210: warm/GB, #187's headline clause, untestable on the 4090: the ladder again where the pool fills
+  (`AXON_KV_PAGES=1722` on the 4090, or bella), its rung rule and ceiling registered before it runs.
+- #211: a subagent-start TTFT cell whose new sessions share a real system prompt and tool catalog, its ceiling worked
+  out before it runs. The fan-out clause had s4's flaw too (shady): with sharing on, each sibling after the leader
+  prefilled 54 of the 6,006 shared tokens, so the 0.261× is the siblings' own 1,110-token deltas and their
+  scheduling, which sharing can't cut. That doesn't change the verdict above; it shapes the next registration.
+- #212: a preempted or unfed prefill claims the shared prefix again when it is fed again.
+- #213: one duplicate page (`Ins::Have`) stops its slot from indexing any of its later pages (shady's SHOULD 1;
+  compounds with #212 under pressure).
+- #188: C4, in-flight prefix dedupe.
