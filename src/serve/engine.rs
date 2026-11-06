@@ -611,7 +611,7 @@ fn plan_claim(
     let w = walk.len();
     if own >= w * PAGE {
         let i = own / PAGE;
-        let page = pages.get(i).filter(|_| own % PAGE != 0);
+        let page = pages.get(i).filter(|_| !own.is_multiple_of(PAGE));
         let (unindex, reuse) = match page.map(|&p| state(p)) {
             Some(PageUse::Alone) => (Some(i), own),
             Some(PageUse::Shared) => (None, i * PAGE),
@@ -919,7 +919,7 @@ impl<'a, 't> Batch<'a, 't> {
     fn release_rows(&mut self, slot: usize, lo: usize) -> Result<(), String> {
         if let Some(sh) = self.share.as_mut() {
             let pages = self.net.slot_pages(&self.pool, slot);
-            if lo % PAGE != 0
+            if !lo.is_multiple_of(PAGE)
                 && let Some(&p) = pages.get(lo / PAGE)
             {
                 assert!(
@@ -1915,7 +1915,7 @@ impl<'a, 't> Batch<'a, 't> {
             let s = &mut self.seqs[i];
             let fed = s.hist.len();
             self.held[s.slot].push(s.hist[fed - 1]);
-            if self.share.is_some() && self.held[s.slot].len() % PAGE == 0 {
+            if self.share.is_some() && self.held[s.slot].len().is_multiple_of(PAGE) {
                 full.push(s.slot);
             }
             let next = match (o, s.sampler.as_mut()) {
