@@ -605,6 +605,20 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
+- **Shared prefix KV pages** (the GPU's paged pool; `AXON_SHARE_KV=0`: off). A request whose
+  prompt starts with whole pages (64 positions) another request already computed, the same
+  tokens after the same prefix, maps those pages instead of computing them again, and prefills
+  only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
+  bits: a page is reused only under the same tokens and the same parent page, so its rows are the
+  ones the request would compute. Pages enter the index as they fill; a request writes only pages
+  it alone holds (a prompt that continues mid-way into a shared page is fed again from that page's
+  start). When a slot gives pages up, the indexed ones stay on the GPU (warm) for a later prompt,
+  until room is needed: then the least recently used warm leaf goes first (with `--cache-ram`, to
+  the RAM tier), before an idle slot's pages. `GET /slots` adds `pages_warm` and `pages_shared`;
+  `/metrics` `axon_kv_pages_warm`, `axon_kv_pages_shared`, `axon_prompt_shared_tokens_total`
+  (prompt tokens mapped from the index) and `axon_pages_evicted_total` (warm pages given up for
+  room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server under
+  memory pressure.
 - `--cache-ram BYTES|auto` (default 0: off): a KV RAM tier. A conversation's KV pages (64
   positions, every layer) are copied to host memory as they fill, so when its slot goes to
   another conversation they are kept there instead of dropped; its next turn copies the

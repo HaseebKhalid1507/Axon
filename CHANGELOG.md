@@ -6,6 +6,24 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Shared prefix KV pages: the engine (#TBD, closes #187; follows #164)
+- **Requests share the KV pages of a common prefix** (the GPU's paged pool, `serve --parallel` > 1). Admission
+  walks the prefix index over the prompt's whole pages and maps the pages it has, another slot's or warm ones kept
+  from a finished request, instead of prefilling them again (`claim_prefix`, design §3.4; phase 1: a prompt that
+  continues mid-way into a shared page is fed again from that page's start, no copy-on-write). Pages are indexed and
+  pinned as they fill (fed, decoded, restored, or written by the request running alone). Room comes from the
+  index's least recently used warm leaves first (`pop_lru_leaf`), then idle slots; with `--cache-ram` an evicted
+  warm page is copied to the RAM tier first (`spill_page` → `Tier::drop_resident` → `unpin_page`), and a slot that
+  gives up indexed pages copies none of them then: they stay on the GPU until evicted.
+- `AXON_SHARE_KV=0` turns it off: admission, eviction and the tier's spills are main's, decision for decision.
+- `/slots`: `pages_warm`, `pages_shared`. `/metrics`: `axon_kv_pages_warm`, `axon_kv_pages_shared`,
+  `axon_prompt_shared_tokens_total`, `axon_pages_evicted_total`. `AXON_KV_PAGES=N`: an N-page pool (tests, gates).
+- Debug builds check after every step that no page leaks (each page in one state, `refs` == its occurrences in slot
+  lists, the index's holds == `refs`, every indexed page pinned), and the immutability rule (E3) on the request
+  running alone (`lend_solo`'s range), as #164 did on the batched writes.
+- Same bits: gen and serve md5 vs main, with `AXON_PAGE_SHUFFLE`, the kill switch, `--cache-ram` and an undersized
+  pool (docs/log/2026-11-06-shared-prefix-pages-c3.md).
+
 ### KV RAM tier: exclusive, and an idle server's backlog in pieces (#201, follows #166; #170)
 - **The tier keeps what the GPU doesn't.** Copies of pages a GPU slot still holds are written only into the tier's
   free room and are evicted first (newest first); RAM's own pages, those whose slot gave its rows up, go least
