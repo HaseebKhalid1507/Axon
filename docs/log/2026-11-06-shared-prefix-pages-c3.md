@@ -60,7 +60,14 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
   board trace, s4, one round; main vs this head with `AXON_PAGE_SHUFFLE=1`, both `--cache-ram 6G`.
 - Timing (design §6 row C; #187's clauses, read as fixed before any data, in the PR body §4):
   - `replayshare.sh`, s4 and s1, 3 rounds each, both binaries `--cache-ram 6G` (main = main + WP2 at the same
-    size): warm/GB cand/main ≥ 1.4 (s4), TTFT-new p50 ≤ 0.6× (s4), s1 ITL p99 ≤ 1.02×.
+    size): TTFT-new p50 ≤ 0.6× (s4), s1 ITL p99 ≤ 1.02×.
+  - warm/GB cand/main ≥ 1.4, on a cell picked by the lead's 11-06 ruling, recorded before any timing data
+    (PR comment 6685131445). The canonical s4 cell capped it at 18 / 14 = 1.29×: main + WP2 already kept 12 / 14 /
+    14 of its 18 turn-sessions warm in #201's bella runs. `warmladder.sh`:
+    - Base only (main + WP2, 6G), up the #186 ladder `--sessions` 8, 16, 24, 32, speed 4, 3 rounds a rung.
+    - The rung is the smallest where base's median warm ÷ turn-sessions ≤ 0.60.
+    - Then the A/B at that rung, 3 rounds interleaved.
+    - No rung ≤ 0.60 up to 32: the clause is untestable on the 4090, and the default rests on the other clauses.
   - `fanshare.sh`: the fan-out cell, idle and busy: siblings' incremental TTFT p50 ≤ 0.25× main, leader ≤ 1.05×.
   - `servetime-r2.sh` (#164's): C=1 decode tok/s within 2 %.
 
