@@ -1,0 +1,44 @@
+[axon-run 17:19:47] submitted 1106-171947-72d5 by /home/haseeb/.cache/axon-ramchk2: /usr/bin/bash fp8cap.sh steps models/hf/Qwen2.5-7B-Instruct-FP8-dynamic 20 8000 32 ./axon-2aec1e5 ./axon-sum-96df8d4 ./axon-8af3b59
+[axon-run 17:31:49] VRAM: claiming the learned 7334 MB instead of --vram 8000 (name:ramchk2-*-fp8cap-steps-7b)
+[axon-run 17:31:49] scope axon-job-1106-171947-72d5-1794004309.scope in app-axonjobs.slice: MemoryMax 17296 MB, MemoryHigh 15566 MB, no swap, oomd pressure kill 80% (claim 10848 MB): an OOM here kills only this job
+[axon-run 17:31:49] job 1106-171947-72d5 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-171947-72d5-1794004309 --slice=app-axonjobs.slice -p MemoryMax=17296M -p MemoryHigh=15566M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash fp8cap.sh steps models/hf/Qwen2.5-7B-Instruct-FP8-dynamic 20 8000 32 ./axon-2aec1e5 ./axon-sum-96df8d4 ./axon-8af3b59
+axon-q 17:31:49 start slot 16-23: /usr/bin/bash fp8cap.sh steps models/hf/Qwen2.5-7B-Instruct-FP8-dynamic 20 8000 32 ./axon-2aec1e5 ./axon-sum-96df8d4 ./axon-8af3b59
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 721 MiB, 12227 MiB
+               total        used        free      shared  buff/cache   available
+Mem:           31487       12771        2316         204       17058       18715
+split:       gpu layers 20/28, 5.16 GiB on GPU
+device:      cuda + cpu, gpu layers 20/28, 5.16 GiB on GPU, kv f16
+The capital of France is Paris. It is located in the northern
+
+axon-2aec1e5: runs from 3675 MiB; at 3659: split needs about 1.31 GiB of RAM (its repacked weights 1.79 GiB, the KV cache of 14 tokens 0.00 GiB, the GPU half's upload staging 0.54 GiB, less the GPU half's 1.02 GiB of the copy, handed back as it goes up) and only 1.28 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/fp8cap-1774643-28388.scope memory.max 3659 MiB); to fit: more --gpu-layers than 20 (fewer l
+axon-sum-96df8d4: runs from 3675 MiB; at 3659: split needs about 1.31 GiB of RAM (the larger of two steps: the GPU half's upload staging 0.54 GiB, then its repacked weights 1.79 GiB, the KV cache of 14 tokens 0.00 GiB, less the GPU half's 1.02 GiB of the copy, handed back as it goes up) and only 1.28 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/fp8cap-1774643-22182.scope memory.max 3659 MiB); to fit: more
+axon-8af3b59: runs from 3148 MiB; at 3132: oom 
+FP8CAP smallest cap that runs: axon-2aec1e5 3675 MiB, axon-sum-96df8d4 3675 MiB, axon-8af3b59 3148 MiB
+  3020M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 split |
+  3052M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 split |
+  3084M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 split |
+  3116M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 oom |
+  3148M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3180M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3212M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3244M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3276M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3308M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3340M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3372M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3404M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3436M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3468M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3500M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3532M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3564M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3596M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3628M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3660M: axon-2aec1e5 split | axon-sum-96df8d4 split | axon-8af3b59 runs |
+  3692M: axon-2aec1e5 runs | axon-sum-96df8d4 runs | axon-8af3b59 runs |
+  3724M: axon-2aec1e5 runs | axon-sum-96df8d4 runs | axon-8af3b59 runs |
+FP8CAP axon-2aec1e5 vs axon-8af3b59: caps where it's OOM-killed and cand refuses: 0; where it refuses and cand runs: 17
+FP8CAP axon-sum-96df8d4 vs axon-8af3b59: caps where it's OOM-killed and cand refuses: 0; where it refuses and cand runs: 17
+FP8CAP cand failed below every refusal: 0; within 48 MiB above one: 1
+FP8CAP PASS
+[axon-run 17:36:52] exit 0 after 303.4s (host bella)

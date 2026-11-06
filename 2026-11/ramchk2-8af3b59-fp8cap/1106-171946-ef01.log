@@ -1,0 +1,41 @@
+[axon-run 17:19:46] submitted 1106-171946-ef01 by /home/haseeb/.cache/axon-ramchk2: /usr/bin/bash fp8cap.sh floor models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic 23 2000 16 ./axon-2aec1e5 ./axon-8af3b59
+[axon-run 17:30:41] scope axon-job-1106-171946-ef01-1794004241.scope in app-axonjobs.slice: MemoryMax 17296 MB, MemoryHigh 15566 MB, no swap, oomd pressure kill 80% (claim 10848 MB): an OOM here kills only this job
+[axon-run 17:30:41] job 1106-171946-ef01 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-171946-ef01-1794004241 --slice=app-axonjobs.slice -p MemoryMax=17296M -p MemoryHigh=15566M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash fp8cap.sh floor models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic 23 2000 16 ./axon-2aec1e5 ./axon-8af3b59
+axon-q 17:30:41 start slot 16-23: /usr/bin/bash fp8cap.sh floor models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic 23 2000 16 ./axon-2aec1e5 ./axon-8af3b59
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 721 MiB, 12227 MiB
+               total        used        free      shared  buff/cache   available
+Mem:           31487       12589        4413         203       15143       18897
+split:       gpu layers 23/24, 0.48 GiB on GPU
+device:      cuda + cpu, gpu layers 23/24, 0.48 GiB on GPU, kv f16
+The capital of France is Paris. It is the largest city in
+
+axon-2aec1e5: runs from 911 MiB; at 903: oom 
+axon-8af3b59: runs from 911 MiB; at 903: oom 
+FP8CAP smallest cap that runs: axon-2aec1e5 911 MiB, axon-8af3b59 911 MiB
+  591M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  607M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  623M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  639M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  655M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  671M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  687M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  703M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  719M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  735M: axon-2aec1e5 oom | axon-8af3b59 conv |
+  751M: axon-2aec1e5 oom | axon-8af3b59 oom |
+  767M: axon-2aec1e5 oom | axon-8af3b59 oom |
+  783M: axon-2aec1e5 split | axon-8af3b59 split |
+  799M: axon-2aec1e5 split | axon-8af3b59 split |
+  815M: axon-2aec1e5 split | axon-8af3b59 split |
+  831M: axon-2aec1e5 split | axon-8af3b59 split |
+  847M: axon-2aec1e5 split | axon-8af3b59 split |
+  863M: axon-2aec1e5 split | axon-8af3b59 split |
+  879M: axon-2aec1e5 oom | axon-8af3b59 oom |
+  895M: axon-2aec1e5 oom | axon-8af3b59 oom |
+  911M: axon-2aec1e5 runs | axon-8af3b59 runs |
+  927M: axon-2aec1e5 runs | axon-8af3b59 runs |
+  943M: axon-2aec1e5 runs | axon-8af3b59 runs |
+FP8CAP axon-2aec1e5 vs axon-8af3b59: caps where it's OOM-killed and cand refuses: 10; where it refuses and cand runs: 0
+FP8CAP cand failed below every refusal: 0; within 48 MiB above one: 4
+FP8CAP PASS
+[axon-run 17:31:16] exit 0 after 35.3s (host bella)
