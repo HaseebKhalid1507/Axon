@@ -86,9 +86,9 @@ round), main `ad0c65e` as the base in every cell (the postmerge build of main).
 | md5: gen + serve | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-7cb0 | **PASS**: gen 0 of 30 cells differ (90 runs, rc 0); serve every reply == main: 7B f16 147/147, 7B q8 147/147, gemma3-1B f16 84/84, Qwen3-0.6B q8 147/147, CPU 0.5B 42/42, in every variant |
 | replay md5 under `AXON_PAGE_SHUFFLE` | `71b1a60` (= `76b8f0b`'s code) | 1106-073531-d9e7 | **PASS**: MD5 SAME, 174 requests each, 0 errors, the round clean |
 | timing: s4, warm/GB ladder, fan-out, servetime, s1 (4090 pod) | `76b8f0b` | 1106-094454-b75c, 1106-094455-4ac1, 1106-094455-e8ca, 1106-094456-10cf, 1106-094456-7274 | **two clauses FAIL** (table below) |
-| touched modules' tests + `share_kv_is_opt_in`, release (r3) | `afb16be` | pending | |
-| same, debug assertions + overflow checks (r3) | `afb16be` | pending | |
-| md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | pending | |
+| touched modules' tests + `share_kv_is_opt_in`, release (r3) | `afb16be` | 1106-120316-feea | pending |
+| same, debug assertions + overflow checks (r3) | `afb16be` | 1106-120317-e24a | pending |
+| md5 (`md5share-v2.sh`: gen + serve, sharing off by default and opt-in) | `afb16be` | 1106-120317-4cc6 | pending |
 | CI (`check`) | `afb16be`+ | | pending |
 
 ### Timing (RTX 4090 pod, `76b8f0b` vs main `ad0c65e`)
