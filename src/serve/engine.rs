@@ -1105,6 +1105,10 @@ impl<'a, 't> Batch<'a, 't> {
         for ev in evs.iter().rev() {
             self.let_go(ev)?;
         }
+        #[cfg(test)]
+        if let Some(m) = &self.metrics {
+            m.unindexed.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 

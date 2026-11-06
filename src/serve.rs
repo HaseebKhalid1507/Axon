@@ -2233,6 +2233,12 @@ impl Server {
     pub fn tier_faults(&self) -> &tier::Faults {
         &self.sh.metrics.tier_faults
     }
+
+    /// Claims so far that unindexed a page to write it in place
+    /// (`Metrics::unindexed`).
+    pub fn unindexed(&self) -> u64 {
+        self.sh.metrics.unindexed.load(Ordering::Relaxed)
+    }
 }
 
 impl Server {

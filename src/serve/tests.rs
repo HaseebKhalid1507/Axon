@@ -2052,9 +2052,9 @@ fn serve_paged_pressure() {
         .iter()
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
-    // Shared prefixes (on by default): no page is shared (the prompts
-    // differ from their first page on), and the index's warm pages (a
-    // preempted request's) are neither held nor free.
+    // Shared prefixes (off unless the run sets AXON_SHARE_KV=1): no page
+    // is shared (the prompts differ from their first page on), and the
+    // index's warm pages (a preempted request's) are neither held nor free.
     let warm = sl.get("pages_warm").map_or(0, |w| w.as_u64().unwrap());
     assert_eq!(
         sl.get("pages_shared").map_or(0, |w| w.as_u64().unwrap()),
@@ -7525,6 +7525,84 @@ fn serve_share_solo_handover() {
     assert!(c1.1 >= 64 * pages, "C cached {}", c1.1);
     let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
     assert!(shared >= 2 * 64 * pages, "{shared}: {m}");
+}
+
+/// The in-place write after a page leaves the index (`Batch::unindex_at`,
+/// design §3.4 and E3), 2 slots, sharing on and off. A (a long prefix and
+/// a question) runs; its whole pages are indexed, its slot alone holding
+/// them. B is the prefix cut where the tokens it shares with A end mid-way
+/// into one of those pages, then another question: it takes A's slot
+/// (`best_slot`), and its claim takes that page and every page after it
+/// out of the index, then B writes the rest of the page in place (it
+/// reports every token it shares with A cached, not only the page's
+/// start). A again: had its pages from the cut on stayed indexed, its
+/// claim would map the page B wrote. Every reply is the one with sharing
+/// off; the server's count of such claims (tests only) is 1 after B with
+/// sharing on, 0 off.
+#[test]
+fn serve_share_unindex_in_place() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(p).unwrap());
+    let prefix =
+        "The lighthouse keeper logs every ship that passes the point after dark. ".repeat(30);
+    let a_text = format!("{prefix}Which ship came last?");
+    let a_ids = tok.encode_prompt(&a_text);
+    // A's whole prompt pages: its slot holds them all once A is fed.
+    let whole = a_ids.len() / 64;
+    // B: the prefix cut at a word where the tokens B shares with A end
+    // mid-way into a page of A's with a whole page after it, and are more
+    // than half of B (best_slot then puts B in A's slot).
+    let words: Vec<&str> = prefix.split_inclusive(' ').collect();
+    let (b_text, common) = (8..words.len())
+        .find_map(|k| {
+            let b = format!("{}Why keep a log?", words[..k].concat());
+            let ids = tok.encode_prompt(&b);
+            let c = (ids.iter().zip(&a_ids)).take_while(|(x, y)| x == y).count();
+            let fits = c >= 128 && (16..=48).contains(&(c % 64)) && c / 64 + 1 < whole;
+            (fits && 2 * c > ids.len()).then_some((b, c as u64))
+        })
+        .expect("a cut mid-way into one of A's pages");
+    let req = |t: &str, n: usize| json!({"prompt": t, "max_tokens": n, "temperature": 0});
+    let run = |share: bool| {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.share = Some(share);
+        });
+        let a = s.addr;
+        let mut got = Vec::new();
+        for (t, n) in [(&a_text, 8), (&b_text, 48), (&a_text, 24)] {
+            let r = share_reply(a, &req(t, n));
+            got.push((r.0, r.1, s.unindexed()));
+        }
+        got
+    };
+    let off = run(false);
+    let on = run(true);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "request {i}: the reply with sharing on");
+    }
+    assert!(
+        off.iter().all(|r| r.2 == 0),
+        "sharing off unindexed: {off:?}"
+    );
+    assert_eq!(
+        (on[0].2, on[1].2),
+        (0, 1),
+        "B's claim (it shares {common} tokens with A, page {} of {whole})",
+        common / 64
+    );
+    // In place from mid-page, on and off; A again too (B's slot holds the
+    // same `common` of A).
+    for r in [&off[1], &on[1], &off[2], &on[2]] {
+        assert_eq!(r.1, common, "cached tokens: {off:?} {on:?}");
+    }
 }
 
 /// Requests sharing a prefix cancelled while decoding and while being fed

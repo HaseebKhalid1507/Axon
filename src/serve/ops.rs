@@ -277,6 +277,11 @@ pub struct Metrics {
     /// engine's tier share.
     #[cfg(test)]
     pub tier_faults: super::tier::Faults,
+    /// Tests: claims that took a page the slot alone held out of the index
+    /// to write the rest of it in place (`Batch::unindex_at`). Not a metric
+    /// either: it rides here as `tier_faults` does.
+    #[cfg(test)]
+    pub unindexed: AtomicU64,
 }
 
 impl Metrics {
@@ -324,6 +329,8 @@ impl Default for Metrics {
             kv_ram_spilled: AtomicU64::new(0),
             #[cfg(test)]
             tier_faults: Default::default(),
+            #[cfg(test)]
+            unindexed: AtomicU64::new(0),
             sched: Mutex::default(),
         }
     }
