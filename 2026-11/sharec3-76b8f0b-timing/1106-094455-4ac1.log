@@ -1,0 +1,141 @@
+[axon-run 09:44:55] submitted 1106-094455-4ac1 by /home/haseeb/.cache/axon-sharec3: /usr/bin/bash warmladder.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-76b8f0b ./agent_replay-ad0c65e.py ./board-trace-v1.json 8,16,24,32 3
+[axon-run 10:05:11] job 1106-094455-4ac1 -> pod1 [RTX 4090 sm_89 secure] (pod zmu6vy2elvx0ft): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 11000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/warmladder-26976557e9ec /usr/bin/bash warmladder.sh ./replayshare.sh ./axon-base-ad0c65e ./axon-76b8f0b ./agent_replay-ad0c65e.py ./board-trace-v1.json 8,16,24,32 3
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (cf173424e2c12d1b58500952) + source of /home/haseeb/.cache/axon-podjob/warmladder-26976557e9ec (delta vs 3 earlier upload(s) there)
+
+sent 2,438 bytes  received 75 bytes  1,675.33 bytes/sec
+total size is 29,133,673  speedup is 11,593.18
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261106-150519-bash-5750 on pod1 (GPU, 11000 MB)
+[axon-node 15:05:19] GPU EXCLUSIVE taken; job wants 11000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 15:05:19] run bash (cf173424e2c12d1b58500952) as /home/haseeb/.cache/axon-podjob/warmladder-26976557e9ec on 36913324e3d4, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+== warmladder: rungs 8,16,24,32, 3 rounds each, base ./axon-base-ad0c65e (rule: smallest rung with base median warm fraction <= 0.60)
+[axon-run 10:05:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:06:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:06:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:07:22] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:07:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:08:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:09:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:09:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:10:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:10:39] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:11:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:11:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:12:18] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:12:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:13:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== replayshare speed 4, 3 rounds, 8 sessions, base only: base ./axon-base-ad0c65e, cand ./axon-76b8f0b, both --cache-ram 6G
+## base-r0 15:05:19:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r0 clean
+## base-r1 15:08:07:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r1 clean
+## base-r2 15:10:55:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r2 clean
+BASEONLY r0: warm 7 of 7 turn-sessions (fraction 1.000), sessions 8, chains 8
+BASEONLY r1: warm 7 of 7 turn-sessions (fraction 1.000), sessions 8, chains 8
+BASEONLY r2: warm 7 of 7 turn-sessions (fraction 1.000), sessions 8, chains 8
+CLEAN ROUNDS 3 of 3 wanted: ['r0', 'r1', 'r2']
+RUNG 8: base median warm fraction 1.000 of its turn-sessions over 3 clean rounds (rule: <= 0.60; INFO of all 8: 0.875)
+[axon-run 10:13:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:14:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:15:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:15:37] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:16:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:16:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:17:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:17:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:18:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:18:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:20:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:20:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:21:08] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:21:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:22:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== replayshare speed 4, 3 rounds, 16 sessions, base only: base ./axon-base-ad0c65e, cand ./axon-76b8f0b, both --cache-ram 6G
+## base-r0 15:13:43:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r0 clean
+## base-r1 15:16:37:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r1 clean
+## base-r2 15:19:32:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r2 clean
+BASEONLY r0: warm 14 of 14 turn-sessions (fraction 1.000), sessions 16, chains 16
+BASEONLY r1: warm 14 of 14 turn-sessions (fraction 1.000), sessions 16, chains 16
+BASEONLY r2: warm 14 of 14 turn-sessions (fraction 1.000), sessions 16, chains 16
+CLEAN ROUNDS 3 of 3 wanted: ['r0', 'r1', 'r2']
+RUNG 16: base median warm fraction 1.000 of its turn-sessions over 3 clean rounds (rule: <= 0.60; INFO of all 16: 0.875)
+[axon-run 10:22:47] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:23:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:23:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:24:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:25:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:25:37] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:26:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:26:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:27:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:27:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:28:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:29:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:30:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:30:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:31:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== replayshare speed 4, 3 rounds, 24 sessions, base only: base ./axon-base-ad0c65e, cand ./axon-76b8f0b, both --cache-ram 6G
+## base-r0 15:22:28:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r0 clean
+## base-r1 15:25:28:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r1 clean
+## base-r2 15:28:28:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r2 clean
+BASEONLY r0: warm 22 of 22 turn-sessions (fraction 1.000), sessions 24, chains 24
+BASEONLY r1: warm 22 of 22 turn-sessions (fraction 1.000), sessions 24, chains 24
+BASEONLY r2: warm 22 of 22 turn-sessions (fraction 1.000), sessions 24, chains 24
+CLEAN ROUNDS 3 of 3 wanted: ['r0', 'r1', 'r2']
+RUNG 24: base median warm fraction 1.000 of its turn-sessions over 3 clean rounds (rule: <= 0.60; INFO of all 24: 0.917)
+[axon-run 10:31:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:32:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:32:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:33:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:33:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:34:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:35:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:35:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:36:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:36:41] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:37:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:37:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:38:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:38:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:39:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:39:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:40:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== replayshare speed 4, 3 rounds, 32 sessions, base only: base ./axon-base-ad0c65e, cand ./axon-76b8f0b, both --cache-ram 6G
+## base-r0 15:31:29:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r0 clean
+## base-r1 15:34:35:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r1 clean
+## base-r2 15:37:41:  ./axon-base-ad0c65e serve ... --ctx 32768 --parallel 16 --kv f16 --cache-ram 6G
+  pool 5288 pages, --kv-gb 25.849
+ROUND r2 clean
+BASEONLY r0: warm 29 of 29 turn-sessions (fraction 1.000), sessions 32, chains 32
+BASEONLY r1: warm 29 of 29 turn-sessions (fraction 1.000), sessions 32, chains 32
+BASEONLY r2: warm 29 of 29 turn-sessions (fraction 1.000), sessions 32, chains 32
+CLEAN ROUNDS 3 of 3 wanted: ['r0', 'r1', 'r2']
+RUNG 32: base median warm fraction 1.000 of its turn-sessions over 3 clean rounds (rule: <= 0.60; INFO of all 32: 0.906)
+WARMLADDER UNTESTABLE: no rung of 8,16,24,32 gets base to <= 60 % warm
+[axon-node 15:40:47] exit 3 after 2128.6s
+[axon-node 15:40:47] peak RSS 6506 MB (job process tree PSS, 2 s samples x1000)
+[axon-run 10:40:48] exit 3 after 2137.7s (host pod1)
+[axon-run 10:40:50] FOREIGN_GPU max=0% mean=0.0% samples=62

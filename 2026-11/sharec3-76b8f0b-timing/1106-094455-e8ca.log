@@ -1,0 +1,71 @@
+[axon-run 09:44:55] submitted 1106-094455-e8ca by /home/haseeb/.cache/axon-sharec3: /usr/bin/bash fanshare.sh ./axon-base-ad0c65e ./axon-76b8f0b ./agent_replay-ad0c65e.py 1
+[axon-run 10:41:03] job 1106-094455-e8ca -> pod1 [RTX 4090 sm_89 secure] (pod zmu6vy2elvx0ft): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 11000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/fanshare-6a6ab188b25a /usr/bin/bash fanshare.sh ./axon-base-ad0c65e ./axon-76b8f0b ./agent_replay-ad0c65e.py 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (120a301001f6ef0570aa61c5) + source of /home/haseeb/.cache/axon-podjob/fanshare-6a6ab188b25a (delta vs 4 earlier upload(s) there)
+
+sent 2,905 bytes  received 75 bytes  1,192.00 bytes/sec
+total size is 24,518,900  speedup is 8,227.82
+
+sent 57 bytes  received 19 bytes  50.67 bytes/sec
+total size is 89  speedup is 1.17
+axon-remote: job 20261106-154109-bash-14543 on pod1 (GPU, 11000 MB)
+[axon-node 15:41:09] GPU EXCLUSIVE taken; job wants 11000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 15:41:10] run bash (120a301001f6ef0570aa61c5) as /home/haseeb/.cache/axon-podjob/fanshare-6a6ab188b25a on 36913324e3d4, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 595.91.07, 39, P8
+               total        used        free      shared  buff/cache   available
+Mem:             251          41          84           0         120         209
+== fanshare: base ./axon-base-ad0c65e, cand ./axon-76b8f0b, both --cache-ram 6G; replay sha256 34b1910bc52539b7
+## base-idle-p1 15:41:10: ./axon-base-ad0c65e serve ... --cache-ram 6G; fanout --busy 0
+[axon-run 10:41:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:42:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+FANOUT busy 0 round 0: errors=0 leader_ttft=0.5481 sib_ttft_p50=2.4506 sib_inc_ttft_p50=1.9025 sib_shared_prefilled=[6006, 6006, 3126, 886, 246, 54, 54] md5=1e45ce47defb215f6010a57eef3d269c
+FANOUT busy 0 round 1: errors=0 leader_ttft=0.5474 sib_ttft_p50=2.4336 sib_inc_ttft_p50=1.8862 sib_shared_prefilled=[6006, 6006, 3446, 1526, 54, 54, 54] md5=5d2b8ebce66dcac774a19867671a3482
+FANOUT busy 0 round 2: errors=0 leader_ttft=0.5505 sib_ttft_p50=2.4389 sib_inc_ttft_p50=1.8885 sib_shared_prefilled=[6006, 6006, 3446, 1526, 54, 54, 54] md5=f6dca1aad743412d1b5f176be115fdc0
+FANOUT busy 0 round 3: errors=0 leader_ttft=0.5492 sib_ttft_p50=2.4122 sib_inc_ttft_p50=1.8629 sib_shared_prefilled=[6006, 6006, 3446, 1526, 54, 54, 54] md5=08021248506ae21bf35f3bbb5c1b7623
+FANOUT busy 0 round 4: errors=0 leader_ttft=0.551 sib_ttft_p50=2.4098 sib_inc_ttft_p50=1.8588 sib_shared_prefilled=[6006, 6006, 3446, 1526, 54, 54, 54] md5=70c7249ca3b5f30d47beb4d11ddd17b2
+FANOUT variant=idle sib_inc_ttft_p50=1.8862 sib_ttft_p50=2.4336 leader_ttft_p50=0.5492 md5s=['08021248506ae21bf35f3bbb5c1b7623', '1e45ce47defb215f6010a57eef3d269c', '5d2b8ebce66dcac774a19867671a3482', '70c7249ca3b5f30d47beb4d11ddd17b2', 'f6dca1aad743412d1b5f176be115fdc0']
+FANOUT END
+axon_prompt_cached_tokens_total 125248 
+## cand-idle-p1 15:42:23: ./axon-76b8f0b serve ... --cache-ram 6G; fanout --busy 0
+[axon-run 10:42:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:43:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+FANOUT busy 0 round 0: errors=0 leader_ttft=0.5493 sib_ttft_p50=1.0011 sib_inc_ttft_p50=0.4517 sib_shared_prefilled=[54, 54, 54, 54, 54, 54, 54] md5=1e45ce47defb215f6010a57eef3d269c
+FANOUT busy 0 round 1: errors=0 leader_ttft=0.5519 sib_ttft_p50=0.9931 sib_inc_ttft_p50=0.4412 sib_shared_prefilled=[54, 54, 54, 54, 54, 54, 54] md5=5d2b8ebce66dcac774a19867671a3482
+FANOUT busy 0 round 2: errors=0 leader_ttft=0.5513 sib_ttft_p50=1.0446 sib_inc_ttft_p50=0.4932 sib_shared_prefilled=[54, 54, 54, 54, 54, 54, 54] md5=f6dca1aad743412d1b5f176be115fdc0
+FANOUT busy 0 round 3: errors=0 leader_ttft=0.5521 sib_ttft_p50=1.0449 sib_inc_ttft_p50=0.4928 sib_shared_prefilled=[54, 54, 54, 54, 54, 54, 54] md5=08021248506ae21bf35f3bbb5c1b7623
+FANOUT busy 0 round 4: errors=0 leader_ttft=0.5484 sib_ttft_p50=1.065 sib_inc_ttft_p50=0.5166 sib_shared_prefilled=[54, 54, 54, 54, 54, 54, 54] md5=70c7249ca3b5f30d47beb4d11ddd17b2
+FANOUT variant=idle sib_inc_ttft_p50=0.4928 sib_ttft_p50=1.0446 leader_ttft_p50=0.5513 md5s=['08021248506ae21bf35f3bbb5c1b7623', '1e45ce47defb215f6010a57eef3d269c', '5d2b8ebce66dcac774a19867671a3482', '70c7249ca3b5f30d47beb4d11ddd17b2', 'f6dca1aad743412d1b5f176be115fdc0']
+FANOUT END
+axon_prompt_cached_tokens_total 208320 axon_kv_pages_warm 927 axon_kv_pages_shared 186 axon_prompt_shared_tokens_total 208320 axon_pages_evicted_total 0 
+## cand-busy-p1 15:43:23: ./axon-76b8f0b serve ... --cache-ram 6G; fanout --busy 4
+[axon-run 10:43:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:44:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+FANOUT busy 4 round 0: errors=0 leader_ttft=0.7341 sib_ttft_p50=1.5217 sib_inc_ttft_p50=0.7877 sib_shared_prefilled=[4854, 54, 54, 54, 54, 54, 54] md5=1e45ce47defb215f6010a57eef3d269c
+FANOUT busy 4 round 1: errors=0 leader_ttft=0.7195 sib_ttft_p50=1.3785 sib_inc_ttft_p50=0.659 sib_shared_prefilled=[4918, 54, 54, 54, 54, 54, 54] md5=5d2b8ebce66dcac774a19867671a3482
+FANOUT busy 4 round 2: errors=0 leader_ttft=0.7201 sib_ttft_p50=1.3746 sib_inc_ttft_p50=0.6546 sib_shared_prefilled=[4918, 54, 54, 54, 54, 54, 54] md5=f6dca1aad743412d1b5f176be115fdc0
+FANOUT busy 4 round 3: errors=0 leader_ttft=0.7115 sib_ttft_p50=1.3676 sib_inc_ttft_p50=0.6562 sib_shared_prefilled=[4918, 54, 54, 54, 54, 54, 54] md5=08021248506ae21bf35f3bbb5c1b7623
+FANOUT busy 4 round 4: errors=0 leader_ttft=0.7095 sib_ttft_p50=1.3583 sib_inc_ttft_p50=0.6488 sib_shared_prefilled=[4918, 54, 54, 54, 54, 54, 54] md5=70c7249ca3b5f30d47beb4d11ddd17b2
+FANOUT variant=busy sib_inc_ttft_p50=0.6562 sib_ttft_p50=1.3746 leader_ttft_p50=0.7195 md5s=['08021248506ae21bf35f3bbb5c1b7623', '1e45ce47defb215f6010a57eef3d269c', '5d2b8ebce66dcac774a19867671a3482', '70c7249ca3b5f30d47beb4d11ddd17b2', 'f6dca1aad743412d1b5f176be115fdc0']
+FANOUT END
+axon_prompt_cached_tokens_total 184064 axon_kv_pages_warm 1663 axon_kv_pages_shared 186 axon_prompt_shared_tokens_total 184064 axon_pages_evicted_total 0 
+## base-busy-p1 15:44:44: ./axon-base-ad0c65e serve ... --cache-ram 6G; fanout --busy 4
+[axon-run 10:44:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:45:26] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 10:46:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+FANOUT busy 4 round 0: errors=0 leader_ttft=0.8279 sib_ttft_p50=2.0654 sib_inc_ttft_p50=1.2375 sib_shared_prefilled=[5686, 3510, 1462, 182, 54, 54, 54] md5=1e45ce47defb215f6010a57eef3d269c
+FANOUT busy 4 round 1: errors=0 leader_ttft=0.7424 sib_ttft_p50=2.0815 sib_inc_ttft_p50=1.339 sib_shared_prefilled=[5686, 3510, 1782, 182, 54, 54, 54] md5=5d2b8ebce66dcac774a19867671a3482
+FANOUT busy 4 round 2: errors=0 leader_ttft=0.7387 sib_ttft_p50=2.078 sib_inc_ttft_p50=1.3393 sib_shared_prefilled=[5686, 3446, 1782, 182, 54, 54, 54] md5=f6dca1aad743412d1b5f176be115fdc0
+FANOUT busy 4 round 3: errors=0 leader_ttft=0.7448 sib_ttft_p50=2.0875 sib_inc_ttft_p50=1.3427 sib_shared_prefilled=[5686, 3510, 1782, 182, 54, 54, 54] md5=08021248506ae21bf35f3bbb5c1b7623
+FANOUT busy 4 round 4: errors=0 leader_ttft=0.7237 sib_ttft_p50=3.244 sib_inc_ttft_p50=2.5203 sib_shared_prefilled=[6006, 6006, 6006, 6006, 6006, 6006, 6006] md5=70c7249ca3b5f30d47beb4d11ddd17b2
+FANOUT variant=busy sib_inc_ttft_p50=1.3393 sib_ttft_p50=2.0815 leader_ttft_p50=0.7424 md5s=['08021248506ae21bf35f3bbb5c1b7623', '1e45ce47defb215f6010a57eef3d269c', '5d2b8ebce66dcac774a19867671a3482', '70c7249ca3b5f30d47beb4d11ddd17b2', 'f6dca1aad743412d1b5f176be115fdc0']
+FANOUT END
+axon_prompt_cached_tokens_total 123264 
+FAN idle: errors 0; sib_inc_ttft_p50 base 1.886 cand 0.493 -> 0.261 (<= 0.25): FAIL; leader_ttft base 0.549 cand 0.551 -> 1.004 (<= 1.05): PASS; sib_ttft_p50 base 2.434 cand 1.045; cand shared-prefilled [[54, 54, 54, 54, 54, 54, 54], [54, 54, 54, 54, 54, 54, 54], [54, 54, 54, 54, 54, 54, 54], [54, 54, 54, 54, 54, 54, 54], [54, 54, 54, 54, 54, 54, 54]]
+FAN idle: md5 SAME over 5 rounds
+FAN busy: errors 0; sib_inc_ttft_p50 base 1.339 cand 0.656 -> 0.490 (<= 0.25): FAIL; leader_ttft base 0.742 cand 0.720 -> 0.969 (<= 1.05): PASS; sib_ttft_p50 base 2.082 cand 1.375; cand shared-prefilled [[4854, 54, 54, 54, 54, 54, 54], [4918, 54, 54, 54, 54, 54, 54], [4918, 54, 54, 54, 54, 54, 54], [4918, 54, 54, 54, 54, 54, 54], [4918, 54, 54, 54, 54, 54, 54]]
+FAN busy: md5 SAME over 5 rounds
+FANSHARE OK
+[axon-node 15:46:15] exit 0 after 305.6s
+[axon-node 15:46:15] peak RSS 6409 MB (job process tree PSS, 2 s samples x143)
+[axon-run 10:46:16] exit 0 after 313.8s (host pod1)
+[axon-run 10:46:21] FOREIGN_GPU max=0% mean=0.0% samples=9
