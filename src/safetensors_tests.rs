@@ -1562,6 +1562,110 @@ fn tiny_fp8_kv_ident_names_cpu_act() {
     }
 }
 
+/// #183 without the checkpoint (CI runs it): the RAM estimate counts the
+/// tiny FP8 model's arena with the repack off too, as the one `Qwen2::
+/// new_layers` builds (`build_skip` gives every F8_E4M3 matrix a slot, its
+/// F8S rows, either way); it used to be 0 then. A CPU half (1 of 2 layers),
+/// the whole model, and more layers than it has.
+#[test]
+fn tiny_fp8_ram_arena_without_repack() {
+    use crate::model::{Qwen2, dense_ram_need_keep};
+    let d = Dir::new("fp8-ram");
+    write_tiny_fp8(&d, |_| {});
+    for repack in [true, false] {
+        for keep in [1, 2, 3] {
+            // A load per build: building releases the tensors it copied.
+            let m = load_dir(&d.0).unwrap();
+            let need = dense_ram_need_keep(&m, repack, 2, keep);
+            let net = Qwen2::new_layers(&m, repack, keep);
+            let built = net.arena_len();
+            assert!(built > 0, "repack {repack} k={keep}: no arena built");
+            assert_eq!(
+                need.arena,
+                built.next_multiple_of(2 << 20),
+                "repack {repack} k={keep}"
+            );
+        }
+    }
+}
+
+/// #185 after #206's review: a BF16/F16 checkpoint runs on the CPU only
+/// (`gpu_refusal`), so its RAM refusal names neither --device cuda nor
+/// --gpu-layers: the --ctx that fits, else more free RAM. An FP8 one runs
+/// on the GPU, whole or split, and its refusal says so.
+#[test]
+fn tiny_bf16_ram_refusal_names_no_gpu() {
+    use crate::gguf::mem::{Avail, Bound};
+    use crate::model::{DenseNeed, GpuWays, dense_ram_need, dense_verdict};
+    const MIB: u64 = 1 << 20;
+    const TOL: u64 = 38 * MIB;
+    let refusal = |m: &Model, avail: u64| {
+        // A 0.5B-sized arena with the checkpoint's KV (1000 positions).
+        let need = DenseNeed {
+            arena: 376 * MIB,
+            ..dense_ram_need(m, true, 2)
+        };
+        let avail = Avail {
+            bytes: need.arena + avail * need.kv_per_pos - TOL,
+            bound: Bound::Host,
+        };
+        dense_verdict(
+            &m.arch,
+            None,
+            GpuWays::of(m),
+            need,
+            false,
+            TOL,
+            1000,
+            Some(avail),
+        )
+        .unwrap_err()
+    };
+    let d = Dir::new("bf16-ram");
+    write_tiny(&d, 1);
+    let m = load_dir(&d.0).unwrap();
+    assert!(gpu_refusal(&m).is_some());
+    assert_eq!(
+        GpuWays::of(&m),
+        GpuWays {
+            whole: false,
+            split: false
+        }
+    );
+    // Room for 999 positions: --ctx 768.
+    let e = refusal(&m, 999);
+    assert!(
+        e.ends_with(
+            "(bound by host MemAvailable); to fit: --ctx 768 or less (its KV cache then fits)"
+        ),
+        "{e}"
+    );
+    let e = refusal(&m, 0);
+    assert!(
+        e.ends_with(
+            "(bound by host MemAvailable); to fit: more free RAM (the model runs on the CPU only)"
+        ),
+        "{e}"
+    );
+    let d = Dir::new("fp8-ram-ways");
+    write_tiny_fp8(&d, |_| {});
+    let m = load_dir(&d.0).unwrap();
+    assert_eq!(
+        GpuWays::of(&m),
+        GpuWays {
+            whole: true,
+            split: true
+        }
+    );
+    assert!(
+        refusal(&m, 0).ends_with(
+            "; to fit: a GPU (--device cuda runs the model there, or with --gpu-layers N part of it)"
+        ),
+        "{}",
+        refusal(&m, 0)
+    );
+}
+
 /// The fingerprint's `act` on the CPU is the net's, the type its FP8
 /// matrices were built as (`Qwen2::fp8_qt`), as kvsave's is: each net here
 /// is built under the test override (`with_fp8_cpu_qt`, standing in for

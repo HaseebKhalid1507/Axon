@@ -887,7 +887,7 @@ fn stream_prefill_bits(rel: &str, name: &str) {
         CacheKv::F16,
         true,
         false,
-        0,
+        false,
         &crate::gguf::mem::avail,
     )
     .unwrap();
@@ -1516,11 +1516,22 @@ fn kv_elem() -> u64 {
 }
 
 /// What `model::check_ram_split` weighs for a k-layer CPU half at ctx:
-/// what its build commits and the KV floor.
-fn half_need(m: &Model, k: usize, ctx: usize) -> u64 {
+/// what its build commits and the KV floor; with a GPU half (on `dev`),
+/// its upload's staging ring added and, on a copy, the bytes it hands back
+/// credited (#184), as `build` counts them (no streaming).
+fn half_need(dev: Option<(&Gpu, &Module)>, m: &Model, k: usize, ctx: usize) -> u64 {
     let need = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
-    crate::model::dense_load_bytes(need, !m.file_backed())
-        + need.kv_per_pos * ctx.min(crate::DEFAULT_CHAT_CTX) as u64
+    let n = block_count(m).unwrap();
+    let cpu = crate::model::dense_load_bytes(need, !m.file_backed())
+        + need.kv_per_pos * ctx.min(crate::DEFAULT_CHAT_CTX) as u64;
+    match dev {
+        Some((g, km)) if k > 0 && k < n => {
+            let sb = crate::cuda::qwen2::split_batch(false);
+            let staging = CudaQwen2::upload_staging(g, km, m, k, CacheKv::F16, sb).unwrap();
+            cpu.saturating_sub(m.release_gain(&|t| gpu_part(&t.name, k, n))) + staging
+        }
+        _ => cpu,
+    }
 }
 
 /// `build` with the RAM available `ram` (repacked, no streaming).
@@ -1539,7 +1550,7 @@ fn build_at<'m, 'g>(
         CacheKv::F16,
         false,
         true,
-        0,
+        false,
         &|| host(ram),
     )
 }
@@ -1549,9 +1560,8 @@ fn build_at<'m, 'g>(
 fn assert_half_is_the_estimate(h: &HybridQwen2, m: &Model, ctx: usize, what: &str) {
     let k = h.n_layers - h.gpu_layers;
     let est = crate::model::dense_ram_need_keep(m, true, kv_elem(), k);
-    let built = (h.cpu.as_ref())
-        .and_then(|c| c.r8_arena())
-        .map_or(0, |a| a.len() as u64);
+    // Its repacked rows' mapping, or an FP8 half's F8S rows' (`arena_len`).
+    let built = h.cpu.as_ref().map_or(0, |c| c.arena_len());
     assert_eq!(
         est.arena,
         built.next_multiple_of(2 << 20),
@@ -1577,7 +1587,7 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
     };
     let n = block_count(&m).unwrap();
     let ctx = 256;
-    let need = half_need(&m, n, ctx);
+    let need = half_need(None, &m, n, ctx);
     let tol = crate::model::ram_tolerance();
     let short = need.checked_sub(tol + 1).unwrap_or_else(|| {
         panic!(
@@ -1601,14 +1611,15 @@ fn hybrid_ram_check_every_layer_on_the_cpu() {
 
 /// #143 on real splits (GPU): for 1, n/2, n-1 and n GPU layers, the CPU
 /// half's arena and KV are the estimate's (`assert_half_is_the_estimate`).
-/// A half that needs more than the tolerance is refused one byte under it
-/// (after the GPU half: the refusal names the split) and goes ahead at the
-/// edge, the tolerance under its need. One that needs less (the 0.5B's
-/// last layer, 12 MiB against 34 MiB on 8 CPUs) is refused by no RAM
-/// figure, so it's built with 0 bytes available: the check doesn't refuse
-/// it. The largest half (one GPU layer) must be past the tolerance on every
-/// model, so the refusal is shown on each, whatever the CPU count. All of
-/// it on the GPU (no CPU half) never reads the RAM.
+/// A half that needs more than the tolerance (with the GPU half's upload
+/// staging, #184) is refused one byte under it (the refusal names the
+/// split) and goes ahead at the edge, the tolerance under its need. One
+/// that needs less (the 0.5B's last layer, 12 MiB and the 16 MiB ring
+/// against 34 MiB on 8 CPUs) is refused by no RAM figure, so it's built
+/// with 0 bytes available: the check doesn't refuse it. The largest half
+/// (one GPU layer) must be past the tolerance on every model, so the
+/// refusal is shown on each, whatever the CPU count. All of it on the GPU
+/// (no CPU half) never reads the RAM.
 #[test]
 fn hybrid_ram_check_on_real_splits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1625,7 +1636,7 @@ fn hybrid_ram_check_on_real_splits() {
         let mut refused = Vec::new();
         for gl in [1, n / 2, n - 1, n] {
             let k = n - gl;
-            let need = half_need(&m, k, ctx);
+            let need = half_need(Some((&g, &km)), &m, k, ctx);
             // The RAM it's built at, and what was shown before.
             let (ram, shown) = match need.checked_sub(tol + 1) {
                 Some(short) if k > 0 => {
@@ -1673,12 +1684,249 @@ fn hybrid_ram_check_on_real_splits() {
             CacheKv::F16,
             false,
             true,
-            0,
+            false,
             &|| -> Option<Avail> { panic!("read the RAM with no CPU half") },
         )
         .unwrap();
         assert!(h.cpu.is_none());
     }
+}
+
+/// #184: the split's RAM check runs before the GPU half's upload. Refused
+/// with no RAM, the build reads the RAM before any tensor has gone up
+/// (each is released to `m` right after its upload) and leaves them all
+/// unreleased; at main it read it after (12 layers released, the 0.5B's
+/// n/2). Its need counts the upload's staging ring (16 MiB for the 0.5B's
+/// GPU half). On a copy of the file the GPU half's bytes, which go back as
+/// they go up, are credited: refused a byte under the edge and built at
+/// it, the credit no more than those bytes. A copy's CPU half commits only
+/// its growth, one matrix in flight and its KV (`dense_load_bytes`), so the
+/// credit must stay under that for the edge to exist: not the 0.5B, whose
+/// untied 138 MiB head goes up with any GPU half (at 12/24 and ctx 512, ~6
+/// MiB against ~250 MiB: the need is the ring alone, under the tolerance,
+/// and nothing can refuse it; bella 1106-084830-8699). Qwen3-0.6B (tied
+/// head) at one GPU layer and ctx 2048: a 16 MiB credit against ~220 MiB
+/// (its KV, 4 KiB a layer a position), so the edge moves with both terms:
+/// without the credit the build at the edge is refused.
+#[test]
+fn hybrid_ram_refused_before_the_upload() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let (gl, ctx) = (n / 2, 512);
+    let k = n - gl;
+    let tol = crate::model::ram_tolerance();
+    let seen = std::cell::Cell::new(None);
+    let ram = || {
+        seen.set(Some(m.released_count()));
+        host(0)
+    };
+    let e = match HybridQwen2::build(
+        Some((&g, &km)),
+        &m,
+        ctx,
+        gl,
+        CacheKv::F16,
+        false,
+        true,
+        false,
+        &ram,
+    ) {
+        Ok(_) => panic!("built a {k}-layer CPU half with no RAM"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        seen.get(),
+        Some(0),
+        "tensors released when the RAM was read"
+    );
+    assert_eq!(m.released_count(), 0, "uploaded before the refusal");
+    assert!(
+        e.contains(&format!("the CPU half of the split ({k} of {n} layers)"))
+            && e.contains("the GPU half's upload staging 0.02 GiB"),
+        "{e}"
+    );
+    let sb = crate::cuda::qwen2::split_batch(false);
+    let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+    assert_eq!(staging, 16 << 20);
+    // A copy: a fresh one per build (a build hands its bytes back).
+    let Some(q) = mapped(Q3) else {
+        return;
+    };
+    let n = block_count(&q).unwrap();
+    drop(q);
+    let (gl, ctx) = (1, 2048);
+    let k = n - gl;
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(Q3);
+    let copy = || crate::gguf::load_with(p.to_str().unwrap(), Some(true)).unwrap();
+    let c = copy();
+    assert!(!c.file_backed());
+    let staging = CudaQwen2::upload_staging(&g, &km, &c, k, CacheKv::F16, sb).unwrap();
+    let freed = c.release_gain(&|t| gpu_part(&t.name, k, n));
+    let gpu_bytes: u64 = (c.tensors.iter())
+        .filter(|t| gpu_part(&t.name, k, n))
+        .map(|t| t.n_bytes)
+        .sum();
+    assert!(
+        freed > 0 && freed <= gpu_bytes,
+        "credit {freed} of {gpu_bytes}"
+    );
+    let need = half_need(Some((&g, &km)), &c, k, ctx);
+    let cpu = half_need(None, &c, k, ctx);
+    assert!(
+        staging > 0 && freed < cpu && need > tol,
+        "{k}-layer CPU half, a copy: need {need} (the CPU half {cpu}, staging {staging}, \
+         credit {freed}), tolerance {tol}"
+    );
+    let short = need - tol - 1;
+    assert!(
+        build_at(Some((&g, &km)), &c, ctx, gl, short).is_err(),
+        "built a byte under the edge"
+    );
+    drop(c);
+    let c = copy();
+    let h = build_at(Some((&g, &km)), &c, ctx, gl, need - tol).expect("at the edge");
+    assert_half_is_the_estimate(&h, &c, ctx, "qwen3-0.6b copy");
+    eprintln!(
+        "qwen3-0.6b {gl}/{n} on the GPU, a copy, ctx {ctx}: need {} MiB (the CPU half {} MiB, \
+         staging {} MiB, the copy's credit {} MiB of the GPU half's {} MiB), tolerance {} MiB",
+        need >> 20,
+        cpu >> 20,
+        staging >> 20,
+        freed >> 20,
+        gpu_bytes >> 20,
+        tol >> 20
+    );
+}
+
+/// #206's review: an FP8 checkpoint's split takes the Q8_0 path (native
+/// FP8 runs only the whole model on one GPU), and its upload converts each
+/// GPU-half FP8 matrix, and the head, to Q8_0 on the host after the ring
+/// is gone: one rows x Q8_0 buffer at a time, allocated while its source
+/// is still held, the head's first. The FP8 0.5B's head is its own
+/// lm_head (`output.weight`: the file carries it though the config ties
+/// it), made F16 in the loader's anonymous arena (260 MiB); as Q8_0 it's
+/// 151936 rows of 952 bytes (138 MiB), and the ring 16 MiB. The staging
+/// counted is at least each of those buffers at 1, 12 and 23 GPU layers.
+/// At 23 the head's F16 bytes, credited as they go up, cover the one-layer
+/// CPU half (16 MiB of arena and its KV), so the need is the staging
+/// alone, the head's conversion: the credit never offsets it (#184's first
+/// version counted the ring alone, and that need, 16 MiB, was under the
+/// tolerance: no RAM figure refused it). The split is refused a byte under
+/// the edge and built at it.
+#[test]
+fn hybrid_fp8_staging_counts_the_q8_conversions() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    // The default (non-FP8) module: a split's, whatever the GPU.
+    let km = Kernels::module(&g).unwrap();
+    // A fresh model per build: a build hands back its GPU half's bytes.
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let m = load();
+    assert!(crate::safetensors::is_fp8(&m));
+    let n = block_count(&m).unwrap();
+    let q8 = |t: &Tensor| {
+        let cols = t.dims[0] as usize;
+        (t.n_elements as usize / cols * crate::quant::row_bytes(crate::quant::Q8_0, cols)) as u64
+    };
+    let named = |s: &str| m.tensors.iter().find(|t| t.name == s);
+    let head = named("output.weight")
+        .or_else(|| named("token_embd.weight"))
+        .unwrap();
+    assert_eq!(q8(head), 151936 * 952, "the 0.5B's head as Q8_0");
+    let sb = crate::cuda::qwen2::split_batch(false);
+    for gl in [1, n / 2, n - 1] {
+        let k = n - gl;
+        let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+        let largest = (m.tensors.iter())
+            .filter(|t| gpu_part(&t.name, k, n) && t.qtype.id == crate::quant::fp8::F8_E4M3)
+            .map(q8)
+            .max()
+            .unwrap();
+        eprintln!(
+            "fp8 0.5b {gl}/{n} on the GPU: staging {} KiB, the head's Q8_0 {} KiB, the largest \
+             FP8 matrix's {} KiB",
+            staging >> 10,
+            q8(head) >> 10,
+            largest >> 10
+        );
+        assert!(
+            staging >= q8(head) && staging >= largest,
+            "{gl}/{n}: staging {staging} under a conversion"
+        );
+    }
+    let (gl, ctx) = (n - 1, 512);
+    let k = n - gl;
+    let tol = crate::model::ram_tolerance();
+    let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+    let cpu = half_need(None, &m, k, ctx);
+    let freed = m.release_gain(&|t| gpu_part(&t.name, k, n));
+    let need = half_need(Some((&g, &km)), &m, k, ctx);
+    eprintln!(
+        "fp8 0.5b {gl}/{n}, --ctx {ctx}: need {} KiB: the CPU half {} KiB, less the credit {} KiB \
+         (none below 0), plus the staging {} KiB; tolerance {} KiB",
+        need >> 10,
+        cpu >> 10,
+        freed >> 10,
+        staging >> 10,
+        tol >> 10
+    );
+    // The premise: a credit over the CPU half, whose rest is still not set
+    // against the staging.
+    assert!(
+        freed > cpu,
+        "{gl}/{n}: credit {freed} not over the CPU half {cpu}"
+    );
+    assert_eq!(need, staging, "{gl}/{n}: the need is the staging alone");
+    assert!(need >= q8(head) && need > tol, "need {need}");
+    drop(m);
+    let m = load();
+    assert!(
+        build_at(Some((&g, &km)), &m, ctx, gl, need - tol - 1).is_err(),
+        "built a byte under the edge"
+    );
+    drop(m);
+    let m = load();
+    let h = build_at(Some((&g, &km)), &m, ctx, gl, need - tol).expect("at the edge");
+    assert_half_is_the_estimate(&h, &m, ctx, "fp8 0.5b");
+}
+
+/// #206's review: the plan's own refusals, which the staging's plan
+/// (`upload_staging`, before the RAM check) now gives first, keep the
+/// split's wording (`{g}/{n} layers on the GPU: ..., or fewer
+/// --gpu-layers`): the FP8 module (sm_89 and up) refuses a split.
+#[test]
+fn hybrid_split_plan_refusal_keeps_its_wording() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Ok(f8) = Kernels::module_f8(&g) else {
+        eprintln!("skipping: no FP8 module on this GPU");
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let m = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let n = block_count(&m).unwrap();
+    let gl = n - 1;
+    let Err(e) = build_at(Some((&g, &f8)), &m, 512, gl, u64::MAX >> 2) else {
+        panic!("split with the FP8 module");
+    };
+    assert!(
+        e.starts_with(&format!("{gl}/{n} layers on the GPU: FP8 natively runs"))
+            && e.ends_with(", or fewer --gpu-layers"),
+        "{e}"
+    );
 }
 
 /// The pin check's decision (pure): the tolerance kept free, the bound

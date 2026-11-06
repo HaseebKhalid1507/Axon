@@ -888,6 +888,12 @@ struct Conv<'m> {
 }
 
 impl Conv<'_> {
+    /// The length of `bytes`: rows x a Q8_0 row.
+    fn q8_len(&self) -> usize {
+        let k = self.t.dims[0] as usize;
+        self.t.n_elements as usize / k * quant::row_bytes(quant::Q8_0, k)
+    }
+
     /// Its Q8_0 bytes (`quant::fp8`'s converters, rows split over threads).
     fn bytes(&self, m: &Model) -> Vec<u8> {
         let k = self.t.dims[0] as usize;
@@ -1433,6 +1439,39 @@ impl<'g> CudaQwen2<'g> {
         Ok(net.vram_want(&plan, max_ctx))
     }
 
+    /// The most host memory `new_layers(.., first, kv, split_batch, _)`'s
+    /// upload takes at once, beyond the model's own bytes: the split's RAM
+    /// check counts it (`hybrid`, #184). That's the larger of two phases,
+    /// which never overlap (`build`):
+    /// - the staging ring it page-locks (`upload::Shape::pick` of the
+    ///   arena; 0 below the ring's minimum or with AXON_UPLOAD_RING=0),
+    ///   counted whether or not the upload then takes it (it doesn't when
+    ///   little of the file is in the page cache), dropped before
+    /// - the matrices converted to Q8_0 on the host (`place_q8`: an FP8
+    ///   checkpoint's F16 embedding and head, and its F8_E4M3 matrices
+    ///   without the FP8 module, as on every split), one rows x Q8_0
+    ///   buffer at a time, each allocated while its source is still held
+    ///   and dropped after its write: the largest of them. The FP8 0.5B's
+    ///   head is 138 MiB (151936 rows of 952 bytes), a 7B's 552 MiB (#206's
+    ///   review: the ring alone missed them).
+    ///
+    /// The plan's own vectors (norms, biases, FP8 row scales), held through
+    /// the upload, are left to the RAM check's tolerance: under 2 MiB on
+    /// the FP8 0.5B, ~6 MiB on a 7B. Nothing allocated here.
+    pub(crate) fn upload_staging(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        first: usize,
+        kv: CacheKv,
+        split_batch: usize,
+    ) -> Result<u64, String> {
+        let (_, plan) = Self::plan(gpu, module, m, first, None, kv, split_batch, false)?;
+        let ring = super::upload::Shape::pick(plan.total).map_or(0, |s| s.bytes());
+        let conv = plan.conv.iter().map(Conv::q8_len).max().unwrap_or(0);
+        Ok(ring.max(conv) as u64)
+    }
+
     /// `vram_need` of the whole model (first 0) as a function of max_ctx,
     /// planned once: what `Backend::new`'s placement weighs.
     pub(crate) fn vram_curve(
@@ -1475,12 +1514,10 @@ impl<'g> CudaQwen2<'g> {
             return Err(crate::model::moe_gpu_refusal(m));
         }
         let gemma = m.arch == "gemma3";
-        if gemma && first > 0 {
-            return Err(
-                "gemma3 doesn't split across the CPU and GPU yet: the whole model \
-                        goes on the GPU (a smaller --ctx), or --device cpu"
-                    .into(),
-            );
+        if first > 0
+            && let Some(e) = crate::hybrid::split_refusal(m)
+        {
+            return Err(e);
         }
         if gemma && kv != CacheKv::F16 {
             return Err("gemma3 has no q8 KV cache on the GPU yet (--kv f16)".into());
