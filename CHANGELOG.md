@@ -22,6 +22,30 @@ measurements behind them.
 - Same bits: gen and serve md5 vs main, now with a section where requests are preempted
   (docs/log/2026-11-06-shared-prefix-c3-1.md).
 
+### RAM pre-load checks, round 2: the loader's conversions checked first, a split needs its larger step (#208, #209)
+- **#208: a safetensors checkpoint's converted tensors are checked before they're made.** The loader converts BF16
+  tensors to F16 or F32 in anonymous memory (a BF16 model's matrices; an FP8 checkpoint's embedding, head and
+  vectors: 519 MiB on the 0.5B) before any RAM check ran, so under a memory limit the FP8 0.5B was OOM-killed at 765
+  MiB and below. The conversion's need (the converted tensors, the conversion threads' buffers) is now checked
+  first, on every device, worded as the CPU model's refusal (#185). Near the edge it waits for the CUDA context,
+  which the CLI makes beside the load, and reads the RAM again. Its tolerance is the memory cgroup's charge batches
+  only (256 KiB a CPU): a conversion gives nothing back, and its estimate is exact in anonymous memory. The cgroup
+  also charges about 1.2 MiB of kernel memory for it (likely the arena's page tables), which the estimate doesn't
+  count, so under a cap a few MiB above the refusals it's still killed converting (on bella about 742–745 MiB for
+  the FP8 0.5B; refused through 735). The CUDA kernels' module (about 25 MiB) is still loaded after this check and
+  before the split's (#217, which also takes the page tables).
+- **#209: a split needs the larger of its two steps, not their sum.** The GPU half's upload staging (#184) is freed
+  before the CPU half is built; the need is now the larger, each with its own residents (the GPU half's credit
+  offsets the CPU half only). The refusal says so, and its `--ctx` is the CPU half's. A trade: within the split
+  check's tolerance (about 32 MiB) above the need, a run the sum refused cleanly can now be OOM-killed instead (two
+  caps on a 3B GGUF split, one on the 7B FP8's under a real cap), against 17 caps where the 7B FP8 split now runs.
+- **An FP8 checkpoint's CPU rows are counted whole.** The estimate credited every matrix's source as memory the load
+  hands back; an FP8 checkpoint's are read from its file, so its CPU model's and a split's CPU half's need was the
+  rows' scales alone (7B at 20 of 28 GPU layers: 1.74 GiB of rows uncounted).
+- An FP8 split in fast mode (sm_89 and up) is refused with what works (`--numerics exact`, or every layer on the GPU),
+  not "fewer --gpu-layers"; the CPU model's refusal of an FP8 checkpoint in fast mode names `--gpu-layers N and
+  --numerics exact`. `scripts/fp8cap.sh` runs the checks under real memory limits (systemd scopes).
+
 ### Shared prefix KV pages: the engine (#207, closes #187; follows #164)
 - **Opt-in: `AXON_SHARE_KV=1`.** Off by default, so a server without it runs main's admission, eviction and spills,
   decision for decision. #187 ships sharing off by default if any timing clause fails, and two did on the RTX 4090:

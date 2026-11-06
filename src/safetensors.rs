@@ -1295,7 +1295,7 @@ fn run_jobs(files: &[&File], jobs: &[Job], aux: &mut [u8]) -> io::Result<()> {
     work.reverse();
     let tab = bf16_to_f16_table();
     let work = std::sync::Mutex::new(work);
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = conv_threads();
     std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|_| {
@@ -1315,6 +1315,106 @@ fn run_jobs(files: &[&File], jobs: &[Job], aux: &mut [u8]) -> io::Result<()> {
         hs.into_iter()
             .try_for_each(|h| h.join().expect("safetensors conversion thread"))
     })
+}
+
+/// The conversion threads `run_jobs` starts.
+fn conv_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
+}
+
+/// What `load` commits in anonymous memory to convert a checkpoint's
+/// tensors (#208): `aux`, the arena of every converted tensor (`tensors`
+/// of them; 2 MiB pages, all written), and `buffers`, the conversion
+/// threads' read buffers (`run_jobs`: each holds the source bytes of the
+/// largest piece it has read, at most `PIECE` elements).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ConvNeed {
+    pub aux: u64,
+    pub tensors: usize,
+    pub buffers: u64,
+}
+
+impl ConvNeed {
+    fn total(&self) -> u64 {
+        self.aux + self.buffers
+    }
+}
+
+/// `ConvNeed` of `jobs` into an arena of `aux_len` bytes, over `threads`
+/// (never more buffers than pieces).
+fn conv_need(jobs: &[Job], aux_len: usize, threads: usize) -> ConvNeed {
+    let pieces: usize = jobs.iter().map(|j| j.n.div_ceil(PIECE)).sum();
+    let piece = (jobs.iter())
+        .map(|j| j.n.min(PIECE) * bytes_per(j.from))
+        .max()
+        .unwrap_or(0);
+    ConvNeed {
+        aux: aux_len.next_multiple_of(2 << 20) as u64,
+        tensors: jobs.len(),
+        buffers: (threads.min(pieces) * piece) as u64,
+    }
+}
+
+/// `load`'s RAM check (pure, #208): Err to refuse converting a checkpoint's
+/// tensors, `need`, when it's over the RAM available (`gguf::mem::avail`)
+/// and the tolerance (`model::conv_tolerance`: the charge batches only),
+/// worded as the CPU model's refusal (#185): the bound named, then the
+/// ways out. The copies are made on every device (the GPU uploads them, an
+/// FP8 checkpoint's embedding and head as Q8_0), so a GPU isn't one; a
+/// BF16/F16 checkpoint's GGUF is read from its file instead, an FP8 one has
+/// none. Ok with no RAM figure.
+pub(crate) fn conv_verdict(
+    arch: &str,
+    fp8: bool,
+    need: ConvNeed,
+    tolerance: u64,
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
+    let Some(avail) = avail else {
+        return Ok(());
+    };
+    if avail.bytes + tolerance >= need.total() {
+        return Ok(());
+    }
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    Err(format!(
+        "{arch}: converting the checkpoint's tensors at load ({} of them, to F16 or F32) needs \
+         about {:.2} GiB of RAM (the converted tensors {:.2} GiB, the conversion threads' \
+         buffers {:.2} GiB) and only {:.2} GiB is available (bound by {avail}); to fit: more \
+         free RAM (they're converted on every device){}",
+        need.tensors,
+        gib(need.total()),
+        gib(need.aux),
+        gib(need.buffers),
+        gib(avail.bytes),
+        match fp8 {
+            true => "",
+            false => {
+                ", or the model as a GGUF (convert_hf_to_gguf.py --outtype f16), which is read \
+                 from its file"
+            }
+        }
+    ))
+}
+
+/// How close to a conversion's need the RAM available must be before
+/// `avail_settled` waits for the CUDA context (`cuda::preinit`) and reads
+/// it again: more than that context's host memory.
+const SETTLE_MARGIN: u64 = 1 << 30;
+
+/// The RAM available for `need` bytes of conversions (`gguf::mem::avail`):
+/// within `SETTLE_MARGIN` of the need, read again once `cuda::preinit`'s
+/// threads are done (`cuda::settle`). The CLI starts the CUDA context
+/// beside the load, and its host memory, charged after a check that read
+/// the RAM without it, would make the margin an OOM kill. Far from the
+/// edge the overlap is kept.
+fn avail_settled(need: u64) -> Option<crate::gguf::mem::Avail> {
+    let a = crate::gguf::mem::avail()?;
+    if a.bytes >= need.saturating_add(SETTLE_MARGIN) {
+        return Some(a);
+    }
+    crate::cuda::settle();
+    crate::gguf::mem::avail()
 }
 
 fn bytes_per(dtype: &str) -> usize {
@@ -1372,11 +1472,32 @@ pub fn checkpoint_metadata(dir: &Path) -> io::Result<(Value, Meta)> {
 /// `check_supported`), as `gguf::load_to_run`'s `wants_copy`; the shards
 /// are always mapped (the converted tensors live in the anonymous `aux`
 /// arena), so its answer is not used. `fill` false: the tensors that need
-/// converting aren't (their bytes can't be read; `axon info`).
+/// converting aren't (their bytes can't be read; `axon info`). Converting
+/// them is refused first (`conv_verdict`, #208) if the RAM available
+/// can't hold it.
 pub fn load(
     dir: &Path,
     check: impl FnOnce(&Model) -> crate::gguf::CopyWish,
     fill: bool,
+) -> io::Result<Model> {
+    load_ram(
+        dir,
+        check,
+        fill,
+        &avail_settled,
+        crate::model::conv_tolerance(),
+    )
+}
+
+/// `load`, with the RAM available for a conversion of the bytes given
+/// read by `ram` (`avail_settled`) and the check's tolerance `tol`
+/// (`model::conv_tolerance`); tests pass their own.
+pub(crate) fn load_ram(
+    dir: &Path,
+    check: impl FnOnce(&Model) -> crate::gguf::CopyWish,
+    fill: bool,
+    ram: &dyn Fn(u64) -> Option<crate::gguf::mem::Avail>,
+    tol: u64,
 ) -> io::Result<Model> {
     let (cfg, meta) = checkpoint_metadata(dir)?;
     let Meta {
@@ -1532,6 +1653,10 @@ pub fn load(
     }
     let _ = check(&m);
     if aux_len > freq_bytes.next_multiple_of(64) && fill {
+        // Refused before any of it is made (#208: the FP8 0.5B's 520 MiB
+        // were OOM-killed under a cap before any check ran).
+        let need = conv_need(&jobs, aux_len, conv_threads());
+        conv_verdict(&m.arch, fp8, need, tol, ram(need.total())).map_err(bad)?;
         let mut aux = memmap2::MmapMut::map_anon(aux_len.next_multiple_of(2 << 20))?;
         #[cfg(target_os = "linux")]
         {

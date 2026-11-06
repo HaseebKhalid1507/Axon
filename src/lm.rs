@@ -936,7 +936,7 @@ impl<'a> Backend<'a> {
                 true => max_ctx.min(crate::DEFAULT_CHAT_CTX),
                 false => max_ctx,
             };
-            if let Some(warn) = crate::model::check_ram_dense(m, ctx)? {
+            if let Some(warn) = crate::model::check_ram_dense(m, ctx, num)? {
                 eprintln!("axon: {warn}");
             }
             return Ok(Backend::of(Inner::Cpu(Box::new(Qwen2::new(m))), num));

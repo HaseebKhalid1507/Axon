@@ -558,6 +558,19 @@ impl Model {
         s..s + t.n_bytes as usize
     }
 
+    /// Whether `t`'s bytes are anonymous memory (a copy of the file, the
+    /// safetensors loader's converted tensors), which `release` hands back,
+    /// not a file mapping's page cache (`region`; #209: an FP8
+    /// checkpoint's matrices are read from its file, the rest of the model
+    /// from anonymous memory).
+    pub(crate) fn anonymous(&self, t: &Tensor) -> bool {
+        match t.shard {
+            0 => !self.file_backed,
+            AUX => true,
+            _ => false,
+        }
+    }
+
     /// Mapping `s`'s bytes, and whether it maps a file (vs anonymous
     /// memory, whose released pages read back as zeros).
     fn region(&self, s: u16) -> (&memmap2::Mmap, bool) {

@@ -1528,7 +1528,8 @@ fn half_need(dev: Option<(&Gpu, &Module)>, m: &Model, k: usize, ctx: usize) -> u
         Some((g, km)) if k > 0 && k < n => {
             let sb = crate::cuda::qwen2::split_batch(false);
             let staging = CudaQwen2::upload_staging(g, km, m, k, CacheKv::F16, sb).unwrap();
-            cpu.saturating_sub(m.release_gain(&|t| gpu_part(&t.name, k, n))) + staging
+            // The larger of the two steps (#209).
+            (cpu.saturating_sub(m.release_gain(&|t| gpu_part(&t.name, k, n)))).max(staging)
         }
         _ => cpu,
     }
@@ -1900,12 +1901,64 @@ fn hybrid_fp8_staging_counts_the_q8_conversions() {
     assert_half_is_the_estimate(&h, &m, ctx, "fp8 0.5b");
 }
 
-/// #206's review: the plan's own refusals, which the staging's plan
-/// (`upload_staging`, before the RAM check) now gives first, keep the
-/// split's wording (`{g}/{n} layers on the GPU: ..., or fewer
-/// --gpu-layers`): the FP8 module (sm_89 and up) refuses a split.
+/// #209: the FP8 0.5B at one GPU layer. The upload converts the head to
+/// Q8_0 on the host (138 MiB), and then the 23-layer CPU half is built
+/// (its F8S rows and KV floor, less the head's F16 bytes, 260 MiB,
+/// handed back as it goes up). Both steps need more than the tolerance,
+/// and never at once: the split is built with room for the larger alone
+/// (#206 summed them and refused it) and refused a byte under that.
 #[test]
-fn hybrid_split_plan_refusal_keeps_its_wording() {
+fn hybrid_fp8_split_needs_the_larger_step() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let m = load();
+    let n = block_count(&m).unwrap();
+    let (gl, ctx) = (1, 512);
+    let k = n - gl;
+    let tol = crate::model::ram_tolerance();
+    let sb = crate::cuda::qwen2::split_batch(false);
+    let staging = CudaQwen2::upload_staging(&g, &km, &m, k, CacheKv::F16, sb).unwrap();
+    let freed = m.release_gain(&|t| gpu_part(&t.name, k, n));
+    let cpu = half_need(None, &m, k, ctx).saturating_sub(freed);
+    let need = half_need(Some((&g, &km)), &m, k, ctx);
+    eprintln!(
+        "fp8 0.5b {gl}/{n}, --ctx {ctx}: need {} KiB, the larger of the staging {} KiB and the \
+         CPU half {} KiB (after the credit {} KiB); their sum {} KiB; tolerance {} KiB",
+        need >> 10,
+        staging >> 10,
+        cpu >> 10,
+        freed >> 10,
+        (staging + cpu) >> 10,
+        tol >> 10
+    );
+    assert!(cpu > tol && staging > tol, "both steps over the tolerance");
+    assert_eq!(need, cpu.max(staging));
+    drop(m);
+    let m = load();
+    assert!(
+        build_at(Some((&g, &km)), &m, ctx, gl, need - tol - 1).is_err(),
+        "built a byte under the larger step"
+    );
+    drop(m);
+    let m = load();
+    let h = build_at(Some((&g, &km)), &m, ctx, gl, need - tol).expect("room for the larger step");
+    assert_half_is_the_estimate(&h, &m, ctx, "fp8 0.5b");
+}
+
+/// The FP8 module (fast mode, sm_89 and up) refuses a split
+/// (`f8_split_refusal`) with the split named (`{g}/{n} layers on the GPU:
+/// ...`, #206's review) and the ways that work (#209): --numerics exact,
+/// and for a split chosen with --gpu-layers, every layer on the GPU. It
+/// was the plan's refusal, wrapped as a VRAM shortfall: "or fewer
+/// --gpu-layers", which is refused too.
+#[test]
+fn hybrid_fp8_split_refusal_names_what_works() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
@@ -1922,10 +1975,37 @@ fn hybrid_split_plan_refusal_keeps_its_wording() {
     let Err(e) = build_at(Some((&g, &f8)), &m, 512, gl, u64::MAX >> 2) else {
         panic!("split with the FP8 module");
     };
-    assert!(
-        e.starts_with(&format!("{gl}/{n} layers on the GPU: FP8 natively runs"))
-            && e.ends_with(", or fewer --gpu-layers"),
-        "{e}"
+    // #209: not "or fewer --gpu-layers" (a split with fewer is refused
+    // too): the ways that work.
+    assert_eq!(
+        e,
+        format!(
+            "{gl}/{n} layers on the GPU: FP8 natively runs every layer of a dense model on one \
+             GPU; --numerics exact runs its Q8_0 form, which splits, or --gpu-layers {n} (every \
+             layer on the GPU), if it has room"
+        )
+    );
+    // Refused before anything is planned: the stream's VRAM plan too (it
+    // ran first, and its refusal had no split prefix).
+    let Err(e) = HybridQwen2::build(
+        Some((&g, &f8)),
+        &m,
+        512,
+        1,
+        CacheKv::F16,
+        true,
+        true,
+        true,
+        &|| host(u64::MAX >> 2),
+    ) else {
+        panic!("split with the FP8 module");
+    };
+    assert_eq!(
+        e,
+        format!(
+            "1/{n} layers on the GPU: FP8 natively runs every layer of a dense model on one GPU; \
+             --numerics exact runs its Q8_0 form, which splits"
+        )
     );
 }
 
