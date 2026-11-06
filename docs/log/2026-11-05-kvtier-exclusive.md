@@ -242,12 +242,23 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
   (X, then other text) gives up 1 page. It must copy nothing; fc7bb13 copies the whole chain. (b) X stored by the
   idle flush, then starved: Q2 gives up P2's pages under X's stored last page, which alone are stored, and R (P2's
   next turn) restores them. Every reply == `--cache-ram 0`'s.
-- **Before / after (bella):** the test on fc7bb13 + the test alone, 1105-205357-b9a0 (expected FAIL at (a)); at
-  e1df27a with every `cache_ram` serve test, 1105-205358-67e4. PENDING.
-- **The gate round** at the head with main merged: release + debug suites, md5 vs main, s4 (bella), s1 and the resume
-  cell (4090), and bella's resume cell (`--timing bella`, no fallback: the number the `auto` flip needs). The bar
-  for the fix (the lead's): s1 resume p50 ≤ ≈ 1.10× main with re-prefill tokens still well below main's, and the
-  resume cell's 13.9× unchanged. PENDING.
+- **Before / after (bella):** the test on fc7bb13 + the test alone, 1105-205357-b9a0 (expected FAIL at (a)); after:
+  in the release and debug suites below (`serve::` holds both tests). PENDING.
+- **The gate round (round 2; it replaces 626051c's)** at 9829783 (e1df27a, main 7a2c9cf merged in 26649ae, one
+  test fix), against main 7a2c9cf, the same harnesses (`agent_replay` sha256 34b1910b…, the trace, `serve_md5.py`,
+  `kv_resume_bench.py` @fe5117d; `resumeexcl.sh` now writes per host, because bella's and the 4090's resume cells
+  share one staged dir). The bar for the fix (the lead's): s1 resume p50 ≤ ≈ 1.10× main with re-prefill tokens still
+  well below main's, and the resume cell's 13.9× unchanged. All PENDING:
+
+  | cell | job | host |
+  |---|---|---|
+  | release `serve:: kvstore:: cuda::qwen2::slots:: cuda::qwen2::kvio::` | 1105-210552-7515 | bella |
+  | debug (debug-assertions, overflow-checks), the same filters | 1105-210552-110a | bella |
+  | md5 vs main, default flags (gen + serve) | 1105-210601-ed07 | bella / pods |
+  | replay s4 | 1105-210655-4117 | `--timing bella` |
+  | replay s1 | 1105-211308-268a | `--timing 4090` (pod1, secure, warmed) |
+  | resume cell | 1105-211420-0618 | `--timing 4090` (pod1, after s1) |
+  | resume cell, bella's (the number `auto` needs) | 1105-211421-8e35 | `--timing bella`, no fallback |
 
 ## What didn't work
 - 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
