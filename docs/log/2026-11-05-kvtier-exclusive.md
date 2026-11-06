@@ -211,7 +211,8 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
 ## Verdict: the rule, and `--cache-ram auto`
 - **The five clauses, as read: all PASS.** ≤ 0.3 s: 0.204 s (a169, 4090). Re-prefill ≤ 5 %: 3.72 % (28ee, bella).
   s1 ITL p99 ≤ 1.05×: 1.025 (c76b, 4090; bella's PROVISIONAL 2d32 read 0.970). s4 ITL p99 ≤ 1.25×: 0.980 (28ee,
-  bella). Replay md5 == main: same in every clean run of every job.
+  bella). Replay md5 == main: same in every clean run of every job. **Round 2 (below, at 9829783, the tail-spill
+  fix): all five PASS again**, its three timing cells read on a 4090.
 - **The rule's outcome is "Pass → default `auto` (≤ 8 GiB), paged GPU pool only". This PR does not flip it.**
   Note §7 and §10.3: the flip needs Haseeb's answer to the plan's Q2 (pinning 8 GiB of bella's RAM) and is not part
   of this PR's gate. `--cache-ram` stays opt-in here.
@@ -221,7 +222,7 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
     88 ms outside the copies, scaled by bella / 4090 (1.73× the decode step, 3.06× the full prefill, f763 vs a169),
     plus 414 pages at 28 or 7 GB/s. So the 4090 does not settle bella's ≤ 0.3 s. Rerunning the cell on bella takes
     ≈ 20 min. **Round 2 (below):** bella read 0.513 s TAINTED (8e35), with its copies in the fast mode, so the
-    estimate's fast-mode range was low; a clean rerun (r4) is queued.
+    estimate's fast-mode range was low; a clean rerun (r4) is running.
   - The tail spill (above): `auto` would have put it on every large-VRAM server, where it is mostly cost. Fixed in
     e1df27a, gates rerun (below).
 
@@ -235,8 +236,8 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
 - **What dropping can cost.** With the kept prefix unstored, everything the slot gives up is dropped, not only a
   reply's tail: a different conversation admitted to a slot that shares only a system prompt with the old one loses
   the old one's pages, unless that prompt is stored. Shared pages usually are: a stored page with children is
-  evicted only after them. The rerun's s1 / s4 re-prefill tokens measure it; the resume cell's session is evicted by
-  reclaims (`keep` 0), which still store everything.
+  evicted only after them. The rerun's s1 / s4 re-prefill tokens measure it (15 % and 8.4 % of main's, 4090); the
+  resume cell's session is evicted by reclaims (`keep` 0), which still store everything.
 - **Tests.** `tier::tests::spill_orphans` (the rule: kept pages stored, another sequence's parent, the s1 case after
   eviction, a reclaim), and the fuzz's admissions now spill by it, `check` after each.
   `serve::tests::serve_cuda_cache_ram_tail_spill`: (a) the write-behind starved, P's reply ends a page past X, and Q
@@ -261,24 +262,35 @@ binaries (the replay is deterministic), its median over the 3 rounds (`s1_per_re
   | replay s1 | 1105-211308-268a | RTX 4090, secure pod, warmed | PASS, 3 of 3 rounds clean: ITL p99 10.64 vs 10.66 ms (0.998×); resume p50 0.054 vs 0.056 s; re-prefill 3,213 vs 21,291 tokens (0.11 % vs 0.73 %); goodput 33.16 both; md5 same |
   | resume cell | 1105-211420-0618 | RTX 4090, the same pod | PASS: 0.141 vs 2.713 s (19.2×), 3 valid rounds each, no VOID, 414 pages restored each; md5 same |
   | replay s4 | 1105-210655-4117 | bella | TAINTED, not read: all 10 runs (5 rounds incl. 2 reruns), foreign SM mean 6.1–22.2 %, max 37–66 % (desktop). Directional only: goodput 3.79–7.33 → 8.35–15.08 tok/s, re-prefill 21.4–28.2 % → 0.8–6.1 %; one md5 over all 10 runs |
-  | replay s4, rerun on a 4090 (the lead's call) | 1106-051153-a1f3 | RTX 4090, secure pod, warmed | RUNNING |
+  | replay s4, rerun on a 4090 (the lead's call) | 1106-051153-a1f3 | RTX 4090, secure pod, warmed | PASS, 3 of 3 rounds clean (foreign 0 / 0 %): ITL p99 77.52 vs 79.04 ms (0.981×); re-prefill share 0.0006 vs 0.0068, 1,665 vs 19,743 tokens; resume p50 0.053 vs 0.053 s; turn p50 0.055 vs 0.056 s; ttft_new p50 1.343 vs 1.406 s; output 130.01 tok/s both; goodput 127.15 vs 128.95 tok/s (−1.4 %, not a clause); 0 errors, 0 preempted; one md5 over all 6 runs |
   | resume cell, bella's (the number `auto` needs) | 1105-211421-8e35 | bella | TAINTED, not read (max 98 %, mean 7.7 %: kitty, Xorg): 0.389–0.526 s (median 0.513) vs main 8.77–9.22 s (median 8.83); md5 same |
   | resume cell, bella's, r3 | 1106-030609-30b7 | bella | void: submitted outside the staged dir (no `models/`), the base server exited 2; also TAINTED. Its bandwidth part ran (bulk 2D per page 27.9 / 22.1 GB/s, one page 20.1 / 18.9 GB/s) |
-  | resume cell, bella's, r4 (staged as 8e35) | 1106-051210-8062 | `--timing bella`, no fallback | QUEUED |
+  | resume cell, bella's, r4 (staged as 8e35) | 1106-051210-8062 | `--timing bella`, no fallback | RUNNING; for the `auto` flip only, not this PR's gate |
 
   Reading it:
+  - **The five clauses, round 2: all PASS, all three timing cells on a 4090** (note §7 asks for bella's; the lead
+    rerouted them). ≤ 0.3 s: 0.141 s (0618). Re-prefill ≤ 5 %: 0.06 % (a1f3). s1 ITL p99 ≤ 1.05×: 0.998 (268a).
+    s4 ITL p99 ≤ 1.25×: 0.981 (a1f3). Replay md5 == main: one md5 per job across all its runs.
   - **The fix meets the lead's bar on the 4090.** s1 resume p50 0.96× main (bar ≤ ≈ 1.10×; round 1 read +26 ms at
     the request level), re-prefill tokens 15 % of main's. The resume cell's 19.2× is not a gain over round 1's 13.9×
     from the fix: a different pod, and this one copied at 24–26 GB/s (its bandwidth rows), round 1's at ≈ 13 GB/s.
-  - **The s4 rerun is on a 4090** because bella's desktop tainted 4117 and blocked the rerun for hours. A 4090 holds
-    5,288 pages against bella's 1,725, so its s4 evicts less, and the cell tests the tier less hard than bella's;
-    4117's tainted runs are the directional bella evidence.
+  - **s4 passes on the 4090 (a1f3):** ITL p99 0.981× main, re-prefill tokens 8.4 % of main's. It ran on a 4090
+    because bella's desktop tainted 4117 and blocked the rerun for hours. A 4090 holds 5,288 pages against bella's
+    1,725, so its s4 evicts less, and the cell tests the tier less hard than bella's; 4117's tainted runs are the
+    directional bella evidence (the same direction, larger).
+  - **s4 goodput −1.4 % (INFO, not a clause).** Goodput counts the output tokens of requests with TTFT ≤ 2 s and
+    their own ITL p99 ≤ 100 ms. Every run emitted the same tokens (130.01 tok/s over the same 153.3 s wall), so the
+    gap is which requests meet that bar. Cand leaves ≈ 438 tokens out in every round (127.15 each time: the same
+    requests), main 108–421 (127.27–129.30); cand is 0.1 % under main's worst round. That is ≈ 2–4 of 174
+    requests near the 100 ms line (≈ 115 tokens a request). Not attributed per request: the per-request outputs
+    stayed on the pod, which is down.
   - **Bella's resume likely misses ≤ 0.3 s even clean.** 8e35's copies ran in bella's fast mode (bandwidth rows
     25–28 GB/s; each restore's step line 36–66 ms), so the excess isn't the slow copy mode: bella / 4090 resume is
     3.6×, about bella's prefill ratio (first turn 8.9 vs 3.07 s, 2.9×). The time is outside the copies (the
     prompt's last 196 tokens prefilled at 26.5k depth, the first step, tokenize and lookup; not attributed line by
     line). So the `auto` flip (a follow-up PR, Haseeb's OK) needs a faster resume path on bella or a bella-aware
-    threshold (main's resume is 8.8 s there; 17× in 8e35). This PR stays opt-in. r4 is the clean read.
+    threshold (main's resume is 8.8 s there; 17× in 8e35). This PR stays opt-in. r4 (8062) is the clean read, for
+    that decision only.
 
 ## What didn't work
 - 68e9: the bench's fixed pressure cap (8 sessions) never evicted anything on the 4090's 5,288-page pool. All 6
