@@ -1,0 +1,51 @@
+[axon-run 08:48:31] submitted 1106-084831-d8cb by /home/haseeb/.cache/axon-ramchk: /home/haseeb/.cache/axon-ramchk/bin/axon-test-dbg-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload
+[axon-run 09:23:19] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 09:23:19] scope axon-job-1106-084831-d8cb-1793974999.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20000 MB): an OOM here kills only this job
+[axon-run 09:23:19] job 1106-084831-d8cb -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-084831-d8cb-1793974999 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk/bin/axon-test-dbg-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --test-threads 4
+axon-q 09:23:19 start slot 16-23: /home/haseeb/.cache/axon-ramchk/bin/axon-test-dbg-e6704b7 model:: hybrid:: gguf:: lm:: qwen2::stream safetensors:: cuda::upload --test-threads 4
+
+running 168 tests
+test cuda::qwen2::stream::tests::unpermute_bench ... ignored, benchmark: unpermute_bench -- --ignored --nocapture
+test gguf::mem::tests::mountinfo_escapes ... ok
+test gguf::mem::tests::host_only_without_cgroupfs ... ok
+test gguf::mem::tests::v1_memory_controller ... ok
+test cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps ... ok
+test gguf::mem::tests::real_avail_is_found ... ok
+test gguf::mem::tests::v2_cgroupns_private_root ... ok
+test gguf::mem::tests::v2_picks_the_mount_above_the_cgroup ... ok
+test gguf::mem::tests::v2_saturates_and_tolerates_missing_files ... ok
+test gguf::mem::tests::v2_mount_root_and_default_mount ... ok
+test gguf::tests::bad_magic_and_version ... ok
+test gguf::tests::bad_tensors ... ok
+test gguf::mem::tests::v2_tightest_level_wins ... ok
+test gguf::tests::honours_general_alignment ... ok
+test gguf::tests::huge_lengths_and_counts ... ok
+test gguf::tests::overlapping_tensors_refused ... ok
+test gguf::tests::load_to_run_map_only_never_copies ... ok
+test gguf::tests::parses_a_valid_file ... ok
+test gguf::tests::metadata_element_budget ... ok
+test gguf::tests::release_small_anonymous_model ... ok
+test gguf::tests::release_span_unaligned_base ... ok
+test gguf::tests::resident_fraction_of_a_read_file ... ok
+test gguf::tests::truncated_files ... ok
+test gguf::tests::unpermute_rows_undoes_the_converter ... ok
+test gguf::tests::unsized_types_are_named_not_sized ... ok
+test gguf::tests::parses_a_long_string_array ... ok
+test gguf::tests::release_gain_is_what_release_drops ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test hybrid::tests::hybrid_auto_split_is_the_most_that_fit ... ok
+test hybrid::tests::hybrid_bad_drafter_output_unchanged ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+test cuda::qwen2::stream::tests::unpermute_inverts_repack ... ok
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+test hybrid::tests::hybrid_logits_match_cpu_1_5b ... ok
+test hybrid::tests::hybrid_logits_match_cpu_llama ... ok
+test hybrid::tests::hybrid_logits_match_cpu_qwen3 ... ok
+test hybrid::tests::hybrid_auto_split_q8_fits_more_layers ... ok
+test hybrid::tests::all_gpu_layers_is_the_cuda_backend has been running for over 60 seconds
+test hybrid::tests::hybrid_halves_own_their_weights has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+[axon-run 09:25:24] signal 15: stopping the job
+[axon-run 09:25:24] exit 143 after 124.4s (host bella)
