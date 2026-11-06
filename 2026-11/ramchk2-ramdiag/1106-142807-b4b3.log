@@ -1,0 +1,171 @@
+[axon-run 14:28:07] submitted 1106-142807-b4b3 by /home/haseeb/.cache/axon-ramchk2: /usr/bin/bash ramdiag.sh ./axon-2aec1e5 ./axon-diag-f0e0bd6
+[axon-run 16:02:46] scope axon-job-1106-142807-b4b3-1793998966.scope in app-axonjobs.slice: MemoryMax 17296 MB, MemoryHigh 15566 MB, no swap, oomd pressure kill 80% (claim 10848 MB): an OOM here kills only this job
+[axon-run 16:02:46] job 1106-142807-b4b3 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-142807-b4b3-1793998966 --slice=app-axonjobs.slice -p MemoryMax=17296M -p MemoryHigh=15566M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash ramdiag.sh ./axon-2aec1e5 ./axon-diag-f0e0bd6
+axon-q 16:02:46 start slot 16-23: /usr/bin/bash ramdiag.sh ./axon-2aec1e5 ./axon-diag-f0e0bd6
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 722 MiB, 12227 MiB
+8
+               total        used        free      shared  buff/cache   available
+Mem:           31487       11021       14435         196        6682       20465
+=== axon-diag-f0e0bd6 cap 2000M AXON_RAMTRACE=1
+rc=0
+RAMTRACE start: unrecl 1.7 (max since last 1.7) anon 0.4 kernel 0.2 shmem 0.0 file 9.1 current 10.7 peak 10.7 avail 1998.1
+RAMTRACE conv-check-before: unrecl 103.9 (max since last 106.1) anon 81.8 kernel 19.3 shmem 0.0 file 38.0 current 141.8 peak 141.8 avail 1896.2
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 1896.2: unrecl 103.8 (max since last 103.9) anon 83.5 kernel 19.3 shmem 0.0 file 38.4 current 142.0 peak 142.0 avail 1896.2
+RAMTRACE converted: unrecl 747.7 (max since last 747.7) anon 660.2 kernel 78.7 shmem 8.0 file 658.6 current 1398.3 peak 1398.3 avail 1252.3
+RAMTRACE fp8-values: unrecl 749.0 (max since last 750.3) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE loaded: unrecl 749.0 (max since last 749.0) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE tokenizer: unrecl 749.0 (max since last 749.0) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE encoded: unrecl 749.0 (max since last 749.0) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE gpu-open-before: unrecl 749.0 (max since last 749.0) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE gpu-open: unrecl 749.0 (max since last 749.0) anon 660.2 kernel 79.6 shmem 8.0 file 992.3 current 1733.0 peak 1733.3 avail 1251.0
+RAMTRACE module: unrecl 773.8 (max since last 773.8) anon 684.8 kernel 79.6 shmem 8.0 file 992.3 current 1757.8 peak 1757.8 avail 1226.2
+RAMTRACE stream-decided: unrecl 773.8 (max since last 773.8) anon 684.8 kernel 79.6 shmem 8.0 file 992.3 current 1757.8 peak 1757.8 avail 1226.2
+RAMTRACE split-check staging 137.9 freed 258.0: unrecl 773.8 (max since last 773.8) anon 684.8 kernel 79.6 shmem 8.0 file 992.3 current 1757.8 peak 1757.8 avail 1226.2
+RAMTRACE split-checked: unrecl 773.8 (max since last 773.8) anon 684.8 kernel 79.6 shmem 8.0 file 992.3 current 1757.8 peak 1757.8 avail 1226.2
+RAMTRACE uploaded: unrecl 517.3 (max since last 912.0) anon 427.1 kernel 82.1 shmem 8.0 file 992.3 current 1501.6 peak 1896.3 avail 1482.7
+RAMTRACE cpu-half: unrecl 533.0 (max since last 533.0) anon 443.1 kernel 81.1 shmem 8.0 file 992.3 current 1517.3 peak 1896.3 avail 1467.0
+note: not streaming the CPU layers for prefill: layer 0 q: type F8S can't be streamed
+split:       gpu layers 23/24, 0.48 GiB on GPU
+prompt eval: 5 tok in 0.02s (315.06 tok/s)
+decode:      8 tok, 7 passes in 0.03s (242.10 tok/s)
+device:      cuda + cpu, gpu layers 23/24, 0.48 GiB on GPU, kv f16
+identity:    fp_f906119a88187543
+draft:       off
+--- out: The capital of France is Paris. It is the largest city in
+=== axon-diag-f0e0bd6 cap 783M AXON_RAMTRACE=1
+rc=2
+RAMTRACE start: unrecl 1.5 (max since last 1.5) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.5 peak 1.5 avail 781.5
+RAMTRACE conv-check-before: unrecl 106.8 (max since last 106.8) anon 84.7 kernel 19.3 shmem 0.0 file 0.0 current 106.8 peak 106.8 avail 674.9
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 592.8: unrecl 190.2 (max since last 190.2) anon 105.3 kernel 75.7 shmem 8.0 file 8.0 current 190.2 peak 190.2 avail 592.8
+RAMTRACE converted: unrecl 745.0 (max since last 745.0) anon 659.3 kernel 76.9 shmem 8.0 file 8.0 current 745.0 peak 745.0 avail 38.0
+RAMTRACE fp8-values: unrecl 745.7 (max since last 746.0) anon 659.3 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 746.0 avail 37.3
+RAMTRACE loaded: unrecl 745.7 (max since last 745.7) anon 659.3 kernel 77.6 shmem 8.0 file 8.0 current 745.7 peak 746.0 avail 37.3
+RAMTRACE tokenizer: unrecl 745.9 (max since last 745.9) anon 659.3 kernel 77.6 shmem 8.0 file 8.0 current 745.9 peak 746.0 avail 37.1
+RAMTRACE encoded: unrecl 745.9 (max since last 745.9) anon 659.3 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.0 avail 37.1
+RAMTRACE gpu-open-before: unrecl 745.9 (max since last 745.9) anon 659.3 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.0 avail 37.1
+RAMTRACE gpu-open: unrecl 745.9 (max since last 745.9) anon 659.3 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.0 avail 37.1
+RAMTRACE module: unrecl 770.4 (max since last 770.4) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.4 peak 770.4 avail 12.6
+RAMTRACE stream-decided: unrecl 770.7 (max since last 770.7) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.7 peak 770.7 avail 12.3
+RAMTRACE split-check staging 137.9 freed 258.0: unrecl 770.7 (max since last 770.7) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.7 peak 770.7 avail 12.3
+RAMTRACE split-checked: unrecl 770.7 (max since last 770.7) anon 684.0 kernel 77.5 shmem 8.0 file 8.0 current 770.7 peak 770.7 avail 12.3
+axon: --device cuda: qwen2: the CPU half of the split (1 of 24 layers) needs about 0.13 GiB of RAM (the larger of two steps: the GPU half's upload staging 0.13 GiB, then its repacked weights 0.02 GiB, the KV cache of 14 tokens 0.00 GiB, less the GPU half's 0.25 GiB of the copy, handed back as it goes up) and only 0.01 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/ramdiag-937649-22443.scope memory.max 783 MiB); to fit: more --gpu-layers than 23 (fewer layers on the CPU), if the GPU has room
+try 'axon --help'
+--- out: 
+=== axon-diag-f0e0bd6 cap 775M AXON_RAMTRACE=1
+rc=2
+RAMTRACE start: unrecl 1.0 (max since last 1.0) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.0 peak 1.0 avail 773.3
+RAMTRACE conv-check-before: unrecl 105.4 (max since last 105.4) anon 84.8 kernel 19.2 shmem 0.0 file 0.0 current 105.4 peak 105.4 avail 669.4
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 584.9: unrecl 190.1 (max since last 190.1) anon 105.3 kernel 75.7 shmem 8.0 file 8.0 current 190.1 peak 190.1 avail 584.9
+RAMTRACE converted: unrecl 744.9 (max since last 744.9) anon 659.4 kernel 76.9 shmem 8.0 file 8.0 current 744.9 peak 744.9 avail 30.1
+RAMTRACE fp8-values: unrecl 745.6 (max since last 745.9) anon 659.4 kernel 77.5 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE loaded: unrecl 745.6 (max since last 745.6) anon 659.4 kernel 77.6 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE tokenizer: unrecl 745.6 (max since last 745.9) anon 659.4 kernel 77.6 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE encoded: unrecl 745.6 (max since last 745.6) anon 659.4 kernel 77.6 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE gpu-open-before: unrecl 745.6 (max since last 745.6) anon 659.4 kernel 77.6 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE gpu-open: unrecl 745.6 (max since last 745.6) anon 659.4 kernel 77.6 shmem 8.0 file 8.0 current 745.6 peak 745.9 avail 29.4
+RAMTRACE module: unrecl 770.1 (max since last 770.1) anon 683.9 kernel 77.6 shmem 8.0 file 8.0 current 770.1 peak 770.1 avail 4.9
+RAMTRACE stream-decided: unrecl 770.1 (max since last 770.1) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.1 peak 770.1 avail 4.9
+RAMTRACE split-check staging 137.9 freed 258.0: unrecl 770.1 (max since last 770.1) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.1 peak 770.1 avail 4.9
+RAMTRACE split-checked: unrecl 770.1 (max since last 770.1) anon 683.9 kernel 77.5 shmem 8.0 file 8.0 current 770.1 peak 770.1 avail 4.9
+axon: --device cuda: qwen2: the CPU half of the split (1 of 24 layers) needs about 0.13 GiB of RAM (the larger of two steps: the GPU half's upload staging 0.13 GiB, then its repacked weights 0.02 GiB, the KV cache of 14 tokens 0.00 GiB, less the GPU half's 0.25 GiB of the copy, handed back as it goes up) and only 0.00 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/ramdiag-937649-20433.scope memory.max 775 MiB); to fit: more --gpu-layers than 23 (fewer layers on the CPU), if the GPU has room
+try 'axon --help'
+--- out: 
+=== axon-diag-f0e0bd6 cap 767M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 940623 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.2 (max since last 1.2) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.2 peak 1.2 avail 765.5
+RAMTRACE conv-check-before: unrecl 113.8 (max since last 113.8) anon 84.7 kernel 24.9 shmem 0.0 file 0.0 current 113.8 peak 114.0 avail 651.0
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 578.0: unrecl 189.0 (max since last 189.0) anon 104.5 kernel 75.7 shmem 8.0 file 8.0 current 189.0 peak 189.0 avail 578.0
+RAMTRACE converted: unrecl 744.0 (max since last 744.0) anon 658.5 kernel 76.9 shmem 8.0 file 8.0 current 744.0 peak 744.0 avail 23.0
+RAMTRACE fp8-values: unrecl 745.0 (max since last 745.0) anon 658.5 kernel 77.5 shmem 8.0 file 8.0 current 745.0 peak 745.0 avail 22.0
+RAMTRACE loaded: unrecl 745.0 (max since last 745.0) anon 658.5 kernel 77.6 shmem 8.0 file 8.0 current 745.0 peak 745.0 avail 22.0
+RAMTRACE tokenizer: unrecl 744.7 (max since last 745.0) anon 658.5 kernel 77.6 shmem 8.0 file 8.0 current 744.7 peak 745.0 avail 22.3
+RAMTRACE encoded: unrecl 744.7 (max since last 744.7) anon 658.6 kernel 77.5 shmem 8.0 file 8.0 current 744.7 peak 745.0 avail 22.3
+RAMTRACE gpu-open-before: unrecl 744.7 (max since last 744.7) anon 658.6 kernel 77.5 shmem 8.0 file 8.0 current 744.7 peak 745.0 avail 22.3
+RAMTRACE gpu-open: unrecl 744.7 (max since last 744.7) anon 658.6 kernel 77.5 shmem 8.0 file 8.0 current 744.7 peak 745.0 avail 22.3
+--- out: 
+=== axon-diag-f0e0bd6 cap 759M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 940706 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.0 (max since last 1.0) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.0 peak 1.0 avail 757.5
+RAMTRACE conv-check-before: unrecl 98.5 (max since last 98.5) anon 79.0 kernel 19.0 shmem 0.0 file 0.0 current 98.5 peak 98.5 avail 660.5
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 568.5: unrecl 190.5 (max since last 190.5) anon 105.6 kernel 75.7 shmem 8.0 file 8.0 current 190.5 peak 190.5 avail 568.5
+RAMTRACE converted: unrecl 745.2 (max since last 745.2) anon 659.7 kernel 76.9 shmem 8.0 file 8.0 current 745.2 peak 745.2 avail 13.8
+RAMTRACE fp8-values: unrecl 745.7 (max since last 746.0) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 746.2 avail 13.3
+RAMTRACE loaded: unrecl 745.7 (max since last 745.7) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 746.2 avail 13.3
+RAMTRACE tokenizer: unrecl 745.9 (max since last 745.9) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.2 avail 13.1
+RAMTRACE encoded: unrecl 745.9 (max since last 745.9) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.2 avail 13.1
+RAMTRACE gpu-open-before: unrecl 745.9 (max since last 745.9) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.2 avail 13.1
+RAMTRACE gpu-open: unrecl 745.9 (max since last 745.9) anon 659.7 kernel 77.5 shmem 8.0 file 8.0 current 745.9 peak 746.2 avail 13.1
+--- out: 
+=== axon-diag-f0e0bd6 cap 751M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 940771 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 0.7 (max since last 0.7) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 0.7 peak 0.7 avail 749.0
+RAMTRACE conv-check-before: unrecl 98.5 (max since last 98.5) anon 78.5 kernel 17.0 shmem 0.0 file 0.0 current 98.5 peak 98.5 avail 652.5
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 561.2: unrecl 189.8 (max since last 189.8) anon 105.1 kernel 75.7 shmem 8.0 file 8.0 current 189.8 peak 189.8 avail 561.2
+RAMTRACE converted: unrecl 744.8 (max since last 744.8) anon 659.2 kernel 76.9 shmem 8.0 file 8.0 current 744.8 peak 744.8 avail 6.2
+RAMTRACE fp8-values: unrecl 745.5 (max since last 745.5) anon 659.2 kernel 77.5 shmem 8.0 file 8.0 current 745.5 peak 745.5 avail 5.5
+RAMTRACE loaded: unrecl 745.5 (max since last 745.5) anon 659.2 kernel 77.6 shmem 8.0 file 8.0 current 745.5 peak 745.5 avail 5.5
+RAMTRACE tokenizer: unrecl 745.7 (max since last 745.7) anon 659.2 kernel 77.6 shmem 8.0 file 8.0 current 745.7 peak 745.8 avail 5.3
+RAMTRACE encoded: unrecl 745.7 (max since last 745.7) anon 659.2 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 745.8 avail 5.3
+RAMTRACE gpu-open-before: unrecl 745.7 (max since last 745.7) anon 659.2 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 745.8 avail 5.3
+RAMTRACE gpu-open: unrecl 745.7 (max since last 745.7) anon 659.2 kernel 77.5 shmem 8.0 file 8.0 current 745.7 peak 745.8 avail 5.3
+--- out: 
+=== axon-diag-f0e0bd6 cap 743M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 940872 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.0 (max since last 1.0) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.0 peak 1.0 avail 741.5
+RAMTRACE conv-check-before: unrecl 145.5 (max since last 145.5) anon 84.8 kernel 58.8 shmem 0.0 file 0.0 current 145.6 peak 145.6 avail 597.5
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 553.2: unrecl 189.8 (max since last 189.8) anon 104.6 kernel 75.7 shmem 8.0 file 8.0 current 189.8 peak 189.8 avail 553.2
+--- out: 
+=== axon-diag-f0e0bd6 cap 735M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 940931 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.2 (max since last 1.2) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.2 peak 1.2 avail 733.3
+RAMTRACE conv-check-before: unrecl 148.6 (max since last 148.6) anon 88.0 kernel 59.4 shmem 0.0 file 0.0 current 148.6 peak 148.6 avail 586.4
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 542.2: unrecl 192.8 (max since last 192.8) anon 107.8 kernel 75.7 shmem 8.0 file 8.0 current 192.8 peak 192.8 avail 542.2
+--- out: 
+=== axon-diag-f0e0bd6 cap 727M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 941026 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.2 (max since last 1.2) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.2 peak 1.7 avail 725.3
+RAMTRACE conv-check-before: unrecl 145.7 (max since last 145.7) anon 85.6 kernel 54.2 shmem 0.0 file 0.0 current 145.7 peak 145.7 avail 581.3
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 536.8: unrecl 190.2 (max since last 190.2) anon 105.4 kernel 75.7 shmem 8.0 file 8.0 current 190.2 peak 190.2 avail 536.8
+--- out: 
+=== axon-diag-f0e0bd6 cap 719M AXON_RAMTRACE=1
+ramdiag.sh: line 7: 941070 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+RAMTRACE start: unrecl 1.2 (max since last 1.2) anon 0.0 kernel 0.0 shmem 0.0 file 0.0 current 1.2 peak 1.2 avail 717.2
+RAMTRACE conv-check-before: unrecl 128.3 (max since last 128.3) anon 84.5 kernel 40.8 shmem 0.0 file 0.0 current 128.3 peak 128.3 avail 589.0
+RAMTRACE conv-check need 554.0 (aux 522.0 buffers 32.0) tol 34.0 avail 530.0: unrecl 189.0 (max since last 189.0) anon 104.4 kernel 75.7 shmem 8.0 file 8.0 current 189.0 peak 189.0 avail 530.0
+--- out: 
+=== axon-2aec1e5 cap 711M 
+ramdiag.sh: line 7: 941105 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 719M 
+ramdiag.sh: line 7: 941178 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 727M 
+ramdiag.sh: line 7: 941251 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 735M 
+ramdiag.sh: line 7: 941286 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 719M 
+ramdiag.sh: line 7: 941422 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 719M 
+ramdiag.sh: line 7: 941505 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+=== axon-2aec1e5 cap 719M 
+ramdiag.sh: line 7: 941551 Killed                     env "$@" systemd-run --user --scope --quiet --unit=ramdiag-$$-$RANDOM -p MemoryMax=${c}M -p MemorySwapMax=0 -- "$b" gen "$F" "The capital of France is" -n 8 --device cuda --gpu-layers 23 --numerics exact > out.txt 2> err.txt
+rc=137
+--- out: 
+[axon-run 16:02:55] exit 0 after 8.8s (host bella)

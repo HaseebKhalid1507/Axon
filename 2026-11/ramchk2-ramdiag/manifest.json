@@ -1,0 +1,49 @@
+{
+ "label": "ramchk2-ramdiag",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1106-142807-b4b3",
+   "name": "ramchk2-f0e0bd6-ramdiag",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "f0e0bd6",
+   "binary": "bash",
+   "started": 1793998966.6147435,
+   "ended": 1793998976.73595,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "78f56ea0f53e4e4e99b907789b8bfe53d12a14283e24e1e35eb6df962e48c27b",
+   "log_bytes": 19704
+  },
+  {
+   "job": "1106-142924-7b50",
+   "name": "ramchk2-ramdiag-cpu",
+   "rc": 2,
+   "verdict": "FAIL (rc 2)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "f0e0bd6",
+   "binary": "axon-diag-f0e0bd6",
+   "started": 1793998976.73595,
+   "ended": 1793998986.8117714,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "abae4d8b62aff44f04cefebb6aeae475a6930c9c392d63a5b635a628d2c5301d",
+   "log_bytes": 1398
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-06 16:03:15 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

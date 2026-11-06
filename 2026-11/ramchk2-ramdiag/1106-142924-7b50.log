@@ -1,0 +1,9 @@
+[axon-run 14:29:24] submitted 1106-142924-7b50 by /home/haseeb/.cache/axon-ramchk2: /home/haseeb/.cache/axon-ramchk2/bin/axon-diag-f0e0bd6 gen models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic 'The capital of France is' -n 8 --device cpu
+[axon-run 16:02:56] scope axon-job-1106-142924-7b50-1793998976.scope in app-axonjobs.slice: MemoryMax 5524 MB, MemoryHigh 4971 MB, no swap, oomd pressure kill 80% (claim 3000 MB): an OOM here kills only this job
+[axon-run 16:02:56] job 1106-142924-7b50 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1106-142924-7b50-1793998976 --slice=app-axonjobs.slice -p MemoryMax=5524M -p MemoryHigh=4971M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ramchk2/bin/axon-diag-f0e0bd6 gen models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic 'The capital of France is' -n 8 --device cpu
+axon-q 16:02:56 waiting: stagger
+axon-q 16:03:06 start slot 16-23: /home/haseeb/.cache/axon-ramchk2/bin/axon-diag-f0e0bd6 gen models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic The capital of France is -n 8 --device cpu
+RAMTRACE start: unrecl 1.1 (max since last 1.1) anon 0.4 kernel 0.2 shmem 0.0 file 0.0 current 1.1 peak 7.2 avail 5522.7
+axon: cannot open 'models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic': no such file
+try 'axon --help'
+[axon-run 16:03:06] exit 2 after 10.1s (host bella)
