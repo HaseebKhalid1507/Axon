@@ -1,7 +1,7 @@
 # An exclusive KV RAM tier, and #170's idle flush in pieces (WP2)
 
 - Date: 2026-11-05. Branch: feat/kvtier-exclusive. Base: main c54a730 (merged in at 84861fc). Status: draft PR #201;
-  **the gate: s4 PASS, s1 PROVISIONAL (rerun queued), the resume cell PENDING** (below). Design: [kv-ram-tier-exclusive.md](../design/kv-ram-tier-exclusive.md)
+  **the gate: s4 PASS, s1 PROVISIONAL (rerun running), the resume cell VOID on a harness bug, rerun queued** (below). Design: [kv-ram-tier-exclusive.md](../design/kv-ram-tier-exclusive.md)
   (revision 3), reviewed at revision 0 by shady (7/10 REVISE) and Fable (BUILD-WITH-CHANGES).
 - Pick: foreman (axon), plan `specs/agent-workload-plan.md` §3 row 2 (Fable). Builder: joestar.
 
@@ -132,5 +132,22 @@ before it runs: c76b is read **on its own**; 2d32 stays PROVISIONAL and is not p
 that is reported, not pooled. Arithmetic, not a reading: with two of three values per binary known, a third clean
 round can only move the s1 ITL ratio within 0.966–0.973.
 
-**Resume cell, 1105-124636-68e9: PENDING** (`kv_resume_bench-440fe18.py`, 3 rounds, `--gap 120`, after
-`kvio::tests::bandwidth` at 25.6k).
+**Moved off bella (the lead, 11-05 18:30).** The resume cell (68e9) and the s1 rerun (c76b) waited 5 h 44 min and
+3 h 15 min behind bella's desktop GPU load. The lead rerouted both by hand to a secure RTX 4090 pod (pod1). Note §7
+says "bella only", so their numbers are **4090 numbers**, labelled as such, never compared with bella's.
+
+**Resume cell, 1105-124636-68e9 (pod1, RTX 4090): VOID, 6 of 6 rounds, rc 3; a harness bug.** Every round read
+"not evicted: 26544 of 26692 prompt tokens still in the GPU pool (pool 5288 pages, pressure +8, 4959 kept)": the
+resume was a prefix-cache hit (0.088 s on both binaries) and the candidate restored nothing (0 restores in its
+traces). The bench sends pressure sessions until the floor page counts of the session and everything after it exceed
+the pool the server logged, but `kv_resume_bench.py` @440fe18 also stopped after 8 of them. On bella's
+1,570–1,744-page pools the loop needs 0–1, so the cap never bound. The 4090's pool is 5,288 pages: the session
+(414 pages), its 3 others and 8 pressure sessions keep 4,959, so nothing had to leave and the check voided every
+round, as it should. **Fix (harness only), fe5117d:** the cap follows the pool (pool / a session's pages + 1, 8 at
+least): 13 there. By 68e9's page counts 9 are then sent, 5,372 > 5,288 (ESTIMATED until a169's `pressure_extra`).
+With bella's pools the loop sends the same sessions as before.
+`resumeexcl.sh` also stops printing `restored × 3.5 MiB / restore_ms` as a rate (that field is enqueue time, above).
+It prints the step-time estimate instead, on lines whose only copy is the restore. Rerun: **1105-191445-a169**
+(`kv_resume_bench-fe5117d.py`, same binaries, `--timing 4090`), PENDING. 68e9's bandwidth rows (MEASURED, 4090,
+25.6k): 2D per 64-pos page 12.83 / 13.12 GB/s D2H / H2D, contiguous 12.92 / 13.26: every layout ≈ 13 GB/s, idle
+and busy alike (the pod's own host link; about half of bella's 28 GB/s fast mode).
