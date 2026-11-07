@@ -554,6 +554,62 @@ impl<'g> CudaQwen2<'g> {
         tab.write_at((slot * m.cap() + r.start) * 4, &m.pages(slot)[r])
     }
 
+    /// Shared prefixes: for each `(i, pg)` of `swaps`, slot `slot`'s `i`th
+    /// page becomes `pg` (live: another slot's or warm; one the slot
+    /// doesn't hold), read only to it, and the page it had leaves it: free
+    /// once nothing in flight reads it and nothing else holds it or the
+    /// prefix index pins it. The caller vouches that `pg` holds the bytes
+    /// the slot's page does (the same block after the same prefix:
+    /// `Batch::index_pages`, #213). Err (nothing changed) for a swap that
+    /// isn't one. The table entries are written now (one synchronous copy,
+    /// as `release`'s).
+    pub(crate) fn replace_pages(
+        &self,
+        p: &mut CudaPool<'g>,
+        slot: usize,
+        swaps: &[(usize, u32)],
+    ) -> Result<(), String> {
+        let Some(m) = p.pm.as_mut() else {
+            return Err("replace_pages: a plain pool has no pages to share".into());
+        };
+        if slot >= p.slots {
+            return Err(format!("replace_pages: slot {slot} of {}", p.slots));
+        }
+        let mut after = m.pages(slot).to_vec();
+        for &(i, pg) in swaps {
+            if i >= after.len() {
+                return Err(format!(
+                    "replace_pages: slot {slot} holds {} pages, not a page {i}",
+                    after.len()
+                ));
+            }
+            if pg as usize >= m.total() || (m.refs(pg) == 0 && !m.pinned(pg)) {
+                return Err(format!("replace_pages: page {pg} isn't live"));
+            }
+            if after.contains(&pg) {
+                return Err(format!(
+                    "replace_pages: slot {slot} would hold page {pg} twice"
+                ));
+            }
+            after[i] = pg;
+        }
+        let (Some(lo), Some(hi)) = (
+            swaps.iter().map(|s| s.0).min(),
+            swaps.iter().map(|s| s.0).max(),
+        ) else {
+            return Ok(());
+        };
+        let tab = p.c.tab.as_ref().expect("a paged pool's table");
+        // Synchronous: the work in flight is done too, so the pages the
+        // slot gives up are free if nothing else holds them.
+        tab.write_at((slot * m.cap() + lo) * 4, &after[lo..=hi])?;
+        for &(i, pg) in swaps {
+            m.replace(slot, i, pg);
+        }
+        m.flush();
+        Ok(())
+    }
+
     /// The prefix index holds page `pg` (one a slot holds): kept with its
     /// bytes after the last slot releases it, and immutable meanwhile.
     pub(crate) fn pin_page(&self, p: &mut CudaPool<'g>, pg: u32) -> Result<(), String> {
@@ -1016,6 +1072,15 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         CudaQwen2::map_pages(self, pool, slot, pages)
     }
 
+    fn replace_pages(
+        &self,
+        pool: &mut CudaPool<'g>,
+        slot: usize,
+        swaps: &[(usize, u32)],
+    ) -> Result<(), String> {
+        CudaQwen2::replace_pages(self, pool, slot, swaps)
+    }
+
     fn pin_page(&self, pool: &mut CudaPool<'g>, page: u32) -> Result<(), String> {
         CudaQwen2::pin_page(self, pool, page)
     }
@@ -1036,6 +1101,10 @@ impl<'g> BatchLm for CudaQwen2<'g> {
 
     fn busy_pages(&self, pool: &CudaPool<'g>, busy: &[bool], mine: &[u32]) -> Option<usize> {
         pool.busy_pages(busy, mine)
+    }
+
+    fn excl_pages(&self, pool: &CudaPool<'g>, slot: usize) -> Option<usize> {
+        pool.excl_pages(slot)
     }
 
     #[cfg(debug_assertions)]
@@ -1203,6 +1272,12 @@ impl CudaPool<'_> {
     /// `BatchLm::busy_pages` (None: plain).
     pub fn busy_pages(&self, busy: &[bool], mine: &[u32]) -> Option<usize> {
         Some(self.pm.as_ref()?.busy_pages(busy, mine))
+    }
+
+    /// `BatchLm::excl_pages` (None: plain, or a slot past the pool's).
+    pub fn excl_pages(&self, slot: usize) -> Option<usize> {
+        let m = self.pm.as_ref().filter(|_| slot < self.slots)?;
+        Some(m.excl(slot))
     }
 
     /// `BatchLm::assert_writable` (plain: nothing to check).

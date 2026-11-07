@@ -283,6 +283,21 @@ struct Job {
     id: u64,
     /// When it was queued (GET /slots: its age).
     arrived: Instant,
+    /// Its prompt's block keys (`block_keys`), worked out at most once.
+    keys: std::cell::OnceCell<Vec<crate::kvstore::Key>>,
+}
+
+impl Job {
+    /// The chain keys of its prompt's whole blocks below its last token
+    /// (`kvstore::keys`): what the prefix index walks. Worked out once, so
+    /// admission's probes, which can look at a waiting request on every
+    /// engine iteration, don't hash the prompt again each time (#214).
+    fn block_keys(&self) -> &[crate::kvstore::Key] {
+        self.keys.get_or_init(|| {
+            let last = self.prompt.len().saturating_sub(1);
+            crate::kvstore::keys(&self.prompt[..last])
+        })
+    }
 }
 
 enum Event {
@@ -1733,7 +1748,7 @@ fn admit_order(b: &Batch, waiting: &VecDeque<Job>, age_ms: u64) -> Vec<u64> {
             let len = j.prompt.len().saturating_sub(1);
             let aged = age_ms > 0 && age >= age_ms;
             let un = match r < probe && !aged {
-                true => b.uncached(&j.prompt).unwrap_or(len),
+                true => b.uncached(j).unwrap_or(len),
                 false => len,
             };
             (engine::admit_key(un, age, age_ms, j.id), j.id)
@@ -1864,8 +1879,6 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
-/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
-/// (`paged_env`, read once at serve's start).
 /// AXON_SHARE_KV: shared prefix KV pages, off unless "1" (`share_on`).
 fn share_env() -> bool {
     share_on(std::env::var("AXON_SHARE_KV").ok().as_deref())
@@ -1897,6 +1910,8 @@ fn kv_pages_of(v: Option<&str>) -> Result<Option<usize>, String> {
     }
 }
 
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
 fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
     device == Device::Cuda && parallel > 1 && paged_env
 }
@@ -2238,6 +2253,21 @@ impl Server {
     /// (`Metrics::unindexed`).
     pub fn unindexed(&self) -> u64 {
         self.sh.metrics.unindexed.load(Ordering::Relaxed)
+    }
+
+    /// Duplicate pages swapped for the index's so far (`Metrics::swapped`).
+    pub fn swapped(&self) -> u64 {
+        self.sh.metrics.swapped.load(Ordering::Relaxed)
+    }
+
+    /// Refed prefills that claimed a prefix again, and its tokens
+    /// (`Metrics::refeed_claims`, `refeed_tokens`).
+    pub fn refeed_claims(&self) -> (u64, u64) {
+        let m = &self.sh.metrics;
+        (
+            m.refeed_claims.load(Ordering::Relaxed),
+            m.refeed_tokens.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -2928,6 +2958,7 @@ fn run_request(
         tx,
         id: n,
         arrived,
+        keys: Default::default(),
     };
     match sh.jobs.try_send(job) {
         Ok(()) => {

@@ -22,6 +22,7 @@
 //! before it, decision for decision.
 
 use super::ATT_BLK;
+use std::cell::RefCell;
 use std::ops::Range;
 
 /// Positions per page (decode.cu PG_ROWS, kvsave::PAGE).
@@ -47,6 +48,10 @@ pub struct PageMap {
     refs: Vec<u32>,
     /// Pages the prefix index holds (kept with refs 0: warm).
     pinned: Vec<bool>,
+    /// `busy_pages`' marks (#214): page p is counted in the current call
+    /// iff `seen.1[p] == seen.0`, the call's stamp, so a call neither
+    /// allocates nor clears a vector of every page.
+    seen: RefCell<(u32, Vec<u32>)>,
 }
 
 impl PageMap {
@@ -64,6 +69,7 @@ impl PageMap {
             rng: shuffle.map(|s| s | 1),
             refs: vec![0; total],
             pinned: vec![false; total],
+            seen: RefCell::new((0, vec![0; total])),
         }
     }
 
@@ -166,6 +172,33 @@ impl PageMap {
         have..have + pages.len()
     }
 
+    /// Slot `slot`'s `i`th page becomes `p` (live: held by a slot or
+    /// pinned; not in the slot's list), one more reference, read only to it
+    /// (`writable`); the page it had loses its reference and retires if
+    /// nothing else holds it (free after the step in flight: `flush`). Its
+    /// old page. The shared-prefix swap of a duplicate block for the
+    /// index's page of it (#213): same bytes, so the slot reads the same.
+    pub fn replace(&mut self, slot: usize, i: usize, p: u32) -> u32 {
+        let j = p as usize;
+        assert!(j < self.total, "replace: page {p} of {}", self.total);
+        assert!(
+            self.refs[j] > 0 || self.pinned[j],
+            "replace: page {p} isn't live (free or retired)"
+        );
+        assert!(
+            !self.pages[slot].contains(&p),
+            "replace: slot {slot} holds page {p} already"
+        );
+        let old = std::mem::replace(&mut self.pages[slot][i], p);
+        self.refs[j] += 1;
+        let r = &mut self.refs[old as usize];
+        *r -= 1;
+        if *r == 0 && !self.pinned[old as usize] {
+            self.retire.push(old);
+        }
+        old
+    }
+
     /// The prefix index holds page `p` (live, not pinned yet): kept, with
     /// its bytes, after the last slot releases it.
     pub fn pin(&mut self, p: u32) {
@@ -231,8 +264,8 @@ impl PageMap {
     }
 
     /// Pages slot `slot` alone holds (what releasing it gives up, to the
-    /// free list or, pinned, to the warm set). As `warm`, C3's to read.
-    #[cfg_attr(not(test), allow(dead_code))] // C3's accounting (design §3.6)
+    /// free list or, pinned, to the warm set): `Batch::reclaim` passes over
+    /// an idle slot that would give up none (#214).
     pub fn excl(&self, slot: usize) -> usize {
         self.pages[slot]
             .iter()
@@ -243,11 +276,20 @@ impl PageMap {
     /// Pages the slots marked in `busy` hold, each counted once (shared
     /// ones are in several lists), but those in `mine`: what admission
     /// can't have while they run (the rest is free, retired, warm, or
-    /// idle slots' to give up). O(pages held), no allocation per page.
+    /// idle slots' to give up). O(pages held and in `mine`), no
+    /// allocation (`seen`'s stamps).
     pub fn busy_pages(&self, busy: &[bool], mine: &[u32]) -> usize {
-        let mut seen = vec![false; self.total];
+        let mut g = self.seen.borrow_mut();
+        let (stamp, seen) = &mut *g;
+        *stamp = stamp.wrapping_add(1);
+        if *stamp == 0 {
+            // Wrapped: every old mark could equal a stamp again.
+            seen.fill(0);
+            *stamp = 1;
+        }
+        let stamp = *stamp;
         for &p in mine {
-            seen[p as usize] = true;
+            seen[p as usize] = stamp;
         }
         let mut n = 0;
         for (s, l) in self.pages.iter().enumerate() {
@@ -256,8 +298,8 @@ impl PageMap {
             }
             for &p in l {
                 let v = &mut seen[p as usize];
-                n += usize::from(!*v);
-                *v = true;
+                n += usize::from(*v != stamp);
+                *v = stamp;
             }
         }
         n
@@ -407,7 +449,7 @@ mod tests {
             for _ in 0..30000 {
                 let slot = rnd(slots);
                 let held = m.pages(slot).len();
-                match rnd(7) {
+                match rnd(8) {
                     0 | 1 => {
                         let free = m.free.len();
                         let want = (held + rnd(3)).min(cap);
@@ -452,9 +494,39 @@ mod tests {
                             m.unpin(pins[rnd(pins.len())]);
                         }
                     }
+                    6 => {
+                        // A page of the slot swapped for a live one it
+                        // doesn't hold (#213's swap).
+                        let live: Vec<u32> = (0..total as u32)
+                            .filter(|&p| m.refs(p) > 0 || m.pinned(p))
+                            .filter(|p| !m.pages(slot).contains(p))
+                            .collect();
+                        if held > 0 && !live.is_empty() {
+                            let (i, p) = (rnd(held), live[rnd(live.len())]);
+                            let old = m.pages(slot)[i];
+                            let (r_old, r_p) = (m.refs(old), m.refs(p));
+                            let retired = m.retire.len();
+                            assert_eq!(m.replace(slot, i, p), old);
+                            assert_eq!(m.pages(slot)[i], p);
+                            assert_eq!((m.refs(old), m.refs(p)), (r_old - 1, r_p + 1));
+                            let gone = r_old == 1 && !m.pinned(old);
+                            assert_eq!(m.retire.len(), retired + usize::from(gone));
+                        }
+                    }
                     _ => m.flush(),
                 }
                 m.check();
+                // busy_pages (stamped marks) == a fresh count.
+                let busy: Vec<bool> = (0..slots).map(|_| rnd(2) == 0).collect();
+                let mine: Vec<u32> = (0..rnd(4)).map(|_| rnd(total) as u32).collect();
+                let mut want: Vec<u32> = (0..slots)
+                    .filter(|&s| busy[s])
+                    .flat_map(|s| m.pages(s).iter().copied())
+                    .filter(|p| !mine.contains(p))
+                    .collect();
+                want.sort_unstable();
+                want.dedup();
+                assert_eq!(m.busy_pages(&busy, &mine), want.len());
                 for sl in 0..slots {
                     for (i, &p) in m.pages(sl).iter().enumerate() {
                         assert_eq!(m.writable(sl, i), m.refs(p) == 1 && !m.pinned(p));
@@ -477,6 +549,50 @@ mod tests {
             assert_eq!(m.free(), total);
             m.check();
         }
+    }
+
+    /// `busy_pages`' stamps (#214) across their wrap: marks left from long
+    /// ago that equal the new stamp are cleared, not read as this call's.
+    /// The stamp starts at u32::MAX - 1. Call 1 (no slot busy, no mark
+    /// written) takes u32::MAX, call 2 wraps: every mark is cleared and the
+    /// stamp skips 0 for 1, then calls 3..=13 take 2..=12. The held pages'
+    /// marks before the wrap are 0 and 1 by turns, the two stamps the
+    /// wrapping call could take, so a wrap that doesn't clear (stamp 1 reads
+    /// the 1s as counted), or that takes stamp 0 (reads the 0s, or every
+    /// page after a clear), counts fewer than 5.
+    #[test]
+    fn busy_pages_stamp_wraps() {
+        let mut m = PageMap::new(2, 4, 8, None);
+        // Slot 0 holds pages 0, 1, 2; slot 1 pages 3, 4 and 0 (shared);
+        // 5, 6, 7 are free.
+        m.ensure(0, 3 * PAGE).unwrap();
+        m.ensure(1, 2 * PAGE).unwrap();
+        m.map(1, &[0]);
+        {
+            let mut g = m.seen.borrow_mut();
+            g.0 = u32::MAX - 1;
+            for (p, v) in g.1.iter_mut().enumerate() {
+                *v = p as u32 % 2;
+            }
+        }
+        assert_eq!(m.busy_pages(&[false, false], &[]), 0);
+        assert_eq!(*m.seen.borrow(), (u32::MAX, vec![0, 1, 0, 1, 0, 1, 0, 1]));
+        for i in 0..4 {
+            assert_eq!(m.busy_pages(&[true, true], &[]), 5, "round {i}");
+            if i == 0 {
+                // The wrap: the held pages marked 1, the free ones' stale
+                // marks (5 and 7 equal to this stamp) cleared.
+                assert_eq!(*m.seen.borrow(), (1, vec![1, 1, 1, 1, 1, 0, 0, 0]));
+            }
+            assert_eq!(m.busy_pages(&[true, false], &[0]), 2, "round {i}");
+            assert_eq!(m.busy_pages(&[false, true], &[]), 3, "round {i}");
+        }
+        assert_eq!(m.seen.borrow().0, 12, "the wrap's stamp 1, then 11 calls");
+        assert_eq!(
+            m.seen.borrow().1[5..],
+            [0, 0, 0],
+            "free pages never marked again"
+        );
     }
 
     /// A pinned page outlives its last slot (warm) and can be mapped again;

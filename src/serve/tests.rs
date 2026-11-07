@@ -7346,9 +7346,10 @@ fn serve_share_fanout_idle() {
 /// pages and the index's warm pages are evicted for room; with the KV RAM
 /// tier and without (an evicted page goes to RAM first). Every reply is
 /// the one it gets with sharing off. Run again, every request reports the
-/// prefix cached but those preempted or unfed meanwhile (fed from 0
-/// again). Debug builds check the pool, the index and their holds against
-/// each other after every step.
+/// prefix cached, those preempted or unfed meanwhile too: fed again, they
+/// claim it again (#212; in C3 they were fed from 0 and reported none).
+/// Debug builds check the pool, the index and their holds against each
+/// other after every step.
 #[test]
 fn serve_share_pressure() {
     let Some(_) = crate::testutil::gpu() else {
@@ -7413,24 +7414,38 @@ fn serve_share_pressure() {
             sl["preempted"].as_u64().unwrap() + sl["prefills_unfed"].as_u64().unwrap()
         };
         let v0 = victims(a);
+        let (rc0, rt0) = s.refeed_claims();
         // Again, its prefix now in the index (warm or held): each request
-        // maps it when admitted. One preempted or unfed after that is fed
-        // from 0 again and reports none cached (`preempt`, `unfeed`: in C3
-        // it doesn't claim its pages again), so at most the round's
-        // victims fall short; the oldest request never gives way, so one
-        // at least reports the prefix.
+        // maps it when admitted. One preempted or unfed after that claims
+        // it again when it is fed again (`refeed_claim`, #212): the oldest
+        // request never gives way, and it holds the index's pages of the
+        // prefix, so they are there to map. Every request reports the
+        // prefix cached. The round has victims (6 requests of ~12 pages
+        // each on 40, none reserved for growth).
         let again = together(a);
         for (i, (t, r)) in again.iter().zip(&refs).enumerate() {
             assert_eq!(&t.0, r, "{what}: request {i} again");
         }
         wait_idle(a);
         let v = victims(a) - v0;
+        let (rc, rt) = s.refeed_claims();
         let cached: Vec<u64> = again.iter().map(|t| t.1).collect();
         let short = cached.iter().filter(|&&c| c < 192).count() as u64;
-        eprintln!("{what}: again: cached {cached:?}, {v} preempted or unfed");
-        assert!(
-            short < 6 && short <= v,
+        eprintln!(
+            "{what}: again: cached {cached:?}, {v} preempted or unfed, {} refed claims ({} tokens)",
+            rc - rc0,
+            rt - rt0
+        );
+        assert!(v > 0, "{what}: again: no victim");
+        assert_eq!(
+            short, 0,
             "{what}: again: cached {cached:?}, {v} preempted or unfed"
+        );
+        assert!(
+            rc - rc0 >= 1 && rt - rt0 >= 192 * (rc - rc0),
+            "{what}: again: {v} victims, {} refed claims of {} tokens",
+            rc - rc0,
+            rt - rt0
         );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;
@@ -7603,6 +7618,136 @@ fn serve_share_unindex_in_place() {
     for r in [&off[1], &on[1], &off[2], &on[2]] {
         assert_eq!(r.1, common, "cached tokens: {off:?} {on:?}");
     }
+}
+
+/// A duplicate page is swapped for the index's (#213), so the slot's later
+/// pages are indexed under it. R decodes (the batch busy: prompts are fed
+/// in chunks, 64 tokens a step, two at a time); A and B, a long common
+/// prefix and a private suffix of several pages each, arrive together and
+/// prefill the prefix side by side, so whichever is behind writes blocks
+/// the other has just indexed: duplicates. Then 4 unrelated requests take
+/// every slot (the slots' indexed pages turn warm, the rest free) and A's
+/// and B's prompts with another question each come in one at a time: each
+/// maps from the index every whole page it shares with A's or B's prompt,
+/// the prefix and the suffix (in C3 the suffix of the one with a duplicate
+/// had left the index: its probe got the prefix only). Every reply is the
+/// one it gets with sharing off. Debug builds check the pool, the index
+/// and their holds after every step (no duplicate kept: `check_share`).
+#[test]
+fn serve_share_dup_swapped() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(p).unwrap());
+    // With qwen2.5-0.5b's tokenizer: the prefix 481 tokens (7.5 pages),
+    // the probes share 768 and 704 tokens of whole pages with A and B.
+    let prefix =
+        "The surveyors mapped each valley, ridge and stream of the northern range. ".repeat(32);
+    let suffix = |who: &str, what: &str| {
+        let line = format!("{who} walked the {what} trail, counting cairns and fallen pines. ");
+        format!("Notes of {who}: {}", line.repeat(18))
+    };
+    let (sa, sb) = (suffix("Alder", "east"), suffix("Birch", "west"));
+    let a_text = format!("{prefix}{sa}What did Alder count?");
+    let b_text = format!("{prefix}{sb}What did Birch count?");
+    let probes = [
+        (format!("{prefix}{sa}Where did Alder walk?"), &a_text),
+        (format!("{prefix}{sb}Where did Birch walk?"), &b_text),
+    ];
+    // A probe's cached tokens once its source's pages are all indexed: the
+    // whole pages of what it shares with it (below its last token).
+    let want: Vec<u64> = (probes.iter())
+        .map(|(t, src)| {
+            let (x, y) = (tok.encode_prompt(t), tok.encode_prompt(src));
+            let c = (x.iter().zip(&y)).take_while(|(a, b)| a == b).count();
+            (c.min(x.len() - 1) / 64 * 64) as u64
+        })
+        .collect();
+    let n_prefix = tok.encode_prompt(&prefix).len();
+    assert!(n_prefix >= 7 * 64, "the prefix: {n_prefix} tokens");
+    assert!(
+        want.iter().all(|&w| w as usize >= n_prefix + 3 * 64),
+        "the suffixes: {want:?}, prefix {n_prefix}"
+    );
+    let req = |t: &str, n: usize| json!({"prompt": t, "max_tokens": n, "temperature": 0});
+    let r_body = req("Write a long story about a fox who learns to sail.", 600);
+    let run = |share: bool| {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 4;
+            o.parallel_set = true;
+            o.prefill_chunk = 64;
+            o.sched.step_tokens = 64;
+            o.sched.lanes = 2;
+            o.share = Some(share);
+        });
+        let a = s.addr;
+        let busy = || {
+            (call(a, "GET", "/slots", "").json()["slots"].as_array())
+                .unwrap()
+                .iter()
+                .filter(|x| x["busy"] == true)
+                .count()
+        };
+        let start = std::sync::Barrier::new(2);
+        let mut got: Vec<(String, u64)> = std::thread::scope(|sc| {
+            let r = sc.spawn(|| share_reply(a, &r_body));
+            wait_for("R decoding", || busy() >= 1);
+            let ab: Vec<_> = [&a_text, &b_text]
+                .into_iter()
+                .map(|t| {
+                    let (start, b) = (&start, req(t, 16));
+                    sc.spawn(move || {
+                        start.wait();
+                        share_reply(a, &b)
+                    })
+                })
+                .collect();
+            let mut v: Vec<_> = ab.into_iter().map(|h| h.join().unwrap()).collect();
+            v.push(r.join().unwrap());
+            v
+        });
+        wait_idle(a);
+        let swapped = s.swapped();
+        // Every slot taken by an unrelated request at once.
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|sc| {
+            for i in 0..4 {
+                let (start, b) = (
+                    &start,
+                    req(&format!("List {} rivers of Europe.", i + 3), 32),
+                );
+                sc.spawn(move || {
+                    start.wait();
+                    share_reply(a, &b)
+                });
+            }
+        });
+        wait_idle(a);
+        for (t, _) in &probes {
+            got.push(share_reply(a, &req(t, 16)));
+        }
+        (got, swapped)
+    };
+    let (off, off_swapped) = run(false);
+    let (on, on_swapped) = run(true);
+    for (i, (x, y)) in off.iter().zip(&on).enumerate() {
+        assert_eq!(x.0, y.0, "request {i}: the reply with sharing on");
+    }
+    assert_eq!(off_swapped, 0, "sharing off swapped pages");
+    let got = [on[3].1, on[4].1];
+    assert_eq!(
+        got,
+        [want[0], want[1]],
+        "the probes' cached tokens (prefix {n_prefix} tokens; {on_swapped} pages swapped)"
+    );
+    assert!(
+        on_swapped > 0,
+        "no duplicate: A and B didn't prefill the prefix together"
+    );
 }
 
 /// Requests sharing a prefix cancelled while decoding and while being fed
