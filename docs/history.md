@@ -1,9 +1,9 @@
 # Engineering history
 
 A chronological log of what was built, why, how it was checked and what it measured, from the first
-commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 to 20 carry it on,
-more briefly, to main `39624db` (2026-10-25 21:19 EDT); their numbers come only from the PR bodies, and each
-PR's log entry in [log/](log/README.md) has the detail. Sources: the PR
+commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 to 24 carry it on,
+more briefly, to main `3014eeb` (2026-11-06 20:07 EST, the development pause); their numbers come only from the PR
+bodies and log entries, and each PR's log entry in [log/](log/README.md) has the detail. Sources: the PR
 bodies (`gh pr view`), `git log`, the foreman's log (PROGRESS.md), the round specs, the builders'
 NOTES.md and the scoreboards. None of those except the PRs and git history are in the repo. The method
 behind all of this is in [methodology.md](methodology.md); everything that was rejected is collected,
@@ -11,7 +11,7 @@ with numbers, in [experiments-rejected.md](experiments-rejected.md).
 
 Conventions:
 
-- Dates and times are EDT (UTC−4), the merge-commit time on main. GitHub shows UTC, so a PR merged at
+- Dates and times are EDT (UTC−4) until 11-01, EST (UTC−5) from 11-02, the merge-commit time on main. GitHub shows UTC, so a PR merged at
   22:41 EDT shows the next day there.
 - "bella" is the dev laptop: Core Ultra 9 275HX + RTX 5070 Ti Laptop, sm_120, 12 GB. BENCH.md and START-HERE call
   it Parabellum. Other hosts are named in [methodology.md](methodology.md#hardware).
@@ -489,3 +489,84 @@ stacked on #119, superseded by #131.
 **Open at 39624db:** #125, the H100 step-anatomy kit (draft; rehearsed on bella, waiting for pod approval), and the
 open issues: #139 (the sjf default on the H100 cells), #135 and #137 (hardening), #118 (the rest of the library API),
 #121 (the MoE-resident md5 aside).
+
+## Phase 21: H100 anatomy, MoE decode and prefill, refusals, the north star (2026-10-25 22:35 → 10-27 18:05, main 39624db → 333276d)
+
+Twenty merges. The H100 anatomy (item 1 (a)) ran and item 2 was shelved by its probe rule; MoE residency reached
+qwen3moe and got its bench of record; methodology step 9 (#155) separated a kill rule's verdict from the merge
+decision; the owner set the north star (#158). Numbers are copied from each PR body or log, MEASURED there unless
+marked.
+
+| PR | merged | what | why | numbers (from the PR body or log) |
+|---|---|---|---|---|
+| #140 | 10-25 22:35 | docs: refresh to 39624db | after #103–#131 | docs only |
+| #141 | 10-26 00:38 | `serve` refuses an explicit `--parallel N` that doesn't fit in GPU memory (exit 2), with the GiB needed and free | #137: it served fewer slots silently | start-up only |
+| #142 | 10-26 02:35 | a dense CPU model that can't fit in the RAM available is refused before it's built (exit 2) | #135: OOM-killed (rc 137) under a memory limit | start-up check only |
+| #145 | 10-26 06:10 | MLA decode kernels (`mla_heads_mv`, `mla_attn`), same bits | Moonlight resident decode: 8.25 ms per step vs llama.cpp's 6.57 (CUPTI, job 1026-011428-edef) | ms per step 1.361 → 0.417 and 0.897 → 0.208 (CUPTI, TAINTED); Moonlight `auto` tg128 121.4 → 151.0 on bella (kill rule ≥ 145 MET, **TAINTED**, job 1026-054428-1455) |
+| #146 | 10-26 09:08 | `--gpu-experts N\|auto` for qwen3moe (default 0), same bits as the CPU experts | item 3: Qwen3-30B-A3B is the headline | end to end in #144 (the full 30B is page-cache bound on bella) |
+| #147 | 10-26 10:23 | MLA prefill: batched heads GEMM, shared K tiles, same bits | the prefill half of the MLA gap | Moonlight `auto` pp2100 2,130 → 3,212 (+51 %; llama.cpp 4,710); kill rule ≥ 2,800 MET in a clean window |
+| #125 | 10-26 15:12 | the H100 step-anatomy kit (`AXON_SERVE_TRACE`, gemmh2 variants, `pool_feed_cost`) and its session's results | item 1 (a) | H100 SXM session 1026-125601: gate 3584×18944 nb 1024: gemmh2 118.9 TMAC/s, 119.4 without the per-256 drain (mma.sync int8 peak 325) ([log](log/2026-10-26-h100-anatomy-results.md)) |
+| #149 | 10-26 21:11 | docs: M6 split-K rejected (#148 closed) | its kill rule | 4090 7B nb 128 step +14 % against a −10 % target (job 1026-204007-20fc) |
+| #144 | 10-26 22:50 | docs: the MoE bench of record, one RTX 4090 vs llama.cpp `4413a19` | item 3, PR D | Qwen3-30B-A3B all resident: pp2100 12,212 vs 9,289 (×1.31), tg128 219.7 vs 252.5 (×0.87); Moonlight ×0.96 / ×0.81 / ×0.57 (clean, job 1026-215154-40d7) |
+| #152 | 10-26 23:04 | docs: the Hopper W4A8 probe NO-GO; item 2 shelved | its pre-registered probe rule | 224.8 TMAC/s < 240 (H100 SXM, job 1026-222543-3f73) |
+| #158 | 10-27 00:36 | docs: the north star ("run Synaps on Axon"), the agent-workload design, the roadmap order | owner, 10-26 | from Synaps' logs: prompt p50 165,532 tokens, 97.6 % a cached prefix |
+| #161 | 10-27 01:49 | the CUDA deepseek2 net refuses a session image, as the CPU does | #159 | — |
+| #153 | 10-27 02:04 | `AXON_MOE_PROFILE` counts resident layers' steps | it printed `inf` / `NaN` at a partial placement (job 1026-222632-d7c1) | diagnostics only |
+| #151 | 10-27 02:09 | `attn_blk_nb`: exact batched decode attention for the serve pool (nb ≥ 32), default on | the anatomy: attention is 57 % of the H100's nb 128 step at depth 4,096 | kill rule **MISSED** (4090 ×1.23 vs ≥ 1.5×, and the three H100 clauses); merged per step 9, the miss recorded |
+| #155 | 10-27 02:09 | docs: methodology step 9: a kill rule bounds further spend; exact, no-regression code that's built can merge | lead ruling, 10-26 | docs only |
+| #154 | 10-27 05:14 | MoE decode step T2b: wider expert GEMVs, sum + residual fused, router top-k by shuffles, same bits | the 30B's decode gap (#144) | 30B tg128 222.1 → 241.6 (+8.8 %); kill rule ≥ 252.5 **MISSED**: ×0.95 llama.cpp's 254.6 (job 1027-020521-6db3); merged default-on per step 9, line closed |
+| #163 | 10-27 08:27 | tests: the planner-vs-old-cut checks no longer depend on the GPU's SM count | a 4090 gate failure | test only |
+| #168 | 10-27 16:05 | `pool_wide_long_steps_match_solo` skips on cards that can't hold its 5.07 GiB pool | #151's case panicked on 6 GB cards | test only |
+| #171 | 10-27 16:29 | docs: the Hopper exact W4A8 prefill path rejected (#169 closed) | Checkpoint 1 KILL (P1R, job 1027-155505-3963) | docs only ([log](log/2026-10-27-w4a8-prefill.md)) |
+| #167 | 10-27 18:05 | `--admit-order sjf --step-ms 80` are the `serve` defaults | #165's rule S, pre-registered, on an H100 SXM | mix C=128 vs fifo60: aggregate +7.6 %, goodput +60.5 %, ITL p99 99.9 ms (job 1027-084258-1ce4) |
+
+## Phase 22: numerics modes, FP8 weights, the KV RAM tier (2026-10-29 14:07 → 10-31 12:54, main 333276d → e04b808)
+
+Six merges: the determinism-modes ADR's scaffolding, then its first fast kernels (FP8 checkpoints), and the agent
+track's PR B.
+
+| PR | merged | what | why | numbers (from the PR body or log) |
+|---|---|---|---|---|
+| #175 | 10-29 14:07 | CI pinned to `ubuntu-24.04` | — | CI only |
+| #173 | 10-29 16:05 | `--numerics exact\|fast`, `numerics=exact/1` in the identity tuple, `serve --datacenter`, the graded harness, `AXON_FAST` cache keys; no kernels | the ADR, accepted 10-29 | every fingerprint changes once; output bytes don't (md5 gate vs main) |
+| #177 | 10-30 09:33 | FP8 checkpoints (RedHatAI `*-FP8-dynamic`) end to end: exact mode as Q8_0, e4m3 kernels under `--numerics fast` | WP-A2 | exact 7B KL 1.2e-3, top-1 98.1 %; fast **fails its bars on bella**: 7B tg128 32 tok/s (bar 47–55), top-1 95.9 % (bar 97 %); not run on an H100 |
+| #178 | 10-31 11:24 | Q4_K / Q5_K `down` on gemm2t from nb 32; q\|k\|v in one launch dropped | WP-A4 | 7B pool step −2.5 % at nb 32 and 64 on bella, same bits (TAINTED); q\|k\|v −1.8 %, inside its noise term |
+| #166 | 10-31 11:45 | `serve --cache-ram`: the KV RAM tier, opt-in, default off | agent PR B | rule B's TTFT-resume clause missed on bella: 6,592 of 26,496 tokens restored, 7.05 vs 8.68 s (job 1031-063509-f763, TAINTED) |
+| #179 | 10-31 12:54 | tests: the FP8 graded gate's debug size | a debug run failed on the bars, not on a check (job 1031-115732-b712) | test only |
+
+## Phase 23: the agent board, FP8 on sm_89, session identity, the C1+C2 groundwork (2026-11-04 09:19 → 11-05 19:00, main e04b808 → 7a2c9cf)
+
+Fifteen merges. Most are correctness: refusals, FP8 on the 4090, and what a saved session's identity must name.
+
+| PR | merged | what | why | numbers (from the PR body or log) |
+|---|---|---|---|---|
+| #157 | 11-04 09:19 | the H100 prefill anatomy of mix C=128, and #139's config cells | where the C=128 feed passes spend | GEMM 78.4 %, launch + gaps 2.3 %; `--step-ms 50` FAIL (aggregate −14.9 %); #139 closed |
+| #160 | 11-04 14:28 | agent PR A: trace extractor, replay client, baseline board; no engine change | the track's ruler | rule A: q8 passes, f16 fails, so B and C stay; shared prefix p50 6,006 tokens; vs ollama, q8, speed 1: TTFT-resume p50 0.140 vs 0.526 s, ITL p99 119 vs 202 ms |
+| #180 | 11-04 15:09 | a `--gpu-layers` split's CPU half is refused when it can't fit | #143 | start-up check only (#142's verdict) |
+| #181 | 11-04 16:03 | KV tier off-path tests; a spill fault in a restore's reclaim no longer exits the server | #172 | reproduced at 658ef08 (job 1104-144238-8244), fixed |
+| #186 | 11-04 18:18 | agent traces A2: harness capture, dry run, the `--sessions` ladder | #182 | harness only |
+| #164 | 11-04 21:26 | C1 + C2: refcounted pages and the prefix index, no behaviour change | agent PR C | every pooled path runs main's code |
+| #191 | 11-05 01:57 | FP8 fast GEMM below sm_120: the e4m3 product as two f16 mmas | #190: a 4090's e4m3 mma keeps about 14 bits, the f64 anchor missed by up to 173× | within 0.18× of the tolerance on the 4090; the 0.5B's fast prefill 17–22 % slower (job 1105-004551-eb25); #194 to win it back |
+| #195 | 11-05 03:48 | a missing FP8 checkpoint fails its tests (`AXON_SKIP_FP8_MODEL_TESTS=1` opts out) | #193 | test only |
+| #197 | 11-05 06:14 | FP8 test skips show in a captured log; `AXON_FP8_NATIVE=0` fails the engine FP8 tests | #195's review | test only |
+| #198 | 11-05 06:40 | an FP8 fast-mode session records whether fp8.cu made it | part of #196 | sessions only |
+| #199 | 11-05 08:01 | a CPU FP8 session records `AXON_FP8_CPU_ACT`'s emulation | #198's review | sessions only |
+| #200 | 11-05 09:33 | the FP8 fingerprint's `act` is the net's; a split names its CPU layers' emulation | #199's review | fingerprints only |
+| #202 | 11-05 18:29 | sessions hash the GPU module the net runs; one session counter; `axon info` predicts FP8 fingerprints | #196 | sessions only; reply fingerprints keep the manual rule |
+| #204 | 11-05 18:45 | a GPU session's identity names the split-attention count and the code target | #203 | sessions only |
+| #205 | 11-05 19:00 | docs: #204's session costs | — | docs only |
+
+## Phase 24: the exclusive RAM tier, RAM checks, shared prefix pages (2026-11-06 06:17 → 20:07, main 7a2c9cf → 3014eeb)
+
+Five merges, then the development pause. What's open at `3014eeb` is in the roadmap's
+[state at the 11-06 pause](roadmap.md#state-at-the-11-06-pause).
+
+| PR | merged | what | why | numbers (from the PR body or log) |
+|---|---|---|---|---|
+| #201 | 11-06 06:17 | an exclusive KV RAM tier (RAM keeps what the GPU doesn't); an idle server's backlog in pieces | WP2, #170 | on an RTX 4090: a 25k session evicted from the GPU resumes in 0.141 vs 2.713 s (job 1105-211420-0618); s4 ITL p99 0.981×, re-prefill 0.06 % vs 0.68 % (1106-051153-a1f3). On bella the resume likely misses 0.3 s (TAINTED). Still opt-in |
+| #206 | 11-06 12:45 | RAM checks: FP8 without the repack, a split checked before its upload, refusals name the way out | #183, #184, #185 | FP8 0.5B under real caps on bella: refused at 781–861 MiB, where main is OOM-killed (job 1106-105219-0faf) |
+| #207 | 11-06 13:44 | C3: shared prefix KV pages, the engine (claim, index, evict); `AXON_SHARE_KV=1`, off by default | #187 | two of #187's clauses **failed** on a 4090: s4 TTFT-new 1.003× (≤ 0.6×), fan-out siblings 0.261× (≤ 0.25×) |
+| #215 | 11-06 18:12 | RAM checks round 2: the loader's conversions checked first; a split needs its larger step | #208, #209 | real caps on bella: FP8 0.5B refused at 10 caps where main is OOM-killed (591–735 MiB, job 1106-171946-ef01); 7B FP8 split runs at 17 caps where main refuses (1106-171947-72d5) |
+| #216 | 11-06 20:07 | C3.1: duplicate pages swapped, refed prefills claim again, C3's nits; #210 / #211's cells registered | #212, #213, #214 | #210 ALL PASS (warm/GB 3.01×, job 1106-170837-edc9); #211 6 of 6 (8 subagents' TTFT p50 0.591× idle, 0.798× busy, 1106-173522-297a); the default flip is a separate PR |
+
+**Closed, not merged (10-25 → 11-06):** #148 (M6 split-K), #169 (Hopper exact W4A8 prefill), each by its kill rule.
