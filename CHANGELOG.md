@@ -310,6 +310,23 @@ measurements behind them.
   in batched passes): teacher-forced ΔNLL between two binaries or modes, per batched prefix (`--prefix`, default
   0,24,160), with an SE clustered by window.
 
+### Merged after the draft, not listed above (10-25 → 10-31)
+- **Behaviour change (#167):** `serve`'s defaults are `--admit-order sjf --step-ms 80` (#131 added both, with fifo
+  and 60 ms the default). #165's rule S on an H100 SXM, mix C=128 against fifo/60: aggregate +7.6 %, goodput
+  +60.5 % (job 1027-084258-1ce4, [log](docs/log/2026-10-27-sjf80-default.md)). `--admit-order fifo --step-ms 60`
+  (`AXON_ADMIT=fifo`) is the scheduling of before; with `AXON_STEP_COST=legacy` too, the scheduling before #131.
+- **`--gpu-experts N|auto`** (`AXON_GPU_EXPERTS`, default 0): routed experts resident on the GPU, deepseek2 (#127)
+  and qwen3moe (#146), same bits as the CPU experts. The bench of record (#144, one RTX 4090): Qwen3-30B-A3B all
+  resident prefills ×1.31 llama.cpp at pp2100 and decodes ×0.87 (×0.95 after #154)
+  ([docs/results.md](docs/results.md#new-models-and-types-since-the-boards)).
+- Faster, same bits: MLA decode and prefill kernels (#145, #147), exact batched decode attention for the serve pool
+  at nb ≥ 32 (#151), the MoE decode step (#154), Q4_K / Q5_K `down` on gemm2t from nb 32 (#178). Each one's
+  numbers are in [docs/history.md](docs/history.md) (Phases 21, 22).
+- `serve`, gpt-oss with tools: a reply with no harmony header streams as the answer (#136, #114). The CUDA deepseek2
+  net refuses a session image, as the CPU does (#161, #159).
+- Diagnostics: `AXON_SERVE_TRACE=FILE`, a per-step trace of `serve`'s pool (#125); `AXON_MOE_PROFILE` counts resident
+  layers' steps (#153).
+
 ## [0.1.0] - unreleased (draft; not tagged)
 
 The first version: everything merged to `main` from the start of the project (2026-10-10) through PR #113

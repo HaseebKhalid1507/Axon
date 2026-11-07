@@ -34,7 +34,7 @@ Development paused at main `3014eeb` for Haseeb's re-evaluation. Since `39624db`
    the board trace itself shares only 4–7 %.
 2. **The KV RAM tier's default** (`--cache-ram auto`): its gate passed on a 4090 (#201); on bella the resume likely
    misses 0.3 s (TAINTED reads). It waits on the RAM-pinning question and a clean bella s4 replay at its head
-   ([results.md](results.md#known-losses-and-gaps-as-of-39624db)).
+   ([results.md](results.md#known-losses-and-gaps-as-of-3014eeb)).
 3. **FP8 fast mode:** fails its accuracy and decode bars on bella (#177); the sm_89 prefill cost is #194. The H100
    fast-GEMM probe (draft #176, rules #174) is staged and not run: RunPod is on hold.
 4. **The v0.1.0 tag** (Haseeb's; item 5).
