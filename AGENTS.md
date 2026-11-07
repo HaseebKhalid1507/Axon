@@ -311,4 +311,4 @@ Don't ask an agent, a bot or a workflow to merge for you.
 | gates, benchmark protocol, hardware | [docs/methodology.md](docs/methodology.md) |
 | what is and isn't deterministic | [docs/determinism.md](docs/determinism.md) |
 | past rounds, before/after numbers | [docs/history.md](docs/history.md), [docs/log/](docs/log/README.md) |
-| flags and environment | [README.md](README.md#usage) |
+| flags and environment | [docs/usage.md](docs/usage.md), [docs/environment.md](docs/environment.md) |
