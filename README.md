@@ -2,8 +2,9 @@
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
 GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture), gpt-oss-20b and DeepSeek V2/V3 / Kimi K2's architecture
-(attention on the GPU, experts on the CPU; DeepSeek's experts optionally on the GPU too), and Hugging Face
-safetensors checkpoints (CPU), written from scratch in Rust.
+(attention on the GPU, experts on the CPU; DeepSeek's and Qwen3 MoE's experts optionally on the GPU too), and
+Hugging Face safetensors checkpoints (BF16/F16/F32 on the CPU; FP8 on the CPU and the GPU), written from scratch in
+Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
 hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
@@ -16,7 +17,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 99k lines of Rust and 8.4k of CUDA, tests included (738 `#[test]`s in `src/`).
+with dlopen). About 121k lines of Rust and 9.9k of CUDA, tests included (904 `#[test]`s in `src/`; counted at `3014eeb`).
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -36,7 +37,7 @@ on throughput at C = 128 today.**
 Every clause is scoped to one board: Qwen2.5-7B-Instruct on one RunPod H100 SXM, main `c15c90e`, 2026-10-19, Axon
 `serve` (Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22 with AWQ int4 and with FP8, closed loop, greedy, 2 rounds,
 medians. *mix*: chat plus 2k–7.6k-token prompts; *classic*: 519-token prompts, 512 out. The weights differ per
-engine (Axon has no FP8 path), so this compares engines as deployed, not kernels on equal bits. No other GPU,
+engine (Axon had no FP8 path then), so this compares engines as deployed, not kernels on equal bits. No other GPU,
 model or workload is covered by these numbers.
 
 | aggregate tok/s | C=1 | C=8 | C=32 | C=128 |
@@ -215,10 +216,15 @@ Works today, honestly scoped:
   written only into free room and are the first evicted, so the tier's useful capacity is about its
   size, not its size minus the pool's. Its gate passed on an RTX 4090; making it the default (`auto`) is
   a later change, and on bella its resume likely misses the gate's 0.3 s
-  ([design](docs/design/kv-ram-tier-exclusive.md) §6, §14).
+  ([design](docs/design/kv-ram-tier-exclusive.md) §6, §14). `AXON_SHARE_KV=1` (opt-in, off by default)
+  lets requests share the KV pages of a common prompt prefix, same bits (#207, #216; [below](#operations-auth-metrics-slots)).
+- RAM checks: a load that can't fit in the RAM available (the host's, or the tightest cgroup limit) is refused at
+  load with the figures and the way out (exit 2), instead of being OOM-killed: a dense CPU model, a split's CPU half,
+  an FP8 checkpoint, a checkpoint's converted tensors (#133, #142, #180, #206, #215; Usage, **Memory limits**).
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, streaming MoE experts through the
+Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, shared prefix
+pages by default and prefilling a shared prefix once for requests that arrive together (#188), streaming MoE experts through the
 GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and `qwen3moe`'s can be:
 `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched speculative decoding in
 `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
@@ -344,7 +350,8 @@ Defaults, as `axon --help` gives them:
   bit-identity contract ([docs/determinism.md](docs/determinism.md)); `fast` may run
   kernels that change the float order (graded against exact, not equal) under its own
   identity, and promises tolerance on every path, never bits (batching, cache reuse,
-  drafting). No fast kernel exists yet: `fast` runs the exact kernels and says so once.
+  drafting). Its only fast kernels are an FP8 checkpoint's on the GPU (#177); elsewhere `fast` runs the exact
+  kernels, under the fast identity, and says so once.
   `serve --datacenter` implies `--numerics fast` (and, today, nothing else); an explicit
   `--numerics` wins. Why: [docs/design/determinism-modes.md](docs/design/determinism-modes.md).
 - `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
@@ -590,14 +597,21 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_tool_calls_dropped_total` (gpt-oss calls begun but not finished as a JSON object), and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
-  text events, about one token each). No host-RAM KV store hits yet: serve has no store.
+  text events, about one token each). The scheduler's (#131): `axon_waiting_requests`,
+  `axon_prefill_lanes` / `axon_prefill_lanes_busy`, `axon_step_prompt_tokens`, the histograms `axon_step_seconds`
+  and `axon_step_seconds_rows16` (steps that fed prompt beside running rows), and the step cost model's
+  `axon_step_cost_*`. The KV RAM tier's and shared pages' are below.
   A request is counted in `axon_requests_total` before its first byte is sent, and out of
   `axon_requests_in_flight` and its slot before its last byte: a client that has the whole
   response, then reads /metrics, never sees its own request still running.
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
-  "age_ms"}], "queue_depth"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
+  "age_ms"}], "queue_depth", "waiting": [{"id", "prompt_tokens", "age_ms"}], "graphs_evicted_oom",
+  "steps_eager_oom"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
   alone is in the slot it runs in (on the CPU, a split or a pipeline, the one cache is slot 0).
+  With the paged pool, each slot adds `pages_used`, and the object `pages_free`, `pages_total`, `page_tokens`,
+  `preempted` and `prefills_unfed`. The two OOM counters: CUDA graphs given up, and steps run kernel by kernel, for
+  lack of VRAM (never fatal, the same bits).
 - `--max-prompt-tokens N`: a longer prompt is refused before prefill with a 400
   (`code: "context_length_exceeded"`, as a prompt past the context). It counts the whole
   rendered prompt: the chat template's tokens and the tool schemas too; exactly N is allowed.
@@ -614,8 +628,9 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default, since
-  its timing gate failed two of its clauses, #207). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default. Its first
+  timing gate failed two of its clauses (#207); the two re-registered cells passed on an RTX 4090 (#210, #211), and
+  the default flip is a separate PR, not made yet). A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
@@ -844,8 +859,8 @@ This board predates #92 and #100 (prefill: +3 % at pp2100 on a 4090, MEASURED; a
 pp1050 on the dev laptop, MEASURED, the 4090 ESTIMATED +12–15 %), so its prefill columns are not current.
 
 **Serving on an H100 SXM** (main c15c90e, 2026-10-19, Qwen2.5-7B, closed loop, 2 rounds; run h100-1019-2058): Axon
-(Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. The weights differ per row (Axon has
-no FP8 path), so this compares engines as deployed. Aggregate tok/s on the *mix* workload (chat plus 2k–7.6k-token
+(Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. The weights differ per row (Axon had
+no FP8 path then), so this compares engines as deployed. Aggregate tok/s on the *mix* workload (chat plus 2k–7.6k-token
 prompts):
 
 | engine | weights | C=1 | C=8 | C=32 | C=128 | TPOT p50 at C=128 | ITL p99 at C=128 |
@@ -865,6 +880,20 @@ step on sm_90 (tuned on consumer GPUs, no decode-shaped wgmma GEMM) and admissio
 item on the [roadmap](docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides). Full tables and method:
 [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19),
 [log](docs/log/2026-10-19-h100-showdown.md).
+
+**Measured since those boards** (none re-boards the tables here; each is the PR's own run, MEASURED):
+- **MoE on one RTX 4090** (#144, main `8508a75` vs llama.cpp `4413a19` at its best placement, 3 interleaved rounds,
+  clean, job 1026-215154-40d7; [board](docs/benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)):
+  Qwen3-30B-A3B with every expert resident, pp2100 12,212 vs 9,289 (×1.31) but tg128 219.7 vs 252.5 (×0.87);
+  after #154, tg128 241.6 vs 254.6 in the same run (×0.95, job 1027-020521-6db3). Moonlight-16B-A3B trails on all
+  three (tg128 ×0.96, pp512 ×0.81, pp2100 ×0.57).
+- **Agent serving, Qwen2.5-7B on an RTX 4090 pod:** with the KV RAM tier, a 25k-token session evicted from the GPU
+  resumes in 0.141 s against main's 2.713 s re-prefill (#201, job 1105-211420-0618). With shared prefix pages
+  (`AXON_SHARE_KV=1`, against main `2aec1e5`), 8 subagents starting on a 6,006-token shared prefix reach their first
+  token at 0.591× main's TTFT p50 idle and 0.798× busy (#211, job 1106-173522-297a). On a 1,722-page pool with 64
+  sessions it keeps 3.01× the warm sessions per GB and 4.50× the goodput, though the server is overloaded on both
+  binaries (TTFT-turn p50 33 s vs 16 s; #210, job 1106-170837-edc9).
+- **FP8 checkpoints** (#177): fast mode fails its bars on bella (above, Status).
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
 and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an
@@ -965,9 +994,13 @@ The GPU, after that:
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
   context: when to use it, llama.cpp agreement, retrieval and short-context cost
-- [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
-  [Hopper](docs/design/hopper.md) designs, and the [determinism-modes ADR](docs/design/determinism-modes.md)
-  (`--numerics exact | fast`, accepted 2026-10-29)
+- [docs/design/](docs/design/): the [determinism-modes ADR](docs/design/determinism-modes.md)
+  (`--numerics exact | fast`, accepted 2026-10-29), [FP8 weights](docs/design/fp8-weights.md), the
+  [agent workload](docs/design/agent-workload.md) track with its [KV RAM tier](docs/design/kv-ram-tier-exclusive.md)
+  and [shared prefix pages](docs/design/shared-prefix-pages.md), [multi-GPU](docs/design/multi-gpu.md),
+  [Hopper](docs/design/hopper.md), [drafting on a split](docs/design/spec-split.md) and the
+  [A4 step structure](docs/design/a4-step-structure.md)
+- [docs/hardening.md](docs/hardening.md): fuzzing, the model zoo and the soak harness
 
 ## Contributing
 

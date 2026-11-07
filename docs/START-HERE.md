@@ -2,8 +2,8 @@
 
 A short orientation for new collaborators. Everything under "What works on main" was checked against
 the source at main `5f96039`; the Architectures, CUDA and Serving rows and the multi-GPU row were updated at
-main `a591e17` from the merged PRs (#33, #34, #35, #38, #42), and the table was brought up to main `39624db`
-(2026-10-25) from the PRs merged since (listed in [history.md](history.md), Phases 17–20). Anything that isn't on
+main `a591e17` from the merged PRs (#33, #34, #35, #38, #42), and the table was brought up to main `3014eeb`
+(2026-11-07) from the PRs merged since (listed in [history.md](history.md), Phases 17–24). Anything that isn't on
 main yet is marked **planned** or **in flight**.
 
 **North star (owner, 10-26): run Synaps on Axon**, many warm agent sessions and subagents on one box, then many
@@ -26,7 +26,7 @@ It runs on the CPU and on NVIDIA GPUs. It doesn't use ggml, BLAS, binding crates
 build time. The CPU path is a GGUF reader, integer dot-product kernels (scalar, AVX2, AVX-VNNI), a
 spinning worker pool and a transformer forward pass. On the GPU, CUDA C++ kernels are compiled by NVRTC
 at run time and launched through the driver API. Both libraries are loaded with `dlopen`. The repo holds
-about 99k lines of Rust and 8.4k of CUDA, tests included (`git ls-files` + `wc -l` at `39624db`; 738 `#[test]`s
+about 121k lines of Rust and 9.9k of CUDA, tests included (`git ls-files` + `wc -l` at `3014eeb`; 904 `#[test]`s
 in `src/`). Single-stream speed is ahead of llama.cpp and ollama in 45 of 45 cells on RunPod RTX 4090 / RTX 5090 /
 H100 SXM (main 7f42c02), and ahead of ollama in 23 of 24 cells on an RTX 4050 laptop
 ([benchmarks-gpu.md](benchmarks-gpu.md)). **Serving at datacenter concurrency is behind:** on an H100 SXM (10-19)
@@ -37,21 +37,21 @@ Axon is the fastest at one stream but 2.0–3.8× behind vLLM / SGLang at 128 co
 
 | area | on main | where |
 |---|---|---|
-| Architectures | `qwen2`, `qwen3` (dense), `gemma3` (1B, 4B; 27B refused; no q8 KV, split, streaming or multi-GPU for it), `llama` (Llama 3.x, including RoPE frequency factors; SentencePiece-tokenizer `llama` models such as Mistral 7B v0.3 and Llama 2, with Mistral's `[INST]` chat format). `qwen3moe` (Qwen3-30B-A3B's architecture), `gpt-oss` (gpt-oss-20b, MXFP4 experts) and `deepseek2` (MLA; DeepSeek V2/V3, Kimi K2, Moonlight): on the CPU, or with `--device cuda` as llama.cpp's `--cpu-moe` layout (attention, router, shared experts and head on the GPU, routed experts on the CPU; #67, #98, #89). deepseek2's routed experts can also be resident on the GPU, layer by layer, same bits (`--gpu-experts N\|auto`, opt-in; #127). YaRN as an opt-in override (#49). Other architectures are refused with an error. | `model.rs` (`ARCHS`), `model/moe.rs`, `model/deepseek2.rs`, `moe.rs` |
-| Model files | GGUF, or a Hugging Face checkpoint directory of a `qwen2` / `qwen3` / `llama` model (BF16 / F16 / F32; BF16 runs as the converter's F16 GGUF, bit for bit). CPU only for checkpoints (#102). | `gguf.rs`, `safetensors.rs` |
+| Architectures | `qwen2`, `qwen3` (dense), `gemma3` (1B, 4B; 27B refused; no q8 KV, split, streaming or multi-GPU for it), `llama` (Llama 3.x, including RoPE frequency factors; SentencePiece-tokenizer `llama` models such as Mistral 7B v0.3 and Llama 2, with Mistral's `[INST]` chat format). `qwen3moe` (Qwen3-30B-A3B's architecture), `gpt-oss` (gpt-oss-20b, MXFP4 experts) and `deepseek2` (MLA; DeepSeek V2/V3, Kimi K2, Moonlight): on the CPU, or with `--device cuda` as llama.cpp's `--cpu-moe` layout (attention, router, shared experts and head on the GPU, routed experts on the CPU; #67, #98, #89). deepseek2's and qwen3moe's routed experts can also be resident on the GPU, layer by layer, same bits (`--gpu-experts N\|auto`, opt-in; #127, #146). YaRN as an opt-in override (#49). Other architectures are refused with an error. | `model.rs` (`ARCHS`), `model/moe.rs`, `model/deepseek2.rs`, `moe.rs` |
+| Model files | GGUF, or a Hugging Face checkpoint directory of a `qwen2` / `qwen3` / `llama` model (BF16 / F16 / F32; BF16 runs as the converter's F16 GGUF, bit for bit), CPU only (#102); and per-channel FP8 checkpoints (RedHatAI `*-FP8-dynamic`) on the CPU and the GPU: as Q8_0 in exact mode, natively under `--numerics fast` (#177, #191). | `gguf.rs`, `safetensors.rs` |
 | Tensor types | CPU: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL. GPU: every weight matrix must be one of the eleven quantized types. | `quant.rs`, `quant/k23.rs`, `quant/iq4nl.rs`, `cuda/kernels.cu` |
 | CPU SIMD | One baseline x86-64 binary. It picks scalar, AVX2 or AVX-VNNI kernels at run time with the same output bits as a `target-cpu` build (`AXON_SIMD` forces a set). Q4_K/Q6_K/Q5_0/Q8_0 are repacked into 8-row interleaved layouts. | `quant.rs`, `quant/r8.rs`, `quant/r8q.rs`, `mv.rs`, `vmath.rs` |
-| CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if no installed NVRTC can target it (older NVRTCs are tried, #39). One token is a captured CUDA graph, replayed. On H100/H200 (sm_90a) the fused gate+up prefill GEMM runs on wgmma + TMA (#33). | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
+| CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if no installed NVRTC can target it (older NVRTCs are tried, #39). One token is a captured CUDA graph, replayed. On H100/H200 (sm_90a) the fused gate+up prefill GEMM runs on wgmma + TMA (#33). `--numerics exact\|fast` (#173): exact is the default and the bit contract; the only fast kernels are FP8's (`cuda/fp8.cu`). | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
 | Commands | `info`, `gen`, `logits` (top-K next-token logits), `chat` (terminal, chat template, KV reuse across turns), `serve` (OpenAI-compatible HTTP). | `cli.rs`, `chat.rs`, `serve.rs` |
 | Library | `axon::load`, `Backend::new` (`BackendOptions`), `Tokenizer`, the sealed `Lm` trait, `generate` (greedy, optional lossless drafting) and `serve`, in-process; `Backend` is opaque. 0.x, not tagged, not yet hardened for embedders (#118) (#117, #124). | `lib.rs`, `generate.rs`, `examples/embed.rs` |
 | Sampling | Greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed (llama.cpp's order). On the GPU the penalty and top-k (k ≤ 256) run on the device. | `sample.rs`, `cuda/sample.cu` |
 | Speculative decoding | Prompt lookup (`--draft K`) and a draft model (`--draft-model small.gguf`). Both are lossless: same output with or without, greedy or seeded sampling. | `spec.rs`, `draft.rs` |
 | CPU + GPU split | A model too big for VRAM puts its first layers on the CPU and the rest plus the head on the GPU (`--gpu-layers N`). For prompts of ≥ 32 tokens the CPU layers' weights are streamed through the GPU. | `hybrid.rs`, `cuda/qwen2/stream.rs` |
-| KV cache | f16 by default; `--kv q8` (GPU only) halves it with slightly different results. In `serve` on one GPU, a paged pool: 64-position pages shared by every slot, admission and preemption by pages (#64, #71). | `kv.rs`, `cuda/qwen2/pages.rs` |
-| Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5, Llama 3.1/3.2 and gpt-oss templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. On one GPU, decode rows of concurrent requests run in one batched step (`--parallel N`; #38), each request's output equal to running it alone; long prompts are fed in chunks between the decode steps (#45). Also OpenAI's Responses API and ollama's native API (#70; [serve-apis.md](serve-apis.md)), and `--api-key`, `/metrics`, `/slots` (#61). Each step's prompt chunk is sized from the measured step cost (`--step-ms 60`); admission is first come first served, shortest-first opt-in (`--admit-order sjf`; #131). On the CPU, a CPU/GPU split, a multi-GPU pipeline or a MoE model, requests run one at a time. The KV cache carries over for shared prefixes. Default context: the model's trained length where it fits (#42). | `serve.rs`, `serve/`, `serve/engine.rs`, `serve/tools.rs` |
+| KV cache | f16 by default; `--kv q8` (GPU only) halves it with slightly different results. In `serve` on one GPU, a paged pool: 64-position pages shared by every slot, admission and preemption by pages (#64, #71). Opt-in: a KV RAM tier (`--cache-ram`, #166, exclusive since #201) and shared prefix pages across requests (`AXON_SHARE_KV=1`, #207, #216). | `kv.rs`, `cuda/qwen2/pages.rs` |
+| Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5, Llama 3.1/3.2 and gpt-oss templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. On one GPU, decode rows of concurrent requests run in one batched step (`--parallel N`; #38), each request's output equal to running it alone; long prompts are fed in chunks between the decode steps (#45). Also OpenAI's Responses API and ollama's native API (#70; [serve-apis.md](serve-apis.md)), and `--api-key`, `/metrics`, `/slots` (#61). Each step's prompt chunk is sized from the measured step cost (#131); shortest-first admission with an 80 ms step is the default (`--admit-order sjf --step-ms 80`, #167). On the CPU, a CPU/GPU split, a multi-GPU pipeline or a MoE model, requests run one at a time. The KV cache carries over for shared prefixes. Default context: the model's trained length where it fits (#42). | `serve.rs`, `serve/`, `serve/engine.rs`, `serve/tools.rs` |
 | Multi-GPU | `--gpus 0,1`: pipeline parallel, layers split across GPUs in order, bit-identical to one GPU. P2P is opt-in and untested (`AXON_P2P=1`). No tensor parallel (#34). | `cuda/qwen2/pipeline.rs` |
 
-**Not on main:** tensor parallel, FP8 weights, qwen3moe / gpt-oss experts on the GPU (deepseek2's can be, #127), streaming MoE experts for prefill, `serve` slot save/restore, batched
+**Not on main:** tensor parallel, block-scaled FP8 / NVFP4 weights, gpt-oss experts on the GPU, streaming MoE experts for prefill, `serve` slot save/restore, batched
 speculative decoding in `serve` (#90 closed by its kill rule), a decode-shaped Hopper GEMM. The legacy `functions`
 field is still a 400.
 
@@ -128,6 +128,12 @@ Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + 
 | `src/cuda/qwen2/pages.rs`, `slots.rs` | The paged KV pool: page lists, the device page table, slot views. |
 | `src/moe.rs`, `src/cuda/qwen2/moe.rs`, `mla.rs` | MoE on the GPU with the experts on the CPU; deepseek2's MLA attention. |
 | `src/safetensors.rs` | Hugging Face checkpoint directories as GGUF tensors and metadata. |
+| `src/quant/fp8.rs`, `src/cuda/fp8.cu` | FP8 (e4m3) codec and CPU reference; the GPU's FP8 kernels (fast mode only). |
+| `src/numerics.rs`, `src/identity.rs` | `--numerics exact\|fast`; the identity tuple behind `system_fingerprint`. |
+| `src/gguf/mem.rs` | RAM available (the host's, bounded by cgroup limits), read by the load-time RAM checks. |
+| `src/kvsave.rs`, `src/kvstore.rs` | `chat --session` KV images; the host-RAM page store, keyed by a hash chain over the token prefix. |
+| `src/serve/tier.rs`, `src/serve/prefix.rs` | `serve --cache-ram`, the KV RAM tier; the index of shared prefix pages (`AXON_SHARE_KV=1`). |
+| `src/serve/ops.rs`, `responses.rs`, `ollama.rs` | `/metrics`, `/slots`, `--api-key`; the Responses and ollama APIs. |
 | `src/cuda/kernels.cu` | Dequant kernels, bit-identical to `quant.rs`. |
 | `src/cuda/decode.cu` | One-token kernels: GEMV (dp4a), RMSNorm, RoPE, attention; defines the canonical order. |
 | `src/cuda/prefill.cu` | Batched kernels: `gemm2*` (mma.sync int8), tensor-core attention, `gemv_ref`. |
@@ -160,32 +166,9 @@ cargo fmt && cargo clippy && cargo test
 
 ## In flight (not on main)
 
-As of main `39624db` (2026-10-25). None of these is on main; each is open work:
-
-- **The H100 serving gap**, the roadmap's proposed order (from an outside review; the owner decides;
-  [roadmap](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides), [reviews/](reviews/README.md)):
-  - **H100 step anatomy** (item 1 (a)): the kit is draft PR #125 (`AXON_SERVE_TRACE`, gemmh2 variants,
-    `pool_feed_cost`), rehearsed on bella; the pod session waits for approval.
-  - **The shortest-first default on the H100** (#139, #165): decided. `--admit-order sjf --step-ms 80` passed
-    #165's pre-registered rule S on an H100 SXM (mix C=128: +7.6 % aggregate, +60.5 % goodput, ITL p99 99.9 ms) and
-    is the default (#167).
-  - Later in the order: an exact Hopper GEMM (item 2), FP8 under `fast` if that GEMM misses (item 4).
-- **One MoE resident on the GPU, next steps** (item 3; PRs A–C are on main for deepseek2):
-  - the **Moonlight bench of record** against llama.cpp (`--n-cpu-moe`), since #127's ×2.06 / ×3.40 was against
-    Axon's own CPU-expert path and TAINTED;
-  - **Qwen3-30B-A3B step 0**: the resident path for `qwen3moe`, which has none yet.
-- **Hardening:** #135 (a dense CPU load under a memory limit is OOM-killed instead of refused). #137 (an explicit
-  `--parallel N` silently serving fewer slots) is fixed by #141: it's refused at start.
-- **Library API for embedders:** the rest of #118 (stderr from library code, env-only config, leaks, `serve`'s
-  exits). The v0.1.0 tag is Haseeb's call.
-- **Determinism modes** (`--numerics exact | fast`): the ADR is accepted (2026-10-29,
-  [design/determinism-modes.md](design/determinism-modes.md)); its scaffolding is built (#173: the flag, the
-  identity line, `serve --datacenter`, the graded test harness, the cache keys). No fast kernel exists yet: `fast`
-  runs the exact kernels under its own identity.
-- **Batched speculative decoding in `serve`:** the first attempt (#90) is closed; a second (latency-guarded gate v2,
-  then multi-row verify) is designed ([research/spec-gate-v2-20261024.md](research/spec-gate-v2-20261024.md)), below
-  the line in the proposed order.
-- **FP8 weights** (safetensors stage B), after stage A (#102).
+Development paused on 2026-11-06 (main `3014eeb`). What's open, the pending decisions and the timing verdicts
+are in the roadmap's [state at the 11-06 pause](roadmap.md#state-at-the-11-06-pause); the priorities and their
+order are in the rest of [roadmap.md](roadmap.md).
 
 ## Other docs
 
@@ -194,6 +177,9 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
 - [design/multi-gpu.md](design/multi-gpu.md): pipeline parallel, then tensor parallel; bit-identity analysis.
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
 - [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (accepted 2026-10-29).
+- [design/fp8-weights.md](design/fp8-weights.md): FP8 checkpoints, exact as Q8_0 and native under `fast`.
+- [design/agent-workload.md](design/agent-workload.md): the north star's track; its stages B and C are
+  [kv-ram-tier-exclusive.md](design/kv-ram-tier-exclusive.md) and [shared-prefix-pages.md](design/shared-prefix-pages.md).
 - [determinism.md](determinism.md): what is bit-identical, and the identity tuple behind `system_fingerprint`.
 - [serve-apis.md](serve-apis.md): `axon serve`'s routes (chat completions, completions, Responses, ollama).
 - [testing.md](testing.md): the test tiers and what to run when.
