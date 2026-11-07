@@ -51,13 +51,19 @@ Axon is the fastest at one stream but 2.0–3.8× behind vLLM / SGLang at 128 co
 | Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5, Llama 3.1/3.2 and gpt-oss templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. On one GPU, decode rows of concurrent requests run in one batched step (`--parallel N`; #38), each request's output equal to running it alone; long prompts are fed in chunks between the decode steps (#45). Also OpenAI's Responses API and ollama's native API (#70; [serve-apis.md](serve-apis.md)), and `--api-key`, `/metrics`, `/slots` (#61). Each step's prompt chunk is sized from the measured step cost (#131); shortest-first admission with an 80 ms step is the default (`--admit-order sjf --step-ms 80`, #167). On the CPU, a CPU/GPU split, a multi-GPU pipeline or a MoE model, requests run one at a time. The KV cache carries over for shared prefixes. Default context: the model's trained length where it fits (#42). | `serve.rs`, `serve/`, `serve/engine.rs`, `serve/tools.rs` |
 | Multi-GPU | `--gpus 0,1`: pipeline parallel, layers split across GPUs in order, bit-identical to one GPU. P2P is opt-in and untested (`AXON_P2P=1`). No tensor parallel (#34). | `cuda/qwen2/pipeline.rs` |
 
-**Not on main** (the same list as the README's [Status](../README.md#status)): tensor parallel, block-scaled FP8 /
-NVFP4 weights, `serve` slot save/restore, shared prefix pages by default and prefilling a shared prefix once (#188),
-streaming MoE experts for prefill, gpt-oss experts on the GPU, batched serving of MoE models, batched speculative
-decoding in `serve` (#90 closed by its kill rule), a decode-shaped Hopper GEMM. The legacy `functions` field is
-still a 400.
+**Not on main yet:** tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, shared
+prefix pages by default and prefilling a shared prefix once for requests that arrive together (#188), streaming MoE
+experts through the GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and
+`qwen3moe`'s can be: `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched
+speculative decoding in `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on
+Hopper (a decode-shaped Hopper GEMM; see [results.md](results.md#serving-at-concurrency-one-h100-board)). The legacy
+`functions` field is still a 400. What's in flight and why: [roadmap.md](roadmap.md). How Axon is built and measured,
+and what was tried and dropped: [methodology.md](methodology.md), [history.md](history.md),
+[experiments-rejected.md](experiments-rejected.md).
 
-The full flag and environment reference is in the [README](../README.md#usage).
+The table in detail: [models.md](models.md) (architectures, types, files, CPU and GPU), [usage.md](usage.md) (every
+command and flag), [serving.md](serving.md) (`axon serve`), [environment.md](environment.md) (the `AXON_*`
+variables) and [library.md](library.md).
 
 ## The design contract: bit identity
 
@@ -99,7 +105,8 @@ Hugging Face's tokenizer, and Ollama's greedy output.
 
 ## Source map
 
-Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + `generate.rs`, then `lm.rs` → `cuda/`.
+Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + `generate.rs`, then `lm.rs` → `cuda/`
+(each step explained in [how-it-works.md](how-it-works.md#reading-the-source)).
 
 | file | what it is |
 |---|---|
@@ -174,6 +181,13 @@ order are in the rest of [roadmap.md](roadmap.md).
 
 ## Other docs
 
+- [usage.md](usage.md), [models.md](models.md), [serving.md](serving.md), [environment.md](environment.md),
+  [library.md](library.md): the reference that was the README's until 2026-11-07 (commands and flags, models and
+  hardware, `axon serve` with its operations and tool calling, the `AXON_*` variables, the library API).
+- [how-it-works.md](how-it-works.md): what Axon is built from, the bit-identity contract in short, and the source
+  in reading order.
+- [long-context.md](long-context.md): YaRN (`--rope-scaling yarn`) past the trained context: when to use it,
+  llama.cpp agreement, retrieval and short-context cost.
 - [benchmarks-gpu.md](benchmarks-gpu.md): RunPod RTX 4090 / RTX 5090 / H100 SXM and RTX 4050 laptop
   results, the serving boards (RTX 4090 and H100 SXM vs vLLM / SGLang), with caveats.
 - [design/multi-gpu.md](design/multi-gpu.md): pipeline parallel, then tensor parallel; bit-identity analysis.
@@ -182,7 +196,10 @@ order are in the rest of [roadmap.md](roadmap.md).
 - [design/fp8-weights.md](design/fp8-weights.md): FP8 checkpoints, exact as Q8_0 and native under `fast`.
 - [design/agent-workload.md](design/agent-workload.md): the north star's track; its stages B and C are
   [kv-ram-tier-exclusive.md](design/kv-ram-tier-exclusive.md) and [shared-prefix-pages.md](design/shared-prefix-pages.md).
-- [determinism.md](determinism.md): what is bit-identical, and the identity tuple behind `system_fingerprint`.
+- [design/spec-split.md](design/spec-split.md): drafting on a CPU/GPU split;
+  [design/a4-step-structure.md](design/a4-step-structure.md): the A4 step structure.
+- [determinism.md](determinism.md): what is bit-identical, and the identity tuple behind `system_fingerprint`
+  (`GET /identity` on `axon serve`).
 - [serve-apis.md](serve-apis.md): `axon serve`'s routes (chat completions, completions, Responses, ollama).
 - [testing.md](testing.md): the test tiers and what to run when.
 - [roadmap.md](roadmap.md): priorities, and what is not planned.
@@ -190,9 +207,10 @@ order are in the rest of [roadmap.md](roadmap.md).
 - [hardening.md](hardening.md): fuzzers, the multi-hour serve soak and the model-zoo sweep: method and results.
 - [history.md](history.md): every round and PR, with why, how it was verified, and before/after numbers.
 - [experiments-rejected.md](experiments-rejected.md): NO-GOs and regressions, with numbers. Read before starting a round.
-- [results.md](results.md): current standing vs ollama and llama.cpp, with dates, commits and hosts.
-- [research/](research/README.md): the round-10 research reports and scope.
-- [reviews/](reviews/README.md): outside reviews (curated; the reviewer's opinions, Haseeb's decisions).
-- [log/](log/README.md): one engineering-log entry per PR, NO-GO, board or merge train.
-- [../BENCH.md](../BENCH.md): CPU numbers and the Parabellum GPU board; [../README.md](../README.md):
-  full usage.
+- [results.md](results.md): current standing vs ollama, llama.cpp, vLLM and SGLang, with dates, commits and hosts.
+- [research/](research/README.md): the round-10 research reports and scope, and the research behind the roadmap.
+- [reviews/](reviews/README.md): outside reviews (curated; the reviewer's opinions, Haseeb's decisions), behind the
+  roadmap's order.
+- [log/](log/README.md): one engineering-log entry per PR, NO-GO, board or merge train (the convention for new work).
+- [../BENCH.md](../BENCH.md): CPU numbers and the Parabellum GPU board; [../README.md](../README.md): the overview
+  (its full usage moved to [usage.md](usage.md) on 2026-11-07).

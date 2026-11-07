@@ -20,7 +20,7 @@ identical across routes for the same messages (`serve_apis_match_chat_completion
 | every route above | OPTIONS | serve.rs: 204 with `Allow`; with `--cors`, a CORS preflight's headers too |
 
 Chat completions and completions: the field table is the module doc of `src/serve/api.rs`;
-tool calling is in the README ("Tool calling").
+tool calling is in [serving.md](serving.md#tool-calling).
 
 ## `POST /v1/responses`
 

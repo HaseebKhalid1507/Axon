@@ -12,7 +12,7 @@
 
 Equal to the fastest int4 engines at one stream; the lowest ITL p99 on the mixed long-prompt workload at C = 128
 (that cell only; worst on the short-prompt workload from C = 8 up); reproducible bits; 1.8–3.8× behind on
-throughput at C = 128 today. (All on one board: Qwen2.5-7B on an H100 SXM, 2026-10-19; [README](../README.md#where-it-stands).)
+throughput at C = 128 today. (All on one board: Qwen2.5-7B on an H100 SXM, 2026-10-19; [results.md](results.md#serving-at-concurrency-one-h100-board).)
 
 ## What it is
 
@@ -53,7 +53,7 @@ against three independent oracles (gguf-py, Hugging Face's tokenizer, Ollama's g
     3,770–7,146 tok/s), behind at every C ≥ 8, with worse TPOT and TTFT p99 at C ≥ 32;
   - cold start 1.0 s with the shipped kernel cache, vs 42–71 s.
 
-  Axon has no FP8 path, so the rows run different weights. [README](../README.md#where-it-stands),
+  Axon has no FP8 path, so the rows run different weights. [results.md](results.md#serving-at-concurrency-one-h100-board),
   [results.md](results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19).
 
 ## Known limits

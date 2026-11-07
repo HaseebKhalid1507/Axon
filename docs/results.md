@@ -82,6 +82,177 @@ requests.
 Method for all boards: [methodology.md](methodology.md#benchmark-protocol). Full raw tables:
 [benchmarks-gpu.md](benchmarks-gpu.md) and [../BENCH.md](../BENCH.md).
 
+## The headline boards
+
+The summary that was the README's "Where it stands" and "Numbers" until 2026-11-07, unchanged. The README now
+carries one table from it; the boards in full are below, in [benchmarks-gpu.md](benchmarks-gpu.md) and in
+[BENCH.md](../BENCH.md).
+
+### Serving at concurrency: one H100 board
+
+**Equal to the fastest int4 engines at one stream; the lowest ITL p99 on the mixed long-prompt workload at
+C = 128 (that cell only; worst on the short-prompt workload from C = 8 up); reproducible bits; 1.8–3.8× behind
+on throughput at C = 128 today.**
+
+Every clause is scoped to one board: Qwen2.5-7B-Instruct on one RunPod H100 SXM, main `c15c90e`, 2026-10-19, Axon
+`serve` (Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22 with AWQ int4 and with FP8, closed loop, greedy, 2 rounds,
+medians. *mix*: chat plus 2k–7.6k-token prompts; *classic*: 519-token prompts, 512 out. The weights differ per
+engine (Axon had no FP8 path then), so this compares engines as deployed, not kernels on equal bits. No other GPU,
+model or workload is covered by these numbers.
+
+| aggregate tok/s | C=1 | C=8 | C=32 | C=128 |
+|---|---:|---:|---:|---:|
+| mix: Axon | **287** | 795 | 1,324 | 1,868 |
+| mix: best other (engine) | 284 (SGLang-AWQ) | 1,212 (SGLang-AWQ) | 3,448 (SGLang-FP8) | 7,146 (vLLM-FP8) |
+| mix: vLLM-AWQ (like-for-like 4-bit) | 235 | 1,096 | 3,012 | 5,748 |
+| classic: Axon | **304** | 1,278 | 2,466 | 4,485 |
+| classic: best other | 296 (SGLang-AWQ) | 2,015 (SGLang-AWQ) | 6,149 (SGLang-FP8) | 14,380 (SGLang-FP8) |
+| classic: vLLM-AWQ | 240 | 1,786 | 5,682 | 12,190 |
+
+| ITL p99, ms (rank of 5, 1 = lowest) | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---:|---:|---:|---:|---:|
+| mix: Axon | 3.6 (1) | 58.2 (**5**) | 68.9 (2) | 74.0 (2) | **77.5 (1)** |
+| mix: the other four | 3.7–4.5 | 7.6–10.7 | 24.3–179.2 | 65.8–191.0 | 126.1–319.8 |
+| classic: Axon | 3.2 (1) | 6.3 (**5**) | 51.7 (**5**) | 53.6 (**5**) | 62.0 (**5**) |
+| classic: the other four | 3.6–4.5 | 4.1–4.9 | 5.2–6.9 | 8.7–9.9 | 20.2–39.7 |
+
+- **Ahead:** one stream (C = 1) on both workloads: throughput (the lead over SGLang-AWQ, +1 % / +3 %, is inside one
+  pod's uncertainty) and ITL p99; ITL p99 on *mix* at C = 128, where Axon's steps are slow (TPOT p50 57.9 ms) but
+  even, while the others spike; cold start, 1.0 s with the shipped kernel cache vs 42–71 s.
+- **Behind:** aggregate throughput at every C ≥ 8, by 2.0–3.8× on *mix* and 1.8–3.2× on *classic* at C = 128;
+  ITL p99 on *classic* from C = 8 up (at C = 128 62.0 vs 20.2–39.7 ms) and on *mix* at C = 8 (58.2 vs 7.6–10.7);
+  TPOT and TTFT at C ≥ 32 (*mix* C = 128: TPOT p50 57.9 vs 12.7–26.4 ms, TTFT p99 14.5 vs 1.9–5.3 s); only 26 % of
+  Axon's *mix* C = 128 requests meet the SLO (67–99 % for the others).
+
+Source: `cells.jsonl` of run `h100-1019-2058` (kept on the dev machine, not in the repo; every number above was
+re-derived from it, rounds 1–2, control round excluded), tables in
+[the board below](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19), method and cost in
+[the log](log/2026-10-19-h100-showdown.md).
+
+**Why not vLLM?** If you serve many concurrent users on datacenter GPUs, use vLLM or SGLang: on that H100 board they
+push 1.8–3.8× Axon's tokens at C = 128 with lower per-token latency from C = 8 up, and they have FP8, far more
+models, multi-node, LoRA and years of production use; Axon has one maintainer and no external users yet. Axon is for
+the other end: one binary with no Python and no CUDA toolkit, a one-second start (with the shipped kernel cache),
+the CPU and consumer GPUs as first-class targets, one-stream speed equal to the best int4 engines (H100; ahead of
+llama.cpp and ollama on the consumer and datacenter GPU boards, [this page](#where-axon-stands)), and outputs
+that don't depend on batching, prompt chunking or speculative drafting (every response says which bits it is:
+`system_fingerprint`). It is also a library ([library.md](library.md)), so a Rust program can run a model
+in-process.
+
+### Single stream: the GPU and CPU boards
+
+tok/s, median of 3. `pp560` / `pp2100` are prompt evaluation over ~560 / ~2100
+tokens, `tg128` decode over 128 tokens, `@1` one thread. Compare engines within one
+machine. Methods, ranges and more runs are in [BENCH.md](../BENCH.md) (CPU, dev laptop GPU)
+and [docs/benchmarks-gpu.md](benchmarks-gpu.md) (RunPod, RTX 4050 laptop, caveats).
+
+Datacenter and desktop GPUs (RunPod, main @ 7f42c02, 2026-10-18): axon ahead of both
+llama.cpp master ff5a233 (`llama-bench -ngl 99`) and ollama 0.40.6 in all 45 cells (3 GPUs ×
+Qwen2.5 0.5B/1.5B/3B/7B and Qwen3 8B Q4_K_M × pp560/pp2100/tg128). Qwen2.5 7B, axon /
+llama.cpp / ollama, and axon's range over llama.cpp across the five models:
+
+| GPU | 7B pp2100 | 7B tg128 | pp2100 vs llama.cpp | tg128 vs llama.cpp |
+|---|---|---|---|---|
+| RTX 4090 | 13632 / 12064 / 11655 | 186 / 181 / 167 | 1.06-1.77x | 1.03-1.19x |
+| RTX 5090 | 18529 / 14633 / 14311 | 310 / 276 / 237 | 1.26-2.10x | 1.12-1.70x |
+| H100 SXM | 14413 / 9684 / 9742 | 314 / 264 / 218 | 1.32-2.16x | 1.13-1.30x |
+
+The margins are thin on the 4090: 7B and Qwen3 8B decode are only +3 % over llama.cpp (186 vs 181,
+170 vs 165; 7B is +2.5 % before rounding), and Qwen3 8B pp2100 is +6 % (12450 vs 11710). On the H100, 7B
+and 8B prefill now runs ahead of the 4090 (7B pp2100 14413 vs 13632, 8B 12754 vs 12450); 0.5B-3B
+pp2100 and every pp560 cell still trail it. This is the first H100 board with #33's default `wgmma`
+routing on sm_90a ([docs/design/hopper.md](design/hopper.md)); axon's H100 pp2100 is +2 to +15 %
+over the 10-15 board, but the driver and host changed too, so that gain is not attributed to #33.
+pp560 gaps are wider (up to 5.3x vs llama.cpp, 12x vs ollama outside the four ollama cells with a
+cold first run) but mostly measure the other engines' fixed per-request cost; quote pp2100. Caveats (split ollama passes, prebuilt llama.cpp, a 5090
+prefill drop vs the 10-15 board that is not yet attributed): [docs/benchmarks-gpu.md](benchmarks-gpu.md).
+This board predates #92 and #100 (prefill: +3 % at pp2100 on a 4090, MEASURED; and a new 128 × 64 tile, +17 % at
+pp1050 on the dev laptop, MEASURED, the 4090 ESTIMATED +12–15 %), so its prefill columns are not current.
+
+**Serving on an H100 SXM** (main c15c90e, 2026-10-19, Qwen2.5-7B, closed loop, 2 rounds; run h100-1019-2058): Axon
+(Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. The weights differ per row (Axon had
+no FP8 path then), so this compares engines as deployed. Aggregate tok/s on the *mix* workload (chat plus 2k–7.6k-token
+prompts):
+
+| engine | weights | C=1 | C=8 | C=32 | C=128 | TPOT p50 at C=128 | ITL p99 at C=128 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Axon | Q4_K_M | **287** | 795 | 1,324 | 1,868 | 57.9 ms | **77.5 ms** |
+| vLLM | AWQ | 235 | 1,096 | 3,012 | 5,748 | 16.7 ms | 205 ms |
+| SGLang | AWQ | 284 | **1,212** | 2,477 | 3,770 | 26.4 ms | 320 ms |
+| vLLM | FP8 | 239 | 1,103 | 3,328 | **7,146** | **12.7 ms** | 140 ms |
+| SGLang | FP8 | 246 | 1,172 | **3,448** | 7,135 | 12.9 ms | 126 ms |
+
+Honest reading: Axon is the fastest single stream (by 1 % over SGLang-AWQ, which one pod can't settle; +20 % over
+vLLM) and has the lowest ITL p99 at C = 128 on this *mix* workload (on *classic* it has the highest from C = 8
+up: 62.0 vs 20.2–39.7 ms at C = 128), but it is **2.0–3.8× behind on throughput at C = 128** and behind from
+C = 8 up; only 26 % of its C = 128 requests meet the SLO (TTFT p99 14.5 s). On the *classic* workload (519 in, 512 out)
+it is 304 vs 240–296 at C = 1 and 4,485 vs 8,288–14,380 at C = 128. The cause is ESTIMATED to be the batched-decode
+step on sm_90 (tuned on consumer GPUs, no decode-shaped wgmma GEMM) and admission at high C; it is the top datacenter
+item on the [roadmap](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides). Full tables and method:
+[docs/benchmarks-gpu.md](benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19),
+[log](log/2026-10-19-h100-showdown.md).
+
+**Measured since those boards** (none re-boards the tables here; each is its PR's or its issue's own run, MEASURED):
+- **MoE on one RTX 4090** (#144, main `8508a75` vs llama.cpp `4413a19` at its best placement, 3 interleaved rounds,
+  clean, job 1026-215154-40d7; [board](benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)):
+  Qwen3-30B-A3B with every expert resident, pp2100 12,212 vs 9,289 (×1.31) but tg128 219.7 vs 252.5 (×0.87);
+  after #154, tg128 241.6 vs 254.6 in the same run (×0.95, job 1027-020521-6db3). Moonlight-16B-A3B trails on all
+  three (tg128 ×0.96, pp512 ×0.81, pp2100 ×0.57).
+- **Agent serving, Qwen2.5-7B on an RTX 4090 pod:** with the KV RAM tier, a 25k-token session evicted from the GPU
+  resumes in 0.141 s against main's 2.713 s re-prefill (#201, job 1105-211420-0618). With shared prefix pages
+  (`AXON_SHARE_KV=1`, against main `2aec1e5`; both with `--cache-ram 6G`), 8 subagents starting on a 6,006-token
+  shared prefix reach their first token at 0.591× main's TTFT p50 idle and 0.798× busy (#211, job 1106-173522-297a).
+  On a 1,722-page pool with 64 sessions (same flags), sharing gave 4.50× main's goodput, about half its turn TTFT
+  (p50 33 s on main, 16 s with sharing: both servers overloaded) and 0.63× the re-prefilled tokens, same bits
+  (medians of 3 rounds, every round the same way; #210, job 1106-170837-edc9). The cell's warm-sessions-per-GB
+  clause (3.01×: 1 warm session against 3–4) measured that queueing, not capacity
+  ([#210's reading](https://github.com/HaseebKhalid1507/Axon/issues/210#issuecomment-6697988287)).
+- **FP8 checkpoints** (#177): fast mode fails its bars on bella ([models.md](models.md#model-files-gguf-and-safetensors)).
+
+Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
+and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an
+NVIDIA GeForce RTX 5070 Ti Laptop GPU (the laptop part, not the desktop card; sm_120,
+12 GB), 2026-10-15:
+
+| model | engine | pp560 | pp2100 | tg128 |
+|---|---|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | axon 0851798 | 44779.7 | 44681.0 | 825.4 |
+| | ollama 0.35.0 | 14288.9 | 42593.6 | 583.2 |
+| | llama.cpp | 25333.7 | 42530.7 | 692.9 |
+| Qwen2.5 1.5B Q4_K_M | axon 0851798 | 21353.3 | 20168.4 | 419.7 |
+| | ollama 0.35.0 | 12157.8 | 17303.7 | 370.5 |
+| | llama.cpp | 13025.7 | 17320.2 | 405.9 |
+| Qwen2.5 3B Q4_K_M | axon 0851798 | 10800.9 | 10273.0 | 255.9 |
+| | ollama 0.35.0 | 7515.5 | 9415.9 | 229.4 |
+| | llama.cpp | 7563.1 | 9302.3 | 206.1 |
+| Qwen2.5 7B Q4_K_M | axon 0851798 | 5040.2 | 4898.1 | 118.0 |
+| | ollama 0.35.0 | 4227.1 | 4800.2 | 111.3 |
+| | llama.cpp | 4412.0 | 4105.1 | 112.0 |
+| Qwen3 0.6B Q8_0 | axon 0851798 | 35792.7 | 31853.1 | 646.0 |
+| | ollama 0.35.0 | 20215.7 | 30777.8 | 472.5 |
+| | llama.cpp | 20178.9 | 30827.2 | 541.6 |
+| Qwen3 4B Q4_K_M | axon 0851798 | 8206.4 | 7780.6 | 204.6 |
+| | ollama 0.35.0 | 6008.5 | 7213.9 | 172.6 |
+| | llama.cpp | 6264.7 | 7091.3 | 163.4 |
+| Qwen3 8B Q4_K_M | axon 0851798 | 4697.4 | 4512.1 | 110.0 |
+| | ollama 0.35.0 | 3806.2 | 4248.5 | 104.0 |
+| | llama.cpp | 3919.1 | 3791.3 | 105.7 |
+
+main has since gained the round-5 prefill changes (#24, 29c98a7): +2-23% pp2100 in
+that commit's own measurements, depending on the model (most on the small ones);
+the table predates them.
+
+CPU, an older run (from BENCH.md: main @ 74fe85e, 2026-10-13, before the GPU backend;
+Qwen2.5-0.5B-Instruct Q4_K_M, Parabellum's Intel Core Ultra 9 275HX, 18 threads, quiet machine):
+
+| engine | pp560 | pp2100 | tg128 | tg128@1 |
+|---|---|---|---|---|
+| axon 74fe85e | 1294.7 | 1068.8 | 163.8 | 29.9 |
+| ollama 0.35.0 | 1027.3 | 961.2 | 161.6 | 34.4 |
+
+How to reproduce the CPU runs (`scripts/bench.py`) and the loaded-machine numbers
+are in BENCH.md.
+
 ## Serving: RunPod H100 SXM, main c15c90e, 2026-10-19
 
 Run `h100-1019-2058`. Qwen2.5-7B-Instruct on one H100 80GB HBM3 SXM: Axon `serve --parallel 128` (Q4_K_M GGUF) vs
