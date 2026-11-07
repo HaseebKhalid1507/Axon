@@ -1,14 +1,14 @@
 # Where Axon stands
 
 The latest measured comparisons against ollama and llama.cpp, per host and model. Every number here is
-MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `39624db` (2026-10-25 21:19 EDT).
+MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `3014eeb` (2026-11-06 20:07 EST).
 
 **Newest result: the first datacenter serving board** (H100 SXM, main `c15c90e`, 2026-10-19, [below](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)).
 Axon is the fastest of five engine/weight rows at one stream and 2.0–3.8× behind vLLM / SGLang at 128 concurrent
 requests.
 
-> **No single-stream board below was run on `39624db`** (nor on `764792f`, `4507c75` or `a591e17`, the mains this
-> page was written for before). The newest single-stream board is RunPod at `7f42c02` (2026-10-18; see the exception at the
+> **No single-stream board below was run on `3014eeb`** (nor on `39624db`, `764792f`, `4507c75` or `a591e17`, the
+> mains this page was written for before). The newest single-stream board is RunPod at `7f42c02` (2026-10-18; see the exception at the
 > end of this box); the H100 serving board ran on `c15c90e`. The newest full boards are from main `0851798` (bella GPU, 2026-10-15 13:06) and main `f8d8a86`
 > (RunPod, avante, CPU, 2026-10-15/16). Merges since then that can change speed or output on some path (none
 > has been re-boarded). Each effect is copied from that PR's own body: **MEASURED** where the PR measured it
@@ -62,6 +62,12 @@ requests.
 > | — | #113, #124 | `serve` metrics ordering (#113: a request leaves in-flight before its last byte; md5 0 of 20) and the opaque library API with env errors instead of panics (#124: 85 md5 pairs identical, serve A/B 138/138); no speed claim |
 > | — | #105, #107, #120, #122, #128, #134 | tests and test-only kernels; no product path changed (#120 / #122: existing kernels' SASS unchanged; #134: md5 identical) |
 > | — | #103, #123, #130 | docs only |
+> | 3014eeb | #145, #147 MLA kernels | deepseek2 on the GPU only, same bits. **MEASURED** (bella, Moonlight `--gpu-experts auto`): tg128 121.4 → 151.0 (TAINTED, 1026-054428-1455), pp2100 2,130 → 3,212 ([log](log/2026-10-26-mla-prefill.md)) |
+> | 3014eeb | #151 `attn_blk_nb` | `serve` batch decode at nb ≥ 32 only, exact. **MEASURED** (clean 4090, attention kernel alone, 7B): ×1.21–1.94 f16, ×1.77–2.59 q8 (1026-221123-4546, [log](log/2026-10-26-attn-pool-nb.md)); end to end not boarded |
+> | 3014eeb | #154 MoE decode T2b | MoE decode, same bits. **MEASURED** (4090): Qwen3-30B-A3B tg128 222.1 → 241.6 (+8.8 %, 1027-020521-6db3) |
+> | 3014eeb | #167 sjf / 80 ms default, #178 gemm2t `down` | `serve` batch only (#165's rule S on an H100; #178: the pool step −2.5 % at nb 32 and 64, [below](#beyond-single-stream-throughput)) |
+> | 3014eeb | #146, #166, #201, #207, #216, #177, #191 | opt-in or new paths: qwen3moe `--gpu-experts`, `--cache-ram`, `AXON_SHARE_KV=1`, FP8 checkpoints (#191: their `--numerics fast` prefill below sm_120) |
+> | — | #141, #142, #180, #206, #215, #173 | start-up checks (refusals) and the identity tuple (#173: every fingerprint changes once; output bytes don't) |
 >
 > **Exception:** the [RunPod board of 2026-10-18](#gpu-runpod-rtx-4090--rtx-5090--h100-sxm-main-7f42c02-2026-10-18-1411--1508)
 > ran on main `7f42c02`, which contains every row above marked `4507c75` or earlier; only the `7f42c02` and `c15c90e` rows
@@ -81,7 +87,7 @@ Method for all boards: [methodology.md](methodology.md#benchmark-protocol). Full
 Run `h100-1019-2058`. Qwen2.5-7B-Instruct on one H100 80GB HBM3 SXM: Axon `serve --parallel 128` (Q4_K_M GGUF) vs
 vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. Closed loop, C = 1 … 128, two workloads (*classic*:
 519-token prompt, 512 out; *mix*: chat plus 2k–7.6k-token prompts), 2 rounds, engines interleaved per C, greedy.
-**The weights differ per row** (Q4_K_M vs AWQ vs FP8; Axon has no FP8 path), so this compares engines as deployed,
+**The weights differ per row** (Q4_K_M vs AWQ vs FP8; Axon had no FP8 path then), so this compares engines as deployed,
 not kernels on equal bits. Full tables: [benchmarks-gpu.md](benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19);
 method, cost and what went wrong: [log](log/2026-10-19-h100-showdown.md).
 
@@ -287,9 +293,10 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 | gpt-oss-20b on the CPU | #78 | pp 130.0 (739-token prompt) vs 104.8 (pp512), 1.24×; tg128 23.5 vs 11.2, 2.10× | bella, exclusive, 24 threads both, neither pinned, llama.cpp's thread count not swept, prompt lengths differ |
 | Q2_K / Q3_K on the GPU | #72 | 7B Q3_K_M pp2100 3787 vs 3467 (+9 %), tg128 96.1 vs 98.9 (**−3 %**); 7B Q2_K pp560 2876 vs 3032 (**−5 %**), pp2100 +3 %, tg128 121.9 vs 111.2 (+10 %) | bella GPU vs `llama-bench -ngl 99`, 3 rounds |
 | FP8 checkpoints (RedHatAI Qwen2.5-7B-Instruct-FP8-dynamic) | #177 | vs the 7B Q4_K_M on the same GPU: `--numerics fast` (native e4m3) **tg128 0.32–0.38×** (32 vs 85–101 tok/s), pp512 0.88–0.97×, pp2048 0.82–0.90×; exact mode (Q8_0 at load) tg128 50–53, pp 0.64–0.77×. Accuracy vs the exact dequant: fast top-1 95.9 % (bar 97 %, **fail**), exact 98.1 % (the 0.5B's exact mode scores 96.7 % against HF F32, below the 97 % bar) | bella, 2 runs of 3 interleaved rounds, both **TAINTED** (foreign GPU mean 10.9 / 11.9 %): the tg gap is far outside it. No llama.cpp or vLLM in the run ([log](log/2026-10-30-fp8-weights.md)) |
+| Qwen3-30B-A3B and Moonlight, experts resident, vs llama.cpp's best placement | #144, #154 | 30B all on the GPU: pp2100 12,212 vs 9,289 (×1.31), pp512 ×1.32, **tg128 219.7 vs 252.5 (×0.87)**, ×0.95 after #154 (241.6 vs 254.6). Moonlight: **×0.96 / ×0.81 / ×0.57** (tg128 / pp512 / pp2100) | RunPod RTX 4090, main 8508a75, 3 interleaved rounds, CLEAN (1026-215154-40d7; #154: 1027-020521-6db3). [Board](benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record) |
 | Q2_K / Q3_K on the CPU | #72 | 7B Q2_K pp2100 57.2 vs 97.0 (**−41 %**), tg128 22.2 vs 10.4; 7B Q3_K_M pp2100 87.8 vs 112.2 (**−22 %**), tg128 18.8 vs 9.0 | bella CPU, 16 threads, 3 rounds, on a binary with the merged CPU kernels (0cb1e7a); a confirmation run on the final binary was queued, not a gate |
 
-## Known losses and gaps (as of 39624db)
+## Known losses and gaps (as of 3014eeb)
 
 - **Datacenter serving (H100 SXM, 10-19):** 2.0–3.8× behind vLLM / SGLang on throughput at C = 128 (mix 1,868 vs
   3,770–7,146 tok/s), behind from C = 8 up, TPOT p50 57.9 ms vs 12.7–26.4, 26 % of requests inside the SLO, TTFT p99
@@ -297,15 +304,18 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 - Serving on the RTX 4090 (10-18): 13–24 % behind vLLM-AWQ at C = 8–32 (since then #86 cut the ≤ 16-row step 5–6 %;
   not re-served).
 - MoE prefill with the experts on the CPU: gpt-oss-20b 0.27× and Moonlight 0.82× llama.cpp (#98, #89); see also #67
-  below. Moonlight with its experts resident (`--gpu-experts auto`, #127) prefills 3.40× its CPU-expert path
-  (TAINTED), but hasn't been run against llama.cpp.
+  below. With every expert resident on a 4090 (#144), Moonlight trails on all three (tg128 ×0.96, pp2100 ×0.57) and
+  Qwen3-30B-A3B on decode (×0.95 after #154); [above](#new-models-and-types-since-the-boards).
 - `serve` runs a MoE model one request at a time (no slot pool for MoE backends).
 - Shortest-first admission (`--admit-order sjf`, #131) missed its kill-rule clause on the laptop cells (short TTFT
   p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed). On the H100 cells it was designed for, `--admit-order sjf
   --step-ms 80` passed #165's rule S (mix C=128 +7.6 % aggregate, +60.5 % goodput) and is the default since #167.
   On small GPUs at low concurrency the 80 ms step is checked by a bella C=1/4 no-regression cell (#167 §5).
-- A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE). (An
-  explicit `--parallel N` that doesn't fit in GPU memory is now refused at start: #137, #141.)
+- Under a memory limit, loads that can't fit are refused instead of OOM-killed: a dense CPU model (#142), a split's
+  CPU half (#180, #206), an FP8 checkpoint and the loader's conversions (#206, #215); an explicit `--parallel N` that
+  doesn't fit in GPU memory (#141). Not yet counted: the CUDA module's ~25 MiB (#217) and the CUDA context (#184).
+  Each check has a tolerance (about 34 MiB on an 8-CPU slot for the split's), and caps just above a refusal can still
+  be OOM-killed ([log](log/2026-11-06-ram-checks-2.md)).
 
 - Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.3–3.5 % on 7B f16, +10–12 % on 0.5B
   f16 in its own runs); nobody has re-boarded it against llama.cpp.
@@ -323,7 +333,7 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   layout yet. Q2_K pp560 and Q3_K_M tg128 on the GPU trail by 5 % and 3 %.
 - MoE prefill trails llama.cpp `--cpu-moe` 2.6× (4x0.6B) and 1.5× (Pruned-2B) at pp512 (#67): llama.cpp ships the
   big-batch expert products to the GPU (stage 3 here).
-- MoE was measured on dev models, gpt-oss-20b and Moonlight-16B-A3B only: no real Qwen3-30B-A3B run, nothing larger.
+- MoE was measured on dev models, gpt-oss-20b, Moonlight-16B-A3B and Qwen3-30B-A3B (#144); nothing larger.
 - The KV RAM tier (`serve --cache-ram`, #166) is opt-in, default off: it missed rule B's TTFT-resume clause on bella
   (7B f16, 6G, 1031-063509-f763: 6,592 of 26,496 tokens restored, 7.05 s vs 8.68 s, TAINTED). It is written as pages
   fill, so it holds about its own size, the GPU pool's included; it helps only when the work written during the gap
@@ -336,5 +346,8 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   resume likely misses the clause's 0.3 s: two TAINTED reads, medians 0.513 s (1105-211421-8e35) and 0.358 s
   (1106-051210-8062), 6 of 6 rounds over 0.3 s, against main's 8.83 and 8.58 s; the lead waived bella's resume cell
   as a gate of #201. Still opt-in: `auto` waits for the RAM-pinning question and a clean bella s4 replay at its head.
+- Shared prefix KV pages (`AXON_SHARE_KV=1`, #207) are opt-in: two of #187's clauses failed on a 4090 (s4 TTFT-new
+  1.003× vs ≤ 0.6×, fan-out siblings 0.261× vs ≤ 0.25×). The re-registered cells (#210, #211) ran at #216's code;
+  their results and the default: [roadmap](roadmap.md#state-at-the-11-06-pause).
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

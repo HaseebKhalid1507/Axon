@@ -120,7 +120,8 @@ still matched each other bit for bit.
 
 ## Gates
 
-Before a PR, on the exact tree that will merge:
+Before a PR, on the exact tree that will merge (commits after the gated one may change docs only; `axon-mergeready`
+checks it):
 
 | gate | what | since |
 |---|---|---|
@@ -176,6 +177,10 @@ each one.
   - axon-run admits bella GPU jobs only at ≤ 80 °C.
   Absolute numbers from a hot or shared machine are labelled as such, and only within-round ratios are
   read (#12, #15, #20).
+- **TAINTED.** A `--timing` job waits while another process's GPU load is above 10 %, logs that foreign load
+  during the run (`FOREIGN_GPU max/mean`) and is marked TAINTED if its mean is over 5 % or its max over 25 %
+  (`axon-run --help`). bella is Haseeb's desktop, so its timing runs often are. A TAINTED number keeps the label
+  wherever it is quoted; the PR or its reviewer says whether it can still decide anything.
 - **Each engine at its best.** On the hybrid CPU, llama.cpp master collapses at 18 threads, so it is
   compared at its best thread count (`sweep.py`) before any claim is made against it (2026-10-13).
 - **Labels.** Every number is MEASURED (with a log or job ID), ESTIMATED (arithmetic shown), CODE (read in the
@@ -210,6 +215,9 @@ each one.
   and a ledger) refuses pods past the cap and kills everything at the cap or the deadline. A watchdog on
   each pod terminates it at its booked end or after 10 min idle. Budget: $20 for 2026-10-15 23:20 to
   10-16 23:20 (guard at $18), raised by $20 on 10-16 14:35 (guard at $38).
+- **Gate plumbing**: `axon-podjob` (script gates), `axon-gatewatch` and `axon-ciwatch` (wake the foreman when a job
+  set or CI finishes), `axon-mergeready` (the read-only merge check), `axon-postmerge` (the gate on `main` after a
+  merge) and `axon-gatelogs` (public gate logs). How a PR uses them: [testing.md](testing.md#gate-jobs-maintainers).
 - **Heartbeat and watchdogs**: `axon-heartbeat` (a systemd user service) sends the foreman a status digest
   every 5 min, with pod and host usage flags. `axon-q-watchdog` reports queue stalls, hung lock holders,
   VRAM hogs and GPU ≥ 90 °C. Small "verify-watch" or "bench-waiter" agents block on a job and wake the foreman.

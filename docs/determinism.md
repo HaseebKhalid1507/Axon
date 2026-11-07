@@ -18,14 +18,15 @@ otherwise.
 | `exact` (default) | this page's whole contract | the md5 of `gen` outputs against main, the bit-identity tests | `numerics=exact/N` |
 | `fast` | the same model to within a tolerance of exact mode on the same device, on every path. **No bits**: a reply may change with what it is batched with, with a cached prefix vs a fresh prefill, with the prompt's chunking and with drafting (the contract's rows below are tolerance, not equality; ADR §4.2), unless a fast kernel documents a stronger property. The fingerprint names the kernel set, not the bits: don't cache replies on it | `assert_graded` against exact with an exact-vs-exact floor, one grading per path (decode, batched prefill, cached prefix, steps under load), ΔNLL, a drafting χ² (ADR §4.2) | `numerics=fast/N.M` |
 
-**No fast kernel exists yet.** Until one does, `--numerics fast` runs the exact kernels and
-says so once on stderr (`no fast kernels on this backend yet; running exact kernels;
-identity says fast`), but it still identifies as fast: its fingerprint, its session files
+**The only fast kernels are an FP8 checkpoint's** (fp8.cu's e4m3 products on the GPU, sm_89 and up: #177; below
+sm_120 the prefill GEMM's product runs as f16 mmas, #191). Everywhere else (every GGUF model, the CPU)
+`--numerics fast` runs the exact kernels and says so once on stderr (`no fast kernels on this backend yet; running
+exact kernels; identity says fast`), but it still identifies as fast: its fingerprint, its session files
 (a `chat --session` file saved in one mode is restored into the other as tokens, prefilled
 again, never as bytes) and its NVRTC kernel modules (compiled with `-DAXON_FAST`, their own
 cache entries) are fast mode's. A fast fingerprint promises less than an exact one, so a
-client that happens to get exact bits under it today was never promised more than
-tolerance, and the first fast kernel bumps `NUMERICS_VERSION_FAST`. The library says which
+client that happens to get exact bits under it was never promised more than
+tolerance. The library says which
 it is: `Backend::fast_kernels()` is false while a fast backend runs exact's kernels. The mode is the whole
 process's (a cache written by one mode's kernels can't be continued exactly by the
 other's); there is no per-request mode: run two servers. Draft models always run exact
@@ -191,7 +192,7 @@ norms, dequant, the sampler's order or RNG; and what turns a request into tokens
 the tokenizer, chat templates and prompt rendering, stop tokens and stop strings, think
 handling. A change that keeps every bit (proven by the md5 gate) doesn't bump it.
 `NUMERICS_VERSION_FAST` is bumped by a change to a fast-set kernel or to its routing. A
-change to code both modes run (today every kernel: fast mode has none of its own) bumps
+change to code both modes run (every kernel except the FP8 checkpoints' fast set: #177, #191) bumps
 `NUMERICS_VERSION_EXACT` alone, and fast's fingerprints move with it anyway: fast's tag is
 `fast/<exact>.<fast>` (`fast/1.3` today), so no second bump has to be remembered. A new flag that
 changes bits adds a field to the tuple, set only when the flag is, so default fingerprints

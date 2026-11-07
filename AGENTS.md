@@ -51,6 +51,9 @@ Breaking one of these gets the PR closed.
    - A feature that must change bits (a new flag such as `--kv q8` or `--rope-scaling`) changes them only
      when the flag is set. Default output stays byte-identical.
    - Changing the canonical order itself needs a maintainer's agreement on the issue *before* you build it.
+   - The exception is `--numerics fast` (opt-in; the default under `serve --datacenter`, #173): its kernels are
+     graded by tolerance against exact mode instead ([determinism.md](docs/determinism.md#numerics-modes)). The
+     only ones so far are FP8 checkpoints' (#177). The default, exact, keeps this rule.
 3. **The md5 gate against `main`.** Greedy `axon gen` output of the candidate is compared with `main`'s,
    built from the merge base, on the same machine. Every md5 must match, or each difference must be
    intended and explained in the PR ([recipe below](#the-md5-gate)).

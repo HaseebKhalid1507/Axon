@@ -2,6 +2,11 @@
 
 > **Draft.** Not tagged, not published. Tagging, the date and the GitHub release are the maintainer's call; this
 > page is what the release would say. Full list of changes: [CHANGELOG.md](../CHANGELOG.md).
+>
+> Written for the CHANGELOG's 0.1.0 scope (through #113, main `aecc49d`, plus the library split). A tag at a later
+> main also ships the CHANGELOG's [Unreleased](../CHANGELOG.md#unreleased-after-010s-draft) entries, and then two
+> lines below are out of date: "Axon has no FP8 path" (FP8 checkpoints since #177) and "MoE experts run on the CPU"
+> (deepseek2's and qwen3moe's can be resident on the GPU, `--gpu-experts`, opt-in: #127, #146).
 
 ## In one sentence
 
