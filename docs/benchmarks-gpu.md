@@ -781,7 +781,7 @@ different prompts and output lengths.
 ### Parabellum: RTX 5070 Ti Laptop (sm_120, 12 GB)
 
 The dev laptop's board (main `0851798`, 2026-10-15, 7 models, vs ollama 0.35.0 and llama.cpp
-`4413a19`) is in [BENCH.md](../BENCH.md#2026-10-15-gpu-main--0851798) and [results.md](results.md#single-stream-the-gpu-and-cpu-boards). Axon led in all
+`4413a19`) is in [BENCH.md](../BENCH.md#2026-10-15-gpu-main--0851798) and [results.md](results.md#gpu-bella-rtx-5070-ti-laptop-sm_120-12-gb-main-0851798-2026-10-15-1306). Axon led in all
 21 cells. The thinnest margins were 7B pp2100 (+2% vs ollama) and 7B tg128 (+5%). That board predates
 the round-5 prefill changes now on main. For scale, Axon 7B there: pp560 5,040 / tg128 118. On the
 RunPod 4090 it was 14,122 / 185.

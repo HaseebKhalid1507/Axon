@@ -6,24 +6,9 @@ hardware: [models.md](models.md). `axon serve`: [serving.md](serving.md). Enviro
 
 ## Quick start
 
-```bash
-git clone https://github.com/HaseebKhalid1507/Axon.git
-cd Axon
-cargo build --release
-
-mkdir -p models
-curl -fL -o models/qwen2.5-0.5b-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
-
-./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32
-./target/release/axon chat models/qwen2.5-0.5b-q4_k_m.gguf
-
-# the same on an NVIDIA GPU (the build is the same; the driver and NVRTC are found at run time)
-./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32 --device cuda
-```
-
-`gen` streams the text to stdout and prints prompt/decode speed to stderr.
-`chat` is a conversation: type a message, get a reply, keep going.
+Build, download a model, `gen`, `chat` and `serve`: the [README's quick start](../README.md#quick-start). `gen`
+streams the text to stdout and prints prompt and decode speed to stderr; `chat` is a conversation: type a message,
+get a reply, keep going.
 
 ## Generation
 

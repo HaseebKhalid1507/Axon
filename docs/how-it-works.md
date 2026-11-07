@@ -6,7 +6,6 @@ file-by-file table is the [source map](START-HERE.md#source-map); the bit-identi
 
 ## Built from scratch
 
-
 No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reader,
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that

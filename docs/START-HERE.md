@@ -30,7 +30,8 @@ about 121k lines of Rust and 9.9k of CUDA, tests included (`git ls-files` + `wc 
 in `src/`). Single-stream speed is ahead of llama.cpp and ollama in 45 of 45 cells on RunPod RTX 4090 / RTX 5090 /
 H100 SXM (main 7f42c02), and ahead of ollama in 23 of 24 cells on an RTX 4050 laptop
 ([benchmarks-gpu.md](benchmarks-gpu.md)). **Serving at datacenter concurrency is behind:** on an H100 SXM (10-19)
-Axon is the fastest at one stream but 2.0–3.8× behind vLLM / SGLang at 128 concurrent requests
+Axon is level with the fastest int4 engines at one stream (+1–3 %, inside one pod's noise) but behind vLLM / SGLang
+(AWQ and FP8 weights) from C = 8 up, 1.8–3.8× at 128 concurrent requests
 ([results.md](results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)).
 
 ## What works on main
@@ -56,7 +57,7 @@ prefix pages by default and prefilling a shared prefix once for requests that ar
 experts through the GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and
 `qwen3moe`'s can be: `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched
 speculative decoding in `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on
-Hopper (a decode-shaped Hopper GEMM; see [results.md](results.md#serving-at-concurrency-one-h100-board)). The legacy
+Hopper (a decode-shaped Hopper GEMM; see [results.md](results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)). The legacy
 `functions` field is still a 400. What's in flight and why: [roadmap.md](roadmap.md). How Axon is built and measured,
 and what was tried and dropped: [methodology.md](methodology.md), [history.md](history.md),
 [experiments-rejected.md](experiments-rejected.md).

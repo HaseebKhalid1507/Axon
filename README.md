@@ -73,44 +73,33 @@ Every flag and its default: [docs/usage.md](docs/usage.md). The `AXON_*` variabl
 
 ## What it does
 
-- **CPU and GPU, one binary.** On the CPU it picks scalar, AVX2 or AVX-VNNI kernels at run time. On NVIDIA GPUs it
-  replays each token as a captured CUDA graph, with int8 tensor cores for prompts (sm_80+). A model too big for the
-  GPU is split across the CPU and the GPU, and `--gpus 0,1` splits one across GPUs. [More](docs/models.md#hardware)
-- **The model families.** Qwen2 / Qwen2.5, Qwen3, Llama 3.x (and SentencePiece `llama` models such as Mistral 7B
-  v0.3), Gemma 3 1B and 4B. Mixture of experts: Qwen3 MoE (Qwen3-30B-A3B), gpt-oss-20b, and the DeepSeek V2/V3 / Kimi
-  K2 architecture (`deepseek2`, run on Moonlight-16B-A3B; nothing larger yet), with attention on the GPU and the
-  experts on the CPU; Qwen3 MoE's and `deepseek2`'s experts can stay on the GPU too (`--gpu-experts`).
-  [More](docs/models.md#architectures)
-- **GGUF and safetensors, FP8 included.** GGUF files are read in place: F32, F16, Q4_0 to Q8_0, Q2_K to Q6_K and
-  IQ4_NL (and gpt-oss's MXFP4 experts). Hugging Face checkpoint directories load too: BF16 / F16 / F32 on the CPU,
-  and per-channel FP8 (`*-FP8-dynamic`) on the CPU and the GPU, as Q8_0 by default or natively on sm_89+ with
-  `--numerics fast`. [More](docs/models.md#model-files-gguf-and-safetensors)
-- **Bit-exact fast paths.** Batched prefill gives exactly the logits of feeding one token at a time, every SIMD
-  kernel matches its scalar twin, and in `serve` on one GPU a request gets the same output batched as alone. Every
-  response names what produced it (`system_fingerprint`). [More](docs/determinism.md)
-- **`axon serve`.** OpenAI chat completions, completions and the Responses API, plus ollama's API, streamed or
-  whole. Tool calling for Qwen3, Qwen2.5, Llama 3.1 / 3.2 and gpt-oss. On one GPU, continuous batching over a paged
-  KV pool, with `--api-key`, `/metrics` and `/slots`. [More](docs/serving.md)
-- **KV that outlives the request.** `chat --session` saves a conversation. A 29.8k-position 7B session restores in
-  0.41–0.45 s instead of a 3.16 s re-prefill (RTX 4090). In `serve`, opt-in for now: a KV RAM tier (`--cache-ram`)
-  and shared prefix pages (`AXON_SHARE_KV=1`). [More](docs/serving.md#operations-auth-metrics-slots)
-- **Speculative drafting, lossless.** Prompt lookup (`--draft K`) or a small draft model (`--draft-model`): the same
-  output with or without. With a draft model (K = 3), greedy decode ran +37 % on Qwen2.5-7B, +44 % on Qwen3-8B and
-  +63 % on Llama-3.1-8B. Sampled, it gains little or nothing. [More](docs/usage.md#speculative-drafting)
-- **Refuses instead of dying.** A load that can't fit in the RAM available (the host's or a cgroup limit's) is
-  refused with the figures and a way out, not OOM-killed. A run capped within ~48 MiB above that edge can still be
-  killed (#217). [More](docs/usage.md#memory-limits)
-- **A library too.** `axon::load`, `Backend`, `Tokenizer`, `Lm`, `generate` and `serve`, in-process from Rust
-  (0.x, not published yet). [More](docs/library.md)
-- **Almost no dependencies.** Five crates. No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: the
-  driver and NVRTC are loaded with `dlopen`. [More](docs/how-it-works.md)
+- **CPU and GPU, one binary.** AVX2 and AVX-VNNI on the CPU, CUDA graphs and tensor cores on NVIDIA GPUs. Big dense
+  Qwen and Llama models split across the CPU and GPUs. [More](docs/models.md#hardware)
+- **The model families.** Qwen2.5, Qwen3, Llama 3, Mistral and Gemma 3, plus the mixture-of-experts Qwen3-30B-A3B,
+  gpt-oss-20b and Moonlight, DeepSeek V3's architecture. [More](docs/models.md#architectures)
+- **GGUF and safetensors, FP8 included.** GGUFs from Q2_K to F16. Hugging Face checkpoints: BF16 on the CPU,
+  FP8-dynamic on the CPU and the GPU. [More](docs/models.md#model-files-gguf-and-safetensors)
+- **Bit-exact fast paths.** By default, batching, prompt chunking and drafting never change a reply's bits, and every
+  response names what produced it. [More](docs/determinism.md)
+- **`axon serve`.** The OpenAI chat, Responses and ollama APIs, with tool calling. Continuous batching for dense
+  models on one GPU; MoE serves one request at a time. [More](docs/serving.md)
+- **KV that outlives the request.** `chat --session` restores a 29.8k-token 7B conversation in 0.41–0.45 s instead
+  of a 3.16 s re-prefill, on an RTX 4090. [More](docs/usage.md#sessions)
+- **Speculative drafting, lossless.** Prompt lookup or a draft model, same output. A draft model sped up greedy 7B
+  and 8B decode by 37–63 %; sampled, it gains little. [More](docs/usage.md#speculative-drafting)
+- **Refuses instead of dying.** A load that won't fit in RAM or its cgroup limit is refused with the numbers, not
+  OOM-killed. One with under ~48 MiB to spare can still be killed. [More](docs/usage.md#memory-limits)
+- **A library too.** Load, place and run a model in-process from Rust: `axon::load`, `Backend`, `generate`, `serve`.
+  Version 0.x, not on crates.io yet. [More](docs/library.md)
+- **Almost no dependencies.** Five crates. No ggml, no BLAS, no CUDA toolkit at build time: the driver and NVRTC
+  load at run time. [More](docs/how-it-works.md)
 
 ## Works with
 
 `axon serve` speaks the APIs these clients already use. Each has been run against it:
 
 - **OpenAI SDKs:** the `openai` Python library, or any OpenAI client with `base_url="http://127.0.0.1:8080/v1"`.
-- **ollama clients:** the `ollama` CLI and the `ollama` Python library (`/api/chat`, `/api/generate`, `/api/tags`, ...).
+- **ollama clients:** the `ollama` CLI and the `ollama` Python library.
 - **codex:** through a `wire_api = "responses"` provider, or `codex --oss --local-provider ollama`.
 - **opencode:** through `ollama-ai-provider-v2`. **pi:** through `openai-responses`.
 - **Synaps:** a Synaps session on gpt-oss-20b, with working tool calls
@@ -124,8 +113,8 @@ transcripts: [docs/log/2026-10-17-serve-responses-ollama.md](docs/log/2026-10-17
 
 ## Benchmarks
 
-One RunPod RTX 4090, Q4_K_M GGUFs, tok/s, medians of 3 interleaved rounds. `pp2100` is a ~2,100-token prompt,
-`tg128` decoding 128 tokens. **Bold** marks where Axon is behind.
+Tokens per second on an RTX 4090 (RunPod) unless marked, medians of interleaved rounds. `pp2100` is a ~2,100-token
+prompt, `tg128` decoding 128 tokens. **Bold** marks where Axon is behind.
 
 | model | test | Axon | llama.cpp | ollama | Axon / llama.cpp |
 |---|---|---:|---:|---:|---:|
@@ -135,52 +124,50 @@ One RunPod RTX 4090, Q4_K_M GGUFs, tok/s, medians of 3 interleaved rounds. `pp21
 | | tg128 | 186 | 181 | 167 | 1.03× |
 | Qwen3-8B | pp2100 | 12,450 | 11,710 | 11,340 | 1.06× |
 | | tg128 | 170 | 165 | 153 | 1.03× |
+| Gemma 3 4B | pp2100 | 8,782 | 17,920 | 3,436 | **0.49×** |
+| | tg128 | 257 | 221 | 97 | 1.16× |
 | Qwen3-30B-A3B (MoE) | pp2100 | 12,212 | 9,289 | – | 1.31× |
 | | tg128 | 219.7 | 252.5 | – | **0.87×** |
 | Moonlight-16B-A3B (MoE) | pp2100 | 7,004 | 12,272 | – | **0.57×** |
 | | tg128 | 272.9 | 285.5 | – | **0.96×** |
+| gpt-oss-20b (MoE) † | pp512 | 265 | 995 | – | **0.27×** |
+| | tg128 | 46.6 | 23.4 | – | 1.99× |
 
-- **Dense rows:** Axon main `7f42c02` against llama.cpp `ff5a233` (`llama-bench -ngl 99`) and ollama 0.40.6,
-  2026-10-18. On that board Axon led both in all 45 cells (RTX 4090, RTX 5090 and H100 SXM × five models × three
-  tests). Its thinnest margins are the 4090 cells above: 7B and 8B decode (1.03×) and 8B pp2100 (1.06×).
-- **MoE rows:** Axon main `8508a75`, every expert on the GPU, against llama.cpp `4413a19` at its best placement
-  (also all on the GPU), 2026-10-26, job `1026-215154-40d7`, no ollama run. Since then #154 brought the 30B's
-  decode to 241.6 against 254.6 (0.95×, job `1027-020521-6db3`).
-- **Behind elsewhere:** serving at datacenter concurrency. On an H100 SXM (Qwen2.5-7B, 2026-10-19) Axon is the
-  fastest of five engine and weight rows at one stream, but vLLM and SGLang push 1.8–3.8× its tokens at 128
-  concurrent requests (two workloads). Also behind: Gemma 3 prefill (no tensor-core attention at its head size),
-  MoE prefill with the experts on the CPU, and CPU decode on 1.5B–8B (tied with ollama, not ahead):
-  [the full list](docs/results.md#known-losses-and-gaps-as-of-3014eeb).
-- None of these boards ran on today's main. Merges since then changed some cells (prefill: #92, #100; MoE decode:
-  #154).
+Dense rows: 2026-10-18, llama.cpp `ff5a233`, ollama 0.40.6. Gemma: #35's own run, 10-16, ollama 0.35. MoE rows:
+10-26, llama.cpp `4413a19`, every expert on the GPU; #154 has since brought the 30B's decode to 0.95×. † A laptop
+RTX 5070 Ti, experts on the CPU for both engines, Axon's prompt 486 tokens (#98, 10-18). None of these ran on
+today's main. Method, caveats and every known loss:
+[docs/results.md](docs/results.md#known-losses-and-gaps-as-of-3014eeb).
 
-Every board with its method, caveats and hardware: [docs/results.md](docs/results.md),
-[docs/benchmarks-gpu.md](docs/benchmarks-gpu.md) and [BENCH.md](BENCH.md).
+**Serving:** on an H100 SXM (Qwen2.5-7B, 10-19) Axon is level with the fastest int4 engines at one stream (+1–3 %,
+inside one pod's noise). From 8 concurrent requests up vLLM and SGLang, on AWQ and FP8 weights, lead: 1.8–3.8×
+Axon's tokens at 128. On an RTX 4090, vLLM-AWQ is 13–24 % ahead at 8–32 requests (Qwen2.5-7B, 10-18).
+[Serving boards](docs/results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)
 
 ## Why Axon
 
 - **Cheap means every machine counts.** The CPU and consumer GPUs are first-class targets, not fallbacks, and one
   binary covers them all.
-- **Reproducible bits.** In the default `exact` numerics a reply doesn't change with what it's batched with, how the
-  prompt is chunked or whether drafting is on, and its `system_fingerprint` names what produced it.
-  [More](docs/determinism.md)
-- **One binary, a one-second start.** No Python, no CUDA toolkit. With the shipped kernel cache it starts in 1.0 s,
-  against 42–71 s for vLLM and SGLang on the same H100.
+- **Reproducible bits.** By default a reply doesn't change with what it's batched with, how the prompt is chunked
+  or whether drafting is on, and its `system_fingerprint` names what produced it. [More](docs/determinism.md)
+- **One binary, a one-second start.** No Python, no CUDA toolkit. Once its kernels are cached it starts in 1.0 s,
+  against 42–71 s for vLLM and SGLang on the same H100. The first GPU run compiles them.
 - **Measured in the open.** Each board names its commit, hardware and job, and what lost or was dropped is written
   down too: [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
 **Not for you if:**
-- you serve many concurrent users on datacenter GPUs. Use vLLM or SGLang: on that H100 they push 1.8–3.8× Axon's
-  tokens at 128 requests, with lower per-token latency from 8 up, and they have far more models, multi-node and
-  LoRA, with years of production use.
-- you need tensor parallel, or a model outside the families above.
+- you serve many concurrent users. Use vLLM or SGLang: they push 1.8–3.8× Axon's tokens at 128 requests on an
+  H100 and vLLM-AWQ is 13–24 % ahead at 8–32 on an RTX 4090, and they have far more models, multi-node and LoRA, with
+  years of production use.
+- you need tensor parallel, batched MoE serving, or a model outside the families above.
 - you want a settled tool. Axon is 0.x, has one maintainer and no external users yet.
 
 ## Docs
 
 - **Start here:** [docs/START-HERE.md](docs/START-HERE.md): what's on main, the design contract, a map of the source.
 - **Use it:** [usage](docs/usage.md), [models and hardware](docs/models.md), [serving](docs/serving.md) and its
-  [routes and fields](docs/serve-apis.md), [environment variables](docs/environment.md), [the library](docs/library.md).
+  [routes and fields](docs/serve-apis.md), [environment variables](docs/environment.md),
+  [the library](docs/library.md).
 - **How it works:** [docs/how-it-works.md](docs/how-it-works.md), [determinism](docs/determinism.md),
   [long context](docs/long-context.md), [design notes](docs/design/).
 - **Numbers:** [results](docs/results.md), [GPU boards](docs/benchmarks-gpu.md), [CPU boards](BENCH.md).

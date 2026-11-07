@@ -41,5 +41,12 @@ in [serving.md](serving.md).
 | `AXON_FP8_NATIVE=0` | cuda, FP8 checkpoint, `--numerics fast`: run the Q8_0 form converted at load, as exact mode does, instead of fp8.cu's kernels (the fingerprint says `weights=fp8-q8`). A `chat --session` file records whether fp8.cu ran (the KV identity has `weights: fp8-native`, #198), so a session saved with it set and restored without it, or the other way round, prefills its saved tokens again instead of loading their KV bytes. With it set, `gpu_fp8_graded_vs_fp8_ref` fails (it has no native FP8 to grade); the FP8 kernel tests don't read it |
 | `AXON_ADMIT=fifo\|sjf` | `serve`: same as `--admit-order` (any case; default sjf); any other value refuses to start |
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
+| `AXON_API_KEY=KEY` | `serve`: same as `--api-key KEY`, kept out of `ps`; `--api-key` wins ([serving.md](serving.md#operations-auth-metrics-slots)) |
+| `AXON_SHARE_KV=1` | `serve`, the GPU's paged pool: requests share the KV pages of a common prompt prefix, same bits (opt-in, off by default; [serving.md](serving.md#operations-auth-metrics-slots)) |
+| `AXON_PAGED_KV=0` | `serve`: the old pool of slots each reserved at the full context, instead of 64-position pages shared by every slot |
+| `AXON_KV_PAGES=N` | `serve`: size the paged pool to N pages (at most what fits), for testing a server under memory pressure |
+| `AXON_KV_RAM_ALLOC=start` | `serve --cache-ram` on the GPU: pin the whole tier before the server answers, instead of in 64 MiB pieces while it runs |
+| `AXON_SERVE_TRACE=FILE` | `serve`: append a JSON line per batched step to FILE (its prompt feeds, its decode pass, its wall time); off by default, no output changes |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
+| `AXON_SKIP_GPU_TESTS=1` | tests: skip the ones that need a GPU (CI sets it; [CONTRIBUTING.md](../CONTRIBUTING.md)) |
 | `AXON_SKIP_FP8_MODEL_TESTS=1` | tests: skip the ones that need the FP8 checkpoint (`models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic`); without it, or `AXON_SKIP_MODEL_TESTS`, a missing checkpoint fails them on a host with a GPU |
