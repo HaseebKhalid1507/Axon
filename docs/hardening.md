@@ -188,7 +188,8 @@ on a real soak (implemented in the review round, smoke-tested on jade CPU only: 
 multi-day runs (the longest is 4 h); pod GPUs; `--kv q8`; `--draft`; a split
 (`--gpu-layers`) or pipeline server; Qwen3 reasoning streams; `--api-key`/`--slot-idle-ms` under load (fuzzed in
 #61, not soaked); thousands of idle connections (`fuzz_serve.py`); OOM and GPU-error injection (still open
-under item 2).
+under item 2; since then, loads under real memory caps are refused, not killed, and `scripts/fp8cap.sh` checks it:
+#142, #180, #206, #215, and a KV RAM tier fault turns the tier off, with injected faults in its tests: #181).
 
 ## Model-zoo results (2026-10-18, MEASURED)
 
