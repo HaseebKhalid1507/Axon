@@ -7,6 +7,8 @@ machine was doing.
 
 - `pp560`, `pp2100`: prompt evaluation, tok/s, ~560 / ~2100-token prompt
 - `tg128`: decode tok/s over 128 tokens; `tg128@1`: the same on one thread
+- `tg128@2k`, `pp8400`, `tg128@8k`: decode after the ~2100-token prompt, a ~8400-token prompt, decode after it;
+  run only when named in `--only` (`--skip` drops metrics, `--only` picks them)
 - `--load N`: N busy-loop processes running alongside (a machine that isn't idle)
 - `--warmup N` (default 1): discarded rounds first, so model loads never land in a sample
 - `--ollama NAME`, `--llama-server PATH`: reference columns (llama-server: one

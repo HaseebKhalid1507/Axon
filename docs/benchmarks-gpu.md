@@ -839,8 +839,8 @@ Written for the 10-15 RunPod board and the laptop boards; the 10-18 board's own 
   ollama's API timings. **Quote pp2100 for prefill.**
 - **H100 prefill is weak.** The H100 beats the 5090 only on 7B/8B decode (HBM3: 7B tg128 311 vs 308).
   Its prefill trails the 5090 and even the 4090 (7B pp2100: 12,534 vs 18,609 and 13,842). Axon's
-  int8 GEMM uses `mma.sync`, not Hopper's `wgmma`, and the H100's clock is 1980 MHz. Analysis and plan:
-  [design/hopper.md](design/hopper.md).
+  int8 GEMM used `mma.sync` then, not Hopper's `wgmma` (default since #33; the 10-18 board is the first with
+  it), and the H100's clock is 1980 MHz. Analysis: [design/hopper.md](design/hopper.md).
 - **ollama thread count.** On the 4090 host (128 shared vCPUs, load average ~100), ollama's default
   thread count stalled it: 0.5B pp560 1,383 / tg128 245. With `num_thread 8` it reached
   6,477 / 652. The 4090 and 5090 ollama columns come from an ollama-only re-run on the same pod right
