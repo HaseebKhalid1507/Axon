@@ -88,8 +88,8 @@ All on bella's CPU, Qwen2.5 0.5B Q4_K_M unless noted, 18 threads, `bench.py` int
 | **Hadamard rotation of K / K+V for q8** | 10-14, bella | 0.5B @2048 KL 4.9e-2 → 1.2e-2, but short contexts worse / noisy | small and inconsistent | deleted |
 | **q8 KV for speed** | 10-14 (#11) and 10-16 (r9), bella | decode unchanged, prefill −4–7 % (#11). At 32k: 7B tg 70.9 (q8) vs 72.4 (f16) | half the bytes, same time: decode attention was latency-bound at 350 of 648 GB/s. lcdec (in flight) measures q8 +13.8–23 % once attention is restructured | `--kv q8` stays a memory feature |
 | **Serve pool of N slots costs N+1 caches** | 10-16, bella (#42) | 7B: 2 slots fit only at 30720, not 32768 | a known gap, not an experiment; follow-up "drop the N+1 cache" (roadmap Scale #2) | fixed by feat/serve-one-cache (docs/log/2026-10-17-serve-one-cache.md) |
-| **KV RAM tier, rule B** (PR #166) | 10-31, bella | TTFT-resume 7.05 vs 8.68 s, 6,592 of 26,496 tokens restored (job 1031-063509-f763) | written as pages fill, the tier holds about its own size, the GPU pool's included; #201 made it exclusive and passed its gate on a 4090 | opt-in (`--cache-ram`) |
-| **Shared prefix pages, #187's clauses** (PR #207) | 11-06, RTX 4090 | s4 TTFT-new 1.003× (≤ 0.6×), fan-out siblings 0.261× (≤ 0.25×) | re-registered as #210 and #211 with their ceilings worked out first; both passed at #216's code (jobs 1106-170837-edc9, 1106-173522-297a). The default flip is pending | opt-in (`AXON_SHARE_KV=1`) |
+| **KV RAM tier, rule B** (PR #166) | 10-31, bella | TTFT-resume 7.05 vs 8.68 s, 6,592 of 26,496 tokens restored (job 1031-063509-f763, TAINTED) | written as pages fill, the tier holds about its own size, the GPU pool's included; #201 made it exclusive and passed its gate on a 4090 | opt-in (`--cache-ram`) |
+| **Shared prefix pages, #187's clauses** (PR #207) | 11-06, RTX 4090 | s4 TTFT-new 1.003× (≤ 0.6×), fan-out siblings 0.261× (≤ 0.25×) | re-registered as #210 and #211 with their ceilings worked out first; both passed at #216's code (jobs 1106-170837-edc9, 1106-173522-297a); the default: [roadmap](roadmap.md#state-at-the-11-06-pause) | opt-in (`AXON_SHARE_KV=1`) |
 
 ## Startup
 

@@ -221,6 +221,8 @@ Works today, honestly scoped:
 - RAM checks: a load that can't fit in the RAM available (the host's, or the tightest cgroup limit) is refused at
   load with the figures and the way out (exit 2), instead of being OOM-killed: a dense CPU model, a split's CPU half,
   an FP8 checkpoint, a checkpoint's converted tensors (#133, #142, #180, #206, #215; Usage, **Memory limits**).
+  Except near the edge: within ~48 MiB above a refusal a run can still be OOM-killed (the checks' tolerance lets it
+  through, and the CUDA module's memory isn't counted: #217).
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, block-scaled FP8 / NVFP4 weights, saving and restoring `serve` slots, shared prefix
@@ -628,9 +630,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default. Its first
-  timing gate failed two of its clauses (#207); the two re-registered cells passed on an RTX 4090 (#210, #211), and
-  the default flip is a separate PR, not made yet). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default; whether that
+  changes: [roadmap](docs/roadmap.md#state-at-the-11-06-pause)). A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
@@ -881,7 +882,7 @@ item on the [roadmap](docs/roadmap.md#next-proposed-order-outside-review-10-19-o
 [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19),
 [log](docs/log/2026-10-19-h100-showdown.md).
 
-**Measured since those boards** (none re-boards the tables here; each is the PR's own run, MEASURED):
+**Measured since those boards** (none re-boards the tables here; each is its PR's or its issue's own run, MEASURED):
 - **MoE on one RTX 4090** (#144, main `8508a75` vs llama.cpp `4413a19` at its best placement, 3 interleaved rounds,
   clean, job 1026-215154-40d7; [board](docs/benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)):
   Qwen3-30B-A3B with every expert resident, pp2100 12,212 vs 9,289 (×1.31) but tg128 219.7 vs 252.5 (×0.87);
@@ -889,10 +890,13 @@ item on the [roadmap](docs/roadmap.md#next-proposed-order-outside-review-10-19-o
   three (tg128 ×0.96, pp512 ×0.81, pp2100 ×0.57).
 - **Agent serving, Qwen2.5-7B on an RTX 4090 pod:** with the KV RAM tier, a 25k-token session evicted from the GPU
   resumes in 0.141 s against main's 2.713 s re-prefill (#201, job 1105-211420-0618). With shared prefix pages
-  (`AXON_SHARE_KV=1`, against main `2aec1e5`), 8 subagents starting on a 6,006-token shared prefix reach their first
-  token at 0.591× main's TTFT p50 idle and 0.798× busy (#211, job 1106-173522-297a). On a 1,722-page pool with 64
-  sessions it keeps 3.01× the warm sessions per GB and 4.50× the goodput, though the server is overloaded on both
-  binaries (TTFT-turn p50 33 s vs 16 s; #210, job 1106-170837-edc9).
+  (`AXON_SHARE_KV=1`, against main `2aec1e5`; both with `--cache-ram 6G`), 8 subagents starting on a 6,006-token
+  shared prefix reach their first token at 0.591× main's TTFT p50 idle and 0.798× busy (#211, job 1106-173522-297a).
+  On a 1,722-page pool with 64 sessions (same flags), sharing gave 4.50× main's goodput, about half its turn TTFT
+  (p50 33 s on main, 16 s with sharing: both servers overloaded) and 0.63× the re-prefilled tokens, same bits
+  (medians of 3 rounds, every round the same way; #210, job 1106-170837-edc9). The cell's warm-sessions-per-GB
+  clause (3.01×: 1 warm session against 3–4) measured that queueing, not capacity
+  ([#210's reading](https://github.com/HaseebKhalid1507/Axon/issues/210#issuecomment-6697988287)).
 - **FP8 checkpoints** (#177): fast mode fails its bars on bella (above, Status).
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0

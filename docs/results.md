@@ -87,7 +87,7 @@ Method for all boards: [methodology.md](methodology.md#benchmark-protocol). Full
 Run `h100-1019-2058`. Qwen2.5-7B-Instruct on one H100 80GB HBM3 SXM: Axon `serve --parallel 128` (Q4_K_M GGUF) vs
 vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. Closed loop, C = 1 … 128, two workloads (*classic*:
 519-token prompt, 512 out; *mix*: chat plus 2k–7.6k-token prompts), 2 rounds, engines interleaved per C, greedy.
-**The weights differ per row** (Q4_K_M vs AWQ vs FP8; Axon has no FP8 path), so this compares engines as deployed,
+**The weights differ per row** (Q4_K_M vs AWQ vs FP8; Axon had no FP8 path then), so this compares engines as deployed,
 not kernels on equal bits. Full tables: [benchmarks-gpu.md](benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19);
 method, cost and what went wrong: [log](log/2026-10-19-h100-showdown.md).
 
@@ -347,7 +347,7 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   (1106-051210-8062), 6 of 6 rounds over 0.3 s, against main's 8.83 and 8.58 s; the lead waived bella's resume cell
   as a gate of #201. Still opt-in: `auto` waits for the RAM-pinning question and a clean bella s4 replay at its head.
 - Shared prefix KV pages (`AXON_SHARE_KV=1`, #207) are opt-in: two of #187's clauses failed on a 4090 (s4 TTFT-new
-  1.003× vs ≤ 0.6×, fan-out siblings 0.261× vs ≤ 0.25×). The re-registered cells passed after #216 (#210 warm/GB
-  3.01×, 1106-170837-edc9; #211 6 of 6, 1106-173522-297a); the default flip is a separate PR, not opened.
+  1.003× vs ≤ 0.6×, fan-out siblings 0.261× vs ≤ 0.25×). The re-registered cells (#210, #211) ran at #216's code;
+  their results and the default: [roadmap](roadmap.md#state-at-the-11-06-pause).
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

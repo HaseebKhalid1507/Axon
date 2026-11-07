@@ -51,9 +51,11 @@ Axon is the fastest at one stream but 2.0–3.8× behind vLLM / SGLang at 128 co
 | Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5, Llama 3.1/3.2 and gpt-oss templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. On one GPU, decode rows of concurrent requests run in one batched step (`--parallel N`; #38), each request's output equal to running it alone; long prompts are fed in chunks between the decode steps (#45). Also OpenAI's Responses API and ollama's native API (#70; [serve-apis.md](serve-apis.md)), and `--api-key`, `/metrics`, `/slots` (#61). Each step's prompt chunk is sized from the measured step cost (#131); shortest-first admission with an 80 ms step is the default (`--admit-order sjf --step-ms 80`, #167). On the CPU, a CPU/GPU split, a multi-GPU pipeline or a MoE model, requests run one at a time. The KV cache carries over for shared prefixes. Default context: the model's trained length where it fits (#42). | `serve.rs`, `serve/`, `serve/engine.rs`, `serve/tools.rs` |
 | Multi-GPU | `--gpus 0,1`: pipeline parallel, layers split across GPUs in order, bit-identical to one GPU. P2P is opt-in and untested (`AXON_P2P=1`). No tensor parallel (#34). | `cuda/qwen2/pipeline.rs` |
 
-**Not on main:** tensor parallel, block-scaled FP8 / NVFP4 weights, gpt-oss experts on the GPU, streaming MoE experts for prefill, `serve` slot save/restore, batched
-speculative decoding in `serve` (#90 closed by its kill rule), a decode-shaped Hopper GEMM. The legacy `functions`
-field is still a 400.
+**Not on main** (the same list as the README's [Status](../README.md#status)): tensor parallel, block-scaled FP8 /
+NVFP4 weights, `serve` slot save/restore, shared prefix pages by default and prefilling a shared prefix once (#188),
+streaming MoE experts for prefill, gpt-oss experts on the GPU, batched serving of MoE models, batched speculative
+decoding in `serve` (#90 closed by its kill rule), a decode-shaped Hopper GEMM. The legacy `functions` field is
+still a 400.
 
 The full flag and environment reference is in the [README](../README.md#usage).
 

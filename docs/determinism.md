@@ -192,7 +192,7 @@ norms, dequant, the sampler's order or RNG; and what turns a request into tokens
 the tokenizer, chat templates and prompt rendering, stop tokens and stop strings, think
 handling. A change that keeps every bit (proven by the md5 gate) doesn't bump it.
 `NUMERICS_VERSION_FAST` is bumped by a change to a fast-set kernel or to its routing. A
-change to code both modes run (today every kernel: fast mode has none of its own) bumps
+change to code both modes run (every kernel except the FP8 checkpoints' fast set: #177, #191) bumps
 `NUMERICS_VERSION_EXACT` alone, and fast's fingerprints move with it anyway: fast's tag is
 `fast/<exact>.<fast>` (`fast/1.3` today), so no second bump has to be remembered. A new flag that
 changes bits adds a field to the tuple, set only when the flag is, so default fingerprints
