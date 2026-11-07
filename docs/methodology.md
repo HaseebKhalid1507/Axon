@@ -177,6 +177,10 @@ each one.
   - axon-run admits bella GPU jobs only at ≤ 80 °C.
   Absolute numbers from a hot or shared machine are labelled as such, and only within-round ratios are
   read (#12, #15, #20).
+- **TAINTED.** A `--timing` job waits while another process's GPU load is above 10 %, logs that foreign load
+  during the run (`FOREIGN_GPU max/mean`) and is marked TAINTED if its mean is over 5 % or its max over 25 %
+  (`axon-run --help`). bella is Haseeb's desktop, so its timing runs often are. A TAINTED number keeps the label
+  wherever it is quoted; the PR or its reviewer says whether it can still decide anything.
 - **Each engine at its best.** On the hybrid CPU, llama.cpp master collapses at 18 threads, so it is
   compared at its best thread count (`sweep.py`) before any claim is made against it (2026-10-13).
 - **Labels.** Every number is MEASURED (with a log or job ID), ESTIMATED (arithmetic shown), CODE (read in the
