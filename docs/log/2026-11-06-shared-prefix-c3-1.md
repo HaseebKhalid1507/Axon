@@ -1,7 +1,8 @@
 # Shared-prefix KV pages, C3.1: duplicates swapped, refed prefills claim again, C3's nits  (PR #216)
 
-- Date: 2026-11-06. Branch: feat/shared-prefix-c3.1. Base: main 2aec1e5 (#207, C3, sharing opt-in). Code `c167272`,
-  head `2ce5d12` (tests only). Status: open; sharing stays opt-in (`AXON_SHARE_KV=1`).
+- Date: 2026-11-06. Branch: feat/shared-prefix-c3.1. Base: main 2aec1e5 (#207, C3, sharing opt-in), merged up to
+  1065204 (#215) in `f1271c7`. Code `c167272`, `2ce5d12` (tests only). Status: open; sharing stays opt-in
+  (`AXON_SHARE_KV=1`).
 - Pick / design: issues #212, #213, #214 (shady's #207 review follow-ups), design note
   [docs/design/shared-prefix-pages.md](../design/shared-prefix-pages.md). Timing registered for #210 and #211 on the
   PR (comment 6693952063) and run outside its merge path (lead's ruling, 11-06): results on #210 / #211.
@@ -72,11 +73,33 @@ Round 2, head `2ce5d12` (product code `c167272`), bella (RTX 5070 Ti Laptop, sm_
   that cell, so it doesn't show main's spread by itself. Off's 981 cached tokens at 192 pages is main's own count
   at that cell in the md5 run (e00e). Unfed counts equal in every run of a cell.
 
+Merge regate, head `f1271c7` (origin/main 1065204 merged in: #215's RAM pre-load checks touch `src/lm.rs`, README and
+CHANGELOG, as this PR does; the conflict was CHANGELOG only, both entries kept). bella, `--on bella`:
+
+| gate | result | job |
+|---|---|---|
+| this PR's modules and #215's (`… kvsave:: model:: hybrid:: gguf:: qwen2::stream safetensors:: cuda::upload`, 402 tests), release | PASS 389 / 0 / 13 ignored | 1106-182016-f597 |
+| same, debug assertions + overflow checks | PASS 389 / 0 / 13 ignored | 1106-182016-04d7 |
+| md5 v3 vs main `1065204` (axon-podjob) | PASS: gen 0 of 30 cells differ; serve 973 / 973 replies equal | 1106-182017-58d2 |
+
+- The pressure section preempted in every undersized arm again. Preempted / unfed (main, off, on, shuffle, tier):
+  qwen2.5-0.5b f16 at 128 pages 27 / 14, 25 / 14, 3 / 45, 33 / 45, 32 / 60; at 192: 1 / 10, 1 / 9, 1 / 22, 1 / 22,
+  29 / 21. Qwen3-0.6B q8 at 128: 5 / 14, 21 / 14, 52 / 59, 3 / 45, 37 / 44; at 192: 1 / 9, 1 / 9, 31 / 21, 1 / 21,
+  1 / 22. Main at its full pool: 0 / 0. The counts moved from round 2's, by arrival order (above); the bits didn't.
+- The CPU serve section's cached tokens move by a token or two between runs, main's too (13082 in e00e, 13083 here;
+  the branch 13083, 13081): arrival order again, every reply equal.
+
 Timing: registered on the PR (comment 6693952063) before any timing job, run on a secure RTX 4090 outside the PR's
 merge path; results on #211 (subagent start) and #210 (W-sys warm/GB). A pass makes the default flip a follow-up PR.
 The W-sys script's own smoke on bella (job 1106-161219-9c15: 0.5B model, 8 sessions, a 60 s window) checked its
 plumbing with the real binaries: pool size, `/metrics`, md5, the verdict lines (W0 untestable there by design: 8
 small sessions fit whole).
+Every registered clause passed. #211 (job 1106-173522-297a, verdict #211 comment 6698163790): the 8 sessions' TTFT
+p50, cand/main, 0.591 idle (≤ 0.80) and 0.798 busy (≤ 0.86); the leader's 1.000 / 0.899 (≤ 1.05); md5 equal every
+round, 0 errors. On main's normal rounds alone (some rounds main's RAM tier gave no sibling the prefix) T1 is 0.591 /
+0.802. #210 W-sys (job 1106-170837-edc9, #210 comment 6697988287): warm/GB 3.01× (≥ 1.4), W0 main warm 1 / 64, W2 md5
+equal; but both servers were queue-bound (median turn TTFT 33 s main, 16 s cand), so the ratio compares 1 warm
+session with 3–4. Pod time $1.05 (secure RTX 4090, 17:02–18:11).
 
 ## Review
 - shady 8/10 SHIP-AFTER-FIXES at `bfa311e` (PR comment 6697783054): no code bug. Checked hunk by hunk against
