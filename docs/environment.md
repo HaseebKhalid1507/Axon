@@ -1,7 +1,7 @@
 # Environment variables
 
-What each `AXON_*` variable in this table changes. A variable that is the same as a flag says so; the flags are in
-[usage.md](usage.md).
+The `AXON_*` variables and what each changes. The command-line flags are in [usage.md](usage.md), and `axon serve`'s
+in [serving.md](serving.md).
 
 | variable | effect |
 |---|---|
