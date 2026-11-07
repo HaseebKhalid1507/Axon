@@ -47,7 +47,7 @@ sha256sum models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 # 6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83
 ```
 
-With a GPU, the FP8 checkpoint tests also need RedHatAI's FP8 build of
+The FP8 checkpoint tests (CPU and GPU) also need RedHatAI's FP8 build of
 Qwen2.5-0.5B-Instruct (9 files, 877 MiB), a Hugging Face directory at
 `models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic` (`AXON_TEST_FP8_MODEL` points them at
 another copy). `curl -f` fails on an HTTP error instead of saving the error page,
@@ -96,9 +96,11 @@ dequantizer, Hugging Face's tokenizer, and Ollama's greedy output on CPU.
 
 ```bash
 cargo fmt
-cargo clippy
+RUSTFLAGS="-D warnings" cargo clippy --all-targets   # as CI runs it: a warning fails
 cargo test
 ```
+
+The full list (release, scalar, the md5 gate against `main`) is in [AGENTS.md](AGENTS.md#before-you-open-the-pr).
 
 ## Pull requests
 

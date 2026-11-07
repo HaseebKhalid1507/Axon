@@ -6,7 +6,7 @@ below are the plain ones for a machine without those rules.
 
 ## The suite
 
-One libtest binary (`src/lib.rs --test`: every unit test is in the library; the `axon` binary, `src/main.rs`, has none. About 690 tests, 35 `#[ignore]`d benchmarks and measurements). Two
+One libtest binary (`src/lib.rs --test`: every unit test is in the library; the `axon` binary, `src/main.rs`, has none. About 900 tests: 904 `#[test]`s at `3014eeb`, 62 of them `#[ignore]`d benchmarks and measurements). Two
 builds of it gate a PR:
 
 - **release**: `-C opt-level=3` (Cargo's `[profile.test]` does the same).
@@ -89,3 +89,25 @@ The policy: fast for every intermediate round. Full once, on the commit that get
 a round changes a kernel's numerics, a cache layout, a head-size or GQA path, or anything the bit-identity
 contracts cover on more than one model, because the skipped bigger-model tests are the only ones that see
 those shapes.
+
+## Gate jobs (maintainers)
+
+The maintainers' gates run through tools outside the repo ([methodology](methodology.md#orchestration-tools-outside-the-repo)).
+How a PR's gates are run and read today:
+
+- **Named after the commit.** Every job is submitted with `axon-run --detach --name <track>-<sha7>-<what>` (`-rel`,
+  `-dbg`, `-md5`, ...), on the merge-ready head (current `main` merged in). A rerun of a job is the same name plus
+  `-rN` (`-r2`, `-r3`): the merge check counts a rerun as replacing the original only by that suffix.
+  Script gates (the md5 sets, real-cap runs) go through `axon-podjob`.
+- **Wait for events, don't poll.** `axon-gatewatch <label> JOB...` wakes the foreman when every job has finished;
+  `axon-ciwatch PR` does the same for GitHub CI and warns when a PR's head lags its branch.
+- **Expect-fail.** A fix's new tests must fail without it: an expect-fail tree (the candidate with each product
+  change reverted, the tests kept, each revert marked `EXPECT-FAIL`) runs them, and each must fail at its own revert
+  ([#206's log](log/2026-11-06-ram-checks.md#how-it-was-verified), [#215's](log/2026-11-06-ram-checks-2.md)).
+- **Merge check.** `axon-mergeready PR` is read-only: the newest gated commit, the code diff from it to the head
+  (docs excluded) must be empty, whether `main` moved in a way that needs a regate, CI, and the review verdict
+  (a `*-AFTER-FIXES` verdict needs a `fixes applied: <reviewer> <sha>` comment). Its verdict is MERGEABLE-NOW or
+  BLOCKED with reasons.
+- **After merging.** `axon-postmerge <main-sha>` gates `main` itself (release and debug suites, the md5 of `gen`
+  against the previous main), the net that lets a merge judged SAFE skip a regate. `axon-gatelogs publish` posts a
+  finished gate set's logs and links them from the PR.

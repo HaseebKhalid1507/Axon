@@ -3,7 +3,7 @@
 A short orientation for new collaborators. Everything under "What works on main" was checked against
 the source at main `5f96039`; the Architectures, CUDA and Serving rows and the multi-GPU row were updated at
 main `a591e17` from the merged PRs (#33, #34, #35, #38, #42), and the table was brought up to main `3014eeb`
-(2026-11-07) from the PRs merged since (listed in [history.md](history.md), Phases 17–24). Anything that isn't on
+(2026-11-06) from the PRs merged since (listed in [history.md](history.md), Phases 17–24). Anything that isn't on
 main yet is marked **planned** or **in flight**.
 
 **North star (owner, 10-26): run Synaps on Axon**, many warm agent sessions and subagents on one box, then many
