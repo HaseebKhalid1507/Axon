@@ -1,0 +1,31 @@
+[axon-run 13:19:45] submitted 1113-131945-cdc4 by /home/haseeb/.cache/axon-wt-dec: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-06d5a1a cli::
+[axon-run 13:37:46] job 1113-131945-cdc4 -> pod1 [RTX 4090 sm_89 secure] (pod 2xcdxq1yvo11md): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 0 --src /home/haseeb/.cache/axon-wt-dec /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-06d5a1a cli::
+axon-remote: uploading axon-test-dbg-06d5a1a (5ee60bd06550d519c6efef72) + source of /home/haseeb/.cache/axon-wt-dec (delta vs 4 earlier upload(s) there)
+
+sent 14,839 bytes  received 58 bytes  9,931.33 bytes/sec
+total size is 8,871,248  speedup is 595.51
+
+sent 7,548,604 bytes  received 30,312 bytes  2,165,404.57 bytes/sec
+total size is 26,697,128  speedup is 3.52
+axon-remote: job 20261113-183754-axon-test-dbg-06d5a1a-2654 on pod1 (CPU-only)
+[axon-node 18:37:54] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 18:37:54] run axon-test-dbg-06d5a1a (5ee60bd06550d519c6efef72) as /home/haseeb/.cache/axon-wt-dec on ec0cf9bf1603, AXON_THREADS=8 RUST_TEST_THREADS=4
+
+running 11 tests
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::help_is_current ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cli::tests::drafting_matches_greedy_hybrid ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::drafting_matches_greedy ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 894 filtered out; finished in 41.08s
+
+[axon-node 18:38:35] exit 0 after 41.1s
+[axon-node 18:38:35] peak RSS 1309 MB (job process tree PSS, 2 s samples x20)
+[axon-run 13:38:36] exit 0 after 50.7s (host pod1)
