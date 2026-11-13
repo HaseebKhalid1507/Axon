@@ -1,0 +1,46 @@
+[axon-run 05:44:41] submitted 1113-054441-6212 by /home/haseeb/.cache/axon-wt-chat: /usr/bin/bash serve-md5.sh ./serve-md5.py ./axon-3014eeb ./axon-7d8049c out
+[axon-run 05:54:04] job 1113-054441-6212 -> pod1 [RTX 4090 sm_89 secure] (pod tojc092l9s9dyh): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 8000 --src /home/haseeb/.cache/axon-podjob/serve-md5-0651f38594bf /usr/bin/bash serve-md5.sh ./serve-md5.py ./axon-3014eeb ./axon-7d8049c out
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (f2767f3db52d7b3b360e67bb) + source of /home/haseeb/.cache/axon-podjob/serve-md5-0651f38594bf (delta vs 1 earlier upload(s) there)
+
+sent 7,594,480 bytes  received 125 bytes  286,588.87 bytes/sec
+total size is 24,621,542  speedup is 3.24
+
+sent 186 bytes  received 30,558 bytes  8,784.00 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261113-105442-bash-1296 on pod1 (GPU, 8000 MB)
+[axon-node 10:54:42] GPU slot taken; job wants 8000 MB; nvidia-smi used/total 396/24564 MB; sharing with 20261113-105403-axon-test-7d8049c-992 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 10:54:42] run bash (f2767f3db52d7b3b360e67bb) as /home/haseeb/.cache/axon-podjob/serve-md5-0651f38594bf on 21bad2a2e479, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23688 MB of 24564 (used 396); GPU processes pid:MB 1005:386
+SERVE-CALLS qwen2.5-0.5b-q4_k_m tools base=[["get_weather", "{\"city\": \"Paris\"}"]] cand=[["get_weather", "{\"city\": \"Paris\"}"]]
+SERVE-MD5 qwen2.5-0.5b-q4_k_m one base=(34, '4a2eb91814ec') cand=(34, '4a2eb91814ec') same
+SERVE-MD5 qwen2.5-0.5b-q4_k_m sys_multi base=(57, 'f96a13be3faa') cand=(57, 'f96a13be3faa') same
+SERVE-MD5 qwen2.5-0.5b-q4_k_m think_hist base=(63, '0aa4ed050748') cand=(63, '0aa4ed050748') same
+SERVE-MD5 qwen2.5-0.5b-q4_k_m tools base=(164, 'a0fb340b2512') cand=(164, 'a0fb340b2512') same
+SERVE-MD5 Qwen3-0.6B-Q8_0 one base=(13, '6aa1e98ab346') cand=(13, '6aa1e98ab346') same
+SERVE-MD5 Qwen3-0.6B-Q8_0 sys_multi base=(57, '1e262460734d') cand=(57, '1e262460734d') same
+SERVE-MD5 Qwen3-0.6B-Q8_0 think_hist base=(33, 'c1c6889696f8') cand=(33, 'c1c6889696f8') same
+SERVE-MD5 Qwen3-0.6B-Q8_0 tools base=(148, 'fe692dba6bca') cand=(148, 'fe692dba6bca') same
+SERVE-CALLS Llama-3.2-1B-Instruct-Q4_K_M tools base=[["get_weather", "{\"city\": \"Paris\"}"]] cand=[["get_weather", "{\"city\": \"Paris\"}"]]
+SERVE-MD5 Llama-3.2-1B-Instruct-Q4_K_M one base=(40, 'ecf1dbdac83a') cand=(40, 'ecf1dbdac83a') same
+SERVE-MD5 Llama-3.2-1B-Instruct-Q4_K_M sys_multi base=(79, '70b415ef0918') cand=(79, '70b415ef0918') same
+SERVE-MD5 Llama-3.2-1B-Instruct-Q4_K_M think_hist base=(69, '791e56c667f8') cand=(69, '791e56c667f8') same
+SERVE-MD5 Llama-3.2-1B-Instruct-Q4_K_M tools base=(174, 'a0fb340b2512') cand=(174, 'a0fb340b2512') same
+SERVE-MD5 google_gemma-3-1b-it-Q4_K_M error base=serve exited 2 cand=serve exited 2 DIFF
+SERVE-CALLS Qwen2.5-7B-Instruct-Q4_K_M tools base=[["get_weather", "{\"city\": \"Paris\"}"]] cand=[["get_weather", "{\"city\": \"Paris\"}"]]
+SERVE-MD5 Qwen2.5-7B-Instruct-Q4_K_M one base=(34, '0f5d7e1bd2f4') cand=(34, '0f5d7e1bd2f4') same
+SERVE-MD5 Qwen2.5-7B-Instruct-Q4_K_M sys_multi base=(57, 'e40d3f05cfec') cand=(57, 'e40d3f05cfec') same
+SERVE-MD5 Qwen2.5-7B-Instruct-Q4_K_M think_hist base=(63, 'cdbfa3c3f511') cand=(63, 'cdbfa3c3f511') same
+SERVE-MD5 Qwen2.5-7B-Instruct-Q4_K_M tools base=(164, 'a0fb340b2512') cand=(164, 'a0fb340b2512') same
+SERVE-MD5 Qwen3-8B-Q4_K_M one base=(13, '79e83e46a426') cand=(13, '79e83e46a426') same
+SERVE-MD5 Qwen3-8B-Q4_K_M sys_multi base=(57, '6034003c7d5c') cand=(57, '6034003c7d5c') same
+SERVE-MD5 Qwen3-8B-Q4_K_M think_hist base=(33, '3ee7bd8d5c10') cand=(33, '3ee7bd8d5c10') same
+SERVE-MD5 Qwen3-8B-Q4_K_M tools base=(148, '0b47f66cd240') cand=(148, '0b47f66cd240') same
+SERVE-CALLS Meta-Llama-3.1-8B-Instruct-Q4_K_M tools base=[["get_weather", "{\"city\": \"Paris\"}"]] cand=[["get_weather", "{\"city\": \"Paris\"}"]]
+SERVE-MD5 Meta-Llama-3.1-8B-Instruct-Q4_K_M one base=(40, 'ecf1dbdac83a') cand=(40, 'ecf1dbdac83a') same
+SERVE-MD5 Meta-Llama-3.1-8B-Instruct-Q4_K_M sys_multi base=(79, 'd838e8aefe1d') cand=(79, 'd838e8aefe1d') same
+SERVE-MD5 Meta-Llama-3.1-8B-Instruct-Q4_K_M think_hist base=(69, 'de6a71839b0a') cand=(69, 'de6a71839b0a') same
+SERVE-MD5 Meta-Llama-3.1-8B-Instruct-Q4_K_M tools base=(174, 'a0fb340b2512') cand=(174, 'a0fb340b2512') same
+SERVE-MD5 1 of 25 differ
+[axon-node 10:55:55] exit 1 after 72.7s
+[axon-node 10:55:55] peak RSS 4993 MB (job process tree PSS, 2 s samples x36)
+[axon-run 05:55:57] exit 1 after 113.0s (host pod1)
