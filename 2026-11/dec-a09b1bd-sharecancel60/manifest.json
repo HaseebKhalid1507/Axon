@@ -1,0 +1,29 @@
+{
+ "label": "dec-a09b1bd-sharecancel60",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-130728-fd2c",
+   "name": "dec-a09b1bd-sharecancel60",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-11-13_14:51.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "a09b1bd",
+   "binary": "bash",
+   "started": 1794599465.0869067,
+   "ended": 1794599806.7504616,
+   "attempts": 1,
+   "remote_job": "20261113-195236-bash-1394",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b1ac577c2ef182132c7d99b082718a129f5876bfda4f26737701caae2a31e262",
+   "log_bytes": 9000
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 14:56:48 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
