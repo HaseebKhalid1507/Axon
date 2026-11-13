@@ -1,0 +1,29 @@
+{
+ "label": "dec-fc845c8-soaksmoke-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-104140-1dd6",
+   "name": "dec-fc845c8-soaksmoke-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fc845c8",
+   "binary": "bash",
+   "started": 1794607054.5470023,
+   "ended": 1794608145.096644,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8ed61fc121e566fc8cfc4458a3b4c9d9baeb1b75018a3a63103334161250f843",
+   "log_bytes": 6310
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 17:15:46 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

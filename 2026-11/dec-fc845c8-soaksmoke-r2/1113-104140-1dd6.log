@@ -1,0 +1,41 @@
+[axon-run 10:41:40] submitted 1113-104140-1dd6 by /home/haseeb/.cache/axon-dec: /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+[axon-run 16:57:34] scope axon-job-1113-104140-1dd6-1794607054.scope in app-axonjobs.slice: MemoryMax 10312 MB, MemoryHigh 9280 MB, no swap, oomd pressure kill 80% (claim 6192 MB): an OOM here kills only this job
+[axon-run 16:57:34] job 1113-104140-1dd6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-104140-1dd6-1794607054 --slice=app-axonjobs.slice -p MemoryMax=10312M -p MemoryHigh=9280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+axon-q 16:57:34 start slot 16-23: /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+main solo run rc 0
+serve: ./axon-dbg-fc845c8 serve models/qwen2.5-1.5b-instruct-q4_k_m.gguf --port 18512 --ctx 4096 --parallel 8 --device cuda --cache-ram off
+loaded in 1.0s, pid 3216552
+primed 480 requests in 9s
+CSV,t_s,rss_mib,anon_mib,file_mib,hwm_mib,vram_mib,vram_src,fds,threads,requests,lat_p50_ms,lat_p99_ms,ttft_p50_ms,ttft_p99_ms,ok,4xx-expected,503,cancelled,accepted-unsupported,503-undocumented,5xx,bad-body,dropped,other-status,slow-blocks-others,timeout,unexpected-200,unexpected-4xx,alive
+CSV,41.7,1433.5,194.3,1173.2,1433.5,1856.0,pid,61,17,230,119.8,750.3,12.8,727.9,190,22,0,18,0,0,0,0,0,0,0,0,0,0,1
+CSV,71.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,41,7,18,62.4,202.0,10.0,10.7,13,3,0,2,0,0,0,0,0,0,0,0,0,0,1
+CSV,101.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,131.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,161.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,191.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,221.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,251.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,281.7,1433.4,194.2,1173.2,1433.4,1856.0,pid,39,6,0,,,,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+SUMMARY {"checks": {"rss": {"slope_mib_per_h": 0.0, "se_mib_per_h": 0.0, "growth_24h_mib": 0.0, "growth_24h_2se_mib": [0.0, 0.0], "bound_24h_mib": 64, "window_h": 0.06, "n": 8, "min_mib": 194.2, "max_mib": 194.2, "median_mib": 194.2, "last_vs_first_quarter_mib": 0.0, "status": "NOT-JUDGED", "would_be": "PASS", "series": "RssAnon", "vmrss_slope_mib_per_h": 0.0}, "vram": {"slope_mib_per_h": 0.0, "se_mib_per_h": 0.0, "growth_24h_mib": 0.0, "growth_24h_2se_mib": [0.0, 0.0], "bound_24h_mib": 16, "window_h": 0.06, "n": 8, "min_mib": 1856.0, "max_mib": 1856.0, "median_mib": 1856.0, "last_vs_first_quarter_mib": 0.0, "status": "NOT-JUDGED", "would_be": "PASS", "src": "pid"}, "errors": {"bad": {}, "status": "PASS"}, "503": {"count": 0, "fraction": 0.0, "ok": 215, "requests": 260, "note": "every 503 body is checked against the documented back-pressure messages (otherwise class 503-undocumented, failing); the fraction is reported, not capped", "status": "PASS"}, "alive": {"status": "PASS"}, "panic": {"lines": [], "status": "PASS"}, "identity": {"runs": 2, "mismatches": [], "status": "PASS"}, "fds_threads": {"before": {"rss_mib": 1429.1, "anon_mib": 189.9, "threads": 6, "fds": 39}, "after": {"rss_mib": 1433.5, "anon_mib": 194.2, "threads": 6, "fds": 39, "hwm_mib": 1433.5}, "status": "PASS"}, "slots_idle": {"busy": 0, "slots": 8, "queue_depth": 0, "status": "PASS"}, "cancels": {"client_disconnects": 20, "server_cancelled": 32, "ratio": 1.6, "status": "REPORTED"}}, "requests": 260, "totals": {"agent:ok": 61, "chat-stream:ok": 35, "chat-whole:ok": 24, "completion:ok": 18, "disconnect:cancelled": 20, "invalid:4xx-expected": 17, "long:ok": 17, "oversize:4xx-expected": 8, "slow-reader:ok": 12, "tool:ok": 48}, "wall_h": 0.149}
+VERDICT PASS rss, vram not judged: window under 4.0 h after warm-up
+SOAK VERDICT rc 0 (cuda, sharing on, --cache-ram off, AXON_KV_PAGES=128)
+SOAK SOLO-MD5 SAME (cand identity runs 2, mismatches 0)
+{"ctx":4096,"graphs_evicted_oom":0,"page_tokens":64,"pages_free":9,"pages_shared":0,"pages_total":128,"pages_warm":41,"preempted":0,"prefills_unfed":0,"queue_depth":0,"slots":[{"age_ms":null,"busy":false,"held_tokens":78,"id":0,"pages_used":2,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":88,"id":1,"pages_used":2,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":55,"id":2,"pages_used":1,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":1137,"id":3,"pages_used":18,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":1450,"id":4,"pages_used":23,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":217,"id":5,"pages_used":4,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":136,"id":6,"pages_used":3,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":1548,"id":7,"pages_used":25,"request_id":null}],"steps_eager_oom":0,"waiting":[{"age_ms":35084,"id":735,"prompt_tokens":1448}]}
+# HELP axon_kv_pages_warm KV pages the prefix index keeps that no request holds (shared prefixes).
+# TYPE axon_kv_pages_warm gauge
+axon_kv_pages_warm 41
+# HELP axon_kv_pages_shared KV pages of the prefix index more than one request holds (shared prefixes).
+# TYPE axon_kv_pages_shared gauge
+axon_kv_pages_shared 0
+# HELP axon_prompt_shared_tokens_total Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.
+# TYPE axon_prompt_shared_tokens_total counter
+axon_prompt_shared_tokens_total 10304
+# HELP axon_refeed_shared_tokens_total Tokens of preempted or unfed requests (their prompt and what they generated) whose KV pages were mapped from the prefix index again when they were fed again.
+# TYPE axon_refeed_shared_tokens_total counter
+axon_refeed_shared_tokens_total 0
+# HELP axon_pages_evicted_total KV pages the prefix index gave up for room (shared prefixes).
+# TYPE axon_pages_evicted_total counter
+axon_pages_evicted_total 127
+[axon-run 17:15:44] exit 0 after 1090.3s (host bella)
+[axon-run 17:15:45] EXPECT ok: output matches /SOAK SOLO-MD5 SAME/
