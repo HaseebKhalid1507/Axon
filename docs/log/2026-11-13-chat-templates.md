@@ -1,9 +1,13 @@
 # Chat prompts follow each GGUF's own template, token for token (PR #246)
 
-- Date: 2026-11-13. Branch: fix/chat-templates. Base: main 4f347a3. Status: open (PR #246).
+- Date: 2026-11-13. Branch: fix/chat-templates. Base: main 4f347a3, merged with main 8e11543 (#225, #226) at
+  4cefcdd. Status: open (PR #246).
 - Fixes #240, #238, #241, #239, all filed from the compatibility audit (#235: four popular families framed
   differently from llama.cpp). Also fixes #249 (the DeepSeek-R1 Qwen2.5 distills were refused at load). Shady's
-  review (7/10, SHIP-AFTER-FIXES) was applied in the second round, below.
+  review (7/10, SHIP-AFTER-FIXES) was applied in the second round, below. Round 2's review (9/10, SHIP-AFTER-FIXES)
+  asked for the gate record (below) and two SHOULDs, taken in the third round: the reason for a broken
+  `eos_token_id` names the id (`Framing::bad_end`), and the CHANGELOG states each family's rule for earlier replies.
+  Its third SHOULD, the tools path's Qwen2.5 default system message, is #256.
 
 ## What changed
 - **`chat::Framing::from_model`** keeps choosing the format from the vocabulary's special tokens. It then reads the
@@ -77,7 +81,7 @@ them (pinned by chat.rs's mistral tests and `tokens_mistral.json`).
   parses special tokens in text.
 - `broken_special_ids_never_reach_a_prompt`: R1-0528 with `bos_token_id` = 2^31 renders without BOS, through serve
   and chat; the scripted model asserts every id is in the vocabulary. With a broken `eos_token_id`, the file has no
-  chat framing and nothing panics.
+  chat framing and nothing panics; `Framing::bad_end` names the id, and `axon chat`'s error is exactly that reason.
 - `tools_need_the_template`: Qwen2, Qwen1.5 and Llama 3.0 refuse tools and tool turns; a file without a template
   keeps the vocabulary's tool family.
 - `default_system_from_the_template`:
@@ -109,10 +113,26 @@ The first round's gates, at 5c00ed9 on an RTX 4090 pod against main's binary (`a
   the chat prompt equal id for id; deepseek-r1 and llama3 were the audit's DIFFs. mistral's logits match (KL
   0.00094) and only its prompt differs, by design.
 
-The second round's regate (fast tier, serve md5, the template test, golden on deepseek-r1, llama3, two controls and
-the 7B R1 distill) is in the PR.
+The second round's gates, at 7d8049c:
+- the template test: 5 / 5 (1113-054439-9566, jade);
+- fast tier, release: 829 / 0 (1113-054440-6686), the same 19 skipped; fast tier, debug + CPU: 848 / 0
+  (1113-054526-4f70);
+- serve md5: 0 / 28 differ (1113-055654-f941). Its first attempt, 1113-054441-6212, counted 1 of 25 because
+  `google_gemma-3-1b-it` didn't start on the pod (`serve exited 2`), for main's binary and this PR's alike: infra;
+- golden.py on deepseek-r1, llama3, the controls qwen3 and llama3.1, and the 7B R1 distill (1113-054619-ca11, on bella):
+  the chat prompt equal to llama.cpp's id for id on all 5, which is this PR's claim. The golden verdict passes on 4. On
+  deepseek-r1 the logits check FAILs under golden's floor limits (max |Δlogprob| 0.342 against 0.3, one top-1 flip
+  that isn't a near-tie, swing 0.635 against 0.6). bella had no CUDA llama-server, so golden had no reference spread
+  to set limits from. The same file with the same 44-id prompt passed d4fb on a 4090, against limits from the
+  reference (max |Δlogprob| 0.62 against 1.38). The job passed only because its EXPECT was the run's last line;
+  the third round's golden job expects every model to pass, with the reference loaded.
+
+The third round's regate (the full tier, md5 and serve md5 against main 8e11543, golden on all 11 on a 4090 with the
+reference) is in the PR.
 
 ## Not done (follow-ups)
+- #256: on a tool request without a system message, a ChatML template that has no default still gets Qwen2.5's
+  (`serve/tools.rs` `hermes`); the plain chat path follows the template.
 - #250: `no_think` on DeepSeek. V3.1's prompt gets Qwen3's empty block after its own `</think>`, and `axon chat
   --no-think` on R1 says it isn't a thinking model. Both are already on main.
 - #251: templates whose generation prompt opens the reasoning block: QwQ (`<|im_start|>assistant\n<think>\n`) and
