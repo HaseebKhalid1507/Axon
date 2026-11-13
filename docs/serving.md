@@ -14,13 +14,14 @@ positions it has; no extra cache for a request running alone); elsewhere it
 runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
 uses) and ollama's native API ([docs/serve-apis.md](serve-apis.md)). Operations: `--api-key`,
 `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
-`--cache-ram BYTES|auto|off` (default `auto`: the smaller of 4 GiB and a quarter of the RAM available
-after the model, off under a binding cgroup limit) keeps conversations' KV pages in pinned host RAM
+`--cache-ram BYTES|auto|off` (opt-in, default off; `auto` is the smaller of 4 GiB and a quarter of the
+RAM available after the model, off under a binding cgroup limit) keeps conversations' KV pages in pinned host RAM
 and copies them back on the next turn, bit for bit. Copies of pages the GPU pool still holds are
 written only into free room and are the first evicted, so the tier's useful capacity is about its
 size, not its size minus the pool's. An evicted 25k-token session resumes in 0.141 s against a
 2.713 s re-prefill on an RTX 4090, and in 0.36–0.51 s against 8.6–8.8 s on bella (two TAINTED reads)
-([design](design/kv-ram-tier-exclusive.md) §6, §14). `AXON_SHARE_KV=1` (opt-in, off by default)
+([design](design/kv-ram-tier-exclusive.md) §6, §14). It stays opt-in until #233 (the first request waits
+3.2–4.0 s for the pinning) and #234 (the write-behind costs 2.3 % tok/s at C=16 on a 4090) are fixed. `AXON_SHARE_KV=1` (opt-in, off by default)
 lets requests share the KV pages of a common prompt prefix, same bits (#207, #216; [below](#operations-auth-metrics-slots)).
 
 ## Starting a server, and its flags
@@ -238,16 +239,16 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   generated ones included, when it is fed again; #219) and `axon_pages_evicted_total` (warm pages given up for
   room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server under
   memory pressure.
-- `--cache-ram BYTES|auto|off` (default `auto`): a KV RAM tier. A conversation's KV pages (64
+- `--cache-ram BYTES|auto|off` (default 0: off): a KV RAM tier. A conversation's KV pages (64
   positions, every layer) are copied to host memory as they fill, so when its slot goes to
   another conversation they are kept there instead of dropped; its next turn copies the
   longest stored prefix back and prefills only the rest. Same bits: the rows are moved, not
-  recomputed (a tail under 64 positions is prefilled again). `auto`, the default, is the smaller
+  recomputed (a tail under 64 positions is prefilled again). `auto` is the smaller
   of 4 GiB and a quarter of the RAM available after the model (the host's `MemAvailable`, or a
   memory cgroup's room if that is less). It is **off when a cgroup limit is the tighter bound**
   (a container, a systemd scope with `MemoryMax`): pinned memory counts against the limit and
   can't be reclaimed. The banner says the size, or why it is off. BYTES (K/M/G suffixes) sets
-  the size, under a cgroup too; `0` or `off` turns the tier off (the kill switch). On the GPU
+  the size, under a cgroup too; `0` or `off` (the default) turns the tier off. On the GPU
   the **whole size is page-locked (unswappable) RAM from server start**, used or
   not: a thread pins it in 64 MiB pieces while the server already runs (or, with
   `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 4 GiB

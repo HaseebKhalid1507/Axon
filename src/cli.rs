@@ -167,9 +167,9 @@ flags:
               The clock starts once the client's receive buffer is full (docs/serving.md)
   --cache-ram BYTES|auto|off  serve: keep conversations' KV pages in host RAM when their slot
               is reused, and copy them back on the next turn instead of prefilling again (same
-              bits). Default auto: the smaller of 4G and a quarter of the RAM available after the
-              model, off under a memory cgroup limit tighter than the host's free RAM (the banner
-              says why); BYTES (K/M/G) sets the size, under a cgroup too; 0 or off: no tier.
+              bits; default 0: off). auto: the smaller of 4G and a quarter of the RAM available
+              after the model, off under a memory cgroup limit tighter than the host's free RAM
+              (the banner says why); BYTES (K/M/G): that size, cgroup or not; 0 or off: no tier.
               On the GPU the whole size is pinned (unswappable) RAM from start. The tier is
               exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
               still holds first, so its useful capacity is about its size (a 7B f16 position is
@@ -1933,7 +1933,7 @@ mod tests {
             .join(" ");
         for want in [
             "The tier is exclusive",
-            "Default auto: the smaller of 4G and a quarter of the RAM available after the model",
+            "default 0: off). auto: the smaller of 4G and a quarter of the RAM available after the model",
             "0 or off: no tier",
             "gemma3",
             "qwen3moe",

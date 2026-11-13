@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// `--cache-ram auto` (the default): the smaller of this and a quarter
+/// `--cache-ram auto`: the smaller of this and a quarter
 /// (`AUTO_DIV`) of the RAM available after the model. On the GPU the whole
 /// size is page-locked (unswappable) from server start, used or not
 /// (`Alloc`), so it stays small beside the desktop: 4 GiB holds a 7B f16
@@ -55,7 +55,7 @@ pub const STEP_BYTES: usize = 16 << 20;
 /// (ESTIMATED, docs/design/kv-ram-tier-exclusive.md §2.5).
 pub const IDLE_BYTES: usize = 64 << 20;
 
-/// `--cache-ram BYTES|auto|off` (default `auto`).
+/// `--cache-ram BYTES|auto|off` (default 0: off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheRam {
     /// Bytes (0: off).
@@ -123,7 +123,7 @@ impl CacheRam {
     /// (None: it doesn't): the figure is unknown, or a cgroup limit is
     /// tighter than the host's free RAM (`Bound::Cgroup`: a container, a
     /// systemd scope). Pinned memory counts against such a limit and can't
-    /// be reclaimed, so a default that takes it could get a server, or its
+    /// be reclaimed, so an automatic size that takes it could get a server, or its
     /// neighbours in the cgroup, OOM-killed; an explicit `--cache-ram SIZE`
     /// still turns the tier on there. A looser cgroup (the host binds)
     /// doesn't count.
@@ -1364,7 +1364,7 @@ mod tests {
         );
     }
 
-    /// `auto` (the default): the smaller of 4 GiB and a quarter of the RAM
+    /// `auto`: the smaller of 4 GiB and a quarter of the RAM
     /// available after the model, bound by the host; off (0, with a
     /// reason) when the figure is unknown or a cgroup limit binds it.
     #[test]
