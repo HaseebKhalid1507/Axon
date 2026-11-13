@@ -1224,53 +1224,6 @@ fn graded_fast_vs_exact_cpu() {
     cpu_mode(Numerics::Fast);
 }
 
-/// `reference` + `Reference::grade` make `grade_sized`'s `Graded`, field
-/// for field (#232): every arm's tallies, ΔNLL, launches and the verify
-/// rows, the f64 sums bit for bit (`Debug` prints the shortest exact
-/// form). Three nets that all differ (the reference, a q8-KV floor, another
-/// quantization under test), so no tally is trivially 0; every arm and
-/// branch of the walk at a few positions each (two batched windows, one of
-/// them past `verify_windows`; the load arm's pool), all on the GPU.
-#[test]
-fn graded_in_two_passes_is_graded_at_once() {
-    if crate::testutil::gpu().is_none() {
-        return;
-    }
-    let Some(p) = crate::testutil::model_path() else {
-        return;
-    };
-    let other =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("models/Qwen2.5-0.5B-Instruct-Q4_0.gguf");
-    if !other.exists() {
-        eprintln!("skipping: {} not present", other.display());
-        return;
-    }
-    let (mr, mf, mo) = (load(&p), load(&p), load(&other));
-    let r = net(&mr, Device::Cuda, KvType::F16, Numerics::Exact);
-    let f = net(&mf, Device::Cuda, KvType::Q8, Numerics::Exact);
-    let o = net(&mo, Device::Cuda, KvType::F16, Numerics::Exact);
-    let sz = Sizes {
-        decode_windows: 1,
-        batch_windows: 2,
-        verify_windows: 1,
-        cached_windows: Some(1),
-        after: 3,
-        load: 3,
-        load_steps: 2,
-    };
-    let at_once = grade_sized(&r, &f, &o, &mr, Floor::KvQ8, Device::Cuda, &sz);
-    let two = reference(&r, &f, &mr, Floor::KvQ8, Device::Cuda, &sz).grade(&o);
-    assert_eq!(format!("{at_once:?}"), format!("{two:?}"));
-    assert_eq!(two.arms.len(), 4);
-    for a in &two.arms {
-        assert!(
-            a.mode.positions > 0 && a.mode.sum_kl > 0.0 && a.floor.sum_kl > 0.0,
-            "{a:?}"
-        );
-    }
-    assert!(two.rows.0 > 0, "{:?}", two.rows);
-}
-
 /// The gate has teeth: another quantization of the same weights (Q4_0 for
 /// the Q4_K_M reference: a model change, which a reordering must never be)
 /// fails it on the GPU in every arm, the batched ones included, on a bound

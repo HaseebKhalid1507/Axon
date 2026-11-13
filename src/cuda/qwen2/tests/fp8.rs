@@ -3,7 +3,7 @@
 //! checkpoint end to end: exact mode's Q8_0 form keeps the contract's bits,
 //! fast mode's native kernels are graded against the CPU's fp8-ref.
 
-use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, reference};
+use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, grade_sized, reference};
 use super::*;
 use crate::cuda::Kernels;
 use crate::kv::KvType;
@@ -491,6 +491,57 @@ fn gpu_fp8_graded_vs_fp8_ref() {
 #[ignore]
 fn gpu_fp8_graded_vs_fp8_ref_1000() {
     fp8_graded(&Sizes::FP8, 1000, true);
+}
+
+/// `numerics::reference` + `Reference::grade` make `grade_sized`'s
+/// `Graded`, field for field (#232): every arm's tallies, ΔNLL, launches
+/// and the verify rows, the f64 sums bit for bit (`Debug` prints the
+/// shortest exact form). Three nets of the FP8 checkpoint that all differ,
+/// all on the GPU: exact (its Q8_0 form) the reference, exact with a q8 KV
+/// cache the floor, fast (native FP8) under test, so no tally is trivially
+/// 0. Every arm and branch of the walk at a few positions each (two
+/// batched windows, one past `verify_windows`; the load arm's pool).
+#[test]
+fn graded_in_two_passes_is_graded_at_once() {
+    if f8_engine_gpu().is_none() {
+        return;
+    }
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let (mr, mf, mo) = (load(), load(), load());
+    let net = |m, kv, n| {
+        let o = BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(super::numerics::CTX)
+            .kv(kv)
+            .numerics(n);
+        Backend::new(m, o).unwrap()
+    };
+    let r = net(&mr, KvType::F16, Numerics::Exact);
+    let f = net(&mf, KvType::Q8, Numerics::Exact);
+    let o = net(&mo, KvType::F16, Numerics::Fast);
+    let sz = Sizes {
+        decode_windows: 1,
+        batch_windows: 2,
+        verify_windows: 1,
+        cached_windows: Some(1),
+        after: 3,
+        load: 3,
+        load_steps: 2,
+    };
+    let at_once = grade_sized(&r, &f, &o, &mr, Floor::KvQ8, Device::Cuda, &sz);
+    let two = reference(&r, &f, &mr, Floor::KvQ8, Device::Cuda, &sz).grade(&o);
+    assert_eq!(format!("{at_once:?}"), format!("{two:?}"));
+    assert_eq!(two.arms.len(), 4);
+    for a in &two.arms {
+        assert!(
+            a.mode.positions > 0 && a.mode.sum_kl > 0.0 && a.floor.sum_kl > 0.0 && a.launches > 0,
+            "{a:?}"
+        );
+    }
+    assert!(two.rows.0 > 0, "{:?}", two.rows);
 }
 
 /// The graded FP8 gate at sizes `sz`, each arm at least `min` positions;
