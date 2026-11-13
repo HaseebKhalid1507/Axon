@@ -1,0 +1,29 @@
+{
+ "label": "safeguards-bc11938-fp8-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-161316-4200",
+   "name": "safeguards-bc11938-fp8-graded",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bc11938",
+   "binary": "axon-test-bc11938",
+   "started": 1794608145.096644,
+   "ended": 1794609621.1792874,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "46567e3dfa871531c7eb89bc0b153fe7656aaa1cea8e2197e36574b985ff71d3",
+   "log_bytes": 1740
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 17:40:26 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
