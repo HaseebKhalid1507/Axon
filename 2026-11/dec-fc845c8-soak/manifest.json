@@ -1,0 +1,29 @@
+{
+ "label": "dec-fc845c8-soak",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1113-004234-f6b4",
+   "name": "dec-fc845c8-soak",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fc845c8",
+   "binary": "bash",
+   "started": 1794584262.5072875,
+   "ended": 1794584285.036775,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c507030be4ee9ab04b735ae5f9b412f479c35cd6b975080a5b4ddac05597ceaa",
+   "log_bytes": 1530
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 10:38:07 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
