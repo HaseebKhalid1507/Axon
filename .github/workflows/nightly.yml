@@ -1,0 +1,123 @@
+name: Nightly
+
+# Process v2 rule 8, the parts too heavy for every PR: the fuzzers on every parser of untrusted bytes Axon has a
+# harness for (GGUF, safetensors, HTTP), and the whole test suite with the real test models present. Bounded: each
+# fuzzer has a wall-clock cap, each job a timeout. A finding fails the run; the logs are kept as an artifact.
+on:
+  schedule:
+    - cron: "23 7 * * *"   # 07:23 UTC, about 02:23 in New York
+  workflow_dispatch:
+  # A PR that changes this workflow, its model list or a fuzzer runs it too (not on every PR: ~1 h).
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/nightly.yml
+      - .github/workflows/models.sh
+      - scripts/fuzz_gguf.py
+      - scripts/fuzz_serve.py
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  AXON_SKIP_GPU_TESTS: "1"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: test models (cached)
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-q05-fp8-v1
+      - name: download the test models
+        if: steps.models.outputs.cache-hit != 'true'
+        run: bash .github/workflows/models.sh fetch
+      - name: the test models' sha256
+        run: bash .github/workflows/models.sh check
+      - run: cargo build --release
+      # The fuzzers write ~1800 mutants that share the model's data through reflinks (fuzz_gguf.py's docstring);
+      # the runner's ext4 can't reflink, so a small XFS image with reflink=1 holds the work dirs.
+      - name: reflink scratch (XFS loop image)
+        run: |
+          command -v mkfs.xfs || { sudo apt-get update -qq; sudo apt-get install -y -qq xfsprogs; }
+          truncate -s 12G "$RUNNER_TEMP/fuzz.img"
+          mkfs.xfs -q -m reflink=1 "$RUNNER_TEMP/fuzz.img"
+          sudo mkdir -p /mnt/fuzz
+          sudo mount -o loop "$RUNNER_TEMP/fuzz.img" /mnt/fuzz
+          sudo chown "$(id -u):$(id -g)" /mnt/fuzz
+          mkdir -p fuzz-logs
+      - name: fuzz the GGUF reader and loader (cap 30 min)
+        if: always()
+        run: |
+          rc=0
+          timeout 30m python3 scripts/fuzz_gguf.py target/release/axon models/qwen2.5-0.5b-q4_k_m.gguf \
+            /mnt/fuzz/gguf --jobs 4 > fuzz-logs/gguf.log 2>&1 || rc=$?
+          grep -E "^FINDING|^HARNESS|mutants, " fuzz-logs/gguf.log | tail -n 40
+          [ $rc = 124 ] && echo "::error::fuzz_gguf.py did not finish in 30 min"
+          exit $rc
+      - name: fuzz the safetensors loader (cap 20 min)
+        if: always()
+        run: |
+          rc=0
+          timeout 20m python3 scripts/fuzz_gguf.py target/release/axon models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic \
+            /mnt/fuzz/st --safetensors --jobs 4 > fuzz-logs/safetensors.log 2>&1 || rc=$?
+          grep -E "^FINDING|^HARNESS|mutants, " fuzz-logs/safetensors.log | tail -n 40
+          [ $rc = 124 ] && echo "::error::fuzz_gguf.py --safetensors did not finish in 20 min"
+          exit $rc
+      - name: fuzz the HTTP server (plain, --slow, --ops, --apis; cap 25 min)
+        if: always()
+        run: |
+          rc=0
+          for mode in "--slow" "--ops" "--apis"; do
+            n=$(echo "$mode" | tr -d -)
+            r=0
+            timeout 10m python3 scripts/fuzz_serve.py target/release/axon models/qwen2.5-0.5b-q4_k_m.gguf $mode \
+              --log-dir "fuzz-logs/serve-$n" > "fuzz-logs/serve-$n.log" 2>&1 || r=$?
+            echo "== fuzz_serve.py $mode: rc $r"; tail -n 15 "fuzz-logs/serve-$n.log"
+            [ $r = 0 ] || rc=$r
+          done
+          exit $rc
+      - name: keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-logs
+          path: fuzz-logs
+          retention-days: 14
+
+  model-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      # The test model and the FP8 checkpoint are here; the other test models aren't, and their tests skip.
+      AXON_SKIP_MODEL_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: test models (cached)
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-q05-fp8-v1
+      - name: download the test models
+        if: steps.models.outputs.cache-hit != 'true'
+        run: bash .github/workflows/models.sh fetch
+      - name: the test models' sha256
+        run: bash .github/workflows/models.sh check
+      - name: the whole suite with the test models (CPU)
+        run: |
+          set -o pipefail
+          cargo test -- --nocapture 2>&1 | tee suite.log | grep -E "^test result|FAILED|panicked" || true
+          if grep -n "skipping: models/qwen2.5-0.5b-q4_k_m.gguf\|the FP8 checkpoint .* is not present" suite.log; then exit 1; fi
+          grep -q "^test result: ok" suite.log && ! grep -q "^test result: FAILED" suite.log
