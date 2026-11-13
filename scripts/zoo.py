@@ -5,7 +5,7 @@
     scripts/zoo.py run --axon BIN --llama-server BIN --dir D [--models-dir M] [--out zoo.json]
                        [--device cpu] [--only SUBSTR] [--prompts N]
     scripts/zoo.py table zoo.json                the markdown table for docs/hardening.md
-    scripts/zoo.py audit-table LOG|zoo.json...   the compatibility-audit table (docs/log/2026-11-13-compat-audit.md)
+    scripts/zoo.py audit-table LOG|zoo.json...   the compatibility-audit table (docs/compat-audit-2026-11-13.md)
 
   --list FILE (fetch, run): a JSON list of {repo, file, sha256, expect, why, ...} instead of ZOO (the audit's
   scripts/examples/compat-audit/ollama-top30.json); --set golden: the nightly golden-model set (GOLDEN below).
@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import urllib.request
@@ -249,7 +250,8 @@ def llama_side(a, model, ids_list, texts=None):
     env["LD_LIBRARY_PATH"] = os.path.dirname(a.llama_server) + ":" + env.get("LD_LIBRARY_PATH", "")
     log = open(os.path.join(a.work, os.path.basename(model) + ".llama.log"), "w")
     srv = subprocess.Popen([a.llama_server, "-m", model, "--port", str(port), "-c", "4096", "-np", "1",
-                            "--no-warmup", "-ngl", str(getattr(a, "llama_ngl", 0)), "-t", str(a.threads), "--jinja"],
+                            "--no-warmup", "-ngl", str(getattr(a, "llama_ngl", 0)), "-t", str(a.threads), "--jinja"]
+                           + shlex.split(getattr(a, "llama_args", "") or ""),
                            env=env, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
     try:
@@ -328,7 +330,8 @@ def one(a, e):
     problems = []
     if panicked(out + err):
         problems.append("info panicked")
-    grc, gout, gerr = run([a.axon, "gen", p, GEN_PROMPT, "-n", "64", "--device", a.device or "cpu"], env=env)
+    xa = shlex.split(getattr(a, "axon_args", "") or "")
+    grc, gout, gerr = run([a.axon, "gen", p, GEN_PROMPT, "-n", "64", "--device", a.device or "cpu"] + xa, env=env)
     r["gen_rc"] = grc
     if panicked(gout + gerr):
         problems.append("gen panicked")
@@ -361,7 +364,7 @@ def one(a, e):
     ids_list, tops = [], []
     for q in prompts + [GEN_PROMPT]:
         try:
-            ids, top = LL.axon_ids_and_top(a.axon, p, q, 20, ["--device", a.device or "cpu"])
+            ids, top = LL.axon_ids_and_top(a.axon, p, q, 20, ["--device", a.device or "cpu"] + xa)
         except subprocess.CalledProcessError as ex:
             problems.append(f"logits failed rc {ex.returncode}: {(ex.stderr or '')[-200:]!r}")
             break
@@ -688,8 +691,12 @@ def load_results(paths):
     out = {}
     for p in paths:
         txt = open(p, errors="replace").read()
-        if txt.lstrip().startswith("["):
-            for r in json.loads(txt):
+        try:   # a zoo.json list; a job log also opens with '[' ("[axon-run ...]"), so parse, don't sniff
+            rows = json.loads(txt)
+        except ValueError:
+            rows = None
+        if isinstance(rows, list):
+            for r in rows:
                 out[r["file"]] = r
             continue
         for ln in txt.splitlines():
@@ -712,6 +719,9 @@ def fix_key(r):
 
 def audit_table(a):
     rs = load_results(a.paths)
+    lst = {x["file"]: x for x in json.load(open(os.path.join(HERE, "examples", "compat-audit", "ollama-top30.json")))}
+    for r in rs:   # the list's pull counts (ZOO-RESULT records don't carry them)
+        r.setdefault("pulls_m", (lst.get(r["file"]) or {}).get("pulls_m"))
     print("| # | ollama model | HF file | arch | quant | Axon | prompt vs llama.cpp | greedy vs llama.cpp | reason / note |")
     print("|---:|---|---|---|---|---|---|---|---|")
     for r in rs:
@@ -738,7 +748,7 @@ def audit_table(a):
             elif r.get("llama"):
                 greedy = "n/a: " + r["llama"][:40]
             if r.get("tok_agree") and not r["tok_agree"].startswith(str(r["tok_agree"].split("/")[1]) + "/"):
-                note += f"tokenizer differs on {r['tok_agree']} prompts agreeing; "
+                note += f"tokenizer: {r['tok_agree']} prompts agree with llama.cpp; "
         elif axon == "refused":
             note = re.sub(r" \(supported: [^)]*\)", "", re.sub(r"^axon: [^:]*\.gguf: ", "", r.get("refusal") or ""))
         note += "; ".join(r.get("problems") or [])
@@ -783,6 +793,8 @@ def main():
     r.add_argument("--list")
     r.add_argument("--set", choices=["golden"])
     r.add_argument("--llama-ngl", type=int, default=0)
+    r.add_argument("--axon-args", default="", help="extra flags for every axon gen/logits (e.g. '--rope-scaling none')")
+    r.add_argument("--llama-args", default="", help="extra flags for llama-server (e.g. '--rope-scaling none')")
     r.add_argument("--chat", action="store_true")
     r.add_argument("--fetch-each", action="store_true")
     r.add_argument("--delete-after", action="store_true")

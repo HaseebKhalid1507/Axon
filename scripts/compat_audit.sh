@@ -1,6 +1,6 @@
 #!/bin/bash
 # compat_audit.sh ZOO_PY LLAMA_LOGITS_PY LIST AXON LLAMA_TGZ [zoo.py run args...]
-# The compatibility audit as one axon-podjob job (docs/log/2026-11-13-compat-audit.md): scripts/zoo.py over LIST
+# The compatibility audit as one axon-podjob job (docs/compat-audit-2026-11-13.md): scripts/zoo.py over LIST
 # (scripts/examples/compat-audit/ollama-top30.json), downloading each model from Hugging Face just before it runs
 # (sha256 checked) and deleting it after; `expect: refuse` entries are tried on their header first (a sparse file),
 # so a clean refusal costs no download. The reference is llama.cpp's prebuilt CPU llama-server from LLAMA_TGZ

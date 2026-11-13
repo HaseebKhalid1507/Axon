@@ -13,7 +13,8 @@
   "ollama_arch": "llama",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "8.0B",
-  "ollama_blob": "sha256:667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29"
+  "ollama_blob": "sha256:667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+  "golden": true
  },
  {
   "rank": 2,
@@ -45,7 +46,8 @@
   "ollama_arch": "qwen3",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "8.2B",
-  "ollama_blob": "sha256:e6a7edc1a4d7d9b2de136a221a57336b76316cfe53a252aeba814496c5ae439d"
+  "ollama_blob": "sha256:e6a7edc1a4d7d9b2de136a221a57336b76316cfe53a252aeba814496c5ae439d",
+  "golden": true
  },
  {
   "rank": 4,
@@ -61,7 +63,8 @@
   "ollama_arch": "llama",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "3.2B",
-  "ollama_blob": "sha256:dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff"
+  "ollama_blob": "sha256:dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff",
+  "golden": true
  },
  {
   "rank": 5,
@@ -77,7 +80,8 @@
   "ollama_arch": "qwen2",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "7.6B",
-  "ollama_blob": "sha256:2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730"
+  "ollama_blob": "sha256:2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730",
+  "golden": true
  },
  {
   "rank": 6,
@@ -93,7 +97,8 @@
   "ollama_arch": "qwen3",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "8.2B",
-  "ollama_blob": "sha256:a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f"
+  "ollama_blob": "sha256:a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f",
+  "golden": true
  },
  {
   "rank": 7,
@@ -109,7 +114,8 @@
   "ollama_arch": "gemma3",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "3.9B",
-  "ollama_blob": "sha256:f06e91e18fc74295d0c781bf91622508c75655e2c18ed869d52447ffe1e667e1"
+  "ollama_blob": "sha256:f06e91e18fc74295d0c781bf91622508c75655e2c18ed869d52447ffe1e667e1",
+  "golden": true
  },
  {
   "rank": 8,
@@ -141,7 +147,8 @@
   "ollama_arch": "llama",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "7.2B",
-  "ollama_blob": "sha256:f5074b1221da0f5a2910d33b642efa5b9eb58cfdddca1c79e16d7ad28aa2b31f"
+  "ollama_blob": "sha256:f5074b1221da0f5a2910d33b642efa5b9eb58cfdddca1c79e16d7ad28aa2b31f",
+  "golden": true
  },
  {
   "rank": 10,
@@ -173,7 +180,8 @@
   "ollama_arch": "llama",
   "ollama_quant": "Q4_0",
   "ollama_params": "8.0B",
-  "ollama_blob": "sha256:6a0746a1ec1aef3e7ec53868f220ff6e389f6f8ef87a01d77c96807de94ca2aa"
+  "ollama_blob": "sha256:6a0746a1ec1aef3e7ec53868f220ff6e389f6f8ef87a01d77c96807de94ca2aa",
+  "golden": true
  },
  {
   "rank": 12,
@@ -205,7 +213,8 @@
   "ollama_arch": "qwen2",
   "ollama_quant": "Q4_K_M",
   "ollama_params": "7.6B",
-  "ollama_blob": "sha256:60e05f2100071479f596b964f89f510f057ce397ea22f2833a0cfe029bfc2463"
+  "ollama_blob": "sha256:60e05f2100071479f596b964f89f510f057ce397ea22f2833a0cfe029bfc2463",
+  "golden": true
  },
  {
   "rank": 14,
@@ -269,7 +278,8 @@
   "ollama_arch": "gpt-oss",
   "ollama_quant": "MXFP4",
   "ollama_params": "20.9B",
-  "ollama_blob": "sha256:8ecb5d4ad6172c63f9cbf1a07a04e525985a8a11a6e516da02b674c4010de716"
+  "ollama_blob": "sha256:8ecb5d4ad6172c63f9cbf1a07a04e525985a8a11a6e516da02b674c4010de716",
+  "golden": true
  },
  {
   "rank": 18,
