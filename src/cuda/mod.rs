@@ -21,8 +21,11 @@
 //! on it; the synchronous `DevBuf` calls wait for the stream afterwards.
 
 mod ffi;
+mod pack;
 pub mod qwen2;
 pub mod upload;
+
+pub use pack::{kernels_cmd, set_embedded as set_embedded_pack};
 
 use crate::numerics::Numerics;
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
@@ -1586,6 +1589,8 @@ pub enum CacheStatus {
     Corrupt,
     /// Compiled: no cache directory (no absolute $XDG_CACHE_HOME or $HOME).
     Off,
+    /// From the precompiled pack (`pack`): no compile, no cache.
+    Pack,
 }
 
 /// Compiled CUDA code loaded on a `Gpu`; unloaded on drop.
@@ -1783,7 +1788,7 @@ fn sweep_stale_tmp(dir: &Path, age: std::time::Duration) {
 
 /// What NVRTC compiles kernels to for a device: architectures as
 /// 10 * major + minor (sm_120 = 120).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Target {
     /// Machine code for sm_XY: runs on that major with an equal or higher minor.
     Cubin(i32),
@@ -1875,6 +1880,111 @@ fn hopper_env() -> bool {
     std::env::var("AXON_HOPPER").ok().as_deref() != Some("0")
 }
 
+/// Where a device's kernels come from (`code_for`).
+#[derive(Clone, Copy)]
+enum Code {
+    /// The precompiled pack (`pack`): its entries for the target. A module
+    /// it lacks is compiled for the same target by NVRTC, if there is one
+    /// (`nvrtc_target`).
+    Pack(&'static pack::Pack<'static>),
+    /// Compiled here by this NVRTC (through the kernel cache).
+    Nvrtc(&'static ffi::Nvrtc),
+}
+
+/// The code for a device of architecture `cc` (10 * major + minor) on a
+/// CUDA `driver` (`hopper`: as `pick_target`), and its target: the
+/// precompiled pack's when there is one (`pack::active`), it has code for
+/// the device (`pack::pick`) and the driver is at least its NVRTC's CUDA
+/// major (`check_versions`); else NVRTC's (`nvrtc_for`). AXON_KERNEL_PACK=0
+/// skips the pack (the kill switch); AXON_KERNEL_PACK=only refuses NVRTC
+/// (the driver-only machine, on purpose). Err: why neither can build for
+/// the device, both reasons.
+fn code_for(cc: i32, driver: (i32, i32), hopper: bool) -> Result<(Code, Target), String> {
+    let mode = pack::mode()?;
+    let p = match mode {
+        pack::Mode::Off => Ok(None),
+        _ => pack::active(),
+    };
+    code_from(mode, p, cc, driver, hopper, || {
+        nvrtc_for(cc, driver, hopper)
+    })
+}
+
+/// `code_for` with AXON_KERNEL_PACK's `mode`, the pack `p` (`pack::active`'s)
+/// and `nvrtc` for `nvrtc_for` (tests).
+fn code_from(
+    mode: pack::Mode,
+    p: Result<Option<&'static pack::Pack<'static>>, String>,
+    cc: i32,
+    driver: (i32, i32),
+    hopper: bool,
+    nvrtc: impl FnOnce() -> Result<(&'static ffi::Nvrtc, Target), String>,
+) -> Result<(Code, Target), String> {
+    let why_not = match p {
+        _ if mode == pack::Mode::Off => None,
+        Err(e) => Some(e),
+        Ok(None) => Some("this build has no precompiled kernels".to_string()),
+        Ok(Some(p)) => {
+            let targets = p.targets();
+            match (
+                check_versions(driver, p.nvrtc()),
+                pack::pick(cc, hopper, &targets),
+            ) {
+                (Ok(()), Some(t)) => return Ok((Code::Pack(p), t)),
+                (Err(e), _) => Some(format!("precompiled kernels: {e}")),
+                (Ok(()), None) => Some(format!(
+                    "no precompiled kernels for sm_{cc} (the pack has {})",
+                    targets
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
+            }
+        }
+    };
+    if mode == pack::Mode::Only {
+        return Err(format!(
+            "AXON_KERNEL_PACK=only: {}",
+            why_not.unwrap_or_default()
+        ));
+    }
+    nvrtc()
+        .map(|(n, t)| (Code::Nvrtc(n), t))
+        .map_err(|e| match why_not {
+            Some(w) => format!("{w}; {e}"),
+            None => e,
+        })
+}
+
+/// An NVRTC that builds `target` for a CUDA `driver` (not newer than it:
+/// `check_versions`): for a module the pack lacks, so it gets the code the
+/// pack's modules have. Err: each loaded NVRTC's refusal, or none found.
+fn nvrtc_target(target: Target, driver: (i32, i32)) -> Result<&'static ffi::Nvrtc, String> {
+    ffi::nvrtc_where(|n| {
+        let nv = ffi::nvrtc_version(n)?;
+        check_versions(driver, nv)?;
+        let archs = ffi::nvrtc_archs(n)?;
+        let ok = match target {
+            Target::Cubin(a) | Target::Ptx(a) => archs.contains(&a),
+            Target::Cubin90a => archs.contains(&90) && nv.0 >= 12,
+        };
+        match ok {
+            true => Ok(()),
+            false => Err(format!("NVRTC {}.{} can't build {target}", nv.0, nv.1)),
+        }
+    })
+}
+
+/// NVRTC's options for `opts` built for `target`: the architecture first.
+/// The runtime compile (`Module::load_cached`) and the pack's
+/// (`pack::build`) both use it, so they hand NVRTC the same arguments.
+fn nvrtc_opts(target: Target, opts: &[&str]) -> Vec<String> {
+    let mut all = vec![format!("--gpu-architecture={target}")];
+    all.extend(opts.iter().map(|s| s.to_string()));
+    all
+}
+
 /// Compile CUDA C++ `src` with NVRTC `n` (`opts` include the architecture)
 /// to a cubin, or for a `Ptx` target NUL-terminated PTX (as
 /// cuModuleLoadData takes it). Err carries the compile log.
@@ -1962,8 +2072,9 @@ fn compile_logged(
 }
 
 impl<'g> Module<'g> {
-    /// `src` compiled for this GPU with `opts` (beyond the architecture),
-    /// through the kernel cache at `cache_dir()`.
+    /// `src` built for this GPU with `opts` (beyond the architecture): the
+    /// precompiled pack's code when it has it, else compiled through the
+    /// kernel cache at `cache_dir()` (`load_in`).
     pub fn load(
         gpu: &'g Gpu,
         src: &str,
@@ -1972,8 +2083,9 @@ impl<'g> Module<'g> {
         Self::load_in(gpu, src, opts, cache_dir().as_deref())
     }
 
-    /// `load` with the cache in `dir` (None: no cache). Picks the NVRTC
-    /// and the target (`nvrtc_for`).
+    /// `load` with the cache in `dir` (None: no cache). Picks where the
+    /// code comes from and its target (`code_for`): the precompiled pack
+    /// (`load_packed`) or NVRTC (`load_for`).
     pub fn load_in(
         gpu: &'g Gpu,
         src: &str,
@@ -1981,11 +2093,45 @@ impl<'g> Module<'g> {
         dir: Option<&Path>,
     ) -> Result<(Module<'g>, CacheStatus), String> {
         let cc = gpu.info()?.cc;
-        let (n, target) = nvrtc_for(
-            (cc.0 * 10 + cc.1) as i32,
-            ffi::driver_version(gpu.d)?,
-            hopper_env(),
-        )?;
+        let cc = (cc.0 * 10 + cc.1) as i32;
+        match code_for(cc, ffi::driver_version(gpu.d)?, hopper_env())? {
+            (Code::Pack(p), target) => Self::load_packed(gpu, p, src, opts, dir, target),
+            (Code::Nvrtc(n), target) => Self::load_for(gpu, n, src, opts, dir, target),
+        }
+    }
+
+    /// `load_in` from pack `p` for `target`: its entry for this source and
+    /// these options (`module_hash`), loaded from memory, no compile and no
+    /// cache (`CacheStatus::Pack`). The entry is what NVRTC builds for them
+    /// (`pack::build`), so the module is the one `load_for` would make with
+    /// that NVRTC. A module the pack lacks (e.g. a debug build's MOE_DEBUG
+    /// router), or whose code the driver refuses, is compiled for the same
+    /// target by NVRTC (`nvrtc_target`) through the cache, unless
+    /// AXON_KERNEL_PACK=only. Err: why the pack's didn't load and why NVRTC
+    /// couldn't build it.
+    fn load_packed(
+        gpu: &'g Gpu,
+        p: &pack::Pack<'_>,
+        src: &str,
+        opts: &[&str],
+        dir: Option<&Path>,
+        target: Target,
+    ) -> Result<(Module<'g>, CacheStatus), String> {
+        let why = match p.find(module_hash(src, opts), target) {
+            None => format!("the precompiled kernels have no {target} code for this module"),
+            Some(e) => match p.image(e).and_then(|img| {
+                let img = pack::Aligned::new(img);
+                Self::from_image(gpu, img.bytes())
+            }) {
+                Ok(m) => return Ok((Self::finish(gpu, m, src, opts, target)?, CacheStatus::Pack)),
+                Err(e) => format!("precompiled {target} kernels: {e}"),
+            },
+        };
+        if pack::mode()? == pack::Mode::Only {
+            return Err(format!("AXON_KERNEL_PACK=only: {why}"));
+        }
+        let n =
+            nvrtc_target(target, ffi::driver_version(gpu.d)?).map_err(|e| format!("{why}; {e}"))?;
         Self::load_for(gpu, n, src, opts, dir, target)
     }
 
@@ -2002,7 +2148,21 @@ impl<'g> Module<'g> {
         dir: Option<&Path>,
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
-        let (mut m, status) = Self::load_cached(gpu, n, src, opts, dir, target)?;
+        let (m, status) = Self::load_cached(gpu, n, src, opts, dir, target)?;
+        Ok((Self::finish(gpu, m, src, opts, target)?, status))
+    }
+
+    /// Module `m`, built for `target` from `src` and `opts`, with what that
+    /// means set: its architecture, Hopper kernels, numerics mode, FP8
+    /// kernels, `src_hash` and `pdl`. The same whether the code came from
+    /// NVRTC or the pack.
+    fn finish(
+        gpu: &'g Gpu,
+        mut m: Module<'g>,
+        src: &str,
+        opts: &[&str],
+        target: Target,
+    ) -> Result<Module<'g>, String> {
         let arch = match target {
             Target::Cubin(a) | Target::Ptx(a) => a,
             Target::Cubin90a => 90,
@@ -2020,10 +2180,10 @@ impl<'g> Module<'g> {
             ffi::driver_version(gpu.d)?,
             env.as_deref(),
         );
-        Ok((m, status))
+        Ok(m)
     }
 
-    /// `load_for` without setting `pdl`.
+    /// `load_for` without `finish`.
     fn load_cached(
         gpu: &'g Gpu,
         n: &ffi::Nvrtc,
@@ -2033,8 +2193,7 @@ impl<'g> Module<'g> {
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
         let nv = ffi::nvrtc_version(n)?;
-        let mut all = vec![format!("--gpu-architecture={target}")];
-        all.extend(opts.iter().map(|s| s.to_string()));
+        let all = nvrtc_opts(target, opts);
         let (joined, ver) = (all.join("\n"), format!("nvrtc {}.{}", nv.0, nv.1));
         let tname = target.to_string();
         let key = fnv128(&[
@@ -2248,6 +2407,70 @@ fn module_spec(oss: bool, f8: bool, ext: bool, n: Numerics) -> (&'static str, Ve
     (src, o)
 }
 
+/// `Kernels::moe_module_for_mode`'s source and options: deepseek2's
+/// (`mla`: `MLA_KERNELS` with the extra types) or moe.cu's router, with
+/// `moe_opts` (MOE_DEBUG in debug builds), in mode `n` (`mode_opts`).
+fn moe_spec(mla: bool, n: Numerics) -> (&'static str, Vec<&'static str>) {
+    let (src, base) = match mla {
+        true => (MLA_KERNELS, &KERNEL_OPTS_EXT[..]),
+        false => (include_str!("moe.cu"), &KERNEL_OPTS[..]),
+    };
+    (src, mode_opts(&moe_opts(base), n))
+}
+
+/// A module the product loads (`product_modules`).
+pub(crate) struct ProductModule {
+    /// For people: which loader and inputs.
+    pub name: String,
+    pub src: &'static str,
+    pub opts: Vec<&'static str>,
+    /// The oldest architecture it's loaded for (10 * major + minor; 0: any).
+    pub min_arch: i32,
+}
+
+/// Every module the product code loads on a GPU: `Kernels::module_for_mode`'s
+/// (`module_spec` over its whole domain: gpt-oss or not, FP8 or not, the extra
+/// types or not, exact or fast) and `Kernels::moe_module_for_mode`'s (`moe_spec`:
+/// MLA or not, exact or fast). What the precompiled pack holds (`pack::build`).
+/// Skipped: FP8 outside fast mode (`module_for_mode` loads fp8.cu only in fast
+/// mode, on sm_89+: `min_arch` 89) and FP8 with gpt-oss (no gpt-oss checkpoint
+/// loads as FP8). A module missing here still runs: `Module::load_packed`
+/// compiles it with NVRTC when there is one.
+pub(crate) fn product_modules() -> Vec<ProductModule> {
+    use crate::numerics::Numerics::{Exact, Fast};
+    let mut v = Vec::new();
+    for oss in [false, true] {
+        for f8 in [false, true] {
+            for ext in [false, true] {
+                for n in [Exact, Fast] {
+                    if f8 && (n != Fast || oss) {
+                        continue;
+                    }
+                    let (src, opts) = module_spec(oss, f8, ext, n);
+                    v.push(ProductModule {
+                        name: format!("model oss={oss} f8={f8} ext={ext} {n}"),
+                        src,
+                        opts,
+                        min_arch: if f8 { 89 } else { 0 },
+                    });
+                }
+            }
+        }
+    }
+    for mla in [false, true] {
+        for n in [Exact, Fast] {
+            let (src, opts) = moe_spec(mla, n);
+            v.push(ProductModule {
+                name: format!("router mla={mla} {n}"),
+                src,
+                opts,
+                min_arch: 0,
+            });
+        }
+    }
+    v
+}
+
 /// Whether fast mode runs FP8 natively on `gpu`: sm_89+ (e4m3) and AXON_FP8_NATIVE isn't 0.
 pub(crate) fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
     let cc = gpu.info()?.cc;
@@ -2332,17 +2555,14 @@ impl<'m> Kernels<'m> {
         Self::moe_module_for_mode(gpu, m, Numerics::Exact)
     }
 
-    /// `moe_module_for` in numerics mode `n` (`mode_opts`).
+    /// `moe_module_for` in numerics mode `n` (`moe_spec`).
     pub fn moe_module_for_mode<'g>(
         gpu: &'g Gpu,
         m: &crate::gguf::Model,
         n: Numerics,
     ) -> Result<Module<'g>, String> {
-        let (src, base) = match m.arch == "deepseek2" {
-            true => (MLA_KERNELS, &KERNEL_OPTS_EXT[..]),
-            false => (include_str!("moe.cu"), &KERNEL_OPTS[..]),
-        };
-        Ok(Module::load(gpu, src, &mode_opts(&moe_opts(base), n))?.0)
+        let (src, o) = moe_spec(m.arch == "deepseek2", n);
+        Ok(Module::load(gpu, src, &o)?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type;
@@ -2454,12 +2674,21 @@ impl<'m> Kernels<'m> {
 }
 
 /// One line about the GPU for `axon info`: name, architecture, memory and
-/// theoretical bandwidth, or why there's none; and if no NVRTC can build
-/// for it (`nvrtc_for`), that it's unusable and why.
+/// theoretical bandwidth, or why there's none; where its kernels come from
+/// (`code_for`: the precompiled pack or NVRTC), or that it's unusable and
+/// why.
 pub fn summary() -> String {
     let usable = |i: &DeviceInfo| {
         let d = ffi::driver_version(ffi::driver()?)?;
-        nvrtc_for((i.cc.0 * 10 + i.cc.1) as i32, d, hopper_env()).map(|_| ())
+        code_for((i.cc.0 * 10 + i.cc.1) as i32, d, hopper_env()).and_then(|(c, t)| {
+            Ok(match c {
+                Code::Pack(_) => format!("kernels: precompiled {t}"),
+                Code::Nvrtc(n) => {
+                    let v = ffi::nvrtc_version(n)?;
+                    format!("kernels: NVRTC {}.{} {t}", v.0, v.1)
+                }
+            })
+        })
     };
     match Gpu::open().and_then(|g| g.info()) {
         Ok(i) => {
@@ -2475,8 +2704,9 @@ pub fn summary() -> String {
             if let Some(bw) = i.bandwidth_gbs() {
                 s.push_str(&format!(" | ~{bw:.0} GB/s"));
             }
-            if let Err(e) = usable(&i) {
-                s.push_str(&format!(" | unusable: {e}"));
+            match usable(&i) {
+                Ok(k) => s.push_str(&format!(" | {k}")),
+                Err(e) => s.push_str(&format!(" | unusable: {e}")),
             }
             s
         }
@@ -2484,14 +2714,16 @@ pub fn summary() -> String {
     }
 }
 
-/// The code `Module::load` builds for `gpu` (`nvrtc_for`'s target), as
-/// NVRTC names it ("sm_89", "sm_90a", "compute_90"); for PTX, which the
-/// driver compiles, with the driver's version; and the architecture it is
-/// for (10 * major + minor, `Module::mma`'s). For the identity tuple.
+/// The code `Module::load` builds for `gpu` (`code_for`'s target, the
+/// pack's or NVRTC's), as NVRTC names it ("sm_89", "sm_90a", "compute_90");
+/// for PTX, which the driver compiles, with the driver's version; and the
+/// architecture it is for (10 * major + minor, `Module::mma`'s). For the
+/// identity tuple. A pack entry is NVRTC's output for its target, so the
+/// same target names the same code either way.
 pub fn code_target(gpu: &Gpu) -> Result<(String, i32), String> {
     let cc = gpu.info()?.cc;
     let d = ffi::driver_version(gpu.d)?;
-    let (_, target) = nvrtc_for((cc.0 * 10 + cc.1) as i32, d, hopper_env())?;
+    let (_, target) = code_for((cc.0 * 10 + cc.1) as i32, d, hopper_env())?;
     Ok(match target {
         Target::Ptx(a) => (format!("{target} PTX, driver {}.{}", d.0, d.1), a),
         Target::Cubin(a) => (target.to_string(), a),
