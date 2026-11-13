@@ -29,6 +29,12 @@ bella` and rerouted by hand to an RTX 4090 (pod1, exclusive, FOREIGN_GPU 0 %), w
 The decision paired the two flips assuming both would pass. The failure is the tier's cost (#233, #234), not
 sharing's, so the lead ruled that sharing flips alone.
 
+Update 11-13 (the lead's roadmap ruling, asked for by shady on #226): the flips are decoupled in `docs/roadmap.md`
+(week 1, item 2). Shared prefix pages go default-on on their own evidence (#218, the A/B's sharing-alone arm, the
+4.5 h soak) and no longer wait on #233 or #234. `--cache-ram auto` default-on waits on #233 (first-request TTFT) and
+#234 (the write-behind's 2–3 % tok/s and ITL p99), then a new A/B. This branch merged main (`4f347a3`, #224's new
+roadmap; docs and infra only) to carry that edit.
+
 ## Why
 #210 and #211 passed at #216's code: same bits, no measured cell worse (C=1 decode, ITL p99, C=8 and C=16
 throughput 1.000× in #207's servetime), eight subagents' TTFT 0.591× on a shared 6,006-token prefix. The review's
