@@ -45,7 +45,8 @@ jobs:
         run: bash .github/workflows/models.sh check
       - run: cargo build --release
       # The fuzzers write ~1800 mutants that share the model's data through reflinks (fuzz_gguf.py's docstring);
-      # the runner's ext4 can't reflink, so a small XFS image with reflink=1 holds the work dirs.
+      # the runner's ext4 can't reflink, so a small XFS image with reflink=1 holds the work dirs, and a copy of the
+      # models: the base copy is copy_file_range, which fails across filesystems (EXDEV).
       - name: reflink scratch (XFS loop image)
         run: |
           command -v mkfs.xfs || { sudo apt-get update -qq; sudo apt-get install -y -qq xfsprogs; }
@@ -54,12 +55,14 @@ jobs:
           sudo mkdir -p /mnt/fuzz
           sudo mount -o loop "$RUNNER_TEMP/fuzz.img" /mnt/fuzz
           sudo chown "$(id -u):$(id -g)" /mnt/fuzz
-          mkdir -p fuzz-logs
+          mkdir -p fuzz-logs /mnt/fuzz/src
+          cp models/qwen2.5-0.5b-q4_k_m.gguf /mnt/fuzz/src/
+          cp -r models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic /mnt/fuzz/src/
       - name: fuzz the GGUF reader and loader (cap 30 min)
         if: always()
         run: |
           rc=0
-          timeout 30m python3 scripts/fuzz_gguf.py target/release/axon models/qwen2.5-0.5b-q4_k_m.gguf \
+          timeout 30m python3 scripts/fuzz_gguf.py target/release/axon /mnt/fuzz/src/qwen2.5-0.5b-q4_k_m.gguf \
             /mnt/fuzz/gguf --jobs 4 > fuzz-logs/gguf.log 2>&1 || rc=$?
           grep -E "^FINDING|^HARNESS|mutants, " fuzz-logs/gguf.log | tail -n 40
           [ $rc = 124 ] && echo "::error::fuzz_gguf.py did not finish in 30 min"
@@ -68,7 +71,7 @@ jobs:
         if: always()
         run: |
           rc=0
-          timeout 20m python3 scripts/fuzz_gguf.py target/release/axon models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic \
+          timeout 20m python3 scripts/fuzz_gguf.py target/release/axon /mnt/fuzz/src/Qwen2.5-0.5B-Instruct-FP8-dynamic \
             /mnt/fuzz/st --safetensors --jobs 4 > fuzz-logs/safetensors.log 2>&1 || rc=$?
           grep -E "^FINDING|^HARNESS|mutants, " fuzz-logs/safetensors.log | tail -n 40
           [ $rc = 124 ] && echo "::error::fuzz_gguf.py --safetensors did not finish in 20 min"
