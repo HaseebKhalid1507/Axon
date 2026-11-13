@@ -7,22 +7,27 @@ measurements behind them.
 ## Unreleased (after 0.1.0's draft)
 
 ### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
-- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Same bits on or off. The
-  win is subagent fan-out (#211: eight subagents' TTFT 0.591× on a shared 6,006-token prefix); the agent board's
-  Synaps-shaped trace shares only 4–7 % of its prompt tokens.
+- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Same bits on or off. On its
+  own: the KV RAM tier stays off by default (#226). In the A/B on an RTX 4090 (#228, job 1112-233524-d38d) sharing
+  alone passed every cell (C=8 ITL p99 0.980×, C=16 tok/s 1.001×), but the tier failed, so the planned pairing was
+  dropped (the lead's ruling, 11-13). The win is subagent fan-out (#211: eight subagents' TTFT 0.591× on a shared
+  6,006-token prefix); the agent board's Synaps-shaped trace shares only 4–7 % of its prompt tokens.
 - **#218:** `index_pages` takes the index's hold on a swapped block only once `replace_pages` has mapped it into the
   slot, so an error in between leaves no hold on a page the slot doesn't map. A refeed claim alone no longer counts
   as a prefill step's progress.
 - **#219:** a preempted or unfed request's claim of shared pages counts in the new
   `axon_refeed_shared_tokens_total`, so `axon_prompt_shared_tokens_total` is admissions' prompt tokens again.
 
-### `axon serve --cache-ram auto` is the default, capped at 4 GiB (11-12 decision)
-- **The KV RAM tier is on by default**: `auto`, the smaller of 4 GiB and a quarter of the RAM available after the
-  model. It was off (`0`) by default, and `auto` was half that RAM, up to 8 GiB, page-locked from start.
-- **Off under a binding memory cgroup** (a container or systemd scope whose limit is tighter than the host's free
-  RAM): pinned memory counts against the limit. The banner says why; an explicit `--cache-ram SIZE` still turns it on.
-- **Kill switch:** `--cache-ram 0`, or the new `--cache-ram off`. Same bits either way: the tier moves rows, it
-  doesn't recompute them.
+### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
+- **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
+  that RAM, up to 8 GiB, page-locked from start.
+- **`auto` is off under a binding memory cgroup** (a container or systemd scope whose limit is tighter than the host's
+  free RAM), because pinned memory counts against the limit. The banner says why. An explicit `--cache-ram SIZE`
+  still turns the tier on.
+- **`--cache-ram off`** is the same as `0`.
+- **The default is still off.** The 11-12 decision made `auto` the default, but its A/B failed the 2 % rule on an
+  RTX 4090 (C=16 tok/s 0.977×, C=8 ITL p99 1.103×), and the first request after each start waited 3.2–4.0 s for the
+  pinning. The flip waits for #233 and #234 (the lead's ruling, 11-13).
 
 ### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
 - Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.

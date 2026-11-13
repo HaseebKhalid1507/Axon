@@ -163,9 +163,11 @@ pub struct Opts {
     /// is cancelled (its slot freed), as if it had disconnected. The CLI
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
-    /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off; the
-    /// CLI's default is `auto`: the smaller of 4 GiB and a quarter of the
-    /// RAM available after the model, off under a binding cgroup limit).
+    /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
+    /// default; `auto` is the smaller of 4 GiB and a quarter of the RAM
+    /// available after the model, off under a binding cgroup limit). Not on
+    /// by default until #233 and #234 are fixed (11-13: its A/B failed the
+    /// 2 % rule on a 4090, and its first request waited for the pinning).
     pub cache_ram: tier::CacheRam,
     /// How its page-locked memory is taken (AXON_KV_RAM_ALLOC).
     pub cache_ram_alloc: tier::Alloc,
@@ -1448,7 +1450,7 @@ fn engine(
     // 2-6 s instead of 2 (MEASURED 1027-134559-a975, 20G; the suspect, not
     // proven). The identity doesn't depend on the tier.
     let identity = crate::identity::of(&o.path, &model, &net);
-    // The KV RAM tier (`--cache-ram`, default auto): sized against the RAM
+    // The KV RAM tier (`--cache-ram`, default off): sized against the RAM
     // available now (the model loaded), and what bounds it (auto is off
     // under a binding cgroup limit). On the GPU the whole size is
     // page-locked from here on, by a thread (or before the server answers,
@@ -3419,7 +3421,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
-        cache_ram: tier::CacheRam::Auto,
+        cache_ram: tier::CacheRam::Bytes(0),
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
     };

@@ -1,10 +1,12 @@
 # Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (#219)
 
-- Date: 2026-11-12. Branch: dec/share-default (on dec/cache-ram-auto, #226). Base: main 213465a. Status: open
+- Date: 2026-11-12, recast 11-13 (sharing alone). Branch: dec/share-default (on dec/cache-ram-auto, #226, with its
+  flip stripped). Base: main 213465a. Status: open
 - Pick / design: the 11-12 decision (Haseeb's answers to the 11-07 Fable 5.2 review, §4 "Shared prefix pages on by
   default: flip", with its conditions: fix #218, the debug suite, a soak of 4 h or more under a small pool, the kill
   switch, flip together with the tier); the foreman's M3/M4 rulings on #224's review (the flip's A/B cells, a
-  sharing-on, tier-off cell).
+  sharing-on, tier-off cell); the lead's 11-13 rulings: the 4090 reading of the A/B stands, the tier stays off by
+  default (#226), sharing flips on its own, and the soak runs the shipped config (sharing on, tier off).
 
 ## What changed
 - **#218** (`index_pages`): a swapped block's index hold, and the call's keys, are taken only once `replace_pages`
@@ -13,7 +15,19 @@
   The nit: a refeed claim alone no longer counts as a prefill step's progress (`feed` returns the tokens fed).
 - **#219**: refeed claims count in `axon_refeed_shared_tokens_total`; `axon_prompt_shared_tokens_total` is
   admissions' prompt tokens again (the split, the issue's recommended option).
-- **The flip**: `AXON_SHARE_KV` on unless `0` (the kill switch), was on for `1` only.
+- **The flip**: `AXON_SHARE_KV` on unless `0` (the kill switch), was on for `1` only. The KV RAM tier stays off by
+  default (#226), so a server with default flags shares pages and has no tier.
+
+## The A/B, and why sharing flips alone (11-13)
+`abshare.sh`, job `1112-233524-d38d`. The stop rule was in the PR body before the run. It was queued `--timing
+bella` and rerouted by hand to an RTX 4090 (pod1, exclusive, FOREIGN_GPU 0 %), where the arms ran interleaved. Arm
+÷ main medians over 5 rounds (rule: tok/s ≥ 0.98×, ITL p99 ≤ 1.02×):
+- `share` (sharing on, tier off): C=1 1.001 / 0.998, C=8 1.000 / 0.980, C=16 1.001 / 1.004. **PASS.**
+- `tier` (`AXON_SHARE_KV=0 --cache-ram 4G`): C=8 ITL p99 1.103, C=16 tok/s 0.977. FAIL.
+- `both`: C=8 ITL p99 1.208, C=16 tok/s 0.977. FAIL.
+
+The decision paired the two flips assuming both would pass. The failure is the tier's cost (#233, #234), not
+sharing's, so the lead ruled that sharing flips alone.
 
 ## Why
 #210 and #211 passed at #216's code: same bits, no measured cell worse (C=1 decode, ITL p99, C=8 and C=16
@@ -26,8 +40,9 @@ subagent fan-out, not every agent workload.
 PR body (job IDs): the full tier on bella (the serve tests that don't set `share` now run with it on, the
 default), a `serve::` run with `AXON_SHARE_KV=0`, `md5share-v4.sh` against main (gen; serve on, off, tier on and
 off, shuffled, undersized pools; pressure), the A/B of rule 4 (four arms: main, both flips, sharing alone, the tier
-alone; stop rule in the PR body before the run), and the 4.5 h soak on a debug-assertions build (page invariants
-checked after every step) with sharing on, `--cache-ram 2G` and a 128-page pool.
+alone; stop rule in the PR body before the run; result above). Then **the soak, the shipped config**: 4.5 h on a
+debug-assertions build (page invariants checked after every step), sharing on, the tier off, a 128-page pool. A
+second soak with sharing on and `--cache-ram 2G` (the opt-in combination) runs at `--low` as extra evidence.
 
 ## Results
 Pending at the time of writing; the PR body has them as they land.
