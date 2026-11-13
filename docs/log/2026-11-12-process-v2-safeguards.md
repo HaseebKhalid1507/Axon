@@ -134,5 +134,9 @@ llama.cpp's spread: mean KL 0.006, |dlogprob| 0.456):
   distribution can come out below zero. |dlogprob| still sees it.
 
 ## Gates
-fmt and clippy `-D warnings` clean; fast tier (rel on a 4090 pod, dbg on the CPU) and md5 against main (6 models x
-5 prompts, cuda): job ids and verdicts in the PR body.
+fmt and clippy `-D warnings` clean. First round (98a0d8d): fast tier (rel on a 4090 pod, dbg on the CPU) and md5
+against main. Merge-ready round (main 8e11543 merged in): the full tier (every test of the release and the
+debug-assertion builds on GPU hosts, sharded), `gpu_fp8_graded_vs_fp8_ref` as its own job (the interim split while
+it holds the GPU test lock through its CPU reference, #232), md5 against main 8e11543 (6 models x 5 prompts, cuda),
+and golden.py itself at the head on the compatibility audit's top 10 (a 4090, llama.cpp b11580 CPU, its CUDA build
+for the spread). `scripts/golden_selftest.py` in CI. Job ids and verdicts in the PR body.
