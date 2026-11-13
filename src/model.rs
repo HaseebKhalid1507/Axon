@@ -832,7 +832,9 @@ fn batch_tolerance(cpus: u64) -> u64 {
 /// unreclaimable memory by 554.7-555.0 MiB under five caps (job
 /// 1106-142807-b4b3, bella). With the dense tolerance, 34 MiB on 8 CPUs,
 /// the check let through caps the conversion was then OOM-killed in
-/// (719-743 MiB there), where it refuses now.
+/// (719-743 MiB there). With this one it refuses them through 735 MiB;
+/// about 742-745 MiB is still killed converting (the arena's page tables,
+/// which the estimate doesn't count: #217).
 pub(crate) fn conv_tolerance() -> u64 {
     batch_tolerance(affinity_cpus())
 }

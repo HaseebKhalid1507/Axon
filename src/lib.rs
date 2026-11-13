@@ -1,5 +1,5 @@
-//! Axon: CPU and CUDA inference for GGUF language models (the README lists
-//! the supported families), bit-exact across decode, batched prefill and
+//! Axon: CPU and CUDA inference for GGUF language models (docs/models.md
+//! lists the supported families), bit-exact across decode, batched prefill and
 //! speculative verify.
 //!
 //! The `axon` binary is a thin wrapper over this crate. The public API is
@@ -46,7 +46,7 @@
 //! changes behaviour. `AXON_GPUS` picks the GPU(s): the only way in 0.1
 //! (read at each `Backend::new`). A value the engine can't use for
 //! `AXON_SIMD`, `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error from
-//! `load` and `Backend::new`. README; #118.
+//! `load` and `Backend::new`. docs/environment.md; #118.
 //!
 //! [`Backend`] and [`BackendCache`] are opaque, [`Lm`] is sealed, and
 //! [`Device`], [`KvType`], [`Numerics`] and [`GenStats`] are
@@ -123,8 +123,8 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
 }
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the
-/// command line, `["axon", "serve", "model.gguf", flags...]` (README,
-/// `axon serve --help`). Blocks. It behaves as the CLI does, process exits
+/// command line, `["axon", "serve", "model.gguf", flags...]`
+/// (docs/serving.md; its flags: `axon --help`). Blocks. It behaves as the CLI does, process exits
 /// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
 /// `AXON_DRAFT`) prints a message and exits with code 2, so does a start
 /// the server refuses (an explicit `--parallel N` that doesn't fit in GPU
