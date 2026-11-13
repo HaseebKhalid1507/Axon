@@ -66,7 +66,7 @@ got=$(sha "$tmp/$asset")
 mkdir "$tmp/x"
 tar -xzf "$tmp/$asset" -C "$tmp/x"
 src=$(find "$tmp/x" -mindepth 2 -maxdepth 2 -type f -name axon | head -n 1)
-[ -n "$src" ] && [ -x "$src" ] || die "no axon binary in the tarball"
+if [ -z "$src" ] || [ ! -x "$src" ]; then die "no axon binary in the tarball"; fi
 new=$("$src" --version 2>/dev/null) || die "the downloaded axon doesn't run here: $("$src" --version 2>&1 | head -n 1)"
 
 mkdir -p "$bin_dir" "$doc_dir" || die "can't create $bin_dir and $doc_dir"
