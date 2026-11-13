@@ -22,21 +22,39 @@ because no human reads the code. This PR is the Axon side; the schedulers live i
   - (c) the distributions along llama.cpp's greedy path: llama.cpp's greedy 64 tokens after (b)'s prompt and after
     a text prompt, Axon teacher-forced on the same ids (`AXON_LOGITS_IDS` + `AXON_LOGITS_PREFIX`: position N-1
     batched, every later one a decode step), top 20 on both sides. Per step: top-1 agreement, KL(llama.cpp || Axon)
-    over llama.cpp's top 20, |dlogprob| of llama.cpp's token, and for a flip its swing (llama.cpp's margin for its
-    token plus Axon's for its own). The yardstick is llama.cpp's own spread: its CUDA build runs the same steps
+    over llama.cpp's top 20 plus a tail bucket per side (the mass outside the top 20: a KL over 21 categories, so
+    never negative), |dlogprob| of llama.cpp's token, and for a flip its swing (llama.cpp's margin for its token plus
+    Axon's for its own). **Hard clauses**, always judged: top-1 at least 90 %, llama.cpp's token inside Axon's top 20,
+    every logit finite. **Scaled clauses**, judged against llama.cpp's own spread: its CUDA build runs the same steps
     (`--llama-server-ref`), and Axon may differ from llama.cpp's CPU by 2.5x that spread, never less than the floors
-    (mean KL 0.006, |dlogprob| 0.3 nats); a flip may swing twice the |dlogprob| limit. It also fails on top-1 under
-    90 %, llama.cpp's token outside Axon's top 20, or a non-finite logit. "Thresholds" below has the numbers.
+    (mean KL 0.006, |dlogprob| 0.3 nats); a flip may swing twice the |dlogprob| limit. Without a usable spread (no
+    reference, one that didn't start, or one that fails the hard clauses itself against llama.cpp's CPU) the scaled
+    clauses are not judged: the floors alone fail clean Gemma 3 1B / 4B and R1 8B (round 2). "Thresholds" below has
+    the numbers. `--llama-ref-extra SUBSTR=ARGS` gives one model's reference extra flags (gpt-oss-20b on bella's
+    12 GB card: `--n-cpu-moe`).
   - Verdicts: pass; FAIL, a real difference (exit 1); ERROR when something wasn't judged (axon crashed or timed out,
-    chat n/a, the reference backend didn't start), missing, llama-error (exit 2). axon-nightly bisects a FAIL only.
-  - **By design** (`BY_DESIGN`, from shady's #246 review): a (model file pattern, check, reason) list of places where
-    Axon departs from llama.cpp on purpose. The check still runs and keeps its difference in the record, but reports
-    BY-DESIGN instead of DIFF, and the model's other checks grade as usual, so it can't turn into a permanent red
-    that teaches everyone to ignore red. One entry: Mistral v0.3's chat prompt, where Axon follows mistral_common's
-    tokens (`src/chat.rs`'s module doc, "Mistral"; llama.cpp tokenizes the rendered text, one `▁` more after `[INST]`).
-    A listed check that comes out equal is flagged stale.
-  - `scripts/golden_selftest.py` (CI, beside the agent replay self-test, 0.05 s): the parsers on canned
-    `axon logits` output, the metrics and limits, the verdicts and exit codes, `BY_DESIGN`, the date fixes.
+    chat n/a, no usable reference spread, golden.py itself crashed on the model: caught per model, the next model
+    runs), missing, llama-error (exit 2). A crash outside any model exits 2 too, never FAIL's 1. The JSON is rewritten
+    after each model and says `planned` (up front), `complete` and `exit` (at the end), so a run that was cut off
+    can't read as green. axon-nightly bisects a FAIL only.
+  - **By design** (`BY_DESIGN`, from shady's #246 review): a list of places where Axon departs from llama.cpp on
+    purpose: the model file pattern, the check, the reason, and Axon's exact ids for that check. The check still runs
+    and keeps its difference in the record; when Axon's ids are exactly the listed ones it reports BY-DESIGN instead of
+    DIFF, and any other difference stays DIFF (round 2: a dropped system message or glued turns must not pass as
+    by design). The model's other checks grade as usual, so it can't turn into a permanent red that teaches everyone
+    to ignore red. One entry: Mistral v0.3's chat prompt, where Axon follows mistral_common's per-piece tokens in
+    llama.cpp's mistral-v3 placement (`src/chat.rs`'s module doc, "Mistral"; llama.cpp tokenizes the rendered text,
+    one `▁` more after `[INST]`). Its 47 ids are each text piece tokenized on its own by llama.cpp's SentencePiece,
+    and Axon renders exactly those (7080). A listed check that comes out equal is flagged stale.
+  - **`scripts/golden-top10.sh`** + **`scripts/golden-top10.json`**: golden.py on the compatibility audit's top 10
+    on a pod (`axon-podjob`), each model from Hugging Face at a pinned revision, sha256-checked. It exits with the
+    worst per-model status (FAIL 1 beats not judged 2); a failed download, a sha256 mismatch, a timeout, a crash or a
+    cut-off JSON count as not judged. It ends `GOLDEN-TOP10 done rc=N`: gate on `--expect '^GOLDEN-TOP10 done rc=0$'`.
+  - `scripts/golden_selftest.py` (CI, beside the agent replay self-test, ~1.5 s): the parsers on canned
+    `axon logits` output, the metrics and limits, the verdicts and exit codes, `BY_DESIGN`, the date fixes, `one()`
+    itself on a fake llama-server and a stub axon (every ERROR path above, and the hard clauses failing without a
+    reference), `run()`'s per-model crash and its `planned` / `complete`, and golden-top10.sh's exit code on a fake
+    golden.py and a failing curl. Each of round 2's surviving mutations of `one()` now fails it.
 - **`AXON_LOGITS_CHAT=FILE`** for `axon logits`: the ids `/v1/chat/completions` would run for a request body
   (`serve::chat_prompt`, rendered exactly as `completion` renders it), printed as `chat prompt ids (N): [...]`,
   then the logits after them. An env-gated debug path of `logits`; gen, chat and serve are unchanged.
@@ -130,8 +148,11 @@ llama.cpp's spread: mean KL 0.006, |dlogprob| 0.456):
   so are its limits. eps x1000 fails (KL 2.6x, top-1 0.87). eps x100, eps x10, exact GELU for the tanh form, and the
   embedding scale sqrt(d) rounded to bf16 all pass. On such a model (c) is coarse by necessity; (a) and (b) are
   exact on every model.
-- **A negative mean KL is real.** The KL is over llama.cpp's top 20 only, so a scale error that sharpens Axon's
-  distribution can come out below zero. |dlogprob| still sees it.
+- **The mean KL was negative for a sharpening bug** (Q6_K scale x1.10 above): over the top 20 alone, a scale error
+  that sharpens Axon's distribution comes out below zero. Round 2 added the tail bucket (above), so KL is >= 0 and at
+  most the full KL. On the recorded bella steps it moves clean means by under 0.0004 (Llama 3.2 1B CUDA 0.00308 ->
+  0.00197, Gemma 3 1B 0.0121 -> 0.0118, Qwen3 4B 0.00229 -> 0.00193; llama.cpp's spreads by under 0.0001), so the
+  constants stand; the floor now sits at 3x the worst clean mean where it applies.
 
 ## Gates
 fmt and clippy `-D warnings` clean. First round (98a0d8d): fast tier (rel on a 4090 pod, dbg on the CPU) and md5
@@ -140,3 +161,14 @@ debug-assertion builds on GPU hosts, sharded), `gpu_fp8_graded_vs_fp8_ref` as it
 it holds the GPU test lock through its CPU reference, #232), md5 against main 8e11543 (6 models x 5 prompts, cuda),
 and golden.py itself at the head on the compatibility audit's top 10 (a 4090, llama.cpp b11580 CPU, its CUDA build
 for the spread). `scripts/golden_selftest.py` in CI. Job ids and verdicts in the PR body.
+
+**golden at bc11938 (job `1113-143305-7080`) is not a pass**, though the job went green: 7 models pass (Mistral as
+BY-DESIGN), 2 FAIL, 1 not judged.
+- R1-0528 Qwen3 8B: chat DIFF at 0, llama.cpp starts with BOS 151643 and Axon doesn't (#238).
+- Llama 3 8B: chat DIFF at 4, Axon writes Llama 3.1's "Cutting Knowledge Date" header on a 3.0 file (#241).
+- gpt-oss-20b: not run (the download failed, HTTP/2 stream CANCEL).
+
+Both FAILs are main's bugs, which #246 fixes: #246's own golden run (d4fb) passes both. The wrapper then lived in a
+builder's scratch, printed `GOLDEN-TOP10 done` whatever the models did, and the EXPECT matched it: the same false
+green as #246's ca11, inside this PR (shady, round 2). Round 2 moved the wrapper into `scripts/`, with the worst rc
+as its exit code. The golden pass of record comes from the merge train's tip, which has #246.

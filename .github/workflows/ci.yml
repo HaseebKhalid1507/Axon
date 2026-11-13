@@ -38,7 +38,8 @@ jobs:
       # The agent replay harness's offline self-test (stdlib only, no engine or model, ~0.1 s).
       - name: agent replay self-test
         run: python3 scripts/agent_replay_selftest.py
-      # golden.py's parsers and verdict logic on canned `axon logits` output (stdlib only, no model, ~0.1 s).
+      # golden.py's parsers, verdict logic and one() on a fake llama-server and a stub axon, and golden-top10.sh's
+      # exit code on a fake golden.py (stdlib only, no model, no network, ~1.5 s).
       - name: golden self-test
         run: python3 scripts/golden_selftest.py
       - run: cargo fmt --check

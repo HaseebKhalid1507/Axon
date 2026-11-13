@@ -2,7 +2,7 @@
 """Golden check: Axon against llama.cpp on whole models, from text in (stdlib only).
 
     scripts/golden.py run --axon BIN --llama-server BIN --models-dir D --models a.gguf,b.gguf
-                          [--llama-server-ref CUDA_BIN [--llama-ref-ngl 99]]
+                          [--llama-server-ref CUDA_BIN [--llama-ref-ngl 99] [--llama-ref-extra SUBSTR=ARGS]]
                           [--device cuda] [--n 64] [--threads 8] [--llama-ngl 0] --out golden.json
     scripts/golden.py table golden.json      a markdown table of a run
 
@@ -22,18 +22,28 @@ from text on both sides and compares, per model, against llama.cpp's llama-serve
   (c) greedy    llama.cpp's greedy N tokens after (b)'s llama.cpp ids and after GEN_PROMPT, then Axon teacher-
                 forced on the same ids (AXON_LOGITS_IDS + AXON_LOGITS_PREFIX), top K on both sides. Per step: top-1
                 agreement, KL(llama || axon) over llama.cpp's top K, |dlogprob| of llama.cpp's token, and for a flip
-                its swing (llama.cpp's margin for its token + Axon's for its own). With --llama-server-ref, llama.cpp's
-                other backend runs the same steps, and Axon may differ from llama.cpp's CPU by SPREAD_FACTOR x that
-                spread (never less than the floors): mean KL, max |dlogprob|, and a swing of twice the |dlogprob|
-                limit (two tokens each off by the limit). Gemma 3 1B differs from a float64 reference by up to 0.4
-                nats in BOTH engines while Llama 3.2 1B stays under 0.13, so one fixed limit is wrong for one of them.
-A model passes when (a) and (b) are equal and (c) is within its limits, top-1 at least AGREE_MIN, llama.cpp's token
-inside Axon's top K at every step, every logit finite. Verdicts: pass, FAIL (a real difference), ERROR (not judged:
-axon crashed or timed out, chat n/a, the reference backend didn't start), missing, llama-error. Exit 0 all pass,
-1 any FAIL, 2 anything not judged (or usage).
+                its swing (llama.cpp's margin for its token + Axon's for its own). KL has a tail bucket on each side
+                (the mass outside the top K), so it is a KL over K+1 categories: never negative.
+                Hard clauses, always judged: top-1 at least AGREE_MIN, llama.cpp's token inside Axon's top K at every
+                step, every logit finite. Scaled clauses: with --llama-server-ref, llama.cpp's other backend runs the
+                same steps, and Axon may differ from llama.cpp's CPU by SPREAD_FACTOR x that spread (never less than
+                the floors): mean KL, max |dlogprob|, and a swing of twice the |dlogprob| limit (two tokens each off
+                by the limit). Gemma 3 1B differs from a float64 reference by up to 0.4 nats in BOTH engines while
+                Llama 3.2 1B stays under 0.13, so one fixed limit is wrong for one of them, and the floors alone fail
+                clean Gemma 3 models. So without a usable spread (no --llama-server-ref, a reference that didn't
+                start, or one that fails the hard clauses itself against llama.cpp's CPU: a garbage reference must not
+                widen the limits) the scaled clauses are NOT judged: the model is ERROR unless a hard clause FAILs.
+                --llama-ref-extra SUBSTR=ARGS adds ARGS to the reference's llama-server for the models whose file name
+                contains SUBSTR (gpt-oss-20b on a 12 GB card: `gpt-oss=--n-cpu-moe 12`).
+A model passes when (a) and (b) are equal and (c) passes. Verdicts: pass, FAIL (a real difference), ERROR (not
+judged: axon crashed or timed out, chat n/a, no usable reference spread, golden.py itself crashed on the model),
+missing, llama-error. Exit 0 all pass, 1 any FAIL, 2 anything not judged (also usage and a crash outside a model).
+The JSON (--out) is rewritten after every model: "planned" (the models of this run, written before the first),
+"complete" (false until the last model is done) and "exit". A doc that isn't complete is a run that was cut off.
 BY_DESIGN lists the checks where Axon departs from llama.cpp on purpose (a model file pattern, the check, the reason
-with the code or doc that says so). Such a check still runs and keeps its difference in the record, but reports
-BY-DESIGN instead of DIFF and doesn't fail the model; the model's other checks are graded as usual. A listed check
+with the code or doc that says so, and Axon's exact ids for that check). Such a check still runs and keeps its
+difference in the record; if Axon's ids are exactly the listed ones it reports BY-DESIGN instead of DIFF and doesn't
+fail the model, any other difference stays DIFF (FAIL). The model's other checks are graded as usual. A listed check
 that comes out equal is flagged stale (the entry can go).
 `--only SUBSTR` runs the matching models only (axon-nightly's bisect).
 `scripts/golden_selftest.py` checks the parsing and the verdict logic offline (CI runs it).
@@ -49,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 
 TOK_PROMPTS = [
@@ -78,11 +89,20 @@ K = 20   # top-K logprobs from both engines (KL over llama.cpp's top K, as scrip
 # eps x10, a Q6_K scale x1.10 and Q3_K_L weights fail; eps x3 and a Q6_K scale x1.05 pass (inside the noise).
 SPREAD_FACTOR, KL_MEAN_FLOOR, DLP_FLOOR, AGREE_MIN = 2.5, 0.006, 0.3, 0.9
 # Differences by design (shady on #246): (model file regex, check, why: the code or doc that decides it).
+# "axon_ids": Axon's whole rendering for that check, exactly; only that difference is by design (shady #229 round 2:
+# a Mistral serve-prompt regression must not pass as BY-DESIGN).
 BY_DESIGN = [
-    (re.compile(r"(?i)mistral-7b-instruct-v0\.3"), "chat",
-     "Axon frames Mistral v0.3 with mistral_common's tokens, each piece between control tokens encoded on its own "
-     "(src/chat.rs module doc, \"Mistral\"; pinned by chat.rs's mistral tests); llama.cpp tokenizes the rendered "
-     "text, a '\u2581' more after [INST], and the GGUF embeds an older template"),
+    {"model": re.compile(r"(?i)mistral-7b-instruct-v0\.3"), "check": "chat",
+     "why": "Axon frames Mistral v0.3 with mistral_common's tokens, each piece between control tokens encoded on its "
+            "own, in llama.cpp's mistral-v3 placement (system message in the first user turn) (src/chat.rs module "
+            "doc, \"Mistral\"; pinned by chat.rs's mistral tests); llama.cpp tokenizes the rendered text, a "
+            "'\u2581' more after [INST], and the GGUF embeds an older template",
+     # CHAT as <s>[INST] {system}\n\n{user}[/INST] {reply}</s>[INST] {user}[/INST], each text piece tokenized on its
+     # own by llama.cpp's SentencePiece (/tokenize, no specials: the piece's dummy-prefix '\u2581'), 11-13, bartowski's
+     # Mistral-7B-Instruct-v0.3-Q4_K_M.gguf (sha256 1270d22c...); Axon at bc11938 renders the same 47 (golden 7080).
+     "axon_ids": [1, 3, 1763, 1228, 1032, 3846, 1632, 14660, 29491, 27075, 1065, 1206, 1848, 2480, 24516, 29491, 781,
+                  781, 3963, 1117, 1040, 6333, 1070, 5611, 29572, 4, 1183, 6333, 1070, 5611, 1117, 6233, 29491, 2, 3,
+                  1783, 1070, 5488, 29572, 16521, 2847, 1146, 4014, 1040, 6333, 29491, 4]},
 ]
 # Templates that print today's date ignore chat_template_kwargs (gpt-oss: strftime_now): llama.cpp's rendering is
 # normalized to Axon's pinned dates before it is tokenized.
@@ -106,14 +126,15 @@ def free_port():
 class Llama:
     """A llama-server on a free port; stopped on exit."""
 
-    def __init__(self, a, model, log):
+    def __init__(self, a, model, log, extra=()):
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         env = dict(os.environ)
         env["LD_LIBRARY_PATH"] = os.path.dirname(a.llama_server) + ":" + env.get("LD_LIBRARY_PATH", "")
         self.log = open(log, "w")
         self.p = subprocess.Popen([a.llama_server, "-m", model, "--port", str(self.port), "-c", "4096", "-np", "1",
-                                   "--jinja", "--no-warmup", "-ngl", str(a.llama_ngl), "-t", str(a.threads)],
+                                   "--jinja", "--no-warmup", "-ngl", str(a.llama_ngl), "-t", str(a.threads),
+                                   *extra],
                                   env=env, stdout=self.log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
 
     def wait(self, limit=600):
@@ -244,10 +265,21 @@ class NotJudged(Exception):
 
 
 def kl_top(pa, pb):
-    """KL(a || b) over a's top K, b floored at its K-th logprob (scripts/oracle/llama_logits.py's kl_top)."""
+    """KL(a || b) over a's top K plus one tail bucket (the mass outside those K) on each side: a KL between two
+    distributions over the same K+1 categories, so never negative (Gibbs), and at most the full KL. Over the top K
+    alone it went negative when b is sharper than a (a logit-scale bug: Q6_K x1.10, the log's planted bugs). b's
+    logprob of a token outside its own top K is floored at its K-th (an upper bound); each side is renormalized if
+    rounding or that floor puts its K masses over 1."""
     db = dict((i, lp) for i, lp in pb)
     floor = min(lp for _, lp in pb)
-    return sum(math.exp(lp) * (lp - db.get(i, floor)) for i, lp in pa)
+    p = [math.exp(lp) for _, lp in pa]
+    q = [math.exp(db.get(i, floor)) for i, _ in pa]
+    pt, qt = max(0.0, 1.0 - sum(p)), max(0.0, 1.0 - sum(q))
+    zp, zq = sum(p) + pt, sum(q) + qt
+    kl = sum(x / zp * math.log((x / zp) / (y / zq)) for x, y in zip(p, q) if x > 0)
+    if pt > 0:
+        kl += pt / zp * math.log((pt / zp) / max(qt / zq, 1e-12))
+    return max(0.0, kl)   # >= 0 in exact arithmetic; clamp the last-ulp rounding
 
 
 def compare(path_, tops, kind, m):
@@ -284,16 +316,30 @@ def summary(m):
             "flips": m["flips"]}
 
 
-def judge(g, spread=None):
-    """(c)'s verdict on summary() g, limits from summary() spread (llama.cpp's CUDA vs its CPU on the same steps; None:
-    the floors). Returns (limits, clear flips, why): an empty why is a pass."""
-    sk = spread["kl_mean"] if spread else 0.0
-    sd = spread["max_dlp"] if spread else 0.0
-    lim = {"kl_mean": round(max(KL_MEAN_FLOOR, SPREAD_FACTOR * sk), 5),
-           "max_dlp": round(max(DLP_FLOOR, SPREAD_FACTOR * sd), 4), "agree_frac": AGREE_MIN,
-           "from": "llama.cpp's spread" if spread else "floors (no --llama-server-ref)"}
-    lim["swing"] = round(2 * lim["max_dlp"], 4)
-    clear = [f for f in g["flips"] if f["swing"] > lim["swing"]]
+def ref_problems(spread):
+    """Why llama.cpp's other backend can't set (c)'s limits: summary() of it vs llama.cpp's CPU on the same steps must
+    pass golden's hard clauses itself (finite logits, the CPU's token inside its top K, top-1 >= AGREE_MIN). The limits
+    scale with the spread and have no ceiling, so a garbage reference would otherwise widen them (shady, #229 round 2:
+    a synthetic one gave KL 13, dlp 17). [] when it is sane."""
+    if not spread or not spread.get("steps"):
+        return ["no finite steps"]
+    why = []
+    if spread["nonfinite"]:
+        why.append(f"non-finite logits at {len(spread['nonfinite'])} step(s)")
+    if spread["missing"]:
+        why.append(f"llama.cpp CPU's token outside its top {K} at {len(spread['missing'])} step(s)")
+    if spread["agree_frac"] < AGREE_MIN:
+        why.append(f"top-1 {spread['agree_frac']} < {AGREE_MIN}")
+    return why
+
+
+def judge(g, spread=None, no_spread="no --llama-server-ref"):
+    """(c)'s verdict on summary() g. Hard clauses, always: steps, finite logits, llama.cpp's token inside Axon's top K,
+    top-1 >= AGREE_MIN. Scaled clauses (mean KL, max |dlogprob|, the flips' swing), only against a sane spread
+    (summary() of llama.cpp's other backend vs its CPU on the same steps, see ref_problems): SPREAD_FACTOR x it, never
+    under the floors. Returns (limits, clear flips, why, unjudged): a non-empty why FAILs the check; else a non-empty
+    unjudged says why the scaled clauses weren't judged (the check is ERROR); else it passes. no_spread: why there is
+    no spread (the reference didn't start, ...)."""
     why = []
     if not g["steps"]:
         why.append("no steps")
@@ -301,38 +347,58 @@ def judge(g, spread=None):
         why.append(f"{len(g['nonfinite'])} step(s) with non-finite logits")
     if g["missing"]:
         why.append(f"llama.cpp's token outside Axon's top {K} at {len(g['missing'])} step(s)")
-    if clear:
-        why.append(f"{len(clear)} flip(s) with a swing over {lim['swing']}")
     if g["steps"] and g["agree_frac"] < AGREE_MIN:
         why.append(f"top-1 {g['agree_frac']} < {AGREE_MIN}")
+    bad = ref_problems(spread) if spread is not None else None
+    if spread is None or bad:
+        unj = ("mean KL, max dlogprob and swing not judged: "
+               + (f"llama.cpp's reference spread is not sane ({'; '.join(bad)})" if bad else no_spread))
+        return {"kl_mean": None, "max_dlp": None, "swing": None, "agree_frac": AGREE_MIN, "from": unj}, [], why, unj
+    lim = {"kl_mean": round(max(KL_MEAN_FLOOR, SPREAD_FACTOR * spread["kl_mean"]), 5),
+           "max_dlp": round(max(DLP_FLOOR, SPREAD_FACTOR * spread["max_dlp"]), 4), "agree_frac": AGREE_MIN,
+           "from": "llama.cpp's spread"}
+    lim["swing"] = round(2 * lim["max_dlp"], 4)
+    clear = [f for f in g["flips"] if f["swing"] > lim["swing"]]
+    if clear:
+        why.append(f"{len(clear)} flip(s) with a swing over {lim['swing']}")
     if g["steps"] and g["kl_mean"] > lim["kl_mean"]:
         why.append(f"KL mean {g['kl_mean']} > {lim['kl_mean']}")
     if g["max_dlp"] > lim["max_dlp"]:
         why.append(f"max dlogprob {g['max_dlp']} > {lim['max_dlp']}")
-    return lim, clear, why
+    return lim, clear, why, None
 
 
 def by_design(model, check):
-    """BY_DESIGN's reason for this model file's check, or None."""
-    for rx, c, why in BY_DESIGN:
-        if c == check and rx.search(model):
-            return why
+    """BY_DESIGN's entry for this model file's check, or None."""
+    for e in BY_DESIGN:
+        if e["check"] == check and e["model"].search(model):
+            return e
     return None
 
 
 def apply_by_design(r):
-    """A judged check that differs where BY_DESIGN says Axon departs on purpose: BY-DESIGN (pass, with the reason and
-    the difference kept); one that came out equal anyway: by_design_stale. Not-judged checks stay not judged."""
+    """A judged check that differs where BY_DESIGN says Axon departs on purpose, with Axon's ids exactly the entry's:
+    BY-DESIGN (pass, with the reason and the difference kept). Any other difference stays DIFF, with by_design_mismatch
+    saying where Axon left the known rendering. One that came out equal anyway: by_design_stale. Not-judged checks stay
+    not judged."""
     r["by_design"] = []
     for k, c in r["checks"].items():
-        why = by_design(r["model"], k)
-        if not why or c.get("not_judged"):
+        e = by_design(r["model"], k)
+        if not e or c.get("not_judged"):
             continue
         if c.get("pass"):
-            c["by_design_stale"] = f"listed as by design but equal: drop its BY_DESIGN entry ({why[:60]}...)"
+            c["by_design_stale"] = f"listed as by design but equal: drop its BY_DESIGN entry ({e['why'][:60]}...)"
             r["problems"].append(f"{k}: {c['by_design_stale']}")
             continue
-        c.update(by_design=why, was=c.get("status", "DIFF"), status="BY-DESIGN")
+        got, want = c.get("axon_ids"), e["axon_ids"]
+        if got != want:
+            i = first_diff(got or [], want)
+            c["by_design_mismatch"] = (f"not the known by-design difference: Axon's ids leave the listed rendering at "
+                                       f"{i} (axon {(got or [])[max(0, (i or 0) - 2):(i or 0) + 4]} vs listed "
+                                       f"{want[max(0, (i or 0) - 2):(i or 0) + 4]}, {len(got or [])} vs {len(want)} ids)")
+            r["problems"].append(f"{k}: {c['by_design_mismatch']}")
+            continue
+        c.update(by_design=e["why"], was=c.get("status", "DIFF"), status="BY-DESIGN")
         c["pass"] = True   # graded as by design; the difference itself stays in the record (at / axon / llama)
         r["by_design"].append(k)
 
@@ -367,6 +433,31 @@ def strip_bos(ids, bos):
     return ids[i:], i
 
 
+def normalize_dates(rendered):
+    """llama.cpp's rendering with DATE_FIXES applied: (text, the patterns that changed something)."""
+    fixed = []
+    for rx, sub in DATE_FIXES:
+        new = rx.sub(sub.format(**TEMPLATE_KWARGS), rendered)
+        if new != rendered:
+            fixed.append(rx.pattern)
+        rendered = new
+    return rendered, fixed
+
+
+def ref_extra(a, name):
+    """--llama-ref-extra's args for this model file (every SUBSTR=ARGS whose SUBSTR is in the name)."""
+    out = []
+    for x in getattr(a, "llama_ref_extra", None) or []:
+        sub, _, args = x.partition("=")
+        if sub and sub in name:
+            out += args.split()
+    return out
+
+
+def new_metrics():
+    return {"steps": 0, "agree": 0, "kl": [], "dlp": [], "missing": [], "nonfinite": [], "flips": []}
+
+
 def one(a, name):
     path = os.path.join(a.models_dir, name)
     r = {"model": name, "checks": {}, "problems": []}
@@ -383,12 +474,7 @@ def one(a, name):
         l_keep = [tokenize_keeping(ll, t, keep) if keep else None for t in TOK_PROMPTS]
         # llama-server's chat endpoint: the template (BOS stripped when the vocab adds one), then add_special + parse
         rendered = ll.post("/apply-template", {"messages": CHAT, "chat_template_kwargs": TEMPLATE_KWARGS})["prompt"]
-        fixed = []
-        for rx, sub in DATE_FIXES:
-            new = rx.sub(sub.format(**TEMPLATE_KWARGS), rendered)
-            if new != rendered:
-                fixed.append(rx.pattern)
-            rendered = new
+        rendered, fixed = normalize_dates(rendered)
         l_chat = ll.tokenize(rendered, True, True)
         l_gen_ids = ll.tokenize(GEN_PROMPT, True, False)
         greedy = {"chat": ll.greedy(l_chat, a.n), "text": ll.greedy(l_gen_ids, a.n)}
@@ -399,17 +485,21 @@ def one(a, name):
         return r
     finally:
         ll.stop()
-    spread = None
+    # llama.cpp's other backend on the same steps: the spread that sets (c)'s scaled limits. One that can't start or
+    # answer leaves them unjudged (ERROR); (a), (b) and (c)'s hard clauses still run.
+    spread, no_spread = None, "no --llama-server-ref"
     if a.llama_server_ref:
         b = argparse.Namespace(llama_server=a.llama_server_ref, threads=a.threads, llama_ngl=a.llama_ref_ngl)
-        lr = Llama(b, path, os.path.join(a.work, name + ".llama-ref.log"))
+        extra = ref_extra(a, name)
+        if extra:
+            r["ref_args"] = extra
+        lr = Llama(b, path, os.path.join(a.work, name + ".llama-ref.log"), extra)
         try:
             lr.wait()
             spread = {k: lr.forced(ids, greedy[k]) for k, ids in (("chat", l_chat), ("text", l_gen_ids))}
-        except Exception as e:  # noqa: BLE001 (no yardstick: the model is not judged)
-            r["verdict"] = "ERROR"
-            r["problems"].append(f"llama.cpp reference backend ({a.llama_server_ref}, -ngl {a.llama_ref_ngl}): {e}")
-            return r
+        except Exception as e:  # noqa: BLE001 (no yardstick: the scaled clauses are not judged)
+            no_spread = f"llama.cpp reference backend ({a.llama_server_ref}, -ngl {a.llama_ref_ngl}): {e}"
+            r["ref_error"] = no_spread
         finally:
             lr.stop()
     bos = bos_probe[0] if bos_probe else None
@@ -455,14 +545,15 @@ def one(a, name):
                         axon_bos=gb, llama_bos=wb)
             if i is not None:
                 chat.update(at=i, axon=g[max(0, i - 3):i + 6], llama=w[max(0, i - 3):i + 6])
+            if chat["status"] == "DIFF":   # both whole (BY_DESIGN compares Axon's with its listed ids)
+                chat.update(axon_ids=got, llama_ids=l_chat)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
         chat.update(status="ERROR", why=str(e)[-300:], not_judged=True)
     chat["pass"] = chat["status"] == "equal"
     r["checks"]["chat"] = chat
     # (c) greedy top-1 and the distributions, teacher-forced on llama.cpp's path; limits from llama.cpp's own spread
     g = {"n": a.n, "k": K}
-    ax = {"steps": 0, "agree": 0, "kl": [], "dlp": [], "missing": [], "nonfinite": [], "flips": []}
-    sp = {"steps": 0, "agree": 0, "kl": [], "dlp": [], "missing": [], "nonfinite": [], "flips": []}
+    ax, sp = new_metrics(), new_metrics()
     try:
         for kind, prompt_ids in (("chat", l_chat), ("text", l_gen_ids)):
             path_ = greedy[kind]
@@ -473,13 +564,19 @@ def one(a, name):
                                       "AXON_LOGITS_PREFIX": str(len(prompt_ids)), "AXON_LOGITS_DIGITS": "6"}, k=K)
             pos = positions(out)
             compare(path_, [pos.get(len(prompt_ids) - 1 + i) for i in range(len(path_))], kind, ax)
-            if spread:
-                compare(path_, spread[kind], kind, sp)
         g.update(summary(ax))
-        if spread:
-            g["spread"] = summary(sp)
-        g["limits"], g["clear"], g["why"] = judge(g, g.get("spread"))
+        if spread is not None:
+            try:
+                for kind in ("chat", "text"):
+                    compare(greedy[kind], spread[kind], kind, sp)
+                g["spread"] = summary(sp)
+            except NotJudged as e:   # the reference gave no logits at a step
+                no_spread = f"llama.cpp's reference: {e}"
+        g["limits"], g["clear"], g["why"], unjudged = judge(g, g.get("spread"), no_spread)
         g["pass"] = not g["why"]
+        if g["pass"] and unjudged:   # the hard clauses held; the scaled ones had no yardstick: ERROR, never a pass
+            g.update(not_judged=True, error=unjudged)
+            g["pass"] = False
     except NotJudged as e:
         g.update(error=str(e)[-300:], not_judged=True)
         g["pass"] = False
@@ -507,12 +604,23 @@ def run(a):
     if not models:
         print("golden: no models", file=sys.stderr)
         return 2
-    ver = subprocess.run([a.axon, "--version"], capture_output=True, text=True).stdout.strip()
+    try:
+        ver = subprocess.run([a.axon, "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        ver = f"unknown: {e}"
     doc = {"axon": a.axon, "axon_version": ver, "llama_server": a.llama_server, "llama_version": llama_version(a),
-           "device": a.device, "n": a.n, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "models": []}
+           "device": a.device, "n": a.n, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "planned": models, "complete": False, "models": []}
+    save(doc, a.out)   # a run cut off before its last model leaves complete: false (axon-nightly checks)
     for m in models:
         t0 = time.time()
-        r = one(a, m)
+        try:
+            r = one(a, m)
+        except Exception as e:  # noqa: BLE001 (a bug in golden.py itself: this model is not judged, the next one runs)
+            r = {"model": m, "checks": {}, "verdict": "ERROR",
+                 "problems": [f"golden.py crashed on this model: {type(e).__name__}: {e}"[:400]],
+                 "traceback": traceback.format_exc()[-3000:]}
+            print(r["traceback"], file=sys.stderr, flush=True)
         r["secs"] = round(time.time() - t0, 1)
         doc["models"].append(r)
         c = r["checks"]
@@ -527,13 +635,24 @@ def run(a):
                           "limits": {k: v for k, v in c.get("greedy", {}).get("limits", {}).items() if k != "from"},
                           "secs": r["secs"],
                           "problems": r["problems"]}), flush=True)
-        json.dump(doc, open(a.out, "w"), indent=1)
+        save(doc, a.out)
     v = [r["verdict"] for r in doc["models"]]
     bd = sum(1 for r in doc["models"] if r.get("by_design"))
     print(f"GOLDEN {len(v)} models: pass {v.count('pass')}, FAIL {v.count('FAIL')}, ERROR {v.count('ERROR')}, "
           f"missing {v.count('missing')}, llama-error {v.count('llama-error')}"
           + (f" (by design: {bd} model(s) with a listed difference)" if bd else ""), flush=True)
-    return exit_code(v)
+    rc = exit_code(v)
+    doc.update(complete=True, exit=rc, finished=time.strftime("%Y-%m-%d %H:%M:%S"))
+    save(doc, a.out)
+    return rc
+
+
+def save(doc, out):
+    """The JSON, replaced atomically (a reader never sees half a file)."""
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=1)
+    os.replace(tmp, out)
 
 
 def table(a):
@@ -571,6 +690,9 @@ def main():
     r.add_argument("--llama-server-ref", help="llama.cpp's other backend (a CUDA build): its spread from --llama-server "
                                               "on the same steps sets (c)'s limits")
     r.add_argument("--llama-ref-ngl", type=int, default=99)
+    r.add_argument("--llama-ref-extra", action="append", metavar="SUBSTR=ARGS",
+                   help="extra llama-server args for the reference on models whose file name contains SUBSTR "
+                        "(repeatable; e.g. 'gpt-oss=--n-cpu-moe 12' to fit a 12 GB card)")
     r.add_argument("--out", required=True)
     t = sub.add_parser("table")
     t.add_argument("file")
@@ -582,4 +704,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception:  # noqa: BLE001 (a crash outside a model is "not judged", never FAIL's exit 1)
+        traceback.print_exc()
+        print("golden: crashed (exit 2: not judged)", file=sys.stderr)
+        sys.exit(2)
