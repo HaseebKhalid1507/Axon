@@ -69,6 +69,6 @@ body:
       label: References
       description: Roadmap item, design doc, log entries, papers, related issues and PRs.
       placeholder: |
-        docs/roadmap.md Scale item 3; docs/log/2026-10-17-paged-kv-s01.md; #50
+        docs/roadmap.md Plan, weeks 2–3 (gpt-oss experts on the GPU); docs/log/2026-10-18-gpt-oss-s1.md; #98
     validations:
       required: false
