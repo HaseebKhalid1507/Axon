@@ -1,0 +1,24 @@
+[axon-run 02:15:11] submitted 1113-021511-07e5 by /home/haseeb/.cache/axon-wt-safeguards: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-sens.sh
+[axon-run 11:18:05] scope axon-job-1113-021511-07e5-1794586685.scope in app-axonjobs.slice: MemoryMax 14231 MB, MemoryHigh 12807 MB, no swap, oomd pressure kill 80% (claim 8805 MB): an OOM here kills only this job
+[axon-run 11:18:05] job 1113-021511-07e5 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-021511-07e5-1794586685 --slice=app-axonjobs.slice -p MemoryMax=14231M -p MemoryHigh=12807M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-sens.sh
+axon-q 11:18:05 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-sens.sh
+text: ref-f64-actq8_0 71 tokens in 41.3s
+chat: ref-f64-actq8_0 113 tokens in 56.7s
+text: ref-f64-actcpu 71 tokens in 40.7s
+chat: ref-f64-actcpu 113 tokens in 56.7s
+text: ref-f64-kv16 71 tokens in 41.1s
+chat: ref-f64-kv16 113 tokens in 55.1s
+text: ref-f64-actq8_0-kv16 71 tokens in 38.4s
+chat: ref-f64-actq8_0-kv16 113 tokens in 52.0s
+text: ref-f64-actcpu 71 tokens in 46.6s
+chat: ref-f64-actcpu 116 tokens in 66.3s
+text: ref-f64-actq8_0-kv16 71 tokens in 48.5s
+chat: ref-f64-actq8_0-kv16 116 tokens in 64.6s
+text: bug-gelu-erf 71 tokens in 38.8s
+chat: bug-gelu-erf 113 tokens in 52.7s
+text: bug-emb-bf16 71 tokens in 37.6s
+chat: bug-emb-bf16 113 tokens in 51.3s
+text: bug-eps100 71 tokens in 38.3s
+chat: bug-eps100 113 tokens in 53.9s
+[axon-run 11:33:32] signal 15: stopping the job
+[axon-run 11:33:32] exit 143 after 927.0s (host bella)

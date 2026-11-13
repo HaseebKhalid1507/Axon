@@ -1,0 +1,29 @@
+{
+ "label": "safeguards-golden-sens",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1113-021511-07e5",
+   "name": "safeguards-golden-sens",
+   "rc": 143,
+   "verdict": "FAIL (rc 143)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794586685.8571548,
+   "ended": 1794587613.099139,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8b83aced44e4e9b084338abd3c264f2b7a90760f34ce96ddb1d3ddb7e2ff1a7b",
+   "log_bytes": 1724
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 11:33:36 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
