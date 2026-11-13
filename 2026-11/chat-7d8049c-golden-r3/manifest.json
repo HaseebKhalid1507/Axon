@@ -1,0 +1,29 @@
+{
+ "label": "chat-7d8049c-golden-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-054619-ca11",
+   "name": "chat-7d8049c-golden-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "7d8049c",
+   "binary": "bash",
+   "started": 1794606156.5227635,
+   "ended": 1794607054.5470023,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f825d88221f74d254e23fb750cf6e8c42c68aa5773b8a96fc465cefaf52adb4b",
+   "log_bytes": 15526
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 16:57:35 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
