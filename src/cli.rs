@@ -816,6 +816,20 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
     let mut ids = tok.encode_prompt(prompt);
+    // AXON_LOGITS_CHAT=FILE: `logits` after the chat prompt `serve` renders
+    // for FILE, a /v1/chat/completions request body ({"messages": [...]}),
+    // instead of the prompt's; its ids are printed first. scripts/golden.py
+    // compares them with llama.cpp's rendering of the GGUF's template.
+    if let Some(f) = env::var_os("AXON_LOGITS_CHAT").filter(|v| !v.is_empty() && cmd == "logits") {
+        if env::var_os("AXON_LOGITS_IDS").is_some_and(|v| !v.is_empty()) {
+            fail("AXON_LOGITS_CHAT and AXON_LOGITS_IDS: set one");
+        }
+        let body = std::fs::read(&f)
+            .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT {}: {e}", f.to_string_lossy())));
+        ids = crate::serve::chat_prompt(&tok, &model.arch, &body)
+            .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT: {e}")));
+        println!("chat prompt ids ({}): {:?}", ids.len(), ids);
+    }
     // AXON_LOGITS_IDS=1,2,3: `logits` of these token ids instead of the
     // prompt's (oracles compare on ids, never on text); with
     // AXON_LOGITS_ALL or AXON_LOGITS_PREFIX, several sequences separated by

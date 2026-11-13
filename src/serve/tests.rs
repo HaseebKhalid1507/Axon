@@ -885,6 +885,47 @@ fn serve_http_behaviour() {
     );
 }
 
+/// `chat_prompt` (AXON_LOGITS_CHAT, scripts/golden.py) renders a request
+/// body as `completion` does: the template's ids for the messages,
+/// `chat_template_kwargs` honoured, request errors as their message.
+#[test]
+fn chat_prompt_renders_as_completion() {
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m.arch).unwrap();
+    let body =
+        br#"{"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]}"#;
+    let ids = super::chat_prompt(&tok, &m.arch, body).unwrap();
+    let msg = |role, c: &str| Message {
+        role,
+        content: c.into(),
+    };
+    let msgs = [
+        msg(Role::System, "S"),
+        msg(Role::User, "a"),
+        msg(Role::Assistant, "b"),
+        msg(Role::User, "c"),
+    ];
+    assert_eq!(ids, t.render(&tok, &msgs, false));
+    assert_eq!(
+        tok.decode(&ids),
+        "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n<|im_start|>assistant\n"
+    );
+    // qwen2 doesn't think: enable_thinking changes nothing.
+    let off = br#"{"messages": [{"role": "user", "content": "a"}], "chat_template_kwargs": {"enable_thinking": false}}"#;
+    assert_eq!(
+        super::chat_prompt(&tok, &m.arch, off).unwrap(),
+        t.render(&tok, &[msg(Role::User, "a")], false)
+    );
+    let e = super::chat_prompt(&tok, &m.arch, b"{").unwrap_err();
+    assert!(e.starts_with("invalid JSON"), "{e}");
+    let e = super::chat_prompt(&tok, &m.arch, br#"{"messages": []}"#).unwrap_err();
+    assert_eq!(e, "'messages' is empty");
+}
+
 /// The chat prompt is `axon chat`'s: the same building blocks (frame), the
 /// default system message for qwen2, the empty think block for qwen3.
 #[test]
