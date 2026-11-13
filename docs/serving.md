@@ -380,5 +380,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 - ollama: `stream` defaults to true (NDJSON); `options` carries the sampling settings
   (`num_predict` is the token limit; `num_ctx` and the runtime options are ignored: the
   server's `--ctx` applies); `think`; tool calls with object arguments; ollama's counts and
-  durations. The model answers to its file name and `--alias`, with or without `:latest`.
+  durations. The model answers to its file name (or, given by a name `axon pull`
+  resolved, such as `axon serve qwen3-8b`, that name) and `--alias`, with or without
+  `:latest`.
   `format` (JSON / structured output), images and embeddings are refused with a clear error.

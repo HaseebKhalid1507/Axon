@@ -19,7 +19,7 @@ in [serving.md](serving.md).
 | `AXON_DRAFT=K` | same as `--draft K` (gen, chat, serve): prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as without it (greedy, or sampled with the same seed) |
 | `AXON_DRAFT_MODEL=PATH` | same as `--draft-model PATH` (gen, chat, serve) |
 | `AXON_MODELS_DIR=DIR` | `axon pull`'s models directory, where `gen`/`chat`/`serve`/`info` also find pulled models by name (default `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) |
-| `HF_TOKEN=TOKEN` | `axon pull`: a Hugging Face access token, for gated or private repos (passed to curl on its stdin) |
+| `HF_TOKEN=TOKEN` | `axon pull`: a Hugging Face access token, for gated or private repos (passed to curl on its stdin; needs curl 7.58+, which doesn't send it on to another host on a redirect) |
 | `AXON_DEVICE=cpu\|cuda` | same as `--device` (default `cpu`) |
 | `AXON_GPU_LAYERS=N` | same as `--gpu-layers N` (with `--device cuda`) |
 | `AXON_GPUS=L` | same as `--gpus L` (gen, chat, serve; with `--device cuda`) |

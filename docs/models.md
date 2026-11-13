@@ -95,12 +95,16 @@ pinned commit with its SHA-256, or any single-file GGUF as `OWNER/REPO/FILE.gguf
 `https://huggingface.co/OWNER/REPO/resolve/main/FILE` URL), checked against the SHA-256 Hugging Face
 publishes for it (the Git LFS oid). No registry. The models directory is `$AXON_MODELS_DIR`, else
 `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`; a file lands in
-`OWNER/REPO/FILE` under it. The bytes come through `curl` (HTTPS only, redirects included), are hashed
-as they arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256
-match (a mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends. Gated repos
-need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line). `gen`, `chat`,
-`serve` and `info` take a pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf`
-or its file name, wherever they take a path; a name not pulled yet says the command that pulls it.
+`OWNER/REPO/FILE` under it (`OWNER/REPO/DIR/FILE` for a file in a directory of the repo). The bytes come
+through `curl` (HTTPS only, redirects included; `-q`, so `~/.curlrc` is not read), are hashed as they
+arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256 match (a
+mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends, if `FILE.part.want`
+says it was a download of the same file (SHA-256 and size; a `.part` of an older version starts over).
+Gated repos need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line; curl
+7.58 or newer, which doesn't send it on to another host). `gen`, `chat`, `serve` and `info` take a
+pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf` or its file name, wherever
+they take a path; a name not pulled yet says the command that pulls it. `axon serve qwen3-8b` serves
+the model as `qwen3-8b` (`/v1/models`, a request's `model`).
 Split GGUFs (`-00001-of-0000N.gguf`) are refused: axon loads single files.
 
 ## Hardware

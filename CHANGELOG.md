@@ -6,6 +6,19 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
+- **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
+  else `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) through `curl`, HTTPS only, resumable,
+  with progress. Nothing reaches its final name until its size and SHA-256 match: a name's pinned checksum, or
+  the one Hugging Face publishes for the file (the LFS oid), fetched at the commit that reported it. No registry.
+- **About ten names** (`axon pull --list`) for local coding agents, each a file at a pinned commit, each run on axon
+  (`axon info` and a greedy gen) before it was listed.
+- **`gen`, `chat`, `serve`, `info` and `--draft-model` take a name** where they took a path. `axon serve NAME`
+  serves the model as `NAME` (`/v1/models`, a request's `model`); given a path, as before, its file stem.
+- **New variables:** `AXON_MODELS_DIR` and `HF_TOKEN` (gated repos; curl 7.58+).
+- Names and paths are untrusted input: owner, repo and every path component are checked against a strict
+  allow-list before any path is built (fuzzed); curl runs with `-q` (no `~/.curlrc`).
+
 ### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
 - **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
   that RAM, up to 8 GiB, page-locked from start.
