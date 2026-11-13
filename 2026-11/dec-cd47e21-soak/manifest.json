@@ -1,0 +1,29 @@
+{
+ "label": "dec-cd47e21-soak",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1112-233612-f921",
+   "name": "dec-cd47e21-soak",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "cd47e21",
+   "binary": "bash",
+   "started": null,
+   "ended": 1794547606.1442983,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "cb5f9355b5aa0164047b2b2ce619b84eee2286fcd9bcd764124877ba76101948",
+   "log_bytes": 169
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:26:47 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
