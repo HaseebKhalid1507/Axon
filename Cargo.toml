@@ -46,3 +46,8 @@ strip = true
 inherits = "release"
 strip = false
 debug = "line-tables-only"
+
+[lints.rust]
+# src/main.rs embeds the precompiled GPU kernels under this cfg (release
+# builds: docs/models.md "NVIDIA GPUs").
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(axon_kernel_pack)'] }

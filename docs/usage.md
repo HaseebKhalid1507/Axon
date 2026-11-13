@@ -77,6 +77,10 @@ axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-mod
           [--device D] [--gpu-layers N] [--kv T] [--parallel N] [--step-ms MS]
           [--admit-order sjf|fifo] [--numerics M] [--datacenter] [...]
                                           OpenAI-compatible HTTP server (serving.md)
+axon kernels list [PACK]                  the precompiled GPU kernels and where this GPU's
+                                          come from (models.md, NVIDIA GPUs)
+axon kernels build OUT [--targets L] [--fatbinary P|none] [-j N]
+                                          compile a kernel pack with NVRTC (release builds)
 axon pull NAME | OWNER/REPO/FILE.gguf      download a GGUF from Hugging Face, checked against its
                                           SHA-256 (models.md, Getting models); axon pull --list
 axon --help | --version

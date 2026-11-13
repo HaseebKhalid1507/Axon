@@ -59,6 +59,7 @@ usage:
                                             up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
                                             time; docs/serving.md)
+  axon kernels list | build ...             the precompiled GPU kernels (axon kernels --help)
   axon pull <name | owner/repo/file.gguf>   download a GGUF from Hugging Face, checked against its
                                             SHA-256, into the models directory (axon pull --list: the
                                             names); gen, chat, serve and info then take the name
@@ -335,6 +336,13 @@ fn load_failed(path: &str, e: std::io::Error) -> ! {
     }
 }
 
+/// The GPU kernels this binary was built with (`axon kernels build`; a
+/// release's src/main.rs embeds them): `--device cuda` loads them instead
+/// of compiling with NVRTC (`cuda::pack`). Call before `main`.
+pub fn set_kernel_pack(bytes: &'static [u8]) {
+    cuda::set_embedded_pack(bytes);
+}
+
 /// The `axon` binary's entry point.
 pub fn main() {
     // A panic must not exit (libcuda's exit handlers) while a `cuda::preinit`
@@ -382,6 +390,10 @@ fn run() -> std::io::Result<()> {
     if args[1] == "serve" {
         return serve::run(&args);
     }
+    if args[1] == "kernels" {
+        cuda::kernels_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
+        return Ok(());
+    }
     if args[1] == "pull" {
         pull::pull_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
         return Ok(());
@@ -401,7 +413,7 @@ fn run() -> std::io::Result<()> {
             &args[1]
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, chat, serve, info, pull)"
+            "unknown command '{c}' (commands: gen, logits, chat, serve, info, kernels, pull)"
         )),
     });
 
