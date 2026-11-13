@@ -1,0 +1,14 @@
+[axon-run 14:33:02] submitted 1113-143302-ad41 by /home/haseeb/.cache/axon-wt-safeguards: /home/haseeb/.cache/axon-safeguards/bin/axon-test-bc11938 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact
+[axon-run 15:12:51] job 1113-143302-ad41 -> pod1 [RTX 4090 sm_89 secure] (pod 2xcdxq1yvo11md): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 1977 --src /home/haseeb/.cache/axon-wt-safeguards /home/haseeb/.cache/axon-safeguards/bin/axon-test-bc11938 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact
+axon-remote: job 20261113-201254-axon-test-bc11938-39252 on pod1 (GPU, 1977 MB)
+[axon-node 20:12:54] GPU slot taken; job wants 1977 MB; nvidia-smi used/total 1908/24564 MB; sharing with 20261113-200455-axon-test-dbg-bc11938-27410 (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 20:12:54] run axon-test-bc11938 (575a36a11bfa15650885b691) as /home/haseeb/.cache/axon-wt-safeguards on ec0cf9bf1603, AXON_THREADS=5 RUST_TEST_THREADS=4; free 22176 MB of 24564 (used 1908); GPU processes pid:MB 27427:1898
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref has been running for over 60 seconds
+[axon-run 16:12:51] MAX DURATION 60 min (--max-min) reached: stopping the job
+[axon-run 16:12:51] signal 15: stopping the job
+
+axon-remote: signal 15, killing remote job 20261113-201254-axon-test-bc11938-39252
+[axon-run 16:12:57] exit 130 after 3606.0s (host pod1)
