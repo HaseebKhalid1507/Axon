@@ -13,10 +13,9 @@
   GPU, with outputs that don't depend on batching, prompt chunking or drafting.
 </p>
 
-**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no hardware, from
-a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close to the hardware
-limit as the math allows, for one stream and for thousands. The best models means the frontier open models, not
-only the ones that fit a laptop.
+**Mission: Axon is for everyone, the standard for running local AI**, as Synaps should be the standard agent runtime:
+inference made cheap and fast. For now the target is the best local backend for coding agents on NVIDIA PCs,
+Linux then Windows, installed with one command ([roadmap](docs/roadmap.md)).
 
 **New here? Start with [docs/START-HERE.md](docs/START-HERE.md).**
 
@@ -103,8 +102,8 @@ Every flag and its default: [docs/usage.md](docs/usage.md). The `AXON_*` variabl
 - **codex:** through a `wire_api = "responses"` provider, or `codex --oss --local-provider ollama`.
 - **opencode:** through `ollama-ai-provider-v2`. **pi:** through `openai-responses`.
 - **Synaps:** a Synaps session on gpt-oss-20b, with working tool calls
-  ([log](docs/log/2026-10-20-gpt-oss-tools.md)). Running Synaps on Axon is the
-  [north star](docs/roadmap.md#mission-and-positioning).
+  ([log](docs/log/2026-10-20-gpt-oss-tools.md)). Running Synaps on Axon waits for a
+  local Synaps profile ([roadmap](docs/roadmap.md#shelved-for-now)).
 - **crush:** with pi, opencode and codex, it ran coding tasks on Qwen2.5-7B through `axon serve` for the agent
   traffic captures ([log](docs/log/2026-11-04-agent-harness-traces.md)).
 

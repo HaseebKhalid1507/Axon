@@ -1,6 +1,59 @@
 # How Axon is developed
 
-This page describes the process behind every change on main since 2026-10-13: how work is picked,
+## Process v2 (2026-11-12)
+
+Adopted when development restarted on 2026-11-12, with the [roadmap](roadmap.md)'s new target. It answers the 11-07
+outside review (Fable 5.2): the loop had turned inward (41 % of commits docs-only, by that review's count), timing
+ceremonies held back changes that kept the bits and regressed nothing (shared prefix pages, #207), and no human
+reads the code. Process v1, below, still holds wherever v2 doesn't replace it; each replaced rule carries a
+*Superseded* note.
+
+1. **Per PR:** the fast tier plus the md5 of `gen` against main, on bella ([testing.md](testing.md#tiers)). The full
+   tier before merge when the PR changes kernel numerics, a cache layout, or the shared paths of `src/model.rs` (one
+   struct carries every architecture by flags). Both tiers run the release and the debug build
+   (`-C debug-assertions -C overflow-checks`).
+2. **Nightly on main:** the full suite (`axon-postmerge`) and a golden check against llama.cpp on the compatibility
+   audit's top 10 models (`scripts/zoo.py`). md5 against main can't catch a model that was wrong from day one; the
+   golden check can. Red means revert or fix forward within a day.
+3. **Weekly:** a single-stream and agent board on a clean RTX 4090 pod (about $2), so the published numbers stay
+   current. The last single-stream board ran on `7f42c02`, 10-18 ([results.md](results.md)).
+4. **Speed and defaults.** A change with equal bits and no measured cell worse than 2 % may ship default-on without
+   a timing pre-registration. A speed claim still needs one clean A/B (interleaved, same host, medians; the
+   [benchmark protocol](#benchmark-protocol)), with its stop rule written in the PR body before it runs. The separate
+   registration ceremony (rules filed as their own issues, re-registered cells) goes.
+5. **Review:** shady, the project's review agent, reviews every PR. A diff that touches `unsafe`, FFI, a parser of
+   untrusted bytes (GGUF, safetensors, HTTP, session files, downloads) or network code also gets a reviewer from a
+   different model family.
+6. **Findings:** MUSTs are fixed in the PR. SHOULDs go into one follow-up issue per PR, not a chain of PRs.
+7. **Docs:** one short engineering-log entry per PR ([log/README.md](log/README.md)). The README, roadmap, results and
+   history are refreshed only at release tags.
+8. **Safeguards, because no human reads the code.** Status at 11-12 in brackets:
+   - public CI runs real small-model tests against an independent reference [not yet: CI sets
+     `AXON_SKIP_MODEL_TESTS` and `AXON_SKIP_GPU_TESTS`];
+   - nightly fuzzing of every parser of untrusted bytes [not yet: `scripts/fuzz_gguf.py` and `scripts/fuzz_serve.py`
+     exist, CI runs neither];
+   - a kill switch for every default-on feature [`AXON_SHARE_KV=0` and `--cache-ram 0` exist for the two pending
+     flips];
+   - a clean-machine install test for every release [not yet: no release exists].
+9. **Tracks:** at most three at once, each tied to a named metric ([roadmap](roadmap.md#tracks)).
+
+What v2 supersedes in v1:
+
+| v2 rule | v1 rule it replaces | where |
+|---|---|---|
+| 1 | the release and debug suites in full, on the exact tree, before every PR merges; testing.md's "full once, on the commit that gets merged" | [Gates](#gates), [testing.md](testing.md#tiers) |
+| 2 | `axon-postmerge` after each merge as the net on main; no recurring comparison against llama.cpp (the model zoo ran once, 10-18) | [Orchestration tools](#orchestration-tools-outside-the-repo), [testing.md](testing.md#gate-jobs-maintainers) |
+| 3 | a scoreboard when a round started from one (none since 10-18) | [The loop](#the-loop), step 1 |
+| 4 | pre-registered timing rules deciding defaults, filed and re-registered as their own issues (#187's clauses kept #207 opt-in; re-registered as #210, #211) | [The loop](#the-loop), steps 7 and 9 |
+| 5 | one critic agent (Fable) reviews every change | [The loop](#the-loop), step 5 and "Who decides" |
+| 6 | review follow-ups as chains of PRs (#197, #199, #200: each from the previous PR's review) | [The loop](#the-loop), step 5 |
+| 7 | README, roadmap, results and history refreshed alongside the PRs | [Writing it down](#writing-it-down) |
+| 8 | public CI with model and GPU tests skipped | [Gates](#gates), the CI row |
+| 9 | no cap on this page (the 10-19 review proposed three, quoted in the roadmap at `213465a`) | [roadmap.md at `213465a`](https://github.com/HaseebKhalid1507/Axon/blob/213465a12e8402041e39b2d0a565de192f6c38c1/docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides) |
+
+## Process v1 (2026-10-13 to the 11-06 pause)
+
+This part describes the process behind every change on main from 2026-10-13 to the 11-06 pause: how work is picked,
 built, checked, measured, and then accepted or rejected. What happened, round by round, is in
 [history.md](history.md). What was tried and dropped is in
 [experiments-rejected.md](experiments-rejected.md). The current numbers are in [results.md](results.md).
@@ -9,7 +62,7 @@ Sources for this page: the foreman's running log (`PROGRESS.md` in the foreman's
 the repo), `BUILDER-RULES.md`, the PR bodies (#1–#46), and the builders' `NOTES.md` files. Where those
 sources describe a rule that changed over time, both versions are given with their dates.
 
-## The loop
+### The loop
 
 ```
 benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic review ──▶ fixes ──▶ verify ──▶ A/B vs main
@@ -22,6 +75,7 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    `scripts/sweep.py`, and a CPU scoreboard script) or GPU (`scoreboard.py`, outside the repo), against
    ollama and llama.cpp on the same GGUF files. The scoreboard names the gap. Examples: G3's prefill
    ran at 40–50 % of llama.cpp (#10), and in round 9 decode lost at 32k context (r9-pick).
+   *Superseded in part by [v2](#process-v2-2026-11-12) rule 3: a weekly board keeps the numbers current.*
 2. **Pick: what to improve.** A strategist agent (Fable) reads the boards, profiles and earlier specs and
    ranks candidate rounds by expected gain, risk to bit identity, size, and which other tracks they
    conflict with. Every claim carries a label (below). Written picks: r1 (forum post, 2026-10-14),
@@ -41,11 +95,15 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    real bugs, for example: the PDL race on the PTX fallback (#8), a `--repeat-last-n 0` + drafting panic
    (#17), the sm<80 attention fallback that no test reached (#19), the fused gate/up hijacking Gemma's
    GeGLU (#35), and the foreman's own rebase breaking the build (#13).
+   *Superseded by [v2](#process-v2-2026-11-12) rules 5 and 6: shady on every PR, a second model family on risky
+   diffs; MUSTs fixed in the PR, SHOULDs in one follow-up issue.*
 6. **Verify.** The foreman runs the gates (below) on a detached checkout of the exact tree. A verify
    was once run in a live worktree while that worktree was being rebased, and conflict markers ended
    up in the test build (2026-10-14 06:22). Since then verifies only run on detached checkouts.
 7. **A/B vs main.** The candidate binary and main's binary run interleaved on the same host (protocol
    below). A change that isn't faster, or doesn't buy something else that was asked for, is rejected.
+   *Since [v2](#process-v2-2026-11-12) rule 4, equal bits and no measured cell worse than 2 % may ship default-on
+   without a timing pre-registration; a speed claim still needs one clean A/B.*
 8. **Accept or reject.** Accepted work becomes a PR with an evidence table (gates, job IDs, numbers
    labelled MEASURED or ESTIMATED). CI has to pass, and then the foreman merges it. Rejected work is
    logged with its numbers (in PROGRESS.md, the builder's NOTES.md and, from now on,
@@ -67,6 +125,8 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    dominated by another term (the mix C = 128 cell was prefill-bound); and booking hardware past a
    missed proxy gate is an override the foreman owns and records in the PR body and `docs/log/`
    (#151's H100 session after the 4090 miss, ~$0.93).
+   *Superseded in part by [v2](#process-v2-2026-11-12) rule 4: the stop rule is written in the PR body before the
+   A/B runs, with no separate registration; the merge bar above (exactness, no cell past 2 %) stands.*
 
 **Who decides.** Fable (`fable-5-1`) does picks, designs, critiques and research. Opus (`opus-5-5`)
 builders write the code. The foreman (Jawz) assigns tracks, runs gates and benchmarks, integrates
@@ -78,8 +138,10 @@ stacked branches and decides. Merge authority changed over time:
 - 2026-10-16 ~03:16: a standing grant for merges and `--admin` was recorded, and main was protected
   (PR plus a passing check).
 - Docs and roadmap PRs that set direction (#44, for example) still say "don't merge without Haseeb's read".
+- *Review since [v2](#process-v2-2026-11-12) rule 5: shady on every PR, plus a reviewer from a different model family
+  on `unsafe`, FFI, parser and network diffs.*
 
-## The bit-identity contract, and why it shapes every decision
+### The bit-identity contract, and why it shapes every decision
 
 The contract in its current form (docs/START-HERE.md, BUILDER-RULES.md):
 
@@ -118,7 +180,11 @@ still matched each other bit for bit.
   is measured: bit-identical r8-bi reached 1.5B pp560 458–574 tok/s, against 734 for the numerics r8
   (PROGRESS, night 1).
 
-## Gates
+### Gates
+
+*Superseded in part by [v2](#process-v2-2026-11-12) rules 1, 2 and 8: per PR the fast tier and md5; the full tier
+before merge only for kernel numerics, a cache layout or `src/model.rs`'s shared paths; the full suite nightly on
+main; public CI to run real small-model tests. The extra gates by kind of change, below, still apply.*
 
 Before a PR, on the exact tree that will merge (commits after the gated one may change docs only; `axon-mergeready`
 checks it):
@@ -158,7 +224,7 @@ pipeline gate, green after merge), #36 (merged ahead of its sm_89 run), #37 (mer
 checks green after merge), #42 (the 12 GB fit check on bella). [history.md](history.md) notes
 each one.
 
-## Benchmark protocol
+### Benchmark protocol
 
 - **Interleaved rounds, medians.** Engines or binaries run in turn, round after round (`bench.py`; GPU
   scoreboards rotate the order), and the median is reported, usually with min–max or the raw values.
@@ -193,7 +259,7 @@ each one.
   main ranged 343–413 tok/s, #30), and the laptop GPU sits at its 140 W power cap (sustained 7B decode
   ~9 % below burst, r5-decode).
 
-## Hardware
+### Hardware
 
 | host | CPU | GPU | role / caveats |
 |---|---|---|---|
@@ -202,7 +268,7 @@ each one.
 | **jade** ("Jaded") | i7-9750H, 6c/12t, AVX2+FMA, no VNNI, 7.5 GB | GTX 1050, sm_61, 3 GB | homelab. Runs under a memory cap and nice/ionice, with an HDD under IO load; the old-GPU and AVX2-only test host |
 | **RunPod pods** | varies (EPYC, Ryzen 9950X, Xeon) | RTX 4090, RTX 5090, A100 SXM4 80 GB (sm_80), H100 SXM and PCIe (sm_90), 2×4090 (no P2P) | correctness suites, same-host md5 gates, and scoreboards. Budget-capped (below) |
 
-## Orchestration tools (outside the repo)
+### Orchestration tools (outside the repo)
 
 - **`axon-run`** (live 2026-10-16 ~03:30): one queue for bella, avante, jade and every live pod. FIFO
   with a fair share per worktree. A job goes to the eligible host with the earliest estimated finish.
@@ -228,7 +294,7 @@ each one.
   RAM; every model run through `axon-run`). The `/tmp` rule comes from two OOM kills of Haseeb's desktop
   session on 2026-10-13, caused by tmpfs growth plus parallel model loads.
 
-## How research feeds the roadmap
+### How research feeds the roadmap
 
 - **Literature.** Research agents read papers (via OpenAlex/arXiv) and map them onto Axon's code and
   contract. Each proposal says its change, gain, bit-identity risk, size and a 1-hour experiment that
@@ -247,9 +313,12 @@ each one.
 - **Oracles.** Independent references are kept in `tests/fixtures/`: gguf-py dequantization, the Hugging
   Face tokenizer, and ollama's greedy path. Bigger checks use f64 reference forwards (Qwen3 in #18, Llama 1B in #39,
   Gemma 3 in #35), llama.cpp greedy runs, and template rendering by transformers.
-- The roadmap ([roadmap.md](roadmap.md)) is ordered from these picks. Its Scale section cites
-  `r10-scope.md`.
+- Until 11-12 the roadmap was ordered from these picks; its Scale section cited `r10-scope.md`
+  ([roadmap.md at `213465a`](https://github.com/HaseebKhalid1507/Axon/blob/213465a12e8402041e39b2d0a565de192f6c38c1/docs/roadmap.md)).
+  Since 11-12 it follows the target and the three tracks in [roadmap.md](roadmap.md).
 
-## Writing it down
+### Writing it down
 
 Every PR adds an engineering-log entry, and so do NO-GO experiments: see [log/README.md](log/README.md).
+Since [v2](#process-v2-2026-11-12) rule 7 the entry is short, and the README, roadmap, results and history are
+refreshed only at release tags.

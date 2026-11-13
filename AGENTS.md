@@ -5,9 +5,10 @@ it before you touch the code. The rules are literal. If a rule and an issue disa
 
 ## Mission
 
-Make LLM inference cheap and fast, and run the best open models. Squeeze every drop out of the
-hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar, as close to
-the hardware limit as the math allows. Every change serves one of those, and has numbers to show it.
+Axon is for everyone: the standard for running local AI, by making inference cheap and fast. The
+current target is the best local backend for coding agents on NVIDIA PCs, Linux then Windows, installed
+with one command ([roadmap](docs/roadmap.md#current-target)). Every change serves it, and has numbers
+to show it.
 
 Background, in this order: [README.md](README.md), [docs/START-HERE.md](docs/START-HERE.md),
 [docs/methodology.md](docs/methodology.md), [docs/roadmap.md](docs/roadmap.md). Before you start
