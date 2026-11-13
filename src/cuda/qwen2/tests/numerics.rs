@@ -419,10 +419,14 @@ impl Reference {
             Some(self.graded),
         );
         assert!(
-            self.kept.next == self.kept.logits.len() && self.kept.traces.is_empty(),
-            "the net under test's pass read {} of {} kept positions",
+            self.kept.next == self.kept.logits.len()
+                && self.kept.traces.is_empty()
+                && self.kept.picks.is_empty(),
+            "the net under test's pass read {} of {} kept positions; {} traces, {} verify picks left",
             self.kept.next,
-            self.kept.logits.len()
+            self.kept.logits.len(),
+            self.kept.traces.len(),
+            self.kept.picks.len()
         );
         g
     }
@@ -1055,19 +1059,64 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
     );
 }
 
+/// `assert_sane_vs_exact`'s loose bars (#247's review): every arm's top-1
+/// at least `LOOSE_TOP1` %, its KL mean at most `LOOSE_KL` x the floor's,
+/// the verify rows at least `LOOSE_ROWS` % the reference's picks. On the
+/// 4090 (1113-035842-b356) the FP8 checkpoint's fast mode had 90.5-94.8 %
+/// top-1, KL means 0.73-1.56x the floor's and 92.9 % of the rows: about 10
+/// points and 2x of headroom. Unlike the run of record's statistical bars
+/// they can't fail on noise: a build on a GPU gives the same numbers every
+/// run (no sampling; the inputs are fixed), so a failure is a change in the
+/// numbers, and only a gross one fails.
+const LOOSE_TOP1: usize = 80;
+const LOOSE_KL: f64 = 3.0;
+const LOOSE_ROWS: usize = 85;
+
+/// The loose bars' failures, one line each (none: pass).
+fn loose_bars(g: &Graded) -> Vec<String> {
+    let mut errs = Vec::new();
+    for a in &g.arms {
+        let (m, f, n) = (&a.mode, &a.floor, a.arm.name());
+        if m.top1 * 100 < LOOSE_TOP1 * m.positions {
+            errs.push(format!(
+                "[{n}]: top-1 {}/{} < {LOOSE_TOP1} %",
+                m.top1, m.positions
+            ));
+        }
+        // The means, cross-multiplied (a floor with no positions fails).
+        let (mp, fp) = (m.positions as f64, f.positions as f64);
+        if f.positions == 0 || m.sum_kl * fp > LOOSE_KL * f.sum_kl * mp {
+            errs.push(format!(
+                "[{n}]: KL mean {:.3e} > {LOOSE_KL} x the floor's {:.3e} ({} floor positions)",
+                m.sum_kl / mp,
+                f.sum_kl / fp,
+                f.positions
+            ));
+        }
+    }
+    let (n, same, _) = g.rows;
+    if n == 0 || same * 100 < LOOSE_ROWS * n {
+        errs.push(format!(
+            "verify rows {same}/{n} the reference's picks (< {LOOSE_ROWS} %, or none)"
+        ));
+    }
+    errs
+}
+
 /// The FP8 checkpoint's always-on test (`fp8::gpu_fp8_fast_vs_exact_sanity`,
 /// #232): no statistics. The graded bars (the binomial top-1, the KL mean,
 /// the outlier count, the verify rows) are the run of record's, against the
-/// CPU's fp8-ref, nightly and by hand (`gpu_fp8_graded_vs_fp8_ref_1000`):
-/// they need >= 1000 positions per arm and still sit about one SD of the
-/// window spread from a correct build (#245; at 98-150 positions they
-/// failed on noise, 1031-115732-b712). Kept: every arm graded with a fast
-/// kernel seen running (the per-arm count is the caller's), and the sanity
-/// backstops on the net under test (`assert_sane`: finite logits, max
-/// |dlogit| < 12 over the whole vocabulary). The numbers are printed,
-/// labelled info only.
+/// CPU's fp8-ref (`gpu_fp8_graded_vs_fp8_ref_1000`): they need >= 1000
+/// positions per arm and still sit about one SD of the window spread from
+/// a correct build (#245; at 98-150 positions they failed on noise,
+/// 1031-115732-b712). Kept: every arm graded with a fast kernel seen
+/// running (the per-arm count is the caller's), the sanity backstops on
+/// the net under test (`assert_sane`: finite logits, max |dlogit| < 12 over
+/// the whole vocabulary), and the loose bars (`loose_bars`: top-1, KL mean
+/// against the floor's, verify rows; deterministic, far from a correct
+/// build's numbers).
 pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
-    report_graded(&format!("{what} (info only, not graded)"), g);
+    report_graded(&format!("{what} (sanity and loose bars)"), g);
     assert!(
         !g.fast_kernels || g.launches() > 0,
         "{what}: fast kernels, but none ran in any arm"
@@ -1080,10 +1129,53 @@ pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
         })
         .collect();
     assert!(errs.is_empty(), "{}", errs.join("\n"));
-    eprintln!(
-        "{what}: sanity checks only (every arm ran a fast kernel, finite logits, max |dlogit| < 12); \
-         the statistical bars are the run of record's, gpu_fp8_graded_vs_fp8_ref_1000"
+    let errs = loose_bars(g);
+    assert!(
+        errs.is_empty(),
+        "{what}: loose bars (top-1 >= {LOOSE_TOP1} %, KL mean <= {LOOSE_KL} x the floor's, verify \
+         rows >= {LOOSE_ROWS} %):\n{}",
+        errs.join("\n")
     );
+    eprintln!(
+        "{what}: sanity checks and loose bars passed (every arm ran a fast kernel, finite logits, \
+         max |dlogit| < 12; top-1 >= {LOOSE_TOP1} %, KL mean <= {LOOSE_KL} x the floor's, verify \
+         rows >= {LOOSE_ROWS} %); the statistical bars are the run of record's, \
+         gpu_fp8_graded_vs_fp8_ref_1000"
+    );
+}
+
+/// `loose_bars` on made-up tallies: b356's numbers pass; top-1 under
+/// 80 %, a KL mean over 3x the floor's, verify rows under 85 % or none,
+/// and a floor with no positions each fail; the bars are inclusive.
+#[test]
+fn loose_bars_rules() {
+    let agree = |positions, top1, sum_kl| Agree {
+        positions,
+        top1,
+        sum_kl,
+        ..Agree::default()
+    };
+    let graded = |top1, kl, fkl, rows| Graded {
+        arms: vec![ArmGrade {
+            mode: agree(1000, top1, kl),
+            floor: agree(1000, 900, fkl),
+            ..ArmGrade::new(Arm::Decode)
+        }],
+        rows,
+        floor_name: "test",
+        fast_kernels: true,
+    };
+    let fails = |g: Graded| loose_bars(&g).len();
+    assert_eq!(fails(graded(905, 30.4, 25.0, (2816, 2615, 2650))), 0);
+    assert_eq!(fails(graded(800, 75.0, 25.0, (100, 85, 90))), 0);
+    assert_eq!(fails(graded(799, 30.4, 25.0, (2816, 2615, 2650))), 1);
+    assert_eq!(fails(graded(905, 75.1, 25.0, (2816, 2615, 2650))), 1);
+    assert_eq!(fails(graded(905, 30.4, 25.0, (100, 84, 90))), 1);
+    assert_eq!(fails(graded(905, 30.4, 25.0, (0, 0, 0))), 1);
+    assert_eq!(fails(graded(500, 90.0, 25.0, (100, 50, 90))), 3);
+    let mut g = graded(905, 30.4, 25.0, (2816, 2615, 2650));
+    g.arms[0].floor.positions = 0;
+    assert_eq!(fails(g), 1, "no floor positions");
 }
 
 /// A GPU of another architecture than GPU 0's, as device 1 (the cross-arch

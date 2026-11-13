@@ -2,8 +2,8 @@
 //! its bits reference and the independent f64 anchor, and the FP8 0.5B
 //! checkpoint end to end: exact mode's Q8_0 form keeps the contract's bits,
 //! fast mode's native kernels run every arm against exact mode on the GPU
-//! (sanity bounds), and are graded against the CPU's fp8-ref by hand and
-//! nightly (`gpu_fp8_graded_vs_fp8_ref_1000`).
+//! (sanity bounds and loose bars), and are graded against the CPU's fp8-ref
+//! by hand (`gpu_fp8_graded_vs_fp8_ref_1000`, on sm_120 and sm_89).
 
 use super::numerics::{
     Arm, Floor, Graded, Sizes, assert_graded_vs_exact_with, grade_sized, reference,
@@ -461,26 +461,43 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 
 /// The FP8 checkpoint's fast mode on every arm of the #173 walk, against
 /// exact mode on the same GPU, at the run of record's positions
-/// (`Sizes::FP8`, >= 1000 per arm), in every suite (#232). No statistics:
-/// the sanity bounds (`assert_sane_vs_exact`: every logit finite, max
-/// |dlogit| < 12 over the whole vocabulary), a fast kernel launched in
-/// every arm, and the routes: every batched
-/// prefix on the FP8 tensor-core GEMM (`F8Route::MmaSync`), the load arm's
-/// rows on the pool's tensor-core attention (`ATT_NB_MIN`). The floor
-/// (exact with a q8 KV cache) is printed for scale, not graded. All three
-/// nets are on the GPU, so the test holds the GPU test lock for seconds,
+/// (`Sizes::FP8`, >= 1000 per arm), in every suite (#232). No statistics.
+/// It checks (`assert_sane_vs_exact`):
+/// - the sanity bounds: every logit finite, max |dlogit| < 12 over the
+///   whole vocabulary (on the 4090, decode's max is 8.65 on a correct
+///   build: the bound only catches garbage);
+/// - the loose bars (`numerics::loose_bars`): every arm's top-1 >= 80 %,
+///   its KL mean <= 3x the floor's (exact with a q8 KV cache), the verify
+///   rows >= 85 %. Deterministic for a build on a GPU, about 10 points and
+///   2x from the 4090's numbers, so only a gross accuracy loss fails;
+/// - a fast kernel launched in every arm (`fp8_arms`);
+/// - the router's table (`fp8_routes`): every batched prefix's size maps
+///   to the FP8 tensor-core GEMM (`F8Route::MmaSync`), the load arm's
+///   batch reaches the pool's tensor-core attention (`ATT_NB_MIN`).
+///
+/// All three nets are on the GPU, so it holds the GPU test lock for about
+/// a minute (55-174 s in release on packed 4090 pods, 60-73 s in debug),
 /// not the CPU reference's half hour (#232, #244).
 ///
-/// What it can't catch: exact mode is the checkpoint's Q8_0 form (D1), so
-/// it shares the loader, the FP8 scales and their dequant, the head (Q8_0
-/// in both modes), attention, norms and RoPE with fast mode. A bug in any
-/// of those is in the reference too, and a drift of both modes from true
-/// FP8 math (the checkpoint read wrong the same way) passes. Within the
-/// bound it doesn't grade accuracy either: a top-1 or KL regression whose
-/// logits move less than 12 passes. Those are what the run of record
-/// grades, against the CPU's fp8-ref with its statistical bars:
-/// `gpu_fp8_graded_vs_fp8_ref_1000`, nightly on main and by hand on every
-/// PR that touches the FP8 kernels or their routing (docs/testing.md).
+/// What it can't catch:
+/// - Exact mode is the checkpoint's Q8_0 form (D1), so it shares the
+///   loader, the FP8 scales and their dequant, the head (Q8_0 in both
+///   modes), attention, norms and RoPE with fast mode. A bug in any of
+///   those is in the reference too, and a drift of both modes from true
+///   FP8 math (the checkpoint read wrong the same way) passes.
+/// - An accuracy loss inside the loose bars.
+/// - Which kernels ran: the route checks read the router's table, not the
+///   launches, and in the batched and cached arms `launches > 0` is met by
+///   the decode steps after each prefill (about 340 fast launches a
+///   position) alone. A prefill call site that stopped reaching `gemm_f8`
+///   would pass here.
+///
+/// Kernel precision is guarded on every PR by `gpu_fp8_gemm_bits_and_anchor`
+/// and `gpu_fp8_gemv_bits_and_anchor` (above, always on). The rest is the
+/// run of record's, against the CPU's fp8-ref with its statistical bars:
+/// `gpu_fp8_graded_vs_fp8_ref_1000`, by hand on every PR that touches the
+/// FP8 kernels, their routing or the FP8 load path, on sm_120 and sm_89
+/// (docs/testing.md).
 #[test]
 fn gpu_fp8_fast_vs_exact_sanity() {
     use std::io::Write;
@@ -510,9 +527,9 @@ fn gpu_fp8_fast_vs_exact_sanity() {
         "exact mode runs no fast kernel"
     );
     let sz = &Sizes::FP8;
-    let g = fp8_routes_and_arms(&o, sz, 1000, || {
-        grade_sized(&r, &f, &o, &mr, Floor::KvQ8, Device::Cuda, sz)
-    });
+    fp8_routes(sz);
+    let g = grade_sized(&r, &f, &o, &mr, Floor::KvQ8, Device::Cuda, sz);
+    fp8_arms(&o, &g, 1000);
     super::numerics::assert_sane_vs_exact("0.5B FP8 cuda fast vs cuda exact (Q8_0)", &g);
     let _ = writeln!(
         std::io::stderr(),
@@ -521,18 +538,12 @@ fn gpu_fp8_fast_vs_exact_sanity() {
     );
 }
 
-/// The checks both FP8 walks make of the fast net `o`: fast mode runs FP8
-/// natively, every batched prefix routes to the tensor-core GEMM, the
-/// load arm reaches the pool's tensor-core attention; then `walk()`'s
-/// grading, whose arms must all be there, each with a fast kernel launched
-/// and at least `min` positions.
-fn fp8_routes_and_arms(
-    o: &Backend,
-    sz: &Sizes,
-    min: usize,
-    walk: impl FnOnce() -> Graded,
-) -> Graded {
-    assert!(o.fast_kernels(), "fast mode on this GPU runs FP8 natively");
+/// The router's table for both FP8 walks at sizes `sz`, before any net
+/// runs (pure functions of the sizes; `fp8_graded` checks it before its
+/// CPU half): every batched prefix's size routes to the tensor-core GEMM,
+/// the load arm's batch reaches the pool's tensor-core attention. It reads
+/// the table, not what ran (`gpu_fp8_fast_vs_exact_sanity`'s doc).
+fn fp8_routes(sz: &Sizes) {
     for &n in super::numerics::prefixes(Device::Cuda) {
         assert_eq!(
             super::batch::f8_route(n, false),
@@ -541,7 +552,13 @@ fn fp8_routes_and_arms(
         );
     }
     assert!(super::batch::ATT_NB_MIN <= sz.load);
-    let g = walk();
+}
+
+/// The checks both FP8 walks make of the fast net `o` and its grading `g`:
+/// fast mode runs FP8 natively, every arm is there, each with a fast kernel
+/// launched and at least `min` positions.
+fn fp8_arms(o: &Backend, g: &Graded, min: usize) {
+    assert!(o.fast_kernels(), "fast mode on this GPU runs FP8 natively");
     let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
     assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
     for a in &g.arms {
@@ -553,7 +570,6 @@ fn fp8_routes_and_arms(
             a.mode.positions
         );
     }
-    g
 }
 
 /// The FP8 gate's run of record, the #173 gate in its FP8 form (§6 B,
@@ -564,12 +580,16 @@ fn fp8_routes_and_arms(
 /// graded (`Top1::Binomial`). Its two CPU nets take most of an hour on a
 /// packed pod (the CPU's float matmul, #244) and keep about 2.5 GB of
 /// logits, so it's out of the suites since #232, which run
-/// `gpu_fp8_fast_vs_exact_sanity` instead. It runs nightly on main
-/// (bella), and by hand on every PR that touches the FP8 kernels or their
-/// routing (docs/testing.md, "The FP8 gate's run of record"):
+/// `gpu_fp8_fast_vs_exact_sanity` instead. It runs by hand on every PR
+/// that touches the FP8 kernels, their routing or the FP8 load path, on
+/// both FP8 GEMM paths: sm_120 (bella; `mma_f8` is the e4m3 `mma.sync`)
+/// and sm_89 (a 4090 pod; two f16 mmas, the path below sm_120, #190).
+/// Not yet nightly: devstack's axon-nightly doesn't run it (asked 11-13).
+/// See docs/testing.md, "The FP8 gate's run of record":
 /// `axon-test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`.
-/// Its bars sit about one SD of the window spread from a correct build
-/// (#245): a failure is a reason to look, not a block by itself.
+/// Until #245's paired bars land, its bars sit about one SD of the window
+/// spread from a correct build: a failure is a reason to look, not a block
+/// by itself; with #245 it blocks again.
 #[test]
 #[ignore]
 fn gpu_fp8_graded_vs_fp8_ref_1000() {
@@ -582,8 +602,17 @@ fn gpu_fp8_graded_vs_fp8_ref_1000() {
 /// shortest exact form). Three nets of the FP8 checkpoint that all differ,
 /// all on the GPU: exact (its Q8_0 form) the reference, exact with a q8 KV
 /// cache the floor, fast (native FP8) under test, so no tally is trivially
-/// 0. Every arm and branch of the walk at a few positions each (two
-/// batched windows, one past `verify_windows`; the load arm's pool).
+/// 0. Every arm of the walk at a few positions each (two batched windows,
+/// one past `verify_windows`; the cached arm on windows of its own,
+/// `cached_windows: Some` as in `Sizes::FP8`; the load arm's pool). Not
+/// run: `cached_windows: None` (the cached arm on the batched arm's text),
+/// which only the one-pass `grade` uses.
+///
+/// It assumes fast mode is deterministic run to run: the same net on the
+/// same inputs gives the same logits (true of every fast kernel today). A
+/// fast kernel with atomics (which the ADR allows in fast mode) would fail
+/// here as if the two passes differed: check that `grade_sized` twice
+/// gives the same `Graded` before reading this test's failure as a walk bug.
 #[test]
 fn graded_in_two_passes_is_graded_at_once() {
     if f8_engine_gpu().is_none() {
@@ -642,6 +671,7 @@ fn fp8_graded(sz: &Sizes, min: usize) {
     let Some(p) = crate::testutil::fp8_model_path() else {
         return;
     };
+    fp8_routes(sz);
     let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
     let t = Instant::now();
     let cpu_half = {
@@ -660,7 +690,8 @@ fn fp8_graded(sz: &Sizes, min: usize) {
     let t = Instant::now();
     let mo = load();
     let o = fp8_net(&mo, Device::Cuda, Numerics::Fast);
-    let g = fp8_routes_and_arms(&o, sz, min, || cpu_half.grade(&o));
+    let g = cpu_half.grade(&o);
+    fp8_arms(&o, &g, min);
     let _ = writeln!(
         std::io::stderr(),
         "fp8 graded gate ({} positions an arm): CPU reference {cpu_s:.1} s without the GPU test \
