@@ -19,6 +19,7 @@
 
 use super::ops::Metrics;
 use crate::cuda::{HostAllocator, HostBuf};
+use crate::gguf::mem::{Avail, Bound};
 use crate::kvsave::{KvIo, PAGE};
 use crate::kvstore::{Key, PageStore, ROOT};
 use crate::lm::{Backend, BackendCache, BatchLm};
@@ -27,10 +28,17 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// `--cache-ram auto`'s ceiling: half the RAM available after the model,
-/// at most this. On the GPU the whole size is page-locked (unswappable)
-/// from server start, used or not (`Alloc`).
-pub const AUTO_CEIL: u64 = 8 << 30;
+/// `--cache-ram auto`: the smaller of this and a quarter
+/// (`AUTO_DIV`) of the RAM available after the model. On the GPU the whole
+/// size is page-locked (unswappable) from server start, used or not
+/// (`Alloc`), so it stays small beside the desktop: 4 GiB holds a 7B f16
+/// session of ~75k positions (56 KiB each). Off under a cgroup limit
+/// tighter than the host's free RAM (`CacheRam::auto_off`).
+pub const AUTO_CEIL: u64 = 4 << 30;
+
+/// `--cache-ram auto` takes at most 1/`AUTO_DIV` of the RAM available
+/// after the model.
+pub const AUTO_DIV: u64 = 4;
 
 /// The arena is page-locked this many bytes at a time (at least a page),
 /// all of it from server start (`Alloc`).
@@ -47,7 +55,7 @@ pub const STEP_BYTES: usize = 16 << 20;
 /// (ESTIMATED, docs/design/kv-ram-tier-exclusive.md §2.5).
 pub const IDLE_BYTES: usize = 64 << 20;
 
-/// `--cache-ram BYTES|auto`.
+/// `--cache-ram BYTES|auto|off` (default 0: off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheRam {
     /// Bytes (0: off).
@@ -56,11 +64,15 @@ pub enum CacheRam {
 }
 
 impl CacheRam {
-    /// `auto`, or bytes with an optional K/M/G/T suffix (powers of 1024).
+    /// `auto`, `off` (= 0, the kill switch), or bytes with an optional
+    /// K/M/G/T suffix (powers of 1024).
     pub fn parse(s: &str) -> Result<CacheRam, String> {
         let s = s.trim();
         if s.eq_ignore_ascii_case("auto") {
             return Ok(CacheRam::Auto);
+        }
+        if s.eq_ignore_ascii_case("off") {
+            return Ok(CacheRam::Bytes(0));
         }
         let (num, shift) = match s.char_indices().last() {
             Some((i, c)) if c.is_ascii_alphabetic() => {
@@ -70,7 +82,7 @@ impl CacheRam {
                     'G' => 30,
                     'T' => 40,
                     'B' => 0,
-                    _ => return Err(format!("--cache-ram {s}: BYTES[K|M|G|T] or auto")),
+                    _ => return Err(format!("--cache-ram {s}: BYTES[K|M|G|T], auto or off")),
                 };
                 (&s[..i], shift)
             }
@@ -80,18 +92,22 @@ impl CacheRam {
             .ok()
             .and_then(|n| n.checked_mul(1u64 << shift))
             .map(CacheRam::Bytes)
-            .ok_or_else(|| format!("--cache-ram {s}: BYTES[K|M|G|T] or auto"))
+            .ok_or_else(|| format!("--cache-ram {s}: BYTES[K|M|G|T], auto or off"))
     }
 
-    /// The store's size in bytes given `avail` bytes of RAM available now
-    /// (after the model): `auto` is half of it, at most `AUTO_CEIL` (0 if
-    /// unknown); a size past `avail` is refused (pinned memory can't be
-    /// swapped out).
-    pub fn bytes(self, avail: Option<u64>) -> Result<u64, String> {
+    /// The store's size in bytes given the RAM available now (after the
+    /// model, `gguf::mem::avail`): `auto` is a quarter of it, at most
+    /// `AUTO_CEIL`, and 0 where `auto_off` gives a reason (unknown, or
+    /// bound by a cgroup); an explicit size past it is refused (pinned
+    /// memory can't be swapped out).
+    pub fn bytes(self, avail: Option<&Avail>) -> Result<u64, String> {
         match self {
             CacheRam::Bytes(0) => Ok(0),
-            CacheRam::Auto => Ok(avail.map_or(0, |a| (a / 2).min(AUTO_CEIL))),
-            CacheRam::Bytes(n) => match avail {
+            CacheRam::Auto => Ok(match (avail, CacheRam::auto_off(avail)) {
+                (Some(a), None) => (a.bytes / AUTO_DIV).min(AUTO_CEIL),
+                _ => 0,
+            }),
+            CacheRam::Bytes(n) => match avail.map(|a| a.bytes) {
                 Some(a) if n > a => Err(format!(
                     "--cache-ram {}: more than the {} of RAM available beside the model \
                      (pinned memory can't be swapped out); a smaller size, or auto",
@@ -99,6 +115,28 @@ impl CacheRam {
                     gib(a)
                 )),
                 _ => Ok(n),
+            },
+        }
+    }
+
+    /// Why `auto` leaves the tier off with `avail` as the RAM available
+    /// (None: it doesn't): the figure is unknown, or a cgroup limit is
+    /// tighter than the host's free RAM (`Bound::Cgroup`: a container, a
+    /// systemd scope). Pinned memory counts against such a limit and can't
+    /// be reclaimed, so an automatic size that takes it could get a server, or its
+    /// neighbours in the cgroup, OOM-killed; an explicit `--cache-ram SIZE`
+    /// still turns the tier on there. A looser cgroup (the host binds)
+    /// doesn't count.
+    pub fn auto_off(avail: Option<&Avail>) -> Option<String> {
+        match avail {
+            None => Some("RAM available unknown".into()),
+            Some(a) => match a.bound {
+                Bound::Host => None,
+                Bound::Cgroup { .. } => Some(format!(
+                    "a memory limit binds: {a}, {} available, under the host's free RAM; \
+                     --cache-ram SIZE turns it on",
+                    gib(a.bytes)
+                )),
             },
         }
     }
@@ -1274,6 +1312,8 @@ mod tests {
     #[test]
     fn cache_ram_parses() {
         assert_eq!(CacheRam::parse("0"), Ok(CacheRam::Bytes(0)));
+        assert_eq!(CacheRam::parse("off"), Ok(CacheRam::Bytes(0)));
+        assert_eq!(CacheRam::parse("OFF"), Ok(CacheRam::Bytes(0)));
         assert_eq!(CacheRam::parse("auto"), Ok(CacheRam::Auto));
         assert_eq!(CacheRam::parse("6G"), Ok(CacheRam::Bytes(6 << 30)));
         assert_eq!(CacheRam::parse("512m"), Ok(CacheRam::Bytes(512 << 20)));
@@ -1284,16 +1324,142 @@ mod tests {
         assert!(CacheRam::parse("99999999999T").is_err());
     }
 
+    fn host(bytes: u64) -> Option<Avail> {
+        Some(Avail {
+            bytes,
+            bound: Bound::Host,
+        })
+    }
+
+    fn cgroup(bytes: u64) -> Option<Avail> {
+        Some(Avail {
+            bytes,
+            bound: Bound::Cgroup {
+                path: "/app.slice/x.scope".into(),
+                limit: 8 << 30,
+                v1: false,
+            },
+        })
+    }
+
     #[test]
     fn cache_ram_sizes() {
         let g = 1u64 << 30;
-        assert_eq!(CacheRam::Bytes(0).bytes(Some(g)), Ok(0));
-        assert_eq!(CacheRam::Auto.bytes(Some(10 * g)), Ok(5 * g));
-        assert_eq!(CacheRam::Auto.bytes(Some(100 * g)), Ok(AUTO_CEIL));
-        assert_eq!(CacheRam::Auto.bytes(None), Ok(0));
-        assert_eq!(CacheRam::Bytes(2 * g).bytes(Some(3 * g)), Ok(2 * g));
-        assert!(CacheRam::Bytes(4 * g).bytes(Some(3 * g)).is_err());
+        assert_eq!(CacheRam::Bytes(0).bytes(host(g).as_ref()), Ok(0));
+        assert_eq!(
+            CacheRam::Bytes(2 * g).bytes(host(3 * g).as_ref()),
+            Ok(2 * g)
+        );
+        assert!(CacheRam::Bytes(4 * g).bytes(host(3 * g).as_ref()).is_err());
         assert_eq!(CacheRam::Bytes(4 * g).bytes(None), Ok(4 * g));
+        // An explicit size is the user's, under a cgroup too.
+        assert_eq!(
+            CacheRam::Bytes(2 * g).bytes(cgroup(3 * g).as_ref()),
+            Ok(2 * g)
+        );
+        assert!(
+            CacheRam::Bytes(4 * g)
+                .bytes(cgroup(3 * g).as_ref())
+                .is_err()
+        );
+    }
+
+    /// `auto`: the smaller of 4 GiB and a quarter of the RAM
+    /// available after the model, bound by the host; off (0, with a
+    /// reason) when the figure is unknown or a cgroup limit binds it.
+    #[test]
+    fn cache_ram_auto_cap() {
+        let (g, m) = (1u64 << 30, 1u64 << 20);
+        assert_eq!((AUTO_CEIL, AUTO_DIV), (4 * g, 4));
+        let auto = |a: Option<Avail>| CacheRam::Auto.bytes(a.as_ref()).unwrap();
+        // A quarter below 16 GiB available: a 16 GB desktop with 6 GiB free
+        // after the model gets 1.5 GiB; 1 MiB free gets 256 KiB (under a
+        // page: the tier then stays off, `set_cache_ram`).
+        assert_eq!(auto(host(6 * g)), 3 * g / 2);
+        assert_eq!(auto(host(10 * g)), 5 * g / 2);
+        assert_eq!(auto(host(m)), m / 4);
+        assert_eq!(auto(host(0)), 0);
+        assert_eq!(auto(host(3)), 0);
+        // 4 GiB from 16 GiB up: bella with ~20 GiB free after a 7B.
+        assert_eq!(auto(host(16 * g - 4)), 4 * g - 1);
+        assert_eq!(auto(host(16 * g)), 4 * g);
+        assert_eq!(auto(host(20 * g)), 4 * g);
+        assert_eq!(auto(host(u64::MAX)), 4 * g);
+        // Off: unknown, or a cgroup binds (whatever its room).
+        assert_eq!(auto(None), 0);
+        assert_eq!(auto(cgroup(20 * g)), 0);
+        assert_eq!(auto(cgroup(g)), 0);
+        assert_eq!(CacheRam::auto_off(host(g).as_ref()), None);
+        assert_eq!(
+            CacheRam::auto_off(None).as_deref(),
+            Some("RAM available unknown")
+        );
+        let why = CacheRam::auto_off(cgroup(3 * g).as_ref()).unwrap();
+        assert!(
+            why.contains("cgroup /app.slice/x.scope memory.max 8192 MiB")
+                && why.contains("3.00 GiB available")
+                && why.contains("--cache-ram SIZE"),
+            "{why}"
+        );
+    }
+
+    /// The cgroup-off rule on what `gguf::mem::avail_at` reads (a synthetic
+    /// /proc and cgroupfs, as `serve` reads the real ones): a scope whose
+    /// limit is tighter than the host's free RAM turns `auto` off and says
+    /// so; the same scope with room past the host's leaves the host as the
+    /// bound, and `auto` takes its quarter, at most 4 GiB.
+    #[test]
+    fn cache_ram_auto_off_under_a_binding_cgroup() {
+        let (g, m) = (1u64 << 30, 1u64 << 20);
+        let root = std::env::temp_dir().join(format!("axon-tier-cg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |rel: &str, s: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        let scope = "sys/fs/cgroup/app.slice/job.scope";
+        // Host: 12 GiB available (MemAvailable in kB).
+        put(
+            "proc/meminfo",
+            &format!("MemAvailable: {} kB\n", 12 * g / 1024),
+        );
+        put("proc/self/cgroup", "0::/app.slice/job.scope\n");
+        put(
+            "proc/self/mountinfo",
+            "46 44 0:29 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n",
+        );
+        put(
+            &format!("{scope}/memory.stat"),
+            "inactive_file 0\nactive_file 0\n",
+        );
+        // The scope: 6 GiB, 1 GiB used: 5 GiB room, under the host's 12.
+        put(&format!("{scope}/memory.max"), &format!("{}\n", 6 * g));
+        put(&format!("{scope}/memory.current"), &format!("{g}\n"));
+        let a = crate::gguf::mem::avail_at(&root);
+        assert_eq!(a.as_ref().map(|a| a.bytes), Some(5 * g));
+        assert_eq!(CacheRam::Auto.bytes(a.as_ref()), Ok(0));
+        let why = CacheRam::auto_off(a.as_ref()).unwrap();
+        assert!(
+            why.contains("cgroup /app.slice/job.scope memory.max 6144 MiB"),
+            "{why}"
+        );
+        // An explicit size still turns it on there.
+        assert_eq!(CacheRam::Bytes(g).bytes(a.as_ref()), Ok(g));
+        // The scope at 64 GiB: the host binds; auto = min(4 GiB, 12 / 4).
+        put(&format!("{scope}/memory.max"), &format!("{}\n", 64 * g));
+        let a = crate::gguf::mem::avail_at(&root);
+        assert_eq!(a.as_ref().map(|a| a.bound.clone()), Some(Bound::Host));
+        assert_eq!(CacheRam::auto_off(a.as_ref()), None);
+        assert_eq!(CacheRam::Auto.bytes(a.as_ref()), Ok(3 * g));
+        // A smaller host: a quarter of 2 GiB.
+        put(
+            "proc/meminfo",
+            &format!("MemAvailable: {} kB\n", 2 * g / 1024),
+        );
+        let a = crate::gguf::mem::avail_at(&root);
+        assert_eq!(CacheRam::Auto.bytes(a.as_ref()), Ok(512 * m));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
