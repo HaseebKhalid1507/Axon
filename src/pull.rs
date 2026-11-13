@@ -937,6 +937,8 @@ pub fn fetch(
     let mut failures: Vec<String> = Vec::new();
     while h.len() < want.size {
         if failures.len() >= TRIES {
+            // Each reason once (a stall is the same five times; each retry said it).
+            failures.dedup();
             return Err(format!(
                 "download failed, {TRIES} tries in a row ({} kept, the next pull resumes it): {}",
                 part.display(),
@@ -1651,6 +1653,7 @@ mod tests {
         let e = fetch(&want, &dest, &stalled, &mut quiet).unwrap_err();
         assert!(e.contains("5 tries in a row"), "{e}");
         assert!(e.contains("kept, the next pull resumes it"), "{e}");
+        assert_eq!(e.matches("connection reset").count(), 1, "{e}");
         assert_eq!(*stalled.opens.borrow(), [0, 5000, 5000, 5000, 5000]);
         assert_eq!(
             *stalled.retries.borrow(),
