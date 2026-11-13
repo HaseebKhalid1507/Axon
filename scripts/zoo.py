@@ -407,12 +407,13 @@ def one(a, e):
     return r
 
 
-def axon_chat(a, p):
-    """axon serve on p: usage.prompt_tokens and the greedy reply for each of CHATS (None, why if it won't serve)."""
+def axon_chat(a, p, ctx=4096):
+    """axon serve on p: usage.prompt_tokens and the greedy reply for each of CHATS (None, why if it won't serve).
+    ctx: at most the model's training context (Axon refuses a longer --ctx without --rope-scaling; llama.cpp caps)."""
     import time
     port = LL.free_port()
     log = open(os.path.join(a.work, os.path.basename(p) + ".serve.log"), "w")
-    srv = subprocess.Popen([a.axon, "serve", p, "--device", a.device or "cpu", "--port", str(port), "--ctx", "4096"],
+    srv = subprocess.Popen([a.axon, "serve", p, "--device", a.device or "cpu", "--port", str(port), "--ctx", str(ctx)],
                            stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
     try:
@@ -445,7 +446,8 @@ def axon_chat(a, p):
 
 def chat_compare(a, p, r, lchat):
     """Each engine's own chat prompt for CHATS: token counts and the greedy replies' characters in common."""
-    ax, why = axon_chat(a, p)
+    m = re.search(r"\| ctx (\d+)", "\n".join(r.get("info") or []))
+    ax, why = axon_chat(a, p, min(4096, int(m.group(1))) if m else 2048)
     if ax is None:
         r.setdefault("problems_chat", []).append(why)
         r["chat"] = why

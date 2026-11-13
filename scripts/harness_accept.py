@@ -35,12 +35,30 @@ CTX = 32768
 
 # Model profiles. KV: q8 for the dense models on both engines (Axon --kv q8, llama-server -ctk/-ctv q8_0); gpt-oss
 # keeps f16 (Axon's gpt-oss path is f16 KV only). Axon serves a MoE one request at a time (--parallel is an error).
+# sampler: the model card's recommended settings (generation_config.json / the README), given to BOTH servers as
+# their defaults (no harness sends temperature or top_p, so the server's defaults are what they sample with). Without
+# it the engines' own defaults differ (Axon serve: top_p 0.9, min_p 0; llama-server: top_p 0.95, min_p 0.05).
+# Repeat penalty 1 (off) on both: Qwen2.5's card has 1.05 over all tokens, which neither engine's penalty matches.
+# --sampler defaults runs each engine's own defaults instead (the out-of-the-box comparison).
 MODELS = {
-    "qwen2.5-7b": dict(file="Qwen2.5-7B-Instruct-Q4_K_M.gguf", moe=False),
-    "qwen3-8b": dict(file="Qwen3-8B-Q4_K_M.gguf", moe=False),
-    "gpt-oss-20b": dict(file="gpt-oss-20b-MXFP4.gguf", moe=True),
-    "qwen2.5-0.5b": dict(file="Qwen2.5-0.5B-Instruct-Q4_0.gguf", moe=False),   # plumbing smoke only
+    "qwen2.5-7b": dict(file="Qwen2.5-7B-Instruct-Q4_K_M.gguf", moe=False,
+                       sampler=dict(temp=0.7, top_k=20, top_p=0.8, min_p=0.0)),
+    "qwen3-8b": dict(file="Qwen3-8B-Q4_K_M.gguf", moe=False,
+                     sampler=dict(temp=0.6, top_k=20, top_p=0.95, min_p=0.0)),       # thinking mode
+    "gpt-oss-20b": dict(file="gpt-oss-20b-MXFP4.gguf", moe=True,
+                        sampler=dict(temp=1.0, top_k=0, top_p=1.0, min_p=0.0)),       # top_k 0 = off on both
+    "qwen2.5-0.5b": dict(file="Qwen2.5-0.5B-Instruct-Q4_0.gguf", moe=False,          # plumbing smoke only
+                         sampler=dict(temp=0.7, top_k=20, top_p=0.8, min_p=0.0)),
 }
+
+
+def sampler_flags(prof):
+    """The same sampling flags for either server (axon serve and llama-server spell them alike)."""
+    s = prof.get("sampler")
+    if not s:
+        return []
+    return ["--temp", str(s["temp"]), "--top-k", str(s["top_k"]), "--top-p", str(s["top_p"]), "--min-p",
+            str(s["min_p"]), "--repeat-penalty", "1.0"]
 
 # ----------------------------------------------------------------------------------------------------------------
 # Workspaces
@@ -1008,10 +1026,10 @@ class Engine:
                  "--ctx", str(CTX), "--alias", self.alias]
             if not moe:
                 a += ["--kv", "q8", "--parallel", "4"]
-            return [a]
+            return [a + sampler_flags(self.prof)]
         base = [self.bin, "-m", self.model, "--host", "127.0.0.1", "--port", str(p), "-a", self.alias, "-ngl", "999",
                 "-fa", "on", "--jinja", "-b", "2048", "-ub", "2048", "-kvu", "--kv-unified-per-slot", str(CTX),
-                "--cache-reuse", "256", "--metrics", "--no-webui"]
+                "--cache-reuse", "256", "--metrics", "--no-webui"] + sampler_flags(self.prof)
         if not moe:
             return [base + ["-ctk", "q8_0", "-ctv", "q8_0", "-np", "4", "-c", str(c)] for c in (131072, 98304, 65536, 49152, 32768)]
         return [base + ["-np", "2", "-c", str(2 * CTX), "--n-cpu-moe", str(n)] for n in (4, 6, 8, 10, 12, 14, 16, 18, 20, 24)]
@@ -1191,7 +1209,9 @@ def cmd_run(a):
     SANDBOX = not a.no_sandbox
     if SANDBOX and not shutil.which("bwrap"):
         sys.exit("harness_accept: bwrap not found (needed to sandbox the harnesses); --no-sandbox to run without")
-    prof = MODELS[a.model]
+    prof = dict(MODELS[a.model])
+    if a.sampler == "defaults":
+        prof.pop("sampler", None)
     mpath = a.model_path or os.path.join(os.environ.get("AXON_MODELS", "models"), prof["file"])
     mpath = os.path.abspath(mpath)
     if not os.path.exists(mpath):
@@ -1223,8 +1243,9 @@ def cmd_run(a):
             sys.exit("harness_accept: harness %s not runnable" % h)
     me = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:12]
     print("ACCEPT start model=%s file=%s engines=%s harness=%s tasks=%d rounds=%d turn_timeout=%ds sandbox=%s script=%s "
-          "bins=%s harness_versions=%s" % (a.model, os.path.basename(mpath), engines, harn, len(tasks), a.rounds,
-                                           a.turn_timeout, SANDBOX, me, sha, vers), flush=True)
+          "bins=%s harness_versions=%s sampler=%s" % (a.model, os.path.basename(mpath), engines, harn, len(tasks),
+                                                      a.rounds, a.turn_timeout, SANDBOX, me, sha, vers,
+                                                      prof.get("sampler", "engine defaults")), flush=True)
     results = []
     for ek in engines:
         eng = Engine(ek, os.path.abspath(bins[ek]), mpath, a.model, prof, out)
@@ -1567,6 +1588,8 @@ def main():
     r.add_argument("--tasks", default="all")
     r.add_argument("--rounds", type=int, default=1)
     r.add_argument("--turn-timeout", type=int, default=420)
+    r.add_argument("--sampler", choices=("card", "defaults"), default="card",
+                   help="card: the model card's sampler on both servers (default); defaults: each engine's own")
     r.add_argument("--axon-bin")
     r.add_argument("--llama-bin")
     r.add_argument("--out", required=True)
