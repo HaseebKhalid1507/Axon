@@ -1,0 +1,29 @@
+{
+ "label": "dec-fp8-dump232-pod-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-013522-ef0b",
+   "name": "dec-fp8-dump232-pod-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-11-13_01:35.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794551722.5001323,
+   "ended": 1794555774.6050193,
+   "attempts": 1,
+   "remote_job": "20261113-063537-bash-166802",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "0779d22f479404ae201928df323773648e57bcb889937ec0cd5817eda0f23363",
+   "log_bytes": 523373
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:42:58 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
