@@ -20,3 +20,11 @@ version, same bytes (each entry records the hash of NVRTC's raw output). Checked
 **Driver floor:** the pack needs R580+ (CUDA 13). An older driver without a CUDA 12 toolkit gets one line from
 `--device cuda`: the driver version (`/proc/driver/nvidia/version`), "need R580+ (CUDA 13)", and `--device cpu`;
 a pre-CUDA-12 driver, whose API axon can't load, gets the same line instead of a missing symbol.
+
+**Review (shady, 7/10, 11-13):** `axon kernels build .` would have run `remove_dir_all(".")` after the build
+(`with_extension` does nothing to a path with no file name). OUT must now name a file that isn't a directory
+(refused before NVRTC is looked up), and the build works in a new `.OUT.axon-kernels-PID.work` beside it
+(`create_dir`: an existing one is an error), the only thing it removes. Also: an unusable pack warns once before
+NVRTC takes over; `axon kernels list` exits non-zero on a pack from another version of the kernels; a fatbin's
+own size (headerSize + fatSize) must lie inside its image; reserved bytes must be zero. The headline claim gets
+its clean-machine run on a driver-only RTX 4090, md5s against main's NVRTC output (PR body).

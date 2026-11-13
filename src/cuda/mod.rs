@@ -1943,9 +1943,18 @@ fn code_for(cc: i32, driver: (i32, i32), hopper: bool) -> Result<(Code, Target),
         pack::Mode::Off => Ok(None),
         _ => pack::active(),
     };
-    code_from(mode, p, cc, (driver, ffi::driver_release), hopper, || {
+    let unusable = p.as_ref().err().cloned();
+    let r = code_from(mode, p, cc, (driver, ffi::driver_release), hopper, || {
         nvrtc_for(cc, driver, hopper)
-    })
+    });
+    // A pack that can't be read or isn't valid (a mistyped
+    // AXON_KERNEL_PACK_FILE) says so, once, rather than leave NVRTC's code
+    // running unannounced.
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let (Some(e), Ok((Code::Nvrtc(_), _))) = (unusable, &r) {
+        WARNED.call_once(|| eprintln!("axon: warning: {e}; the GPU kernels come from NVRTC"));
+    }
+    r
 }
 
 /// `code_for` with AXON_KERNEL_PACK's `mode`, the pack `p` (`pack::active`'s),

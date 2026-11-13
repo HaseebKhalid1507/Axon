@@ -95,12 +95,16 @@ pinned commit with its SHA-256, or any single-file GGUF as `OWNER/REPO/FILE.gguf
 `https://huggingface.co/OWNER/REPO/resolve/main/FILE` URL), checked against the SHA-256 Hugging Face
 publishes for it (the Git LFS oid). No registry. The models directory is `$AXON_MODELS_DIR`, else
 `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`; a file lands in
-`OWNER/REPO/FILE` under it. The bytes come through `curl` (HTTPS only, redirects included), are hashed
-as they arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256
-match (a mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends. Gated repos
-need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line). `gen`, `chat`,
-`serve` and `info` take a pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf`
-or its file name, wherever they take a path; a name not pulled yet says the command that pulls it.
+`OWNER/REPO/FILE` under it (`OWNER/REPO/DIR/FILE` for a file in a directory of the repo). The bytes come
+through `curl` (HTTPS only, redirects included; `-q`, so `~/.curlrc` is not read), are hashed as they
+arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256 match (a
+mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends, if `FILE.part.want`
+says it was a download of the same file (SHA-256 and size; a `.part` of an older version starts over).
+Gated repos need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line; curl
+7.58 or newer, which doesn't send it on to another host). `gen`, `chat`, `serve` and `info` take a
+pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf` or its file name, wherever
+they take a path; a name not pulled yet says the command that pulls it. `axon serve qwen3-8b` serves
+the model as `qwen3-8b` (`/v1/models`, a request's `model`).
 Split GGUFs (`-00001-of-0000N.gguf`) are refused: axon loads single files.
 
 ## Hardware
@@ -122,12 +126,16 @@ to build, and a release binary needs nothing but the NVIDIA driver (`libcuda.so.
 run: it carries its kernels precompiled (the kernel pack: `axon kernels build`, embedded
 with `--cfg axon_kernel_pack`) for sm_75, sm_80, sm_86, sm_89, sm_90 and sm_90a, and
 sm_120 (RTX 20/30/40/50, A100, H100), plus compute_120 PTX that the driver compiles for a
-newer GPU. Each is NVRTC's output for the same source and options as a run-time compile,
+GPU newer than sm_120. Data-center Blackwell (B200/B300: sm_100, sm_103) is numerically
+below sm_120, so neither the PTX nor a cubin covers it: it needs NVRTC (a CUDA toolkit), as
+do Pascal and Volta. Each is NVRTC's output for the same source and options as a run-time compile,
 so the same code. The pack needs a driver for its NVRTC's CUDA major: CUDA 13, driver
 R580 or newer. On an older driver `--device cuda` compiles with NVRTC if a CUDA 12 toolkit
 is installed, and otherwise stops with one line: the driver it found, that the kernels
 need R580+, and `--device cpu` to run on the CPU instead. `axon kernels list` says what the binary carries and where this GPU's
-kernels come from; `AXON_KERNEL_PACK=0` turns the pack off ([environment.md](environment.md)).
+kernels come from, and exits non-zero when the pack lacks some of the binary's kernel modules
+(a pack built from another version of axon); `AXON_KERNEL_PACK=0` turns the pack off
+([environment.md](environment.md)).
 Otherwise (a source build, a GPU or driver the pack doesn't cover) axon loads NVRTC
 (`libnvrtc.so`, `.so.13` or `.so.12`, from the library path or the toolkit's `lib64`
 under `$CUDA_PATH`, `/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU

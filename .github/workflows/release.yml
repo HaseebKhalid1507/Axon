@@ -96,8 +96,9 @@ jobs:
         run: |
           b=target/release/axon
           $b --version
-          $b kernels list | tee list.txt
-          # Every module this build loads is in the pack it carries (N of this build's N).
+          # Exits non-zero when the pack lacks a module this build loads (not through a pipe: bash -e, no pipefail).
+          $b kernels list > list.txt || { cat list.txt; exit 1; }
+          cat list.txt
           grep -Eq '\(([0-9]+) of this build.s \1\)' list.txt
           grep -q 'built in' list.txt
           # No GPU here: the CPU still runs, and --device cuda says why not.

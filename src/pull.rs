@@ -274,11 +274,13 @@ impl HfFile {
         )
     }
 
-    /// Where it's kept under models directory `dir`: `dir/OWNER/REPO/FILE`.
+    /// Where it's kept under models directory `dir`: `dir/OWNER/REPO/PATH`,
+    /// its path in the repo kept (so two files of one name in different
+    /// directories of a repo don't collide).
     pub fn dest(&self, dir: &Path) -> PathBuf {
-        dir.join(&self.owner)
-            .join(&self.repo)
-            .join(self.file_name())
+        let mut d = dir.join(&self.owner).join(&self.repo);
+        d.extend(&self.path);
+        d
     }
 }
 
@@ -362,20 +364,11 @@ fn resolve_in(arg: &str, dir: Option<&Path>) -> Result<String, String> {
     {
         return pulled(f, "a Hugging Face file");
     }
-    // A pulled file by name: DIR/OWNER/REPO/NAME.
+    // A pulled file by name: DIR/OWNER/REPO/[DIRS/]NAME.
     if component(arg, "file", 200).is_ok() {
         let names = [arg.to_string(), format!("{arg}.gguf")];
         let mut found = Vec::new();
-        for o in read_dirs(dir) {
-            for r in read_dirs(&o) {
-                for n in &names {
-                    let p = r.join(n);
-                    if p.is_file() {
-                        found.push(p);
-                    }
-                }
-            }
-        }
+        find_named(dir, 0, &names, &mut found);
         match found.len() {
             0 => {}
             1 => return Ok(found[0].to_string_lossy().into_owned()),
@@ -389,6 +382,26 @@ fn resolve_in(arg: &str, dir: Option<&Path>) -> Result<String, String> {
         }
     }
     Ok(arg.to_string())
+}
+
+/// Files named one of `names` under models directory level `depth` (0:
+/// the models directory, 2: a repo), in a repo or a directory of one, as
+/// deep as `HfFile::parse` allows; into `found`.
+fn find_named(d: &Path, depth: usize, names: &[String], found: &mut Vec<PathBuf>) {
+    if depth >= 2 {
+        for n in names {
+            let p = d.join(n);
+            if p.is_file() {
+                found.push(p);
+            }
+        }
+    }
+    // A file's path has at most 6 components (`parse`): 5 directories.
+    if depth < 7 {
+        for sub in read_dirs(d) {
+            find_named(&sub, depth + 1, names, found);
+        }
+    }
 }
 
 /// The subdirectories of `d` (none if it can't be read).
@@ -521,13 +534,52 @@ pub enum Fetch {
 
 /// `curl`, HTTPS only, following redirects (to Hugging Face's CDN) only to
 /// HTTPS; `HF_TOKEN`, if set, as a bearer token through curl's stdin (not
-/// its command line), which curl doesn't send on to another host.
+/// its command line), which curl (7.58+: `curl_ok`) doesn't send on to
+/// another host. `-q` first: no `~/.curlrc` (its `insecure`,
+/// `location-trusted` or `trace` would undo all that).
 pub struct Curl;
+
+/// The oldest curl `axon pull` sends `HF_TOKEN` through: 7.58.0 stopped
+/// sending a custom Authorization header on to another host on a redirect
+/// (CVE-2018-1000007).
+const CURL_TOKEN_MIN: (u32, u32, u32) = (7, 58, 0);
+
+/// The version in `curl --version`'s first line (`curl 8.5.0 (x86_64...`).
+fn curl_version(text: &str) -> Option<(u32, u32, u32)> {
+    let v = text.lines().next()?.strip_prefix("curl ")?;
+    let v = v.split([' ', '-']).next()?;
+    let mut n = v.split('.').map(|x| x.parse::<u32>().ok());
+    Some((n.next()??, n.next()??, n.next().flatten().unwrap_or(0)))
+}
+
+/// Err when `HF_TOKEN` would go through a curl older than `CURL_TOKEN_MIN`
+/// (checked once).
+fn curl_ok() -> Result<(), String> {
+    static OK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    OK.get_or_init(|| {
+        let out = std::process::Command::new("curl")
+            .args(["-q", "--version"])
+            .output()
+            .map_err(|e| format!("curl: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        match curl_version(&text) {
+            Some(v) if v >= CURL_TOKEN_MIN => Ok(()),
+            v => Err(format!(
+                "HF_TOKEN is set, and this curl ({}) is older than 7.58, which sends it on to the \
+                 host a redirect names: update curl, or unset HF_TOKEN for a public repo",
+                v.map_or("version unknown".into(), |(a, b, c)| format!("{a}.{b}.{c}"))
+            )),
+        }
+    })
+    .clone()
+}
 
 impl Curl {
     fn command(extra: &[&str], url: &str) -> std::process::Command {
         let mut c = std::process::Command::new("curl");
         c.args([
+            // First, or curl reads ~/.curlrc.
+            "-q",
             "--silent",
             "--show-error",
             "--proto",
@@ -562,6 +614,12 @@ impl Curl {
         if let Ok(t) = std::env::var("HF_TOKEN")
             && !t.is_empty()
         {
+            if let Err(e) = curl_ok() {
+                drop(stdin);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
             // Only a token's characters: nothing that could end the quoted
             // value in curl's config syntax.
             match t
@@ -757,7 +815,9 @@ impl Progress {
 }
 
 /// Download `want` into `dest` through `src`: into `dest` + ".part"
-/// (locked against a second pull of it), resumed from whatever it holds,
+/// (locked against a second pull of it, until it's renamed), resumed from
+/// whatever it holds if `dest` + ".part.want" says it is this download (its
+/// SHA-256 and size; else it starts over: an older version of the file),
 /// hashed as it's written; renamed to `dest` once `want.size` bytes hash
 /// to `want.sha256`. `say` hears progress (bytes so far, a verb). A
 /// mismatch deletes the `.part`: the next pull starts over.
@@ -768,7 +828,12 @@ pub fn fetch(
     say: &mut dyn FnMut(u64, &str),
 ) -> Result<(), String> {
     let part = PathBuf::from(format!("{}.part", dest.display()));
+    let side = PathBuf::from(format!("{}.part.want", dest.display()));
     let ctx = |e: std::io::Error| format!("{}: {e}", part.display());
+    let drop_part = || {
+        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&side);
+    };
     if let Some(d) = dest.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
@@ -788,6 +853,20 @@ pub fn fetch(
             ));
         }
         Err(std::fs::TryLockError::Error(e)) => return Err(ctx(e)),
+    }
+    // Another pull may have finished (renamed the `.part` away) between our
+    // open and our lock: then the file we hold isn't the `.part` any more.
+    if !same_file(&f, &part) {
+        return Err(format!(
+            "{} was just downloaded by another axon pull: run axon pull again to check it",
+            dest.display()
+        ));
+    }
+    // The `.part` is this download's only if its sidecar says so.
+    let wanted = format!("{} {}\n", want.sha256, want.size);
+    if std::fs::read_to_string(&side).ok().as_deref() != Some(wanted.as_str()) {
+        f.set_len(0).map_err(ctx)?;
+        std::fs::write(&side, &wanted).map_err(|e| format!("{}: {e}", side.display()))?;
     }
     let mut have = f.metadata().map_err(ctx)?.len();
     if have > want.size {
@@ -840,7 +919,7 @@ pub fn fetch(
                     if h.len() + n as u64 > want.size {
                         drop(s);
                         drop(f);
-                        let _ = std::fs::remove_file(&part);
+                        drop_part();
                         return Err(format!(
                             "the server sent more than the {} bytes expected: not this file (the \
                              partial download was deleted)",
@@ -872,21 +951,41 @@ pub fn fetch(
     let got = h.finish_hex();
     if got != want.sha256 {
         drop(f);
-        let _ = std::fs::remove_file(&part);
+        drop_part();
         return Err(format!(
             "checksum mismatch: SHA-256 {got}, expected {} (the download was deleted; pull again)",
             want.sha256
         ));
     }
     f.sync_all().map_err(ctx)?;
-    drop(f);
+    // Renamed with the lock still held, so no second pull takes the `.part`
+    // between the check and the rename.
     std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    drop(f);
+    let _ = std::fs::remove_file(&side);
     if let Some(d) = dest.parent()
         && let Ok(dir) = std::fs::File::open(d)
     {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// Whether open file `f` is the file at `path` (same device and inode).
+fn same_file(f: &std::fs::File, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (f.metadata(), std::fs::metadata(path)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = f;
+        path.is_file()
+    }
 }
 
 /// Whether `path` holds `want`'s bytes (size, then SHA-256).
@@ -1035,7 +1134,10 @@ mod tests {
             d.url("abc"),
             "https://huggingface.co/o/r/resolve/abc/Q4_K_M/m.gguf"
         );
-        assert_eq!(d.dest(Path::new("/m")), Path::new("/m/o/r/m.gguf"));
+        // The repo's directories are kept: two files of one name don't collide.
+        assert_eq!(d.dest(Path::new("/m")), Path::new("/m/o/r/Q4_K_M/m.gguf"));
+        let e = HfFile::parse("o/r/Q5_K_M/m.gguf").unwrap();
+        assert_ne!(d.dest(Path::new("/m")), e.dest(Path::new("/m")));
         assert!(HfFile::parse("o/r/M.GGUF").is_ok());
     }
 
@@ -1133,7 +1235,7 @@ mod tests {
             let d = f.dest(dir);
             let rel = d.strip_prefix(dir).unwrap();
             let parts: Vec<_> = rel.components().collect();
-            assert_eq!(parts.len(), 3, "{s:?} -> {d:?}");
+            assert_eq!(parts.len(), 2 + f.path.len(), "{s:?} -> {d:?}");
             for c in parts {
                 let std::path::Component::Normal(c) = c else {
                     panic!("{s:?} -> {d:?}")
@@ -1235,6 +1337,14 @@ mod tests {
         assert_eq!(resolve_in("nope.gguf", Some(&dir)).unwrap(), "nope.gguf");
         assert_eq!(resolve_in("../x", Some(&dir)).unwrap(), "../x");
         assert_eq!(resolve_in("qwen3-8b", None).unwrap(), "qwen3-8b");
+        // A file in a directory of a repo is found by name too.
+        let sub = HfFile::parse("o/r/Q8_0/deep-q8.gguf").unwrap().dest(&dir);
+        std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+        std::fs::write(&sub, b"z").unwrap();
+        assert_eq!(
+            resolve_in("deep-q8", Some(&dir)).unwrap(),
+            sub.to_string_lossy()
+        );
         // Two pulled files of one name: ambiguous.
         let q = dir.join("other/repo").join(a.file);
         std::fs::create_dir_all(q.parent().unwrap()).unwrap();
@@ -1396,16 +1506,23 @@ mod tests {
         };
         let dest = t.0.join("o/r/m.gguf");
         let part = t.0.join("o/r/m.gguf.part");
+        let side = t.0.join("o/r/m.gguf.part.want");
         let mut quiet = |_: u64, _: &str| {};
         let reset = || {
             let _ = std::fs::remove_file(&dest);
             let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(&side);
+        };
+        // A `.part` an earlier pull of this file left, with its sidecar.
+        let seed = |bytes: &[u8]| {
+            std::fs::write(&part, bytes).unwrap();
+            std::fs::write(&side, format!("{} {}\n", want.sha256, want.size)).unwrap();
         };
 
         let src = fake(&data, 0, 0);
         fetch(&want, &dest, &src, &mut quiet).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
-        assert!(!part.exists());
+        assert!(!part.exists() && !side.exists());
         assert_eq!(*src.opens.borrow(), [0]);
 
         reset();
@@ -1415,7 +1532,7 @@ mod tests {
         assert_eq!(*src.opens.borrow(), [0, 100_000, 200_000]);
 
         reset();
-        std::fs::write(&part, &data[..123_457]).unwrap();
+        seed(&data[..123_457]);
         let src = fake(&data, 0, 0);
         let mut checked = 0;
         fetch(&want, &dest, &src, &mut |n, v| {
@@ -1429,7 +1546,7 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), data);
 
         reset();
-        std::fs::write(&part, &data[..5000]).unwrap();
+        seed(&data[..5000]);
         let mut src = fake(&data, 0, 0);
         src.no_resume = true;
         fetch(&want, &dest, &src, &mut quiet).unwrap();
@@ -1439,20 +1556,20 @@ mod tests {
         reset();
         let mut bad = data[..5000].to_vec();
         bad[17] ^= 1;
-        std::fs::write(&part, &bad).unwrap();
+        seed(&bad);
         let e = fetch(&want, &dest, &fake(&data, 0, 0), &mut quiet).unwrap_err();
         assert!(e.contains("checksum mismatch"), "{e}");
-        assert!(!part.exists() && !dest.exists());
+        assert!(!part.exists() && !dest.exists() && !side.exists());
 
         reset();
         let mut longer = data.clone();
         longer.push(0);
         let e = fetch(&want, &dest, &fake(&longer, 0, 0), &mut quiet).unwrap_err();
         assert!(e.contains("more than"), "{e}");
-        assert!(!part.exists() && !dest.exists());
+        assert!(!part.exists() && !dest.exists() && !side.exists());
 
         reset();
-        std::fs::write(&part, &longer).unwrap();
+        seed(&longer);
         fetch(&want, &dest, &fake(&data, 0, 0), &mut quiet).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
 
@@ -1460,15 +1577,89 @@ mod tests {
         let e = fetch(&want, &dest, &fake(&data, 1000, 99), &mut quiet).unwrap_err();
         assert!(e.contains("kept, the next pull resumes it"), "{e}");
         assert_eq!(std::fs::metadata(&part).unwrap().len(), 5000);
+        assert!(side.is_file());
         // ... and the next pull does.
         fetch(&want, &dest, &fake(&data, 0, 0), &mut quiet).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+        // A `.part` of another version of the file (its sidecar names another
+        // SHA-256 or size), or with no sidecar: started over, not resumed.
+        for stale in [
+            Some(format!("{} {}\n", "0".repeat(64), want.size)),
+            Some(format!("{} {}\n", want.sha256, want.size + 1)),
+            None,
+        ] {
+            reset();
+            std::fs::write(&part, &data[..77_777]).unwrap();
+            if let Some(l) = &stale {
+                std::fs::write(&side, l).unwrap();
+            }
+            let src = fake(&data, 0, 0);
+            fetch(&want, &dest, &src, &mut quiet).unwrap();
+            assert_eq!(*src.opens.borrow(), [0], "{stale:?}");
+            assert_eq!(std::fs::read(&dest).unwrap(), data);
+            assert!(!part.exists() && !side.exists());
+        }
 
         // Already there and intact: `verified` says so without a download.
         assert!(verified(&dest, &want, &mut quiet).unwrap());
         let mut w2 = want.clone();
         w2.sha256 = "0".repeat(64);
         assert!(!verified(&dest, &w2, &mut quiet).unwrap());
+    }
+
+    /// `same_file`: an open `.part` renamed away (another pull finished it)
+    /// is no longer the file at its path, nor is a new file there.
+    #[test]
+    fn pull_same_file_sees_a_rename() {
+        let t = Scratch::new("same");
+        let (a, b) = (t.0.join("m.part"), t.0.join("m.gguf"));
+        std::fs::write(&a, b"x").unwrap();
+        let f = std::fs::File::open(&a).unwrap();
+        assert!(same_file(&f, &a));
+        std::fs::rename(&a, &b).unwrap();
+        assert!(!same_file(&f, &a), "gone");
+        std::fs::write(&a, b"y").unwrap();
+        assert!(!same_file(&f, &a), "another file");
+    }
+
+    /// curl skips ~/.curlrc only when `-q` is its first argument; the URL
+    /// comes after `--`.
+    #[test]
+    fn pull_curl_ignores_curlrc() {
+        let c = Curl::command(
+            &["--head"],
+            "https://huggingface.co/o/r/resolve/main/m.gguf",
+        );
+        let args: Vec<&str> = c.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args[0], "-q", "{args:?}");
+        assert_eq!(args.iter().filter(|a| **a == "-q").count(), 1);
+        let n = args.len();
+        assert_eq!(
+            args[n - 2..],
+            ["--", "https://huggingface.co/o/r/resolve/main/m.gguf"]
+        );
+        assert!(!args.contains(&"--location-trusted") && !args.contains(&"--insecure"));
+    }
+
+    /// `curl --version`'s first line, and the floor for sending HF_TOKEN.
+    #[test]
+    fn pull_curl_version() {
+        let v = |s: &str| curl_version(s);
+        assert_eq!(
+            v("curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0\nRelease-Date"),
+            Some((8, 5, 0))
+        );
+        assert_eq!(
+            v("curl 7.55.1 (Windows) libcurl/7.55.1 WinSSL"),
+            Some((7, 55, 1))
+        );
+        assert_eq!(v("curl 8.12.0-DEV (x86_64)"), Some((8, 12, 0)));
+        assert_eq!(v("curl 7.58 (x)"), Some((7, 58, 0)));
+        assert_eq!(v("nope"), None);
+        assert_eq!(v(""), None);
+        assert!(v("curl 7.55.1 (Windows)").unwrap() < CURL_TOKEN_MIN);
+        assert!(v("curl 7.58.0 (Linux)").unwrap() >= CURL_TOKEN_MIN);
     }
 
     /// Two pulls of one file at once: the second is refused, not interleaved.

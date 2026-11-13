@@ -6,6 +6,35 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
+- **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
+  else `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) through `curl`, HTTPS only, resumable,
+  with progress. Nothing reaches its final name until its size and SHA-256 match: a name's pinned checksum, or
+  the one Hugging Face publishes for the file (the LFS oid), fetched at the commit that reported it. No registry.
+- **About ten names** (`axon pull --list`) for local coding agents, each a file at a pinned commit, each run on axon
+  (`axon info` and a greedy gen) before it was listed.
+- **`gen`, `chat`, `serve`, `info` and `--draft-model` take a name** where they took a path. `axon serve NAME`
+  serves the model as `NAME` (`/v1/models`, a request's `model`); given a path, as before, its file stem.
+- **New variables:** `AXON_MODELS_DIR` and `HF_TOKEN` (gated repos; curl 7.58+).
+- Names and paths are untrusted input: owner, repo and every path component are checked against a strict
+  allow-list before any path is built (fuzzed); curl runs with `-q` (no `~/.curlrc`).
+
+### Precompiled GPU kernels: `--device cuda` with only the NVIDIA driver (#227)
+- **A release binary carries its CUDA kernels precompiled** (the kernel pack): cubins for sm_75, sm_80, sm_86,
+  sm_89, sm_90, sm_90a and sm_120, plus compute_120 PTX for newer GPUs. So `--device cuda` needs no CUDA toolkit
+  and no NVRTC, only a driver for CUDA 13 (R580+). Each entry is NVRTC 13.4's output for the run-time compile's
+  source, options and target, so the same code: the md5 gate matches main's NVRTC output.
+- **Not covered:** data-center Blackwell (sm_100/sm_103, below sm_120), Pascal, Volta and drivers before R580 still
+  need NVRTC; with none, `--device cuda` stops with one line naming the driver and the way out.
+- **`axon kernels list [PACK]`** says what the binary (or a pack file) carries and where this GPU's kernels come
+  from; it exits non-zero when the pack lacks some of the binary's kernel modules. **`axon kernels build OUT`**
+  compiles a pack with NVRTC (no GPU needed); OUT must name a file, and the build's temp files go in a new
+  directory beside it, the only thing it deletes.
+- **New variables:** `AXON_KERNEL_PACK=0` (the kill switch: NVRTC only, as a source build) or `only` (never
+  NVRTC), and `AXON_KERNEL_PACK_FILE=PATH` (a pack file instead of the built-in one; an unreadable or invalid one
+  is a warning, then NVRTC).
+- Source builds are unchanged: no pack, NVRTC as before.
+
 ### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
 - **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
   that RAM, up to 8 GiB, page-locked from start.
