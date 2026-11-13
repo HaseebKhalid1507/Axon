@@ -1,0 +1,29 @@
+{
+ "label": "eval-c45cddc-audit-dryrun2-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-005312-739b",
+   "name": "eval-c45cddc-audit-dryrun2-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "c45cddc",
+   "binary": "bash",
+   "started": 1794549192.9086447,
+   "ended": 1794549569.0417776,
+   "attempts": 1,
+   "remote_job": "20261113-005317-bash-2372958",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6d18be420d03eb8c736286048bf2579d5ab01c77772a0fc0aaf6483f7d3d020c",
+   "log_bytes": 11129
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:59:30 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
