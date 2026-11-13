@@ -685,8 +685,12 @@ struct Progress {
     verb: String,
 }
 
+/// A size for people: GB from 1 GB up, else MB.
 fn gb(b: u64) -> String {
-    format!("{:.2} GB", b as f64 / 1e9)
+    match b >= 1_000_000_000 {
+        true => format!("{:.2} GB", b as f64 / 1e9),
+        false => format!("{:.1} MB", b as f64 / 1e6),
+    }
 }
 
 impl Progress {
