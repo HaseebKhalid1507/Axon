@@ -44,7 +44,8 @@ jobs:
         with:
           path: kernels.pack
           # A stale pack can't ship anyway: the build job checks it holds every module this build loads.
-          key: kernels-${{ env.CUDA_VER }}-${{ env.PACK_TARGETS }}-${{ hashFiles('src/cuda/**', 'src/numerics.rs') }}
+          # (This file is in the hash: CUDA_VER and PACK_TARGETS.)
+          key: kernels-${{ hashFiles('.github/workflows/release.yml', 'src/cuda/**', 'src/numerics.rs') }}
       - name: NVRTC and fatbinary (NVIDIA's apt repo)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
