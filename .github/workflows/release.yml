@@ -38,14 +38,15 @@ jobs:
         run: |
           shellcheck --shell=sh install.sh
           dash -n install.sh
-      # The pack depends only on the kernel sources, the module list, the targets and NVRTC.
+      # The pack depends only on the kernel sources, the module list, the targets and NVRTC. A stale pack can't ship
+      # anyway: the build job checks it holds every module this build loads. (Cache keys can't hold commas.)
+      - id: key
+        run: echo "key=kernels-$CUDA_VER-$(echo "$PACK_TARGETS" | tr , _)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: cache
         with:
           path: kernels.pack
-          # A stale pack can't ship anyway: the build job checks it holds every module this build loads.
-          # (This file is in the hash: CUDA_VER and PACK_TARGETS.)
-          key: kernels-${{ hashFiles('.github/workflows/release.yml', 'src/cuda/**', 'src/numerics.rs') }}
+          key: ${{ steps.key.outputs.key }}-${{ hashFiles('src/cuda/**', 'src/numerics.rs') }}
       - name: NVRTC and fatbinary (NVIDIA's apt repo)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
