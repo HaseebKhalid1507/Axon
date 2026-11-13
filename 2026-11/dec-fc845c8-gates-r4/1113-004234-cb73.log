@@ -1,0 +1,14 @@
+[axon-run 00:42:34] submitted 1113-004234-cb73 by /home/haseeb/.cache/axon-dec: /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+[axon-run 10:37:37] scope axon-job-1113-004234-cb73-1794584257.scope in app-axonjobs.slice: MemoryMax 10312 MB, MemoryHigh 9280 MB, no swap, oomd pressure kill 80% (claim 6192 MB): an OOM here kills only this job
+[axon-run 10:37:37] job 1113-004234-cb73 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-004234-cb73-1794584257 --slice=app-axonjobs.slice -p MemoryMax=10312M -p MemoryHigh=9280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+axon-q 10:37:37 start slot 16-23: /usr/bin/bash soakshare.sh ./axon-base-213465a ./axon-dbg-fc845c8 ./soak.py 0.08 128 smoke off
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+main solo run rc 1
+serve: ./axon-dbg-fc845c8 serve models/qwen2.5-1.5b-instruct-q4_k_m.gguf --port 18512 --ctx 4096 --parallel 8 --cache-ram off
+server exited rc=2 while loading: smoke-cand/serve.log
+SOAK VERDICT rc 1 (sharing on, --cache-ram off, AXON_KV_PAGES=128)
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "<stdin>", line 2, in <genexpr>
+FileNotFoundError: [Errno 2] No such file or directory: 'smoke-main/summary.json'
+[axon-run 10:37:38] exit 1 after 1.4s (host bella)
