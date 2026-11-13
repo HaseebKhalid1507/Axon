@@ -1,0 +1,49 @@
+{
+ "label": "safeguards-98a0d8d-regate",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-011859-b20d",
+   "name": "safeguards-98a0d8d-fast-rel2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-13_01:25.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "98a0d8d",
+   "binary": "axon-test-98a0d8d",
+   "started": 1794551100.556851,
+   "ended": 1794552978.9706666,
+   "attempts": 1,
+   "remote_job": "20261113-062520-axon-test-98a0d8d-82312",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "25a21ee72825ec6653ad189061dc4286a6d84cf03f9267400d7149babd5edfa7",
+   "log_bytes": 59124
+  },
+  {
+   "job": "1113-011859-f12b",
+   "name": "safeguards-98a0d8d-fp8-graded",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "98a0d8d",
+   "binary": "axon-test-98a0d8d",
+   "started": 1794595849.0112715,
+   "ended": 1794597152.6009355,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "81c86da7b2c006bf53708d129d8c23c85f0d105ad3fb00b8e09d5f875cde6a6e",
+   "log_bytes": 1749
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 14:12:34 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
