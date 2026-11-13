@@ -1,0 +1,7 @@
+# pod1 = pod o0kd3yabjvo5c8 (NVIDIA GeForce RTX 3090, community, image runpod/base:1.4.0-ubuntu2404); captured 2026-11-13 06:47:03 EST at pod setup by axon-pods
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz], pcie.link.gen.max, pcie.link.width.max
+NVIDIA GeForce RTX 3090, 580.65.06, 94.02.26.48.15, 24576 MiB, 310.00 W, 2100 MHz, 9751 MHz, 4, 16
+| NVIDIA-SMI 580.65.06              Driver Version: 580.65.06      CUDA Version: 13.0     |
+cpu: AMD Ryzen Threadripper PRO 5975WX 32-Cores x 64
+kernel: 6.8.0-57-generic
+nvrtc: nvrtc-13.0
