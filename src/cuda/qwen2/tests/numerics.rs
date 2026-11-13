@@ -210,11 +210,6 @@ impl ArmGrade {
         }
     }
 
-    /// A new sequence (`Agree`'s previous-position KL starts again).
-    fn start(&mut self) {
-        (self.mode.last_kl, self.floor.last_kl) = (0.0, 0.0);
-    }
-
     /// One position: the reference's logits, the floor's and the net's
     /// (each None in the pass that doesn't run it: `Reference`);
     /// `next`: (window, the teacher-forced token after it).
@@ -527,6 +522,21 @@ struct Caches<RC, FC, OC> {
 type NetCaches<F> = Caches<BackendCache, <F as Lm>::Cache, BackendCache>;
 
 impl<F: Lm> Nets<'_, '_, F> {
+    /// A new sequence in `a`: the previous-position KL (`Agree::last_kl`)
+    /// starts again for each net this pass tallies, and only those. A
+    /// `reference` pass's floor tallies are final when `Reference::grade`
+    /// runs, the floor's last `last_kl` included, as in `grade_sized`'s one
+    /// pass; resetting both here zeroed it (#247's first gate run,
+    /// `graded_in_two_passes_is_graded_at_once`, 1113-031552-6419).
+    fn start(&self, a: &mut ArmGrade) {
+        if self.f.is_some() {
+            a.floor.last_kl = 0.0;
+        }
+        if self.o.is_some() {
+            a.mode.last_kl = 0.0;
+        }
+    }
+
     /// The reference's logits: `r`'s by `run` (kept when the pass has no
     /// net under test), or a `reference` pass's, read back.
     fn reference(&self, kept: &mut Kept, run: impl FnOnce(&Backend) -> Vec<f32>) -> Vec<f32> {
@@ -649,7 +659,7 @@ fn walk<F: Lm>(
     }
     for (w, seq) in dec.chunks(WINDOW).enumerate() {
         let mut c = n.caches(true);
-        a.start();
+        n.start(&mut a);
         for (pos, &t) in seq.iter().enumerate() {
             let (lr, lf, lo) = n.forward(kept, &mut c, t, pos);
             let next = seq.get(pos + 1).map(|&t| (w, t));
@@ -667,7 +677,7 @@ fn walk<F: Lm>(
         let w = sz.decode_windows + i;
         for &p in pre {
             let mut c = n.caches(true);
-            a.start();
+            n.start(&mut a);
             let (lr, lf, lo) = n.prefill(kept, &mut c, &seq[..p], 0);
             a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((w, seq[p])));
             decode_after(&mut a, n, kept, &mut c, seq, p, w, sz.after);
@@ -704,7 +714,7 @@ fn walk<F: Lm>(
     for (w, seq) in cwin.enumerate() {
         let w = w0 + w;
         let mut c = n.caches(true);
-        a.start();
+        n.start(&mut a);
         n.feed(&mut c, &seq[..c0], 0);
         let (lr, lf, lo) = n.prefill(kept, &mut c, &seq[c0..c0 + c1], c0);
         a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((w, seq[c0 + c1])));
@@ -784,7 +794,7 @@ fn walk<F: Lm>(
                 let (lr, lf) = alone[s].next().unwrap();
                 let lr = lr.unwrap_or_else(|| kept.read());
                 let next = seq[load_prefix(s) + k + 1];
-                a.start();
+                n.start(&mut a);
                 a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((lw + s, next)));
                 if n.o.is_none() {
                     kept.logits.push(lr);

@@ -26,6 +26,15 @@ Test-only, plus docs.
 - **`graded_in_two_passes_is_graded_at_once` (new).** `reference` + `Reference::grade` give `grade_sized`'s `Graded`
   field for field, f64 sums bit for bit. It uses three GPU nets of the checkpoint (exact, exact q8 KV, fast) on every
   arm and branch of the walk.
+  - **Update: its first gate run caught a difference** (release shard 1, 1113-031552-6419, pod1; the debug run
+    1113-032053-efeb too). Each arm's floor `Agree::last_kl` (the previous position's KL, a sequence's running state)
+    ended at its last position's KL in one pass and at 0.0 in two. Nothing else differed. The cause was
+    `ArmGrade::start`, which reset both nets' `last_kl` at every sequence start in every pass, so `Reference::grade`'s
+    pass zeroed the floor's, which only the `reference` pass tallies. `walk` now resets only the nets the pass runs
+    (`Nets::start`), so each pass leaves the other nets' tallies as it found them.
+  - No graded value depended on it. `last_kl` is read only by the same net's next tally, as an `over_half` entry's
+    previous-position KL, and the floor's tallies all happen in the `reference` pass with the same resets as in one
+    pass. The earlier runs' verdicts (6d27, ef0b) stand.
 - `walk()` is the one skeleton for both. The interleaved `grade_sized` makes the same calls in the same order as
   before for every caller.
 
@@ -64,6 +73,7 @@ always-on suite:
 | the CPU-first test at a provisional ~520 positions an arm, packed pod1 (`--nocapture`) | pass; CPU reference 1980.7 s without the lock, 0.1 s waiting, GPU half 11.9 s holding it | 1113-013544-6d27 |
 | the measure build (phase timing + per-position dump), `Sizes::FP8`, packed pod2 | pass, every arm; 4031 s | 1113-013522-ef0b |
 | build, clippy `-D warnings`, rustfmt | see the PR's gates table | — |
+| the equivalence test, first run (head 54f1005) | fail: the floor's `last_kl` (above); fixed in `walk` | 1113-031552-6419, 1113-032053-efeb |
 | fast tier release (the whole suite, nothing skipped), debug suite, the equivalence test | see the PR's gates table | — |
 
 ## What didn't work
