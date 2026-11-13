@@ -1,0 +1,29 @@
+{
+ "label": "dist-1d65540-md5",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-000024-2fc1",
+   "name": "dist-1d65540-md5",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "1d65540",
+   "binary": "bash",
+   "started": 1794553219.7548053,
+   "ended": 1794553502.9848256,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f8e19dbeea3bbcada976882830cbfb18c3b379917f809d2fd9a39cf02c8fe84f",
+   "log_bytes": 5459
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:05:07 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
