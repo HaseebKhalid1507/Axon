@@ -1843,8 +1843,9 @@ fn conversion_refused_before_it_is_made() {
 /// 151936 x 896 x 2 bytes, 519 MiB) with its vectors, and the threads'
 /// buffers, refused a byte under the edge, loaded at it. The edge is the
 /// need less `model::conv_tolerance` (the charge batches): a figure the
-/// dense tolerance (`model::ram_tolerance`) would let through is refused,
-/// as at b4b3's 719-743 MiB caps, where it was OOM-killed converting.
+/// dense tolerance (`model::ram_tolerance`) would let through is refused:
+/// b4b3's caps from 719 MiB, where it was OOM-killed converting, are
+/// refused through 735 MiB (about 742-745 is still killed: #217).
 #[test]
 fn fp8_conversion_need_of_the_checkpoint() {
     use crate::gguf::mem::{Avail, Bound};
