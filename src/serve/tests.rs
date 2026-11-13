@@ -7415,6 +7415,11 @@ fn serve_share_pressure() {
         };
         let v0 = victims(a);
         let (rc0, rt0) = s.refeed_claims();
+        let refed = |a: SocketAddr| {
+            let m = call(a, "GET", "/metrics", "").body;
+            metric(&m, "axon_refeed_shared_tokens_total").unwrap()
+        };
+        let rm0 = refed(a);
         // Again, its prefix now in the index (warm or held): each request
         // maps it when admitted. One preempted or unfed after that claims
         // it again when it is fed again (`refeed_claim`, #212): the oldest
@@ -7446,6 +7451,13 @@ fn serve_share_pressure() {
             "{what}: again: {v} victims, {} refed claims of {} tokens",
             rc - rc0,
             rt - rt0
+        );
+        // #219: the refed claims' pages have their own counter (a refed
+        // prefill holds nothing, so all it claims is mapped pages).
+        assert_eq!(
+            refed(a) - rm0,
+            rt - rt0,
+            "{what}: axon_refeed_shared_tokens_total"
         );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;

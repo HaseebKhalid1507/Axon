@@ -545,6 +545,10 @@ pub(super) struct Batch<'a, 't> {
     share: Option<Share>,
     /// Prompt tokens admissions mapped from the prefix index so far.
     pub shared_tokens: u64,
+    /// Tokens refed prefills (preempted or unfed: their prompt and what
+    /// they generated) mapped from the prefix index again so far
+    /// (`refeed_claim`; apart from `shared_tokens`, #219).
+    pub refeed_shared_tokens: u64,
     /// Pages the prefix index gave up for room so far (`evict_warm`).
     pub evicted: u64,
 }
@@ -852,6 +856,7 @@ impl<'a, 't> Batch<'a, 't> {
             stalled: false,
             share: None,
             shared_tokens: 0,
+            refeed_shared_tokens: 0,
             evicted: 0,
         }
     }
@@ -972,12 +977,15 @@ impl<'a, 't> Batch<'a, 't> {
     /// positions of `prompt`; it gives up the rest of its rows, and maps the
     /// index's pages of the prompt where the index knows more
     /// (`plan_claim`, design §3.4). The positions it holds after (`held`
-    /// says so). Sharing off: main's (it keeps `min(common, last)`).
+    /// says so). Sharing off: main's (it keeps `min(common, last)`). A
+    /// refed prefill's claim (`refeed`: `prompt` is its tokens so far, the
+    /// generated ones included) counts its pages apart (#219).
     fn claim_prefix(
         &mut self,
         slot: usize,
         prompt: &[u32],
         common: usize,
+        refeed: bool,
     ) -> Result<usize, String> {
         let last = prompt.len() - 1;
         let Some(sh) = self.share.as_mut() else {
@@ -1005,9 +1013,16 @@ impl<'a, 't> Batch<'a, 't> {
         }
         self.held[slot] = prompt[..cl.reuse].to_vec();
         let n = (cl.map.len() * PAGE) as u64;
-        self.shared_tokens += n;
+        match refeed {
+            false => self.shared_tokens += n,
+            true => self.refeed_shared_tokens += n,
+        }
         if let Some(m) = &self.metrics {
-            m.shared_tokens.fetch_add(n, Ordering::Relaxed);
+            match refeed {
+                false => &m.shared_tokens,
+                true => &m.refeed_shared_tokens,
+            }
+            .fetch_add(n, Ordering::Relaxed);
         }
         Ok(cl.reuse)
     }
@@ -1581,7 +1596,7 @@ impl<'a, 't> Batch<'a, 't> {
         // its last conversation's), its pages free (a paged pool); with
         // shared prefixes, the index's pages of the prompt are mapped if it
         // knows more of it.
-        let reuse = self.claim_prefix(slot, p, common)?;
+        let reuse = self.claim_prefix(slot, p, common, false)?;
         let reuse = self.restore(slot, p, reuse)?;
         self.index_pages(slot)?;
         if super::debug() {
@@ -1744,7 +1759,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
         let s = f.seq.slot;
         let hist = f.seq.hist.clone();
-        let reuse = self.claim_prefix(s, &hist, 0)?;
+        let reuse = self.claim_prefix(s, &hist, 0, true)?;
         let f = &mut self.pre[i];
         f.fed = reuse;
         f.seq.cached = reuse.min(f.seq.job.prompt.len() - 1);
@@ -1810,7 +1825,7 @@ impl<'a, 't> Batch<'a, 't> {
             }
             // As `admit`'s: the index's pages of the prompt mapped if it
             // knows more of it (the slot then holds no row past them).
-            Some(_) => self.claim_prefix(slot, prompt, common)?,
+            Some(_) => self.claim_prefix(slot, prompt, common, false)?,
         };
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
         let short = self.make_room(slot, want)?;
