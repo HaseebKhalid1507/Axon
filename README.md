@@ -23,36 +23,44 @@ Linux then Windows, installed with one command ([roadmap](docs/roadmap.md)).
 
 ## Install
 
-Any x86-64 CPU (other targets build too, scalar only); NVIDIA GPUs on Linux. There are no release binaries yet:
-build it with Rust 1.89 or newer.
+Linux x86-64, one command; it puts `axon` in `~/.local/bin` after checking the release tarball's SHA-256:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/Axon/main/install.sh | sh
+```
+
+It runs on any x86-64 CPU, and on an NVIDIA GPU with nothing but the driver, **R580 or newer** (CUDA 13): the GPU
+kernels are built in for RTX 20 through RTX 50, A100 and H100. On an older driver, `--device cuda` stops with one
+line naming the driver it found and that it needs R580+: update the driver, or run on the CPU (`--device cpu`, the
+default). Details: [docs/usage.md](docs/usage.md#install-a-release-linux-x86-64).
+
+From source (any x86-64 CPU, other targets scalar only; NVIDIA GPUs on Linux), with Rust 1.89 or newer:
 
 ```bash
 git clone https://github.com/HaseebKhalid1507/Axon.git && cd Axon
-cargo build --release          # one binary for the CPU and the GPU
-./target/release/axon --version
+cargo build --release          # one binary for the CPU and the GPU: ./target/release/axon
 ```
 
-Nothing CUDA is needed to build. For `--device cuda`, Axon loads the NVIDIA driver (CUDA 12 or newer) and NVRTC at
-run time, compiles its kernels on first use and caches them. Details: [docs/models.md](docs/models.md#nvidia-gpus).
+Nothing CUDA is needed to build. A source build's `--device cuda` loads the driver (CUDA 12 or newer) and the CUDA
+toolkit's NVRTC at run time, compiles its kernels on first use and caches them. Details:
+[docs/models.md](docs/models.md#nvidia-gpus).
 
 ## Quick start
 
 ```bash
-mkdir -p models
-curl -fL -o models/qwen2.5-0.5b-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
-
-./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32
-./target/release/axon chat models/qwen2.5-0.5b-q4_k_m.gguf
-./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32 --device cuda
+axon pull qwen2.5-0.5b         # 0.49 GB into ~/.local/share/axon/models; axon pull --list names the others
+axon gen qwen2.5-0.5b "The capital of France is" -n 32
+axon chat qwen2.5-0.5b
+axon gen qwen2.5-0.5b "The capital of France is" -n 32 --device cuda
 ```
 
-`gen` streams the text to stdout and prints prompt and decode speed to stderr. `chat` is a conversation.
+`gen` streams the text to stdout and prints prompt and decode speed to stderr. `chat` is a conversation. Any GGUF on
+Hugging Face: `axon pull OWNER/REPO/FILE.gguf`; a path to a `.gguf` works wherever a name does.
 
 Serve it, and talk to it with any OpenAI or ollama client:
 
 ```bash
-./target/release/axon serve models/qwen2.5-0.5b-q4_k_m.gguf --device cuda --port 8080
+axon serve qwen2.5-0.5b --device cuda --port 8080
 curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hi!"}],"stream":true}'
 ```
@@ -66,6 +74,7 @@ curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
 | `axon logits <model> "<prompt>"` | The top-K next-token logits after the prompt |
 | `axon chat <model>` | Talk to an instruct model in the terminal |
 | `axon serve <model>` | The HTTP server: the OpenAI and ollama APIs |
+| `axon pull <name>` | Download a GGUF from Hugging Face, checked against its SHA-256 |
 
 Every flag and its default: [docs/usage.md](docs/usage.md). The `AXON_*` variables:
 [docs/environment.md](docs/environment.md).

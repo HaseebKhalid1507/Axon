@@ -15,3 +15,6 @@ file), idempotent (same bytes: nothing replaced).
 
 **Why build the pack in CI:** NVRTC needs no GPU, and the same NVRTC version gives the same bytes; the CI pack is
 checked against bella's NVRTC entry by entry (`gpu_release_pack_is_nvrtcs`) and by the md5 gate: results in the PR.
+
+**README:** the install section leads with `install.sh` (driver R580+, the one-line refusal on older drivers and
+`--device cpu`), then the source build; the quick start uses `axon pull` and model names.

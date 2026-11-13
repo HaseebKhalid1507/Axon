@@ -18,8 +18,18 @@ the license notices in `~/.local/share/doc/axon`; run again, it replaces the bin
 The release binary needs glibc 2.28+ (RHEL 8, Debian 10, Ubuntu 20.04 and newer) and, for `--device cuda`, only the
 NVIDIA driver, R580 or newer (CUDA 13): its GPU kernels are built in for Turing (RTX 20), Ampere, Ada, Hopper and
 Blackwell RTX (sm_120) GPUs, with PTX for newer ones (models.md, NVIDIA GPUs); other GPUs (B200-class sm_100,
-Pascal) and older drivers need the CUDA toolkit's NVRTC, as a source build does. Without a GPU it runs on the CPU. To uninstall: `rm ~/.local/bin/axon`,
-and `~/.local/share/axon/models` for the pulled models.
+Pascal) need the CUDA toolkit's NVRTC, as a source build does. On a driver older than R580, `--device cuda` uses a
+CUDA 12 toolkit's NVRTC if there is one, and otherwise stops with one line (and axon's usual hint), for example
+
+```
+axon: --device cuda: NVIDIA driver 570.86.15 (CUDA 12.8) is too old: axon's GPU kernels need R580+ (CUDA 13); update the driver, or run on the CPU with --device cpu
+try 'axon --help'
+```
+
+(exit code 2, as for every refusal).
+
+Without a GPU it runs on the CPU (the default). To uninstall: `rm ~/.local/bin/axon`, and
+`~/.local/share/axon/models` for the pulled models.
 
 ## Quick start
 
