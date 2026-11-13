@@ -1133,7 +1133,7 @@ fn engine(
     }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
-        crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
+        crate::draft::DraftModel::open(&crate::model_arg(p), crate::copy_for(device), &model, tok)
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
@@ -3383,7 +3383,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         crate::fail(SERVE_USAGE);
     };
     let mut o = Opts {
-        path: path.clone(),
+        path: crate::model_arg(path),
         host: "127.0.0.1".into(),
         port: 8080,
         device: crate::device_env(),
