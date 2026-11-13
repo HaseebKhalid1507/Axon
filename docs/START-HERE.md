@@ -142,7 +142,7 @@ Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + 
 | `src/numerics.rs`, `src/identity.rs` | `--numerics exact\|fast`; the identity tuple behind `system_fingerprint`. |
 | `src/gguf/mem.rs` | RAM available (the host's, bounded by cgroup limits), read by the load-time RAM checks. |
 | `src/kvsave.rs`, `src/kvstore.rs` | `chat --session` KV images; the host-RAM page store, keyed by a hash chain over the token prefix. |
-| `src/serve/tier.rs`, `src/serve/prefix.rs` | `serve --cache-ram`, the KV RAM tier; the index of shared prefix pages (`AXON_SHARE_KV=1`). |
+| `src/serve/tier.rs`, `src/serve/prefix.rs` | `serve --cache-ram`, the KV RAM tier; the index of shared prefix pages (on by default; `AXON_SHARE_KV=0`: off). |
 | `src/serve/ops.rs`, `responses.rs`, `ollama.rs` | `/metrics`, `/slots`, `--api-key`; the Responses and ollama APIs. |
 | `src/cuda/kernels.cu` | Dequant kernels, bit-identical to `quant.rs`. |
 | `src/cuda/decode.cu` | One-token kernels: GEMV (dp4a), RMSNorm, RoPE, attention; defines the canonical order. |

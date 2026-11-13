@@ -539,7 +539,7 @@ pub(super) struct Batch<'a, 't> {
     /// take, a key collision): it waits, as with no backlog, until the
     /// batch steps, admits or the tier grows.
     stalled: bool,
-    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV unset or not "1",
+    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV=0,
     /// or a plain pool, and every path below is main's, decision for
     /// decision).
     share: Option<Share>,
@@ -861,7 +861,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Shared prefixes on or off (`AXON_SHARE_KV=1`), before any request: on
+    /// Shared prefixes on or off (`AXON_SHARE_KV`), before any request: on
     /// for a paged pool only (a plain one has no pages to share). Whether
     /// they are on.
     pub fn set_share(&mut self, on: bool) -> bool {
