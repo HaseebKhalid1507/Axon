@@ -1,0 +1,30 @@
+[axon-run 01:47:36] submitted 1113-014736-b647 by /home/haseeb/.cache/axon-wt-dec-fp8: /home/haseeb/.cache/axon-dec/bin/axon-test-fp8fix2 cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical --exact --nocapture
+[axon-run 01:47:36] job 1113-014736-b647 -> pod2 [RTX 4090 sm_89 secure] (pod 6peqhwssswqg8d): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 5000 --src /home/haseeb/.cache/axon-wt-dec-fp8m /home/haseeb/.cache/axon-dec/bin/axon-test-fp8fix2 cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical --exact --nocapture
+axon-remote: job 20261113-064742-axon-test-fp8fix2-188152 on pod2 (GPU, 5000 MB)
+[axon-node 06:47:42] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1579/24564 MB; sharing with 20261113-063537-bash-166802, 20261113-064737-axon-test-a09b1bd-188069 (slots 3, budget 23064 MB, vCPU 15.3)
+[axon-node 06:47:42] run axon-test-fp8fix2 (61f99a38fafe3d9b7aad94e4) as /home/haseeb/.cache/axon-wt-dec-fp8m on e7a80a4d7508, AXON_THREADS=5 RUST_TEST_THREADS=4; free 22501 MB of 24564 (used 1583); GPU processes pid:MB 166839:1174,188088:394
+
+running 2 tests
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical' (188170) panicked at src/testutil.rs:105:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-wt-dec-fp8/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... FAILED
+
+thread 'cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once' (188171) panicked at src/testutil.rs:105:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-wt-dec-fp8/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+test cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once ... FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical
+    cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 904 filtered out; finished in 0.29s
+
+[axon-node 06:47:42] exit 101 after 0.3s
+[axon-node 06:47:42] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-node 06:47:42] failures not retried (not all shared-GPU sensitive / OOM): cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical, cuda::qwen2::tests::fp8::graded_in_two_passes_is_graded_at_once
+[axon-run 01:47:45] exit 101 after 8.5s (host pod2)
