@@ -31,7 +31,12 @@ A model passes when (a) and (b) are equal and (c) is within its limits, top-1 at
 inside Axon's top K at every step, every logit finite. Verdicts: pass, FAIL (a real difference), ERROR (not judged:
 axon crashed or timed out, chat n/a, the reference backend didn't start), missing, llama-error. Exit 0 all pass,
 1 any FAIL, 2 anything not judged (or usage).
+BY_DESIGN lists the checks where Axon departs from llama.cpp on purpose (a model file pattern, the check, the reason
+with the code or doc that says so). Such a check still runs and keeps its difference in the record, but reports
+BY-DESIGN instead of DIFF and doesn't fail the model; the model's other checks are graded as usual. A listed check
+that comes out equal is flagged stale (the entry can go).
 `--only SUBSTR` runs the matching models only (axon-nightly's bisect).
+`scripts/golden_selftest.py` checks the parsing and the verdict logic offline (CI runs it).
 """
 
 import argparse
@@ -66,9 +71,19 @@ GEN_PROMPT = "The history of the printing press begins"
 TEMPLATE_KWARGS = {"date_string": "26 Jul 2024", "current_date": "2025-08-05"}
 K = 20   # top-K logprobs from both engines (KL over llama.cpp's top K, as scripts/oracle/llama_logits.py)
 # (c)'s limits: Axon vs llama.cpp's CPU may differ by SPREAD_FACTOR x llama.cpp's own CUDA-vs-CPU spread on the same
-# steps (--llama-server-ref), never less than the floors. Set from the 11-13 bella measurements in
-# docs/log/2026-11-12-process-v2-safeguards.md ("Thresholds").
-SPREAD_FACTOR, KL_MEAN_FLOOR, DLP_FLOOR, AGREE_MIN = 2.0, 0.01, 0.3, 0.9
+# steps (--llama-server-ref), never less than the floors. From the 11-13 measurements (13 models, bella sm_120 and a
+# 4090) in docs/log/2026-11-12-process-v2-safeguards.md, "Thresholds": clean Axon reaches 1.66x llama.cpp's spread
+# on max |dlogprob| (Gemma 3 4B), so 2.5 keeps every clean model at or under 2/3 of each limit; KL_MEAN_FLOOR is
+# twice the worst clean mean KL where the floor applies (0.00308, Llama 3.2 1B CUDA). Planted on Llama 3.2 1B: rms
+# eps x10, a Q6_K scale x1.10 and Q3_K_L weights fail; eps x3 and a Q6_K scale x1.05 pass (inside the noise).
+SPREAD_FACTOR, KL_MEAN_FLOOR, DLP_FLOOR, AGREE_MIN = 2.5, 0.006, 0.3, 0.9
+# Differences by design (shady on #246): (model file regex, check, why: the code or doc that decides it).
+BY_DESIGN = [
+    (re.compile(r"(?i)mistral-7b-instruct-v0\.3"), "chat",
+     "Axon frames Mistral v0.3 with mistral_common's tokens, each piece between control tokens encoded on its own "
+     "(src/chat.rs module doc, \"Mistral\"; pinned by chat.rs's mistral tests); llama.cpp tokenizes the rendered "
+     "text, a '\u2581' more after [INST], and the GGUF embeds an older template"),
+]
 # Templates that print today's date ignore chat_template_kwargs (gpt-oss: strftime_now): llama.cpp's rendering is
 # normalized to Axon's pinned dates before it is tokenized.
 DATE_FIXES = [(re.compile(r"Current date: \d{4}-\d{2}-\d{2}"), "Current date: {current_date}"),
@@ -269,6 +284,75 @@ def summary(m):
             "flips": m["flips"]}
 
 
+def judge(g, spread=None):
+    """(c)'s verdict on summary() g, limits from summary() spread (llama.cpp's CUDA vs its CPU on the same steps; None:
+    the floors). Returns (limits, clear flips, why): an empty why is a pass."""
+    sk = spread["kl_mean"] if spread else 0.0
+    sd = spread["max_dlp"] if spread else 0.0
+    lim = {"kl_mean": round(max(KL_MEAN_FLOOR, SPREAD_FACTOR * sk), 5),
+           "max_dlp": round(max(DLP_FLOOR, SPREAD_FACTOR * sd), 4), "agree_frac": AGREE_MIN,
+           "from": "llama.cpp's spread" if spread else "floors (no --llama-server-ref)"}
+    lim["swing"] = round(2 * lim["max_dlp"], 4)
+    clear = [f for f in g["flips"] if f["swing"] > lim["swing"]]
+    why = []
+    if not g["steps"]:
+        why.append("no steps")
+    if g["nonfinite"]:
+        why.append(f"{len(g['nonfinite'])} step(s) with non-finite logits")
+    if g["missing"]:
+        why.append(f"llama.cpp's token outside Axon's top {K} at {len(g['missing'])} step(s)")
+    if clear:
+        why.append(f"{len(clear)} flip(s) with a swing over {lim['swing']}")
+    if g["steps"] and g["agree_frac"] < AGREE_MIN:
+        why.append(f"top-1 {g['agree_frac']} < {AGREE_MIN}")
+    if g["steps"] and g["kl_mean"] > lim["kl_mean"]:
+        why.append(f"KL mean {g['kl_mean']} > {lim['kl_mean']}")
+    if g["max_dlp"] > lim["max_dlp"]:
+        why.append(f"max dlogprob {g['max_dlp']} > {lim['max_dlp']}")
+    return lim, clear, why
+
+
+def by_design(model, check):
+    """BY_DESIGN's reason for this model file's check, or None."""
+    for rx, c, why in BY_DESIGN:
+        if c == check and rx.search(model):
+            return why
+    return None
+
+
+def apply_by_design(r):
+    """A judged check that differs where BY_DESIGN says Axon departs on purpose: BY-DESIGN (pass, with the reason and
+    the difference kept); one that came out equal anyway: by_design_stale. Not-judged checks stay not judged."""
+    r["by_design"] = []
+    for k, c in r["checks"].items():
+        why = by_design(r["model"], k)
+        if not why or c.get("not_judged"):
+            continue
+        if c.get("pass"):
+            c["by_design_stale"] = f"listed as by design but equal: drop its BY_DESIGN entry ({why[:60]}...)"
+            r["problems"].append(f"{k}: {c['by_design_stale']}")
+            continue
+        c.update(by_design=why, was=c.get("status", "DIFF"), status="BY-DESIGN")
+        c["pass"] = True   # graded as by design; the difference itself stays in the record (at / axon / llama)
+        r["by_design"].append(k)
+
+
+def verdict(r):
+    """The model's verdict from its checks: FAIL if a judged check failed, else ERROR if one wasn't judged, else pass."""
+    judged = [c for c in r["checks"].values() if not c.get("not_judged")]
+    if any(not c["pass"] for c in judged):
+        return "FAIL"
+    if len(judged) < len(r["checks"]):
+        r["problems"] += [f"{k}: {c.get('error') or c.get('why')}" for k, c in r["checks"].items() if c.get("not_judged")]
+        return "ERROR"
+    return "pass"
+
+
+def exit_code(verdicts):
+    """1: a real difference; 2: something wasn't judged (a missing model, llama.cpp or axon not running, chat n/a)."""
+    return 1 if "FAIL" in verdicts else (2 if any(x != "pass" for x in verdicts) else 0)
+
+
 def first_diff(x, y):
     for i, (p, q) in enumerate(zip(x, y)):
         if p != q:
@@ -394,31 +478,8 @@ def one(a, name):
         g.update(summary(ax))
         if spread:
             g["spread"] = summary(sp)
-        sk = g["spread"]["kl_mean"] if spread else 0.0
-        sd = g["spread"]["max_dlp"] if spread else 0.0
-        lim = {"kl_mean": round(max(KL_MEAN_FLOOR, SPREAD_FACTOR * sk), 5),
-               "max_dlp": round(max(DLP_FLOOR, SPREAD_FACTOR * sd), 4), "agree_frac": AGREE_MIN,
-               "from": "llama.cpp's spread" if spread else "floors (no --llama-server-ref)"}
-        lim["swing"] = round(2 * lim["max_dlp"], 4)
-        g["limits"] = lim
-        g["clear"] = [f for f in g["flips"] if f["swing"] > lim["swing"]]
-        why = []
-        if not g["steps"]:
-            why.append("no steps")
-        if g["nonfinite"]:
-            why.append(f"{len(g['nonfinite'])} step(s) with non-finite logits")
-        if g["missing"]:
-            why.append(f"llama.cpp's token outside Axon's top {K} at {len(g['missing'])} step(s)")
-        if g["clear"]:
-            why.append(f"{len(g['clear'])} flip(s) with a swing over {lim['swing']}")
-        if g["steps"] and g["agree_frac"] < AGREE_MIN:
-            why.append(f"top-1 {g['agree_frac']} < {AGREE_MIN}")
-        if g["steps"] and g["kl_mean"] > lim["kl_mean"]:
-            why.append(f"KL mean {g['kl_mean']} > {lim['kl_mean']}")
-        if g["max_dlp"] > lim["max_dlp"]:
-            why.append(f"max dlogprob {g['max_dlp']} > {lim['max_dlp']}")
-        g["why"] = why
-        g["pass"] = not why
+        g["limits"], g["clear"], g["why"] = judge(g, g.get("spread"))
+        g["pass"] = not g["why"]
     except NotJudged as e:
         g.update(error=str(e)[-300:], not_judged=True)
         g["pass"] = False
@@ -426,14 +487,8 @@ def one(a, name):
         g.update(error=str(e)[-300:], not_judged=True)
         g["pass"] = False
     r["checks"]["greedy"] = g
-    judged = [c for c in r["checks"].values() if not c.get("not_judged")]
-    if any(not c["pass"] for c in judged):
-        r["verdict"] = "FAIL"
-    elif len(judged) < len(r["checks"]):
-        r["verdict"] = "ERROR"
-        r["problems"] += [f"{k}: {c.get('error') or c.get('why')}" for k, c in r["checks"].items() if c.get("not_judged")]
-    else:
-        r["verdict"] = "pass"
+    apply_by_design(r)
+    r["verdict"] = verdict(r)
     return r
 
 
@@ -464,6 +519,7 @@ def run(a):
         print(json.dumps({"model": m, "verdict": r["verdict"],
                           "tokenize": c.get("tokenize", {}).get("equal"),
                           "chat": c.get("chat", {}).get("status"),
+                          "by_design": r.get("by_design") or None,
                           "agree": c.get("greedy", {}).get("agree_frac"),
                           "clear": len(c.get("greedy", {}).get("clear", [])),
                           "max_dlp": c.get("greedy", {}).get("max_dlp"),
@@ -473,10 +529,11 @@ def run(a):
                           "problems": r["problems"]}), flush=True)
         json.dump(doc, open(a.out, "w"), indent=1)
     v = [r["verdict"] for r in doc["models"]]
+    bd = sum(1 for r in doc["models"] if r.get("by_design"))
     print(f"GOLDEN {len(v)} models: pass {v.count('pass')}, FAIL {v.count('FAIL')}, ERROR {v.count('ERROR')}, "
-          f"missing {v.count('missing')}, llama-error {v.count('llama-error')}", flush=True)
-    # 1: a real difference; 2: something wasn't judged (a missing model, llama.cpp or axon not running, chat n/a)
-    return 1 if "FAIL" in v else (2 if any(x != "pass" for x in v) else 0)
+          f"missing {v.count('missing')}, llama-error {v.count('llama-error')}"
+          + (f" (by design: {bd} model(s) with a listed difference)" if bd else ""), flush=True)
+    return exit_code(v)
 
 
 def table(a):
@@ -490,6 +547,7 @@ def table(a):
         c = r["checks"]
         t, ch, g = c.get("tokenize", {}), c.get("chat", {}), c.get("greedy", {})
         ov = f" ({len(t['llama_override'])} via llama.cpp's override)" if t.get("llama_override") else ""
+        ov += " BY-DESIGN" if t.get("by_design") else ""
         print(f"| {r['model']} | {r['verdict']} | {t.get('equal', '')}/{t.get('prompts', '')}{ov} | "
               f"{ch.get('status', '')} | {g.get('agree', '')}/{g.get('steps', '')} | "
               f"{len(g.get('flips', []))} ({len(g.get('clear', []))}) | {g.get('kl_mean', '')} "

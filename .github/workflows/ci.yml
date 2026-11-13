@@ -38,6 +38,9 @@ jobs:
       # The agent replay harness's offline self-test (stdlib only, no engine or model, ~0.1 s).
       - name: agent replay self-test
         run: python3 scripts/agent_replay_selftest.py
+      # golden.py's parsers and verdict logic on canned `axon logits` output (stdlib only, no model, ~0.1 s).
+      - name: golden self-test
+        run: python3 scripts/golden_selftest.py
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
