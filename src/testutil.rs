@@ -58,7 +58,7 @@ const FP8_SKIP_VARS: [&str; 2] = ["AXON_SKIP_MODEL_TESTS", "AXON_SKIP_FP8_MODEL_
 /// quietly, and libtest reports a test that returns early as `ok`, so gate
 /// runs on GPUs without the checkpoint showed the FP8 gate passing when it
 /// had never run (#193). The callers check for a usable GPU first
-/// (`gpu_fp8_graded_vs_fp8_ref` for an sm_89+ one; the exact-mode test runs
+/// (`gpu_fp8_fast_vs_exact_sanity` for an sm_89+ one; the exact-mode test runs
 /// on any), so a host without one, CI included, never gets here.
 pub fn fp8_model_path() -> Option<PathBuf> {
     let path = match std::env::var_os("AXON_TEST_FP8_MODEL") {

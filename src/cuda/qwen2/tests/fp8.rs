@@ -1,9 +1,13 @@
 //! FP8 (fp8.cu, docs/design/fp8-weights.md §3, §6 B-D): each kernel against
 //! its bits reference and the independent f64 anchor, and the FP8 0.5B
 //! checkpoint end to end: exact mode's Q8_0 form keeps the contract's bits,
-//! fast mode's native kernels are graded against the CPU's fp8-ref.
+//! fast mode's native kernels run every arm against exact mode on the GPU
+//! (sanity bounds), and are graded against the CPU's fp8-ref by hand and
+//! nightly (`gpu_fp8_graded_vs_fp8_ref_1000`).
 
-use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, grade_sized, reference};
+use super::numerics::{
+    Arm, Floor, Graded, Sizes, assert_graded_vs_exact_with, grade_sized, reference,
+};
 use super::*;
 use crate::cuda::Kernels;
 use crate::kv::KvType;
@@ -455,42 +459,121 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
     assert!(!b.fast_kernels());
 }
 
-/// The #173 gate in its FP8 form (§6 B, ruling 2): the GPU's native FP8
-/// (fast) against the CPU's fp8-ref (exact dequant, f32 activations), the
-/// floor the CPU's fp8-ref with the fast path's activation rounding
-/// (e4m3 per token): the same precision change in the CPU's order. Every
-/// arm graded, and a fast kernel seen in each (decode on a fresh net: its
-/// steps are batched passes of one row; the batched arm's prefixes all
-/// past the GEMV's 16 rows). In a release build at `Sizes::FP8_FAST`
-/// (the same bars as the run of record, on fewer positions: #232); the
-/// run of record at >= 1000 positions per arm is
-/// `gpu_fp8_graded_vs_fp8_ref_1000`, by hand. A debug-assertions build runs
-/// every arm and route on fewer (`Sizes::FP8_DEBUG`) for the checks only it
-/// makes, with the sanity backstops and no statistical grading
-/// (`assert_sane_vs_exact`: lead ruling, 10-31, after 1031-115732-b712).
-/// `Sizes::FP8_FAST`'s smallest arm.
-const FP8_FAST_MIN: usize = 520;
-
+/// The FP8 checkpoint's fast mode on every arm of the #173 walk, against
+/// exact mode on the same GPU, at the run of record's positions
+/// (`Sizes::FP8`, >= 1000 per arm), in every suite (#232). No statistics:
+/// the sanity bounds (`assert_sane_vs_exact`: every logit finite, max
+/// |dlogit| < 12 over the whole vocabulary), a fast kernel launched in
+/// every arm, and the routes: every batched
+/// prefix on the FP8 tensor-core GEMM (`F8Route::MmaSync`), the load arm's
+/// rows on the pool's tensor-core attention (`ATT_NB_MIN`). The floor
+/// (exact with a q8 KV cache) is printed for scale, not graded. All three
+/// nets are on the GPU, so the test holds the GPU test lock for seconds,
+/// not the CPU reference's half hour (#232, #244).
+///
+/// What it can't catch: exact mode is the checkpoint's Q8_0 form (D1), so
+/// it shares the loader, the FP8 scales and their dequant, the head (Q8_0
+/// in both modes), attention, norms and RoPE with fast mode. A bug in any
+/// of those is in the reference too, and a drift of both modes from true
+/// FP8 math (the checkpoint read wrong the same way) passes. Within the
+/// bound it doesn't grade accuracy either: a top-1 or KL regression whose
+/// logits move less than 12 passes. Those are what the run of record
+/// grades, against the CPU's fp8-ref with its statistical bars:
+/// `gpu_fp8_graded_vs_fp8_ref_1000`, nightly on main and by hand on every
+/// PR that touches the FP8 kernels or their routing (docs/testing.md).
 #[test]
-fn gpu_fp8_graded_vs_fp8_ref() {
-    match cfg!(debug_assertions) {
-        false => fp8_graded(&Sizes::FP8_FAST, FP8_FAST_MIN, true),
-        true => fp8_graded(&Sizes::FP8_DEBUG, 98, false),
+fn gpu_fp8_fast_vs_exact_sanity() {
+    use std::io::Write;
+    use std::time::Instant;
+    if f8_engine_gpu().is_none() {
+        return;
     }
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let t = Instant::now();
+    let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+    let (mr, mf, mo) = (load(), load(), load());
+    let net = |m, kv, n| {
+        let o = BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(super::numerics::CTX)
+            .kv(kv)
+            .numerics(n);
+        Backend::new(m, o).unwrap()
+    };
+    let r = net(&mr, KvType::F16, Numerics::Exact);
+    let f = net(&mf, KvType::Q8, Numerics::Exact);
+    let o = net(&mo, KvType::F16, Numerics::Fast);
+    assert!(
+        !r.fast_kernels() && !f.fast_kernels(),
+        "exact mode runs no fast kernel"
+    );
+    let sz = &Sizes::FP8;
+    let g = fp8_routes_and_arms(&o, sz, 1000, || {
+        grade_sized(&r, &f, &o, &mr, Floor::KvQ8, Device::Cuda, sz)
+    });
+    super::numerics::assert_sane_vs_exact("0.5B FP8 cuda fast vs cuda exact (Q8_0)", &g);
+    let _ = writeln!(
+        std::io::stderr(),
+        "fp8 fast vs exact on the GPU: {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
 }
 
-/// The FP8 gate's run of record (docs/design/fp8-weights.md §6 B): every
-/// arm at >= 1000 positions (`Sizes::FP8`), graded. Its CPU reference takes
-/// about 20 minutes alone and keeps about 2.5 GB of logits, so it's out of
-/// the suites since #232 (it held the GPU test lock for over 2700 s on
-/// packed pods). It runs nightly on main (bella), and by hand on every PR
-/// that touches the FP8 kernels or their routing (docs/testing.md, "The FP8
-/// gate's run of record"):
+/// The checks both FP8 walks make of the fast net `o`: fast mode runs FP8
+/// natively, every batched prefix routes to the tensor-core GEMM, the
+/// load arm reaches the pool's tensor-core attention; then `walk()`'s
+/// grading, whose arms must all be there, each with a fast kernel launched
+/// and at least `min` positions.
+fn fp8_routes_and_arms(
+    o: &Backend,
+    sz: &Sizes,
+    min: usize,
+    walk: impl FnOnce() -> Graded,
+) -> Graded {
+    assert!(o.fast_kernels(), "fast mode on this GPU runs FP8 natively");
+    for &n in super::numerics::prefixes(Device::Cuda) {
+        assert_eq!(
+            super::batch::f8_route(n, false),
+            super::batch::F8Route::MmaSync,
+            "prefix {n}"
+        );
+    }
+    assert!(super::batch::ATT_NB_MIN <= sz.load);
+    let g = walk();
+    let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
+    assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
+    for a in &g.arms {
+        assert!(a.launches > 0, "[{}]: no FP8 kernel ran", a.arm.name());
+        assert!(
+            a.mode.positions >= min,
+            "[{}]: {} positions",
+            a.arm.name(),
+            a.mode.positions
+        );
+    }
+    g
+}
+
+/// The FP8 gate's run of record, the #173 gate in its FP8 form (§6 B,
+/// ruling 2): the GPU's native FP8 (fast) against the CPU's fp8-ref (exact
+/// dequant, f32 activations); the floor the CPU's fp8-ref with the fast
+/// path's activation rounding (e4m3 per token): the same precision change
+/// in the CPU's order. Every arm at >= 1000 positions (`Sizes::FP8`),
+/// graded (`Top1::Binomial`). Its two CPU nets take most of an hour on a
+/// packed pod (the CPU's float matmul, #244) and keep about 2.5 GB of
+/// logits, so it's out of the suites since #232, which run
+/// `gpu_fp8_fast_vs_exact_sanity` instead. It runs nightly on main
+/// (bella), and by hand on every PR that touches the FP8 kernels or their
+/// routing (docs/testing.md, "The FP8 gate's run of record"):
 /// `axon-test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`.
+/// Its bars sit about one SD of the window spread from a correct build
+/// (#245): a failure is a reason to look, not a block by itself.
 #[test]
 #[ignore]
 fn gpu_fp8_graded_vs_fp8_ref_1000() {
-    fp8_graded(&Sizes::FP8, 1000, true);
+    fp8_graded(&Sizes::FP8, 1000);
 }
 
 /// `numerics::reference` + `Reference::grade` make `grade_sized`'s
@@ -544,14 +627,13 @@ fn graded_in_two_passes_is_graded_at_once() {
     assert!(two.rows.0 > 0, "{:?}", two.rows);
 }
 
-/// The graded FP8 gate at sizes `sz`, each arm at least `min` positions;
-/// with `graded` false, the debug build's sanity checks instead of the
-/// statistics. The CPU nets (the reference and the floor) run first, then
+/// The graded FP8 gate at sizes `sz`, each arm at least `min` positions.
+/// The CPU nets (the reference and the floor) run first, then
 /// the test takes the GPU test lock for the GPU half only
 /// (`numerics::reference`, #232): before, the lock was held through
 /// the CPU forwards too, and on a packed pod every other GPU test of the
 /// suite timed out behind it. The phases' times go straight to stderr.
-fn fp8_graded(sz: &Sizes, min: usize, graded: bool) {
+fn fp8_graded(sz: &Sizes, min: usize) {
     use std::io::Write;
     use std::time::Instant;
     if !f8_engine_capable() {
@@ -578,16 +660,7 @@ fn fp8_graded(sz: &Sizes, min: usize, graded: bool) {
     let t = Instant::now();
     let mo = load();
     let o = fp8_net(&mo, Device::Cuda, Numerics::Fast);
-    assert!(o.fast_kernels(), "fast mode on this GPU runs FP8 natively");
-    for &n in super::numerics::prefixes(Device::Cuda) {
-        assert_eq!(
-            super::batch::f8_route(n, false),
-            super::batch::F8Route::MmaSync,
-            "prefix {n}"
-        );
-    }
-    assert!(super::batch::ATT_NB_MIN <= sz.load);
-    let g = cpu_half.grade(&o);
+    let g = fp8_routes_and_arms(&o, sz, min, || cpu_half.grade(&o));
     let _ = writeln!(
         std::io::stderr(),
         "fp8 graded gate ({} positions an arm): CPU reference {cpu_s:.1} s without the GPU test \
@@ -596,24 +669,7 @@ fn fp8_graded(sz: &Sizes, min: usize, graded: bool) {
         wait_s,
         t.elapsed().as_secs_f64()
     );
-    let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
-    assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
-    for a in &g.arms {
-        assert!(a.launches > 0, "[{}]: no FP8 kernel ran", a.arm.name());
-    }
-    for a in &g.arms {
-        assert!(
-            a.mode.positions >= min,
-            "[{}]: {} positions",
-            a.arm.name(),
-            a.mode.positions
-        );
-    }
-    let what = "0.5B FP8 cuda fast vs fp8-ref";
-    match graded {
-        true => assert_graded_vs_exact_with(what, &g, false, Top1::Binomial),
-        false => super::numerics::assert_sane_vs_exact(what, &g),
-    }
+    assert_graded_vs_exact_with("0.5B FP8 cuda fast vs fp8-ref", &g, false, Top1::Binomial);
     let _ = fp8::F8S;
 }
 

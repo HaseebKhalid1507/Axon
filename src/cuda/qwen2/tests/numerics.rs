@@ -144,42 +144,6 @@ impl Sizes {
         load: LOAD,
         load_steps: 25,
     };
-    /// PROVISIONAL (#232; the size is set from measurements): the release
-    /// suite's FP8 gate, the same bars as `FP8` on about half its
-    /// positions: decode 6 x 17 + 9 x 48 = 534, batched 4 x 3 x 49 = 588,
-    /// cached 11 x 49 = 539, load 40 x 13 = 520.
-    pub(crate) const FP8_FAST: Sizes = Sizes {
-        decode_windows: 9,
-        batch_windows: 4,
-        verify_windows: BATCH_WINDOWS,
-        cached_windows: Some(11),
-        after: 48,
-        load: LOAD,
-        load_steps: 13,
-    };
-    /// `FP8` in a debug-assertions build: every arm, prefix length and
-    /// route of the release gate (the load arm's 32 rows reach the pool's
-    /// tensor-core attention, `ATT_NB_MIN`), on about a quarter of the CPU
-    /// reference's tokens: decode 6 x 17 + 48 = 150, batched 3 x 49 = 147,
-    /// cached 2 x 49 = 98, load 32 x 4 = 128 positions. The two CPU nets
-    /// are the test's cost: at `FP8`'s size it held the GPU test lock for
-    /// over 2700 s in a debug shard with 4 test threads (1031-080835-d64f).
-    /// This size keeps what only a debug build checks on those paths:
-    /// every launch's argument count (`cuda::Kernel`'s cuFuncGetParamInfo
-    /// check), the pool's page table, the fast counter's assertion and
-    /// overflow checks. The statistical verdict at >= 1000 positions per
-    /// arm is the release build's (`Sizes::FP8`): the debug build adds
-    /// checks, not other arithmetic, so its larger run would grade the
-    /// same numbers again.
-    pub(crate) const FP8_DEBUG: Sizes = Sizes {
-        decode_windows: 1,
-        batch_windows: 1,
-        verify_windows: 1,
-        cached_windows: Some(2),
-        after: 48,
-        load: 32,
-        load_steps: 4,
-    };
 }
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU
@@ -1081,19 +1045,19 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
     );
 }
 
-/// The FP8 gate in a debug-assertions build (lead ruling, 10-31): no
-/// statistics. The graded bars (the binomial top-1, the KL mean, the
-/// outlier count, the verify rows) are a test of >= 1000 positions per arm,
-/// whose run of record is the release build (the debug build does the same
-/// arithmetic); `Sizes::FP8_DEBUG`'s 98-150 positions can't carry them (job
-/// 1031-115732-b712: the batched arm's 137/147 against a floor of 142,
-/// 2 SE 4.4, where the release build's 1000-position arms pass). Kept:
-/// every arm graded with a fast kernel seen running (the per-arm count is
-/// the caller's), and the sanity backstops on the net under test
-/// (`assert_sane`: finite logits, max |dlogit| < 12 over the whole
-/// vocabulary). The numbers are printed, labelled info only.
+/// The FP8 checkpoint's always-on test (`fp8::gpu_fp8_fast_vs_exact_sanity`,
+/// #232): no statistics. The graded bars (the binomial top-1, the KL mean,
+/// the outlier count, the verify rows) are the run of record's, against the
+/// CPU's fp8-ref, nightly and by hand (`gpu_fp8_graded_vs_fp8_ref_1000`):
+/// they need >= 1000 positions per arm and still sit about one SD of the
+/// window spread from a correct build (#245; at 98-150 positions they
+/// failed on noise, 1031-115732-b712). Kept: every arm graded with a fast
+/// kernel seen running (the per-arm count is the caller's), and the sanity
+/// backstops on the net under test (`assert_sane`: finite logits, max
+/// |dlogit| < 12 over the whole vocabulary). The numbers are printed,
+/// labelled info only.
 pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
-    report_graded(&format!("{what} (debug build: info only, not graded)"), g);
+    report_graded(&format!("{what} (info only, not graded)"), g);
     assert!(
         !g.fast_kernels || g.launches() > 0,
         "{what}: fast kernels, but none ran in any arm"
@@ -1107,8 +1071,8 @@ pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
         .collect();
     assert!(errs.is_empty(), "{}", errs.join("\n"));
     eprintln!(
-        "{what}: debug build: sanity checks only (every arm ran a fast kernel, finite logits, max \
-         |dlogit| < 12); the statistical bars are the release build's run of record"
+        "{what}: sanity checks only (every arm ran a fast kernel, finite logits, max |dlogit| < 12); \
+         the statistical bars are the run of record's, gpu_fp8_graded_vs_fp8_ref_1000"
     );
 }
 

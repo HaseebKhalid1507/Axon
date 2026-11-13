@@ -102,9 +102,20 @@ files or a head-size or GQA path (rule 1 lists them); the full suite nightly on 
 ### The FP8 gate's run of record
 
 `cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000` grades native FP8 (fast mode) against the CPU's fp8-ref
-at >= 1000 positions per arm (`Sizes::FP8`, docs/design/fp8-weights.md §6 B). It is `#[ignore]`d (#232). Its CPU
-reference alone takes about 20 minutes on bella and keeps about 2.5 GB of logits, which is too much for a suite
-that shares a pod. The suites run `gpu_fp8_graded_vs_fp8_ref`: the same bars on fewer positions (`Sizes::FP8_FAST`).
+at >= 1000 positions per arm (`Sizes::FP8`, docs/design/fp8-weights.md §6 B). It is `#[ignore]`d (#232). Its two
+CPU nets take about 20 minutes on bella and most of an hour on a packed pod (the CPU's float matmul is a serial
+scalar dot, #244), and keep about 2.5 GB of logits: too much for a suite that shares a pod. No smaller size fits
+either: one window an arm still costs 600-800 s of CPU on a packed pod, and below 1000 positions the bars fail
+with no bug far more often (#245).
+
+The suites run `gpu_fp8_fast_vs_exact_sanity` instead: fast mode against exact mode (the checkpoint's Q8_0 form),
+both on the GPU, every arm at the same >= 1000 positions, with no statistics. It checks that every logit is finite,
+that the max |dlogit| over the vocabulary is below 12, that every arm launched a fast kernel, and the routes (the
+FP8 tensor-core GEMM for every batched prefix, the pool's tensor-core attention for the load arm). It holds the GPU
+test lock for seconds. It can't see a bug that fast and exact mode share (the loader, the FP8 scales, the head,
+attention), both modes drifting from true FP8 math, or an accuracy loss inside the |dlogit| bound: those are the
+run of record's.
+
 The run of record runs:
 
 - **nightly on main**, on bella (axon-nightly, devstack), so a regression shows up within a day;
@@ -113,6 +124,13 @@ The run of record runs:
   (`src/quant/fp8.rs`, `model::with_fp8_cpu_qt`). On bella:
   `axon-run --on bella --max-min 90 -- <axon-test> cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`.
   Its job ID and verdict go in the PR's gates table.
+
+**A failure means look, not block.** Its bars sit about one standard deviation of the window-to-window spread from a
+correct build: in a bootstrap of a passing 4090 run (`1113-013522-ef0b`), about 1 in 3 harmless numerics changes
+(reordered sums, a new kernel route) would fail it, and the 0.5B decode arm clears the 90 % top-1 floor by 1.3 points.
+The test's text is fixed, so the same code on the same GPU gives the same verdict every run; a new failure on main
+(or on a PR) is a change in the FP8 numbers worth reading (which arm and bar, by how much, the floor's numbers next
+to it), and the lead decides whether it blocks. The redesign around paired discordance is #245.
 
 ## Gate jobs (maintainers)
 

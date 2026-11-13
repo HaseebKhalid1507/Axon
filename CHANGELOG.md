@@ -6,6 +6,20 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Tests: the FP8 gate off the GPU test lock; GPU fast vs GPU exact in the suites (#232)
+- **`gpu_fp8_fast_vs_exact_sanity` replaces `gpu_fp8_graded_vs_fp8_ref` in every suite.** It runs the FP8 0.5B
+  checkpoint's fast mode against its exact mode on the same GPU, every arm at >= 1000 positions, with sanity bounds
+  only: finite logits, max |dlogit| < 12, a fast kernel in every arm, and the FP8 routes. It holds the GPU test lock
+  for seconds. The old test held it through its CPU reference, over 2700 s on packed pods, and 138 GPU tests of one
+  suite failed on the lock timeout behind it.
+- **The run of record, `gpu_fp8_graded_vs_fp8_ref_1000`, is `#[ignore]`d.** It grades against the CPU's fp8-ref with
+  the statistical bars, unchanged. It runs its CPU nets before it takes the lock. It runs nightly on main and by hand
+  on PRs that touch the FP8 kernels or their routing (docs/testing.md, the PR template).
+  - A failure means look, not block: its bars flag about 1 in 3 harmless numerics changes (#245).
+  - Its CPU reference is slow because the CPU's float matmul is a serial scalar dot (#244).
+- `graded_in_two_passes_is_graded_at_once`: the two-pass grading equals the interleaved one, field for field
+  (docs/log/2026-11-13-fp8-gate-lock.md).
+
 ### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
 - Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.
 - **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each wrote
