@@ -16,3 +16,7 @@ start-up and no NVIDIA blob to redistribute.
 version, same bytes (each entry records the hash of NVRTC's raw output). Checked by `gpu_release_pack_is_nvrtcs`,
 `gpu_pack_module_is_nvrtcs` (logits bit for bit) and the md5 gate (main on NVRTC vs the pack with
 `AXON_KERNEL_PACK=only`): results in the PR.
+
+**Driver floor:** the pack needs R580+ (CUDA 13). An older driver without a CUDA 12 toolkit gets one line from
+`--device cuda`: the driver version (`/proc/driver/nvidia/version`), "need R580+ (CUDA 13)", and `--device cpu`;
+a pre-CUDA-12 driver, whose API axon can't load, gets the same line instead of a missing symbol.
