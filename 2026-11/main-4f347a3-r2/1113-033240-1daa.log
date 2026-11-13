@@ -1,0 +1,31 @@
+[axon-run 03:32:40] submitted 1113-033240-1daa by /home/haseeb/.cache/axon-main: shard 3/3 of 1113-033240-1bae, 253 tests: /home/haseeb/.cache/axon-main/axon-test-4f347a3 --skip hybrid:: --skip cuda::tests:: --skip model:: --skip cuda::qwen2::mla:: --skip cuda::qwen2::paged_tests:: --skip cuda::qwen2::experts:: --skip cuda::qwen2::tests::numerics:: --skip pool:: --skip tokenizer:: --skip identity:: --skip moe::ds2_tests:: --skip cuda::qwen2::tests::wave_passes_shapes --skip cuda::qwen2::tests::wide_flips_rule --skip m
+[axon-run 04:27:59] job 1113-033240-1daa -> pod2 [RTX 4090 sm_89 secure] (pod hqwgkemb0h5vhp): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod2 --vram 8872 --src /home/haseeb/.cache/axon-main/wt /home/haseeb/.cache/axon-main/axon-test-4f347a3 --skip hybrid:: --skip cuda::tests:: --skip model:: --skip cuda::qwen2::mla:: --skip cuda::qwen2::paged_tests:: --skip cuda::qwen2::experts:: --skip cuda::qwen2::tests::numerics:: --skip pool:: --skip tokenizer:: --skip identity:: --skip moe::ds2_tests:: --skip cuda::qwen2::tests::wave_passes_shapes --skip cuda::qwen2::tests::wide_flips_rule --skip moe::oss_tests:: --skip generate:: --skip cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps --skip numerics::tests:: --skip tests::kv_f32_after_f16_is_an_error --skip serve:: --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b --skip cuda::qwen2::tests::gpu_prefill_logits_match_forward_big --skip cuda::qwen2::tests::gpu_prefill_wave_split_bits --skip cuda::qwen2::tests::gpu_products_match_reference_bits --skip cuda::qwen2::tests::gpu_products_real_weights_q2k_q3k --skip cuda::qwen2::tests::gpu_prompt_chunks_bits --skip cuda::qwen2::tests::gpu_q8_attention_matches_reference --skip cuda::qwen2::tests::gpu_q8_kv_close_to_f16_0_5b --skip cuda::qwen2::tests::gpu_q8_kv_close_to_f16_1_5b --skip cuda::qwen2::tests::gpu_q8_llama --skip cuda::qwen2::tests::gpu_q8_qwen3 --skip cuda::qwen2::tests::gpu_q8_qwen3_4b --skip cuda::qwen2::tests::gpu_q8_store_matches_rule --skip cuda::qwen2::tests::gpu_qkv_rope_matches_cpu --skip cuda::qwen2::tests::gpu_qwen3_matches_reference_forward --skip cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --skip cuda::qwen2::tests::gpu_split_attention_matches_decode_bits --skip cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference --skip cuda::qwen2::tests::gpu_tc_attention_close_to_f64 --skip cuda::qwen2::tests::gpu_too_big_is_an_error --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_0_5b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_1_5b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_0_5b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b --skip cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits --skip cuda::qwen2::tests::lm_chunk_ranges --skip cuda::qwen2::tests::magic_i2f_is_cvt_rn --skip cuda::qwen2::tests::q6k8_never_costs_context --skip cuda::qwen2::tests::ref_spread_zero_fails_by_name --skip cuda::qwen2::tests::sane_backstops --skip cuda::qwen2::tests::teacher_forced_dump --skip cuda::qwen2::tests::tile_t_picks --skip cuda::qwen2::tests::top1_binomial_rule --skip cuda::qwen2::tests::top_k_is_the_largest --skip quant:: --skip cuda::qwen2::sample_tests:: --skip cuda::qwen2::tests::fp8:: --skip cuda::qwen2::pages:: --skip safetensors:: --skip sample:: --skip cuda::qwen2::moe:: --skip kvstore:: --skip draft:: --skip cuda::qwen2::stream:: --skip spec:: --skip vmath:: --skip lm:: --skip rope::
+axon-remote: job 20261113-092801-axon-test-4f347a3-68104 on pod2 (GPU, 8872 MB)
+[axon-node 09:28:01] GPU slot taken; job wants 8872 MB; nvidia-smi used/total 1186/24564 MB; sharing with 20261113-090754-axon-test-4f347a3-30340 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 09:28:01] run axon-test-4f347a3 (e98a7e921402b7c2d29d2ba0) as /home/haseeb/.cache/axon-main/wt on 2679e3cf136e, AXON_THREADS=4 RUST_TEST_THREADS=4; free 22898 MB of 24564 (used 1186); GPU processes pid:MB 30357:1176
+
+running 253 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::fp8_session_cpu_act_child ... ignored, run by fp8_session_across_cpu_act
+test chat::tests::fp8_session_q8_child ... ignored, run by gpu_fp8_session_across_native
+test chat::tests::framing_matches_template ... ok
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::gpu_session_module_hash ... ok
+test chat::tests::gpu_session_split_count ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+test chat::tests::gpu_fp8_session_across_native ... ok
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::session_across_numerics_modes ... ok
+[axon-run 04:28:51] signal 15: stopping the job
+
+axon-remote: signal 15, killing remote job 20261113-092801-axon-test-4f347a3-68104
+[axon-run 04:28:57] exit 130 after 57.6s (host pod2)
