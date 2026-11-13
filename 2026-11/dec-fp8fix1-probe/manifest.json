@@ -1,0 +1,29 @@
+{
+ "label": "dec-fp8fix1-probe",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-013544-6d27",
+   "name": "dec-fp8fix1-probe",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-13_01:35.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": null,
+   "binary": "axon-test-fp8fix1",
+   "started": 1794551742.9742165,
+   "ended": 1794553762.1627967,
+   "attempts": 1,
+   "remote_job": "20261113-063602-axon-test-fp8fix1-111529",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6f712c2102e09f300d83a1ee668b1d801cf476973e4c00e31bce57fcae1ec2af",
+   "log_bytes": 8752
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:09:23 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
