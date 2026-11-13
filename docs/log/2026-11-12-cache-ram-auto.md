@@ -35,8 +35,8 @@ the decision waives (17–24×). The objection to the default was the size: `aut
 a 30 GB desktop whose session was OOM-killed twice on 10-13. 4 GiB holds a 7B f16 session of about 75k positions
 (56 KiB each). A 16 GB desktop with 6 GiB free after the model gets 1.5 GiB, still one warm 27k-position session.
 
-Under a cgroup the default stays off because pinned memory there is charged to the limit and can't be reclaimed, so
-a default that took it could get the server, or its neighbours in the cgroup, OOM-killed.
+Under a binding cgroup `auto` is off because pinned memory there is charged to the limit and can't be reclaimed, so
+`auto` taking it could get the server, or its neighbours in the cgroup, OOM-killed.
 
 ## How it was verified
 - New tests: `tier::tests::cache_ram_auto_cap` (the cap arithmetic: a quarter below 16 GiB available, 4 GiB from 16
@@ -51,6 +51,30 @@ a default that took it could get the server, or its neighbours in the cgroup, OO
   gemma-3-1b and Qwen3-0.6B q8 on the GPU and the 0.5B on the CPU.
 - The A/B: #228's `tier` arm (the foreman's ruling, 11-12), FAIL, above. After the strip, this PR makes no timing
   claim. Its gates at the new head are for correctness only: the fast tier and the md5s against main.
+
+Jobs (axon-run) at `a09b1bd`:
+
+| gate | job | result |
+|---|---|---|
+| fast tier, release, `--shard 3` | 1113-003537-9d65, -7e61, -d7f5 | 328/1 (`serve_share_cancel_frees`, see below), killed behind `gpu_fp8_graded_vs_fp8_ref` (#232), 251/0 |
+| shard 1 again; the test alone | 1113-014731-36af; 1113-014732-89c0 | 329/0; ok |
+| shard 2 with `--skip …gpu_fp8_graded_vs_fp8_ref`; that test alone (bella) | 1113-011046-9828; 1113-010621-7899 | 247/0; ok |
+| `serve_share_cancel_frees`, 60 fresh processes | 1113-130728-fd2c | in the PR body |
+| fast tier, debug, CPU queue | 1113-003537-916f | 846/0 |
+| md5 of `gen`; serve md5 (`md5ram.sh`) | 1113-003537-7892; 1113-003538-4cac | 0 of 30 differ; every reply equal |
+
+The one shard-1 failure (`axon_prompt_shared_tokens_total` 0 where the test wants the third request's 5 pages) is in
+main's test on main's code path: the PR changes neither `serve/tests.rs` nor `serve/engine.rs`, and the test asks for
+no tier. The classification is on the PR (comment 6861109452).
+
+## After shady's review (11-13)
+8/10 SHIP-AFTER-FIXES. Its MUST was Process v2 rule 1: the diff touches `src/serve/tier.rs`, so the full tier runs, or
+the lead waives it in writing. The lead ruled for a focused run instead of either: the debug-assertion build's tier
+and cache-RAM tests on a GPU host (`dec-456ec4c-tier-dbg-gpu`, job IDs in the PR body). The reason: the change is the
+sizing arithmetic in `CacheRam` (`bytes`, `auto_off`, `off`) plus its tests, all of which run before the tier starts.
+`PoolTier`, `CacheTier` and the write-behind are untouched. The full tier's 18 extra tests (bigger models) set no
+`--cache-ram`. The fast tier's debug half ran on the CPU queue, where the GPU tier tests skip themselves. The branch
+merged #225's fixes (`456ec4c`). The SHOULDs are in #253.
 
 ## Measuring what users get
 axon-run puts every job in a systemd scope with `MemoryMax` (on bella 22,000 MiB, under `app.slice`'s 23,552 MiB).
