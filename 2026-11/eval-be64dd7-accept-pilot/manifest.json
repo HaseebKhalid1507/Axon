@@ -1,0 +1,29 @@
+{
+ "label": "eval-be64dd7-accept-pilot",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1112-230839-77be",
+   "name": "eval-be64dd7-accept-pilot",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "be64dd7",
+   "binary": "bash",
+   "started": 1794548264.73124,
+   "ended": 1794548683.070305,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "01b06c614f0410bbb03696a27b7442655430f993c89dd80941c865768058d51f",
+   "log_bytes": 12087
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:44:44 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
