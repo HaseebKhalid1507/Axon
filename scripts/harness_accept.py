@@ -1307,6 +1307,7 @@ def cmd_run(a):
                     time.sleep(0.5)
                     recs = px.take()
                     for r in recs:
+                        r["model"] = a.model
                         reqf.write(json.dumps(r) + "\n")
                     reqf.flush()
                     m1 = eng.metrics() if eng.alive() else m0
@@ -1323,8 +1324,89 @@ def cmd_run(a):
                     print("RESULT " + json.dumps(res), flush=True)
         px.stop()
         eng.stop()
+    reqf.close()
     print_summary(results)
+    print_latency(load_requests([os.path.join(out, "requests.jsonl")]))
     return 0
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Latency and prefill from the proxy's request records (requests.jsonl). Prefill tok/s = uncached prompt tokens /
+# TTFT, on SOLO requests only: no other request to the same engine in flight between this one's start and its first
+# token (opencode's title request runs beside the main one, and a request queued behind another's prefill would
+# count the other's work). Both engines report cached tokens (usage.prompt_tokens_details / input_tokens_details).
+# ----------------------------------------------------------------------------------------------------------------
+SIZE_BUCKETS = ((0, 256), (256, 1000), (1000, 2000), (2000, 4000), (4000, 8000), (8000, 16000), (16000, 10 ** 9))
+PREFILL_MIN = 1000
+
+
+def load_requests(paths):
+    out = []
+    for p in paths:
+        with open(p, errors="replace") as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if "engine" in r and "ttft_ms" in r:
+                    out.append(r)
+    return out
+
+
+def latency_stats(reqs):
+    """{(model, engine): stats} over the given request records."""
+    groups = {}
+    for r in reqs:
+        groups.setdefault((r.get("model", "?"), r["engine"]), []).append(r)
+    out = {}
+    for k, rs in groups.items():
+        ok = [r for r in rs if r.get("status") == 200 and r.get("ttft_ms") is not None and r.get("t") is not None]
+        spans = [(r["t"], r["t"] + (r.get("total_ms") or r["ttft_ms"]) / 1000.0, id(r)) for r in ok]
+
+        def solo(r):
+            a0, a1 = r["t"], r["t"] + r["ttft_ms"] / 1000.0
+            return not any(s0 < a1 and s1 > a0 for s0, s1, i in spans if i != id(r))
+
+        new = lambda r: (r.get("prompt_tokens") or 0) - (r.get("cached_tokens") or 0)
+        big = [r for r in ok if new(r) >= PREFILL_MIN and r["ttft_ms"] > 0]
+        bigsolo = [r for r in big if solo(r)]
+        rate = lambda xs: [new(r) / (r["ttft_ms"] / 1000.0) for r in xs]
+        dec = [r["completion_tokens"] / ((r["total_ms"] - r["ttft_ms"]) / 1000.0) for r in ok
+               if (r.get("completion_tokens") or 0) >= 50 and (r.get("total_ms") or 0) > r["ttft_ms"]]
+        sizes = [new(r) for r in ok]
+        out[k] = dict(
+            n=len(ok), ttft_p50=pct([r["ttft_ms"] for r in ok], 0.5), ttft_p90=pct([r["ttft_ms"] for r in ok], 0.9),
+            ttft_big_p50=pct([r["ttft_ms"] for r in big], 0.5), ttft_big_p90=pct([r["ttft_ms"] for r in big], 0.9),
+            n_big=len(big), n_solo=len(bigsolo),
+            pf_p50=pct(rate(bigsolo), 0.5), pf_p90=pct(rate(bigsolo), 0.9),
+            pf_all_p50=pct(rate(big), 0.5),
+            dec_p50=pct(dec, 0.5), n_dec=len(dec),
+            sizes=[sum(1 for s in sizes if lo <= s < hi) for lo, hi in SIZE_BUCKETS],
+            new_p50=pct(sizes, 0.5), new_p90=pct(sizes, 0.9), new_max=max(sizes or [0]))
+    return out
+
+
+def print_latency(reqs):
+    st = latency_stats(reqs)
+    if not st:
+        return
+    f = lambda x: "-" if x is None else "%d" % round(x)
+    print("LATENCY (TTFT ms over all requests; prefill tok/s = uncached prompt tokens / TTFT on solo requests with >= %d "
+          "uncached tokens; decode tok/s on replies of >= 50 tokens)" % PREFILL_MIN)
+    print("%-12s %-6s %5s %7s %7s %6s %8s %8s %6s %8s %8s %8s" % ("model", "engine", "n", "ttft50", "ttft90", "n_pf",
+                                                              "pf50", "pf90", "n_all", "pf50all", "dec50", "n_dec"))
+    for k in sorted(st):
+        s = st[k]
+        print("%-12s %-6s %5d %7s %7s %6d %8s %8s %6d %8s %8s %8d" % (
+            k[0], k[1], s["n"], f(s["ttft_p50"]), f(s["ttft_p90"]), s["n_solo"], f(s["pf_p50"]), f(s["pf_p90"]),
+            s["n_big"], f(s["pf_all_p50"]), f(s["dec_p50"]), s["n_dec"]))
+    print("SIZES uncached prompt tokens per request, buckets " +
+          " ".join("%d-%s" % (lo, "" if hi >= 10 ** 9 else hi) for lo, hi in SIZE_BUCKETS))
+    for k in sorted(st):
+        s = st[k]
+        print("%-12s %-6s %s  p50 %s p90 %s max %s" % (k[0], k[1], " ".join("%5d" % c for c in s["sizes"]),
+                                                      f(s["new_p50"]), f(s["new_p90"]), f(s["new_max"])), flush=True)
 
 
 def print_summary(results):
@@ -1377,8 +1459,14 @@ def norm_err(e):
 
 
 def cmd_table(a):
-    rs = load_results(a.paths)
+    reqp = [p for p in a.paths if os.path.basename(p).startswith("requests")]
+    if reqp:
+        print_latency(load_requests(reqp))
+        print()
+    rs = load_results([p for p in a.paths if p not in reqp])
     if not rs:
+        if reqp:
+            return 0
         sys.exit("no RESULT lines")
     cells = {}
     for r in rs:
