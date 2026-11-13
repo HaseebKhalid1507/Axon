@@ -124,7 +124,7 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the
 /// command line, `["axon", "serve", "model.gguf", flags...]`
-/// (docs/serving.md, `axon serve --help`). Blocks. It behaves as the CLI does, process exits
+/// (docs/serving.md; its flags: `axon --help`). Blocks. It behaves as the CLI does, process exits
 /// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
 /// `AXON_DRAFT`) prints a message and exits with code 2, so does a start
 /// the server refuses (an explicit `--parallel N` that doesn't fit in GPU
