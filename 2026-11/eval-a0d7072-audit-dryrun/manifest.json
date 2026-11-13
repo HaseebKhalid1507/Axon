@@ -1,0 +1,29 @@
+{
+ "label": "eval-a0d7072-audit-dryrun",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1112-231912-abdc",
+   "name": "eval-a0d7072-audit-dryrun",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "a0d7072",
+   "binary": "bash",
+   "started": 1794548803.895302,
+   "ended": 1794548864.7680426,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8bdf447a794fbe2904c11cbeee373caac969cf4aee72883f0523004379a6d9fe",
+   "log_bytes": 20617
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:47:46 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
