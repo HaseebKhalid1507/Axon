@@ -1,0 +1,29 @@
+{
+ "label": "eval-4707cda-audit-dryrun2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1113-004918-e28e",
+   "name": "eval-4707cda-audit-dryrun2",
+   "rc": 2,
+   "verdict": "FAIL (rc 2)",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "4707cda",
+   "binary": "bash",
+   "started": 1794548956.6505418,
+   "ended": 1794548969.241022,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2b8e34da8dedd102ddfa79bdcb217aaab19c54dec2a31f4dc17360da5151c0db",
+   "log_bytes": 8095
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:49:56 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

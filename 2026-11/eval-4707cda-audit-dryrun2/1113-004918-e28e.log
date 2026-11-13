@@ -1,0 +1,80 @@
+[axon-run 00:49:18] submitted 1113-004918-e28e by /home/haseeb/.cache/axon-wt-eval: /usr/bin/bash compat_audit.sh ./zoo.py ./llama_logits.py ./dryrun2.json ./axon-3014eeb ./llama-b11580-bin-ubuntu-x64.tar.gz --device cpu --chat --fetch-each --delete-after --sparse-first --prompts 8
+[axon-run 00:49:19] job 1113-004918-e28e -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/compat_audit-b2de382ad15a --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash compat_audit.sh ./zoo.py ./llama_logits.py ./dryrun2.json ./axon-3014eeb ./llama-b11580-bin-ubuntu-x64.tar.gz --device cpu --chat --fetch-each --delete-after --sparse-first --prompts 8 --test-threads 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (043b39dbb92fcdf47df8c3d4) + source of /home/haseeb/.cache/axon-podjob/compat_audit-b2de382ad15a
+
+sent 21,516,610 bytes  received 163 bytes  14,344,515.33 bytes/sec
+total size is 30,069,860  speedup is 1.40
+
+sent 168 bytes  received 35 bytes  135.33 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261113-004924-bash-2371069 on jade (CPU-only)
+[axon-node 00:49:24] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 00:49:24] run bash (043b39dbb92fcdf47df8c3d4) as /home/haseeb/.cache/axon-podjob/compat_audit-b2de382ad15a on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 00:49:24] memory cap (scope MemoryMax) 2816 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 00:49:24] MemAvailable 4352 MB, load ['0.52', '0.56', '0.72']; nice -n 19 ionice -c3 taskset -c 0-7
+tar: llama-b11580/libggml-cpu-cooperlake.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-quantize-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-completion: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-tts: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-common.so.0.6.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-fit-params: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-fit-params-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/LICENSE: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-server-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-minicpmv-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libmtmd.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-piledriver.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-mtmd-debug: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-zen4.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-gemma3-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-tokenize: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml.so.0.26.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-base.so.0.26.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-completion-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama.so.0.6.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-common.so.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-results: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-server: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-rpc.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-batched-bench: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-llava-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-alderlake.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-sse42.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-qwen2vl-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-haswell.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-perplexity-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-cli-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-cannonlake.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-imatrix: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml.so.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-perplexity: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-sapphirerapids.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libmtmd.so.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-common.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-base.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-cascadelake.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libmtmd.so.0.6.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-sandybridge.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-bench-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-ivybridge.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-mtmd-cli: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/ggml-rpc-server: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama.so.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libllama-batched-bench-impl.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-skylakex.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-quantize: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-base.so.0: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-icelake.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-gguf-split: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/libggml-cpu-x64.so: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580/llama-bench: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: llama-b11580: Cannot change ownership to uid 1001, gid 1001: Invalid argument
+tar: Exiting with failure status due to previous errors
+[axon-node 00:49:27] exit 2 after 3.3s; lowest MemAvailable seen 4313 MB
+[axon-node 00:49:27] peak RSS 0 MB (job process tree PSS, 2 s samples x1)
+[axon-run 00:49:28] exit 2 after 9.3s (host jade)
