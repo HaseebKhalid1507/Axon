@@ -2052,7 +2052,7 @@ fn serve_paged_pressure() {
         .iter()
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
-    // Shared prefixes (off unless the run sets AXON_SHARE_KV=1): no page
+    // Shared prefixes (on unless the run sets AXON_SHARE_KV=0): no page
     // is shared (the prompts differ from their first page on), and the
     // index's warm pages (a preempted request's) are neither held nor free.
     let warm = sl.get("pages_warm").map_or(0, |w| w.as_u64().unwrap());
@@ -7207,18 +7207,18 @@ fn wait_idle(a: SocketAddr) {
     });
 }
 
-/// AXON_SHARE_KV is opt-in (#207's timing clauses failed, so #187 ships
-/// sharing off by default): on for "1" only; unset, "0" or anything else
-/// is off, main's paths.
+/// AXON_SHARE_KV is on by default (the 11-12 decision): "0" is the kill
+/// switch, main's paths; unset or any other value is on ("1" as when it
+/// was opt-in).
 #[test]
-fn share_kv_is_opt_in() {
+fn share_kv_is_on_by_default() {
     use super::share_on;
-    assert!(!share_on(None));
-    for v in ["", "0", "true", "yes", "2", "on"] {
-        assert!(!share_on(Some(v)), "{v:?}");
+    assert!(share_on(None));
+    for v in ["1", " 1\n", "", "true", "on", "2"] {
+        assert!(share_on(Some(v)), "{v:?}");
     }
-    assert!(share_on(Some("1")));
-    assert!(share_on(Some(" 1\n")));
+    assert!(!share_on(Some("0")));
+    assert!(!share_on(Some(" 0\n")));
 }
 
 /// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
@@ -7415,6 +7415,11 @@ fn serve_share_pressure() {
         };
         let v0 = victims(a);
         let (rc0, rt0) = s.refeed_claims();
+        let refed = |a: SocketAddr| {
+            let m = call(a, "GET", "/metrics", "").body;
+            metric(&m, "axon_refeed_shared_tokens_total").unwrap()
+        };
+        let rm0 = refed(a);
         // Again, its prefix now in the index (warm or held): each request
         // maps it when admitted. One preempted or unfed after that claims
         // it again when it is fed again (`refeed_claim`, #212): the oldest
@@ -7446,6 +7451,13 @@ fn serve_share_pressure() {
             "{what}: again: {v} victims, {} refed claims of {} tokens",
             rc - rc0,
             rt - rt0
+        );
+        // #219: the refed claims' pages have their own counter (a refed
+        // prefill holds nothing, so all it claims is mapped pages).
+        assert_eq!(
+            refed(a) - rm0,
+            rt - rt0,
+            "{what}: axon_refeed_shared_tokens_total"
         );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;

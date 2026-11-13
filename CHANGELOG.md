@@ -6,6 +6,18 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
+- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Same bits on or off. On its
+  own: the KV RAM tier stays off by default (#226). In the A/B on an RTX 4090 (#228, job 1112-233524-d38d) sharing
+  alone passed every cell (C=8 ITL p99 0.980×, C=16 tok/s 1.001×), but the tier failed, so the planned pairing was
+  dropped (the lead's ruling, 11-13). The win is subagent fan-out (#211: eight subagents' TTFT 0.591× on a shared
+  6,006-token prefix); the agent board's Synaps-shaped trace shares only 4–7 % of its prompt tokens.
+- **#218:** `index_pages` takes the index's hold on a swapped block only once `replace_pages` has mapped it into the
+  slot, so an error in between leaves no hold on a page the slot doesn't map. A refeed claim alone no longer counts
+  as a prefill step's progress.
+- **#219:** a preempted or unfed request's claim of shared pages counts in the new
+  `axon_refeed_shared_tokens_total`, so `axon_prompt_shared_tokens_total` is admissions' prompt tokens again.
+
 ### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
 - **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
   that RAM, up to 8 GiB, page-locked from start.

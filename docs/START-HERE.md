@@ -6,8 +6,9 @@ main `a591e17` from the merged PRs (#33, #34, #35, #38, #42), and the table was 
 (2026-11-06) from the PRs merged since (listed in [history.md](history.md), Phases 17–24). Anything that isn't on
 main yet is marked **planned** or **in flight**.
 
-**North star (owner, 10-26): run Synaps on Axon**, many warm agent sessions and subagents on one box, then many
-users: [roadmap](roadmap.md#mission-and-positioning), [design/agent-workload.md](design/agent-workload.md).
+**Current target (2026-11-12, four weeks): the best local backend for coding agents (opencode, codex, pi) on NVIDIA
+PCs, Linux then Windows, installed with one command on a machine with only the GPU driver**:
+[roadmap](roadmap.md#current-target). The 10-26 north star, Synaps on Axon, waits for a local Synaps profile.
 
 How Axon is developed, what was tried (including what failed) and where it stands:
 [methodology.md](methodology.md), [history.md](history.md),
@@ -15,10 +16,9 @@ How Axon is developed, what was tried (including what failed) and where it stand
 
 ## What Axon is
 
-**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
-hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
-to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
-open models, not only the ones that fit a laptop.
+**Mission (Haseeb, 11-12): Axon is for everyone, the standard for running local AI**, as Synaps should be the
+standard agent runtime, by making inference cheap and fast ([roadmap](roadmap.md#mission)). What that shelves for
+now, the datacenter tier among it: [roadmap](roadmap.md#shelved-for-now).
 
 Axon is an LLM inference engine for GGUF models (Qwen2, Qwen3, Llama 3, Gemma 3, and the Qwen3 MoE, gpt-oss and
 DeepSeek V2/V3 / Kimi K2 architectures) and Hugging Face safetensors checkpoints, written from scratch in Rust.
@@ -142,7 +142,7 @@ Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + 
 | `src/numerics.rs`, `src/identity.rs` | `--numerics exact\|fast`; the identity tuple behind `system_fingerprint`. |
 | `src/gguf/mem.rs` | RAM available (the host's, bounded by cgroup limits), read by the load-time RAM checks. |
 | `src/kvsave.rs`, `src/kvstore.rs` | `chat --session` KV images; the host-RAM page store, keyed by a hash chain over the token prefix. |
-| `src/serve/tier.rs`, `src/serve/prefix.rs` | `serve --cache-ram`, the KV RAM tier; the index of shared prefix pages (`AXON_SHARE_KV=1`). |
+| `src/serve/tier.rs`, `src/serve/prefix.rs` | `serve --cache-ram`, the KV RAM tier; the index of shared prefix pages (on by default; `AXON_SHARE_KV=0`: off). |
 | `src/serve/ops.rs`, `responses.rs`, `ollama.rs` | `/metrics`, `/slots`, `--api-key`; the Responses and ollama APIs. |
 | `src/cuda/kernels.cu` | Dequant kernels, bit-identical to `quant.rs`. |
 | `src/cuda/decode.cu` | One-token kernels: GEMV (dp4a), RMSNorm, RoPE, attention; defines the canonical order. |
@@ -176,9 +176,10 @@ cargo fmt && cargo clippy && cargo test
 
 ## In flight (not on main)
 
-Development paused on 2026-11-06 (main `3014eeb`). What's open, the pending decisions and the timing verdicts
-are in the roadmap's [state at the 11-06 pause](roadmap.md#state-at-the-11-06-pause); the priorities and their
-order are in the rest of [roadmap.md](roadmap.md).
+Development paused on 2026-11-06 (main `3014eeb`) and restarted on 2026-11-12 under
+[Process v2](methodology.md#process-v2-2026-11-12). The four-week plan, its three tracks and the open follow-ups:
+[roadmap.md](roadmap.md#plan). What was pending at the pause, with its timing verdicts:
+[the roadmap at `213465a`](https://github.com/HaseebKhalid1507/Axon/blob/213465a12e8402041e39b2d0a565de192f6c38c1/docs/roadmap.md#state-at-the-11-06-pause).
 
 ## Other docs
 
@@ -195,7 +196,7 @@ order are in the rest of [roadmap.md](roadmap.md).
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
 - [design/determinism-modes.md](design/determinism-modes.md): the `exact` / `fast` numerics ADR (accepted 2026-10-29).
 - [design/fp8-weights.md](design/fp8-weights.md): FP8 checkpoints, exact as Q8_0 and native under `fast`.
-- [design/agent-workload.md](design/agent-workload.md): the north star's track; its stages B and C are
+- [design/agent-workload.md](design/agent-workload.md): the agent track (the 10-26 north star); its stages B and C are
   [kv-ram-tier-exclusive.md](design/kv-ram-tier-exclusive.md) and [shared-prefix-pages.md](design/shared-prefix-pages.md).
 - [design/spec-split.md](design/spec-split.md): drafting on a CPU/GPU split;
   [design/a4-step-structure.md](design/a4-step-structure.md): the A4 step structure.
@@ -203,8 +204,9 @@ order are in the rest of [roadmap.md](roadmap.md).
   (`GET /identity` on `axon serve`).
 - [serve-apis.md](serve-apis.md): `axon serve`'s routes (chat completions, completions, Responses, ollama).
 - [testing.md](testing.md): the test tiers and what to run when.
-- [roadmap.md](roadmap.md): priorities, and what is not planned.
-- [methodology.md](methodology.md): how work is picked, built, reviewed, gated and benchmarked.
+- [roadmap.md](roadmap.md): the mission, the four-week target and plan, what is shelved and what is not planned.
+- [methodology.md](methodology.md): Process v2 (2026-11-12), then how work was picked, built, reviewed, gated and
+  benchmarked before it.
 - [hardening.md](hardening.md): fuzzers, the multi-hour serve soak and the model-zoo sweep: method and results.
 - [history.md](history.md): every round and PR, with why, how it was verified, and before/after numbers.
 - [experiments-rejected.md](experiments-rejected.md): NO-GOs and regressions, with numbers. Read before starting a round.

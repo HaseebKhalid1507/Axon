@@ -21,8 +21,9 @@ written only into free room and are the first evicted, so the tier's useful capa
 size, not its size minus the pool's. An evicted 25k-token session resumes in 0.141 s against a
 2.713 s re-prefill on an RTX 4090, and in 0.36–0.51 s against 8.6–8.8 s on bella (two TAINTED reads)
 ([design](design/kv-ram-tier-exclusive.md) §6, §14). It stays opt-in until #233 (the first request waits
-3.2–4.0 s for the pinning) and #234 (the write-behind costs 2.3 % tok/s at C=16 on a 4090) are fixed. `AXON_SHARE_KV=1` (opt-in, off by default)
-lets requests share the KV pages of a common prompt prefix, same bits (#207, #216; [below](#operations-auth-metrics-slots)).
+3.2–4.0 s for the pinning) and #234 (the write-behind costs 2.3 % tok/s at C=16 on a 4090) are fixed.
+Requests share the KV pages of a common prompt prefix, same bits (on by default; `AXON_SHARE_KV=0` turns it
+off; #207, #216; [below](#operations-auth-metrics-slots)).
 
 ## Starting a server, and its flags
 
@@ -223,8 +224,7 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default; whether that
-  changes: [roadmap](roadmap.md#state-at-the-11-06-pause)). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; on by default, `AXON_SHARE_KV=0` turns them off). A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
@@ -235,10 +235,13 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   until room is needed: then the least recently used warm leaf goes first (with `--cache-ram`, to
   the RAM tier), before an idle slot's pages. `GET /slots` adds `pages_warm` and `pages_shared`;
   `/metrics` `axon_kv_pages_warm`, `axon_kv_pages_shared`, `axon_prompt_shared_tokens_total`
-  (tokens mapped from the index: admissions' prompts, and since #216 a preempted request's tokens so far,
-  generated ones included, when it is fed again; #219) and `axon_pages_evicted_total` (warm pages given up for
-  room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server under
-  memory pressure.
+  (admissions' prompt tokens mapped from the index), `axon_refeed_shared_tokens_total` (tokens a preempted
+  or unfed request maps from the index again when it is fed again: its prompt and what it generated so far;
+  apart since #219, so preemption doesn't inflate the prompt count) and `axon_pages_evicted_total` (warm
+  pages given up for room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server
+  under memory pressure. The win is subagent fan-out: eight subagents on a 6,006-token prefix reach their first
+  token in 0.591× the time (#211); the agent board's Synaps-shaped trace shares only 4–7 % of its prompt tokens,
+  so it gains little there.
 - `--cache-ram BYTES|auto|off` (default 0: off): a KV RAM tier. A conversation's KV pages (64
   positions, every layer) are copied to host memory as they fill, so when its slot goes to
   another conversation they are kept there instead of dropped; its next turn copies the

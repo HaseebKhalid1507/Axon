@@ -267,6 +267,12 @@ pub struct Metrics {
     /// Prompt tokens admissions mapped from the prefix index (shared
     /// prefixes; their rows weren't prefilled).
     pub shared_tokens: AtomicU64,
+    /// Tokens refed prefills (preempted or unfed) mapped from the prefix
+    /// index again: their prompt and what they generated so far
+    /// (`Batch::refeed_claim`, #212). Apart from `shared_tokens` (#219), so
+    /// preemption doesn't inflate the prompt count a sharing win is read
+    /// from.
+    pub refeed_shared_tokens: AtomicU64,
     /// Pages the prefix index gave up for room (shared prefixes).
     pub pages_evicted: AtomicU64,
     /// Pages copied by a spill (a slot giving its rows up), of those
@@ -335,6 +341,7 @@ impl Default for Metrics {
             kv_ram_pinned: AtomicU64::new(0),
             kv_ram_gpu_pages: AtomicU64::new(0),
             shared_tokens: AtomicU64::new(0),
+            refeed_shared_tokens: AtomicU64::new(0),
             pages_evicted: AtomicU64::new(0),
             kv_ram_spilled: AtomicU64::new(0),
             #[cfg(test)]
@@ -591,6 +598,13 @@ impl Metrics {
                 "axon_prompt_shared_tokens_total",
                 "Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.",
                 self.shared_tokens.load(Ordering::Relaxed),
+            );
+            counter(
+                &mut o,
+                "axon_refeed_shared_tokens_total",
+                "Tokens of preempted or unfed requests (their prompt and what they generated) \
+                 whose KV pages were mapped from the prefix index again when they were fed again.",
+                self.refeed_shared_tokens.load(Ordering::Relaxed),
             );
             counter(
                 &mut o,
@@ -917,6 +931,7 @@ mod tests {
         assert!(!m.render(0).contains("axon_kv_pages_warm"));
         // On: their counts in /slots, gauges and counters in /metrics.
         m.shared_tokens.store(640, Ordering::Relaxed);
+        m.refeed_shared_tokens.store(192, Ordering::Relaxed);
         m.pages_evicted.store(3, Ordering::Relaxed);
         let share = PagesView {
             share: Some((4, 2)),
@@ -933,6 +948,7 @@ mod tests {
             "axon_kv_pages_warm 4",
             "axon_kv_pages_shared 2",
             "axon_prompt_shared_tokens_total 640",
+            "axon_refeed_shared_tokens_total 192",
             "axon_pages_evicted_total 3",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in\n{text}");
