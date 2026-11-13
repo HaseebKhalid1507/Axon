@@ -1,0 +1,49 @@
+{
+ "label": "safeguards-golden-data",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-005648-4a50",
+   "name": "safeguards-golden-diag-gpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794553502.9848256,
+   "ended": 1794553624.2158313,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b5af0e4eb3c751ff5b1897347a4d5112e97adc8014b86bb13985663bffff5233",
+   "log_bytes": 4164
+  },
+  {
+   "job": "1113-014119-8232",
+   "name": "safeguards-golden-bugs2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794552461.924157,
+   "ended": 1794552910.6874862,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "3c4ef9a7fe2ca8b9c09eb37b3f2a4ed99650d51ae066e5a48abf3b9b749cd637",
+   "log_bytes": 1275
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:07:06 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

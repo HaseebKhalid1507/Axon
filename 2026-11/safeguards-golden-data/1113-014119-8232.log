@@ -1,0 +1,15 @@
+[axon-run 01:41:19] submitted 1113-014119-8232 by /home/haseeb/.cache/axon-wt-safeguards: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-bugs.sh
+[axon-run 01:47:42] scope axon-job-1113-014119-8232-1794552462.scope in app-axonjobs.slice: MemoryMax 14231 MB, MemoryHigh 12807 MB, no swap, oomd pressure kill 80% (claim 8805 MB): an OOM here kills only this job
+[axon-run 01:47:42] job 1113-014119-8232 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-014119-8232-1794552462 --slice=app-axonjobs.slice -p MemoryMax=14231M -p MemoryHigh=12807M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-bugs.sh
+axon-q 01:47:42 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-bugs.sh
+text: bug-eps10 71 tokens in 52.2s
+chat: bug-eps10 116 tokens in 68.9s
+text: bug-q6k101 71 tokens in 50.3s
+chat: bug-q6k101 116 tokens in 70.1s
+text: bug-eps10 71 tokens in 39.5s
+chat: bug-eps10 113 tokens in 54.9s
+text: bug-q6k101 71 tokens in 38.4s
+chat: bug-q6k101 113 tokens in 52.9s
+text axon-Q3_K_L done 0
+chat axon-Q3_K_L done 0
+[axon-run 01:55:09] exit 0 after 447.8s (host bella)
