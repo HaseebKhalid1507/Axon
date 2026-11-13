@@ -1053,9 +1053,23 @@ impl<'a, 't> Batch<'a, 't> {
             return Ok(());
         }
         let mut pages = self.net.slot_pages(&self.pool, slot);
-        let mut swaps = Vec::new();
+        // This call's keys, in block order, the swaps (#213) and the
+        // swapped blocks' keys. The index holds a page for each slot that
+        // maps it (`release_rows` lets go by page), so a new block is held
+        // at once (its page is the slot's own), but a swapped block only
+        // once `replace_pages` has mapped the index's page into the slot,
+        // and the keys are listed then too (#218): an error before that (a
+        // later block's `pin_page`, debug's `same_page_bytes`, the swap
+        // itself) leaves no hold on a page the slot doesn't map, and the
+        // slot's list where it was (a later call offers the blocks again;
+        // its new blocks are then `Have`s at its own pages).
+        let (mut keys, mut swaps, mut swapped) = (Vec::new(), Vec::new(), Vec::new());
         for i in sh.keys[slot].len()..whole {
-            let parent = sh.keys[slot].last().copied().unwrap_or(ROOT);
+            let parent = keys
+                .last()
+                .or(sh.keys[slot].last())
+                .copied()
+                .unwrap_or(ROOT);
             let block = &self.held[slot][i * PAGE..(i + 1) * PAGE];
             let ok = i == 0 || sh.index.page(parent) == Some(pages[i - 1]);
             let ins = match ok {
@@ -1066,12 +1080,12 @@ impl<'a, 't> Batch<'a, 't> {
                 Ins::New(k) => {
                     sh.index.hold(k);
                     self.net.pin_page(&mut self.pool, pages[i])?;
-                    sh.keys[slot].push(k);
+                    keys.push(k);
                 }
                 // The slot holds the index's page of the block elsewhere
                 // already (a chain-key collision): its own copy stays, as
                 // a block the index can't take.
-                Ins::Have(k, other) if pages.contains(&other) => sh.keys[slot].push(k),
+                Ins::Have(k, other) if pages.contains(&other) => keys.push(k),
                 Ins::Have(k, other) => {
                     // Debug builds: the bytes are the same (§2's runtime
                     // proof; what sharing rests on, and what makes the
@@ -1087,20 +1101,24 @@ impl<'a, 't> Batch<'a, 't> {
                     // page is whole: the slot never writes it again.
                     swaps.push((i, other));
                     pages[i] = other;
-                    sh.index.hold(k);
-                    sh.keys[slot].push(k);
+                    swapped.push(k);
+                    keys.push(k);
                 }
-                Ins::No => sh.keys[slot].push(chain(parent, block)),
+                Ins::No => keys.push(chain(parent, block)),
             }
         }
-        if swaps.is_empty() {
-            return Ok(());
+        if !swaps.is_empty() {
+            self.net.replace_pages(&mut self.pool, slot, &swaps)?;
+            #[cfg(test)]
+            if let Some(m) = &self.metrics {
+                m.swapped.fetch_add(swaps.len() as u64, Ordering::Relaxed);
+            }
         }
-        self.net.replace_pages(&mut self.pool, slot, &swaps)?;
-        #[cfg(test)]
-        if let Some(m) = &self.metrics {
-            m.swapped.fetch_add(swaps.len() as u64, Ordering::Relaxed);
+        let sh = self.share.as_mut().expect("sharing");
+        for k in swapped {
+            sh.index.hold(k);
         }
+        sh.keys[slot].extend(keys);
         Ok(())
     }
 
@@ -1636,7 +1654,10 @@ impl<'a, 't> Batch<'a, 't> {
         let mut moved = false;
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
-                moved |= self.feed(i, n)? > 0;
+                // Fed tokens are progress; a refeed claim alone (it took no
+                // free page) only if it finished the prompt (#218).
+                let f = self.feed(i, n)?;
+                moved |= f > 0 || self.pre[i].fed == self.pre[i].seq.hist.len() - 1;
             }
         }
         // Nothing decodes and no prompt has the pages to go on: the
@@ -1668,14 +1689,14 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Feed the next `n` tokens of prefill `i`'s prompt into its slot (a
     /// paged pool: as many as there are pages for, beside a page for each
-    /// running request's growth; none: it waits, decode first).
-    /// Its progress: the positions it holds now that it didn't (fed, or
-    /// claimed again: `refeed_claim`).
+    /// running request's growth; none: it waits, decode first), after
+    /// claiming its prefix again if it was refed (`refeed_claim`). The
+    /// tokens fed: a claim's positions don't count (it takes no free page,
+    /// so it isn't the progress `prefill` asks about).
     fn feed(&mut self, i: usize, n: usize) -> Result<usize, String> {
-        let got = match self.pre[i].refeed {
-            true => self.refeed_claim(i)?,
-            false => 0,
-        };
+        if self.pre[i].refeed {
+            self.refeed_claim(i)?;
+        }
         let f = &self.pre[i];
         let n = n.min(f.seq.hist.len() - 1 - f.fed);
         let n = match n {
@@ -1683,7 +1704,7 @@ impl<'a, 't> Batch<'a, 't> {
             n => self.feedable(i, n)?,
         };
         if n == 0 {
-            return Ok(got);
+            return Ok(0);
         }
         let f = &mut self.pre[i];
         let s = f.seq.slot;
@@ -1702,7 +1723,7 @@ impl<'a, 't> Batch<'a, 't> {
         f.fed += n;
         self.fed_now += n;
         self.index_pages(s)?;
-        Ok(got + n)
+        Ok(n)
     }
 
     /// Prefill `i` was preempted or unfed (`refeed`), and its slot holds
