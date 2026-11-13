@@ -1,0 +1,15 @@
+[axon-run 15:45:19] submitted 1113-154519-7d46 by /home/haseeb/.cache/axon-wt-dist: /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 --exact cuda::pack::tests::gpu_release_pack_is_nvrtcs cuda::pack::tests::gpu_pack_module_is_nvrtcs
+[axon-run 17:45:03] VRAM: claiming the learned 707 MB instead of --vram 3000 (name:dist-*-packtest)
+[axon-run 17:45:03] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 17:45:03] scope axon-job-1113-154519-7d46-1794609903.scope in app-axonjobs.slice: MemoryMax 4084 MB, MemoryHigh 3675 MB, no swap, oomd pressure kill 80% (claim 1757 MB): an OOM here kills only this job
+[axon-run 17:45:03] job 1113-154519-7d46 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-154519-7d46-1794609903 --slice=app-axonjobs.slice -p MemoryMax=4084M -p MemoryHigh=3675M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 --exact cuda::pack::tests::gpu_release_pack_is_nvrtcs cuda::pack::tests::gpu_pack_module_is_nvrtcs --test-threads 6
+axon-q 17:45:03 start slot 16-23: /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 --exact cuda::pack::tests::gpu_release_pack_is_nvrtcs cuda::pack::tests::gpu_pack_module_is_nvrtcs --test-threads 6
+
+running 2 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::pack::tests::gpu_release_pack_is_nvrtcs ... ok
+test cuda::pack::tests::gpu_pack_module_is_nvrtcs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 919 filtered out; finished in 6.92s
+
+[axon-run 17:45:10] exit 0 after 7.1s (host bella)

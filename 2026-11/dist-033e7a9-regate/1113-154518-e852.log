@@ -1,0 +1,15 @@
+[axon-run 15:45:18] submitted 1113-154518-e852 by /home/haseeb/.cache/axon-wt-dist: /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact
+[axon-run 16:59:07] VRAM: claiming the learned 1977 MB instead of --vram 5000 (name:dist-*-fp8graded)
+[axon-run 16:59:07] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 16:59:07] scope axon-job-1113-154518-e852-1794607147.scope in app-axonjobs.slice: MemoryMax 8483 MB, MemoryHigh 7634 MB, no swap, oomd pressure kill 80% (claim 4973 MB): an OOM here kills only this job
+[axon-run 16:59:07] job 1113-154518-e852 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-154518-e852-1794607147 --slice=app-axonjobs.slice -p MemoryMax=8483M -p MemoryHigh=7634M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact --test-threads 6
+axon-q 16:59:07 start slot 8-15: /home/haseeb/.cache/axon-dist/bin/axon-test-033e7a9 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact --test-threads 6
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 920 filtered out; finished in 1405.01s
+
+[axon-run 17:22:32] exit 0 after 1405.2s (host bella)
