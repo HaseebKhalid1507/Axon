@@ -1,0 +1,15 @@
+[axon-run 01:47:32] submitted 1113-014732-89c0 by /home/haseeb/.cache/axon-wt-dec-ram: /home/haseeb/.cache/axon-dec/bin/axon-test-a09b1bd serve::tests::serve_share_cancel_frees --exact
+[axon-run 01:47:32] job 1113-014732-89c0 -> pod1 [RTX 4090 sm_89 secure] (pod wk82lhrtkkvgbe): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-dec-ram /home/haseeb/.cache/axon-dec/bin/axon-test-a09b1bd serve::tests::serve_share_cancel_frees --exact
+axon-remote: job 20261113-064737-axon-test-a09b1bd-123825 on pod1 (GPU, 5000 MB)
+[axon-node 06:47:38] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 784/24564 MB; sharing with 20261113-062520-axon-test-98a0d8d-82312, 20261113-063602-axon-test-fp8fix1-111529 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 06:47:38] run axon-test-a09b1bd (150bd16aa58b2ad5ffd8f664) as /home/haseeb/.cache/axon-wt-dec-ram on 4e582397dfa2, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23300 MB of 24564 (used 784); GPU processes pid:MB 82327:772
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_share_cancel_frees ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 1.93s
+
+[axon-node 06:47:40] exit 0 after 2.0s
+[axon-node 06:47:40] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 01:47:41] exit 0 after 9.6s (host pod1)
