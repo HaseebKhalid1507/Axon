@@ -1,0 +1,49 @@
+[axon-run 13:24:06] submitted 1113-132406-5be3 by /home/haseeb/.cache/axon-wt-dec-ram: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-456ec4c serve::tier:: cache_ram serve_share_fanout_idle serve_share_pressure serve_explicit_parallel_refused_when_short
+[axon-run 13:36:40] job 1113-132406-5be3 -> pod1 [RTX 4090 sm_89 secure] (pod 2xcdxq1yvo11md): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-dec-ram /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-456ec4c serve::tier:: cache_ram serve_share_fanout_idle serve_share_pressure serve_explicit_parallel_refused_when_short
+axon-remote: uploading axon-test-dbg-456ec4c (3d0520ac339869c9eeca5c05) + source of /home/haseeb/.cache/axon-wt-dec-ram
+
+sent 2,598,272 bytes  received 6,683 bytes  1,041,982.00 bytes/sec
+total size is 8,885,724  speedup is 3.41
+
+sent 8,339,297 bytes  received 35 bytes  794,222.10 bytes/sec
+total size is 26,647,976  speedup is 3.20
+axon-remote: job 20261113-183656-axon-test-dbg-456ec4c-2277 on pod1 (GPU, 5000 MB)
+[axon-node 18:36:56] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 4/24564 MB; sharing with 20261113-183655-axon-test-67bbe1b-2225 (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 18:36:56] run axon-test-dbg-456ec4c (3d0520ac339869c9eeca5c05) as /home/haseeb/.cache/axon-wt-dec-ram on ec0cf9bf1603, AXON_THREADS=5 RUST_TEST_THREADS=4; free 24080 MB of 24564 (used 4); GPU processes pid:MB none
+
+running 23 tests
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_cache_ram_refused_past_ram ... ok
+test serve::tests::serve_cpu_cache_ram has been running for over 60 seconds
+test serve::tests::serve_cpu_cache_ram_off has been running for over 60 seconds
+test serve::tests::serve_cuda_cache_ram has been running for over 60 seconds
+test serve::tests::serve_cuda_cache_ram_idle_flush has been running for over 60 seconds
+test serve::tests::serve_cpu_cache_ram ... ok
+test serve::tests::serve_cpu_cache_ram_off ... ok
+test serve::tests::serve_cuda_cache_ram ... ok
+test serve::tests::serve_cuda_cache_ram_tail_spill ... ok
+test serve::tests::serve_explicit_parallel_refused_when_short ... ok
+test serve::tests::serve_cuda_cache_ram_off has been running for over 60 seconds
+test serve::tests::serve_cuda_cache_ram_off ... ok
+test serve::tests::serve_share_pressure ... ok
+test serve::tier::tests::a_restore_down_classes ... ok
+test serve::tier::tests::a_restores_holds_beat_class0_eviction ... ok
+test serve::tier::tests::cache_ram_auto_cap ... ok
+test serve::tier::tests::cache_ram_auto_off_under_a_binding_cgroup ... ok
+test serve::tier::tests::cache_ram_parses ... ok
+test serve::tier::tests::cache_ram_sizes ... ok
+test serve::tier::tests::fuzz ... ok
+test serve::tier::tests::keys_are_class0_and_drain_pops_them ... ok
+test serve::tier::tests::pages_read_in_order ... ok
+test serve::tier::tests::shared_pages_and_a_two_page_eviction ... ok
+test serve::tier::tests::spill_orphans ... ok
+test serve::tier::tests::the_index_keeps_pages_class0 ... ok
+test serve::tests::serve_cuda_cache_ram_off_in_reclaim ... ok
+test serve::tests::serve_share_fanout_idle ... ok
+test serve::tests::serve_cuda_cache_ram_idle_flush ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 884 filtered out; finished in 161.31s
+
+[axon-node 18:39:38] exit 0 after 161.6s
+[axon-node 18:39:38] peak RSS 1770 MB (job process tree PSS, 2 s samples x79)
+[axon-run 13:39:39] exit 0 after 179.5s (host pod1)

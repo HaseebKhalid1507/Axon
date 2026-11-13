@@ -1,0 +1,31 @@
+[axon-run 13:24:06] submitted 1113-132406-bc7c by /home/haseeb/.cache/axon-wt-dec-ram: /home/haseeb/.cache/axon-dec/bin/axon-test-456ec4c cli::
+[axon-run 13:36:40] job 1113-132406-bc7c -> pod1 [RTX 4090 sm_89 secure] (pod 2xcdxq1yvo11md): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 0 --src /home/haseeb/.cache/axon-wt-dec-ram /home/haseeb/.cache/axon-dec/bin/axon-test-456ec4c cli::
+axon-remote: uploading axon-test-456ec4c (1884ff86ff7b9c76bd4493f5) + source of /home/haseeb/.cache/axon-wt-dec-ram
+
+sent 2,598,276 bytes  received 6,683 bytes  744,274.00 bytes/sec
+total size is 8,885,724  speedup is 3.41
+
+sent 7,822,492 bytes  received 35 bytes  1,203,465.69 bytes/sec
+total size is 25,387,672  speedup is 3.25
+axon-remote: job 20261113-183652-axon-test-456ec4c-2023 on pod1 (CPU-only)
+[axon-node 18:36:52] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 18:36:52] run axon-test-456ec4c (1884ff86ff7b9c76bd4493f5) as /home/haseeb/.cache/axon-wt-dec-ram on ec0cf9bf1603, AXON_THREADS=8 RUST_TEST_THREADS=4
+
+running 11 tests
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::help_is_current ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+test cli::tests::drafting_matches_greedy_hybrid ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::drafting_matches_greedy ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 896 filtered out; finished in 46.03s
+
+[axon-node 18:37:38] exit 0 after 46.1s
+[axon-node 18:37:38] peak RSS 904 MB (job process tree PSS, 2 s samples x22)
+[axon-run 13:37:39] exit 0 after 59.8s (host pod1)
