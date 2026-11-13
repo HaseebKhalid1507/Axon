@@ -26,7 +26,7 @@ layout; stage 2, [log](log/2026-10-17-moe-stage2.md)). Both: decode == batched
 prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
 split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
 bytes per token. `--gpu-experts N|auto` keeps the experts of N MoE layers on the GPU too,
-with the same bits (below; [roadmap](roadmap.md#mixture-of-experts)).
+with the same bits (below; [roadmap](roadmap.md#tracks)).
 
 `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
 Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
