@@ -53,5 +53,17 @@ and token ids recorded by `scripts/oracle/make_fixtures.py`.
 
 Crates in `Cargo.lock` are under MIT, Apache-2.0, Zlib, Unlicense, BSL-1.0 or
 Unicode-3.0 (`unicode-ident`) licenses; none is copyleft. Their notices ship
-with their sources on crates.io; a binary distribution should include them
-(e.g. generated with `cargo about`).
+with their sources on crates.io. A release tarball includes the license files
+of every crate linked into its binary in `THIRD_PARTY_LICENSES.txt`
+(`scripts/release/rust_licenses.py`, which also fails the release if a crate's
+license leaves that list).
+
+## GPU kernels in release binaries (NVIDIA CUDA Toolkit)
+
+A release binary carries its GPU kernels precompiled (the kernel pack,
+`docs/models.md`, "NVIDIA GPUs"): Axon's own CUDA sources (`src/cuda/*.cu`)
+compiled by NVIDIA's NVRTC and compressed with `fatbinary`, both from the CUDA
+Toolkit, as any CUDA application's compiled kernels are; device code the
+compiler builds in from its CUDA headers and libdevice is NVIDIA's, under the
+CUDA Toolkit EULA (https://docs.nvidia.com/cuda/eula/). No NVIDIA library is
+shipped: `--device cuda` uses the NVIDIA driver installed on the machine.

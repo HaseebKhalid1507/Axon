@@ -1,0 +1,154 @@
+name: Release
+
+# Builds the Linux x86-64 release tarball: `axon` with its GPU kernels precompiled (the kernel pack,
+# docs/models.md "NVIDIA GPUs") and the license notices. A pushed tag `v*` uploads it to a draft GitHub
+# release for that tag (a maintainer publishes it); any other run (workflow_dispatch, or a pull request that
+# touches the release files) only builds it, tests install.sh against it, and keeps it as a workflow artifact.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'install.sh'
+      - 'scripts/release/**'
+      - 'src/cuda/pack.rs'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The NVRTC that compiles the pack: the version bella's md5 gate checks the pack's bits with (13.4.92). A pack
+  # entry is that NVRTC's exact output, and it needs a driver for its CUDA major (13: R580+).
+  CUDA_PKG: '13-4'
+  CUDA_VER: '13.4.92-1'
+  PACK_TARGETS: 'sm_75,sm_80,sm_86,sm_89,sm_90,sm_90a,sm_120,compute_120'
+  RUST: '1.95.0'
+
+jobs:
+  pack:
+    name: kernel pack (NVRTC, no GPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh is POSIX sh
+        run: |
+          shellcheck --shell=sh install.sh
+          dash -n install.sh
+      # The pack depends only on the kernel sources, the module list, the targets and NVRTC.
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: kernels.pack
+          # A stale pack can't ship anyway: the build job checks it holds every module this build loads.
+          key: kernels-${{ env.CUDA_VER }}-${{ env.PACK_TARGETS }}-${{ hashFiles('src/cuda/**', 'src/numerics.rs') }}
+      - name: NVRTC and fatbinary (NVIDIA's apt repo)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends "cuda-nvrtc-$CUDA_PKG=$CUDA_VER" "cuda-nvcc-$CUDA_PKG=$CUDA_VER"
+          ls /usr/local/cuda-*/lib64/libnvrtc.so* /usr/local/cuda-*/bin/fatbinary
+      - uses: dtolnay/rust-toolchain@1.95.0
+        if: steps.cache.outputs.cache-hit != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.cache.outputs.cache-hit != 'true'
+      - name: build the pack
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo build --release --locked
+          cuda=$(ls -d /usr/local/cuda-* | head -n 1)
+          CUDA_PATH=$cuda LD_LIBRARY_PATH=$cuda/lib64 \
+            target/release/axon kernels build kernels.pack --targets "$PACK_TARGETS" -j "$(nproc)"
+          target/release/axon kernels list kernels.pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernels-pack
+          path: kernels.pack
+          retention-days: 7
+
+  build:
+    name: axon x86_64-linux
+    needs: pack
+    runs-on: ubuntu-24.04
+    # glibc 2.28: the binary runs on RHEL/Alma/Rocky 8, Debian 10, Ubuntu 18.10 and newer.
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernels-pack
+      - name: Rust
+        run: |
+          curl -fsSL --proto '=https' https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: build axon with the pack embedded
+        run: |
+          # Only the binary crate takes the cfg (src/main.rs embeds the pack); the library is as for a source build.
+          AXON_BUILD_KERNEL_PACK="$PWD/kernels.pack" cargo rustc --release --locked --bin axon -- --cfg axon_kernel_pack
+      - name: check the binary
+        run: |
+          b=target/release/axon
+          $b --version
+          $b kernels list | tee list.txt
+          # Every module this build loads is in the pack it carries (N of this build's N).
+          grep -Eq '\(([0-9]+) of this build.s \1\)' list.txt
+          grep -q 'built in' list.txt
+          # No GPU here: the CPU still runs, and --device cuda says why not.
+          $b kernels list | grep -q 'gpu: none'
+          v=$(objdump -T $b | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          echo "newest glibc symbol: $v"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$v" | sort -V | tail -n 1)" = GLIBC_2.28 ]
+      - name: package
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) ver=${GITHUB_REF#refs/tags/} ;; *) ver=dev-$(echo "$GITHUB_SHA" | cut -c1-7) ;; esac
+          d=axon-$ver-x86_64-linux
+          mkdir -p dist "$d"
+          cp target/release/axon LICENSE THIRD_PARTY_NOTICES.md README.md "$d/"
+          py=$(command -v python3 || ls /opt/python/cp3*/bin/python3 | tail -n 1)
+          "$py" scripts/release/rust_licenses.py > "$d/THIRD_PARTY_LICENSES.txt"
+          tar -czf dist/axon-x86_64-linux.tar.gz --owner=0 --group=0 "$d"
+          (cd dist && sha256sum axon-x86_64-linux.tar.gz > axon-x86_64-linux.tar.gz.sha256)
+          cat dist/*.sha256
+          ls -la dist "$d"
+      - name: install.sh against the tarball (twice, then a tampered one)
+        run: |
+          export HOME=$PWD/home AXON_INSTALL_URL="file://$PWD/dist"
+          sh install.sh
+          test -x home/.local/bin/axon
+          home/.local/bin/axon --version
+          sh install.sh 2>&1 | tee again.txt
+          grep -q 'is already' again.txt
+          test -f home/.local/share/doc/axon/THIRD_PARTY_LICENSES.txt
+          mkdir bad && cp dist/* bad/ && printf x >> bad/axon-x86_64-linux.tar.gz
+          if AXON_INSTALL_URL="file://$PWD/bad" sh install.sh; then echo "installed a tampered tarball"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axon-x86_64-linux
+          path: dist/
+          retention-days: 14
+
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: axon-x86_64-linux
+          path: dist
+      - name: upload to a draft release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Axon $GITHUB_REF_NAME" \
+            --notes "Linux x86-64. Install: curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh" \
+            dist/axon-x86_64-linux.tar.gz dist/axon-x86_64-linux.tar.gz.sha256
