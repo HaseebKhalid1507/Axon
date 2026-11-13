@@ -10,6 +10,16 @@
 set -u
 [ $# -ge 6 ] || { echo "usage: $0 PY MAKE_REPO AXON LLAMA MODEL HARNESS [args]"; exit 2; }
 PY=$1; MR=$2; AX=$3; LL=$4; M=$5; H=$6; shift 6
+# axon-run appends `--test-threads N` on CPU nodes (it takes the job for a Rust test binary): not ours, drop it.
+A=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --test-threads) shift; [ $# -gt 0 ] && shift ;;
+    --test-threads=*) shift ;;
+    *) A+=("$1"); shift ;;
+  esac
+done
+set -- ${A[@]+"${A[@]}"}
 D=$(cd "$(dirname "$PY")" && pwd)
 [ -e "$D/make_repo.py" ] || cp "$MR" "$D/make_repo.py"
 OUT=${AXON_ACCEPT_OUT:-$HOME/.cache/axon-eval/accept}/$M-$H-$(date +%m%d-%H%M%S)

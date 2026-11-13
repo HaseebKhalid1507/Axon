@@ -13,6 +13,17 @@
 set -u
 [ $# -ge 5 ] || { echo "usage: $0 ZOO_PY LLAMA_LOGITS_PY LIST AXON LLAMA_TGZ [zoo run args]"; exit 2; }
 ZOO=$1; LLP=$2; LIST=$3; AX=$4; TGZ=$5; shift 5
+# axon-run appends `--test-threads N` on CPU nodes (jade/avante: it takes the job for a Rust test binary; job
+# 1113-005056-f5a9). Not a zoo.py flag: drop it (AXON_THREADS from the node still reaches axon).
+A=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --test-threads) shift; [ $# -gt 0 ] && shift ;;
+    --test-threads=*) shift ;;
+    *) A+=("$1"); shift ;;
+  esac
+done
+set -- ${A[@]+"${A[@]}"}
 D=$(cd "$(dirname "$ZOO")" && pwd)
 mkdir -p "$D/oracle" && cp "$LLP" "$D/oracle/llama_logits.py"
 W=${AXON_AUDIT_DIR:-$HOME/.cache/axon-eval/audit-run}/$(date +%m%d-%H%M%S)
