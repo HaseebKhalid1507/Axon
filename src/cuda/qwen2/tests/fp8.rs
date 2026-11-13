@@ -3,7 +3,7 @@
 //! checkpoint end to end: exact mode's Q8_0 form keeps the contract's bits,
 //! fast mode's native kernels are graded against the CPU's fp8-ref.
 
-use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, grade_sized};
+use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, reference};
 use super::*;
 use crate::cuda::Kernels;
 use crate::kv::KvType;
@@ -156,14 +156,19 @@ fn check_sample(what: &str, got: &[f32], sample: &[(usize, (f64, f64))], slack: 
 /// `f8_engine_gpu`.
 fn f8_gpu() -> Option<Gpu> {
     let g = crate::testutil::gpu()?;
-    let (major, minor) = g.info().unwrap().cc;
-    if major * 10 + minor < 89 {
+    e4m3(g.info().unwrap().cc).then_some(g)
+}
+
+/// Compute capability `cc` has e4m3 tensor cores (sm_89 and later); if
+/// not, `testutil::skip_note` says so.
+fn e4m3((major, minor): (u32, u32)) -> bool {
+    let has = major * 10 + minor >= 89;
+    if !has {
         crate::testutil::skip_note(format_args!(
             "no e4m3 tensor cores on this GPU (sm_{major}{minor}; they are sm_89 and later)"
         ));
-        return None;
     }
-    Some(g)
+    has
 }
 
 /// `f8_gpu` for the tests that run the checkpoint natively through the
@@ -181,12 +186,32 @@ fn f8_gpu() -> Option<Gpu> {
 /// whether the checkpoint is there or not.
 fn f8_engine_gpu() -> Option<Gpu> {
     let g = f8_gpu()?;
+    native_on();
+    Some(g)
+}
+
+/// `f8_engine_gpu`'s checks without the GPU test lock
+/// (`testutil::gpu_cc`): for the graded gate, which runs its CPU nets
+/// before it takes the lock and must know first whether its GPU half will
+/// run (#232).
+fn f8_engine_capable() -> bool {
+    let Some(cc) = crate::testutil::gpu_cc() else {
+        return false;
+    };
+    if !e4m3(cc) {
+        return false;
+    }
+    native_on();
+    true
+}
+
+/// `f8_engine_gpu`'s `AXON_FP8_NATIVE` check.
+fn native_on() {
     assert!(
         std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"),
         "AXON_FP8_NATIVE=0 is set: fast mode runs the FP8 checkpoint as Q8_0, so this test has \
          no native FP8 to grade. Unset it to run the test (the FP8 kernel tests don't read it)."
     );
-    Some(g)
 }
 
 /// The quantizer's GPU half (fp8.cu f8x2 and quant_f8_tok) against the Rust
@@ -436,33 +461,72 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 /// (e4m3 per token): the same precision change in the CPU's order. Every
 /// arm graded, and a fast kernel seen in each (decode on a fresh net: its
 /// steps are batched passes of one row; the batched arm's prefixes all
-/// past the GEMV's 16 rows). At >= 1000 positions per arm in a release
-/// build (`Sizes::FP8`, the binding run of record for the statistical
-/// bars); a debug-assertions build runs every arm and route on fewer
-/// (`Sizes::FP8_DEBUG`: the lock timeout) for the checks only it makes,
-/// with the sanity backstops and no statistical grading
+/// past the GEMV's 16 rows). In a release build at `Sizes::FP8_FAST`
+/// (the same bars as the run of record, on fewer positions: #232); the
+/// run of record at >= 1000 positions per arm is
+/// `gpu_fp8_graded_vs_fp8_ref_1000`, by hand. A debug-assertions build runs
+/// every arm and route on fewer (`Sizes::FP8_DEBUG`) for the checks only it
+/// makes, with the sanity backstops and no statistical grading
 /// (`assert_sane_vs_exact`: lead ruling, 10-31, after 1031-115732-b712).
+/// `Sizes::FP8_FAST`'s smallest arm.
+const FP8_FAST_MIN: usize = 520;
+
 #[test]
 fn gpu_fp8_graded_vs_fp8_ref() {
-    if f8_engine_gpu().is_none() {
+    match cfg!(debug_assertions) {
+        false => fp8_graded(&Sizes::FP8_FAST, FP8_FAST_MIN, true),
+        true => fp8_graded(&Sizes::FP8_DEBUG, 98, false),
+    }
+}
+
+/// The FP8 gate's run of record (docs/design/fp8-weights.md §6 B): every
+/// arm at >= 1000 positions (`Sizes::FP8`), graded. Its CPU reference takes
+/// several minutes alone and holds about 2.5 GB of logits, so it's out of
+/// the suites since #232 (it held the GPU test lock for over 2700 s on
+/// packed pods): run it by hand on a PR that changes the FP8 kernels or
+/// their routing,
+/// `axon-test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`
+/// (an `axon-run` job on bella).
+#[test]
+#[ignore]
+fn gpu_fp8_graded_vs_fp8_ref_1000() {
+    fp8_graded(&Sizes::FP8, 1000, true);
+}
+
+/// The graded FP8 gate at sizes `sz`, each arm at least `min` positions;
+/// with `graded` false, the debug build's sanity checks instead of the
+/// statistics. The CPU nets (the reference and the floor) run first, then
+/// the test takes the GPU test lock for the GPU half only
+/// (`numerics::reference`, #232): before, the lock was held through
+/// the CPU forwards too, and on a packed pod every other GPU test of the
+/// suite timed out behind it. The phases' times go straight to stderr.
+fn fp8_graded(sz: &Sizes, min: usize, graded: bool) {
+    use std::io::Write;
+    use std::time::Instant;
+    if !f8_engine_capable() {
         return;
     }
     let Some(p) = crate::testutil::fp8_model_path() else {
         return;
     };
     let load = || crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
-    let (mr, mf, mo) = (load(), load(), load());
-    let net = |m, d, n| {
-        let o = BackendOptions::default()
-            .device(d)
-            .max_ctx(super::numerics::CTX)
-            .kv(KvType::F16)
-            .numerics(n);
-        Backend::new(m, o).unwrap()
+    let t = Instant::now();
+    let cpu_half = {
+        let (mr, mf) = (load(), load());
+        let r = fp8_net(&mr, Device::Cpu, Numerics::Exact);
+        let f = crate::model::with_fp8_cpu_qt(F8S_TOK, || crate::model::Qwen2::new_with(&mf, true));
+        reference(&r, &f, &mr, Floor::Fp8Emu, Device::Cuda, sz)
     };
-    let r = net(&mr, Device::Cpu, Numerics::Exact);
-    let f = crate::model::with_fp8_cpu_qt(F8S_TOK, || crate::model::Qwen2::new_with(&mf, true));
-    let o = net(&mo, Device::Cuda, Numerics::Fast);
+    let cpu_s = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    assert!(
+        crate::testutil::gpu().is_some(),
+        "f8_engine_capable saw a GPU"
+    );
+    let wait_s = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let mo = load();
+    let o = fp8_net(&mo, Device::Cuda, Numerics::Fast);
     assert!(o.fast_kernels(), "fast mode on this GPU runs FP8 natively");
     for &n in super::numerics::prefixes(Device::Cuda) {
         assert_eq!(
@@ -471,12 +535,16 @@ fn gpu_fp8_graded_vs_fp8_ref() {
             "prefix {n}"
         );
     }
-    let (sz, min) = match cfg!(debug_assertions) {
-        false => (Sizes::FP8, 1000),
-        true => (Sizes::FP8_DEBUG, 98),
-    };
     assert!(super::batch::ATT_NB_MIN <= sz.load);
-    let g = grade_sized(&r, &f, &o, &mr, Floor::Fp8Emu, Device::Cuda, &sz);
+    let g = cpu_half.grade(&o);
+    let _ = writeln!(
+        std::io::stderr(),
+        "fp8 graded gate ({} positions an arm): CPU reference {cpu_s:.1} s without the GPU test \
+         lock, {:.1} s waiting for it, GPU half {:.1} s holding it",
+        g.arms.iter().map(|a| a.mode.positions).min().unwrap_or(0),
+        wait_s,
+        t.elapsed().as_secs_f64()
+    );
     let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
     assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
     for a in &g.arms {
@@ -491,11 +559,22 @@ fn gpu_fp8_graded_vs_fp8_ref() {
         );
     }
     let what = "0.5B FP8 cuda fast vs fp8-ref";
-    match cfg!(debug_assertions) {
-        false => assert_graded_vs_exact_with(what, &g, false, Top1::Binomial),
-        true => super::numerics::assert_sane_vs_exact(what, &g),
+    match graded {
+        true => assert_graded_vs_exact_with(what, &g, false, Top1::Binomial),
+        false => super::numerics::assert_sane_vs_exact(what, &g),
     }
     let _ = fp8::F8S;
+}
+
+/// The FP8 checkpoint `m` as a net on `d` in numerics mode `n`, at the
+/// graded gate's context and an f16 KV cache.
+fn fp8_net(m: &Model, d: Device, n: Numerics) -> Backend<'_> {
+    let o = BackendOptions::default()
+        .device(d)
+        .max_ctx(super::numerics::CTX)
+        .kv(KvType::F16)
+        .numerics(n);
+    Backend::new(m, o).unwrap()
 }
 
 /// The load arm's max |dlogit|, diagnosed (`numerics::load_diag`): run by

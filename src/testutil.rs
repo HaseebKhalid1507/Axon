@@ -396,17 +396,35 @@ pub fn read_json(rel: &str) -> serde_json::Value {
 /// holds the lock: it would wait forever. Instead of hanging the suite,
 /// such a wait panics once one holder has kept the lock for
 /// `AXON_TEST_GPU_LOCK_TIMEOUT` seconds (default 2700, 45 min). No GPU test
-/// is known to come near that. The slowest measured single GPU test is
-/// ~4 min on a packed pod (prefill_batchings_q8_1_5b, 235 s with 4 threads
-/// contending); a debug build on a laptop GPU can take a few times longer.
-/// The clock runs per holder, so waiting through a queue of other tests
-/// doesn't count.
+/// was known to come near that until the FP8 graded gate: it computed its
+/// CPU reference while holding the lock, and on packed pods held it for
+/// over 2700 s (#232). A test with CPU work of its own does it before it
+/// calls `gpu` (`gpu_cc` says beforehand whether its GPU half will run).
+/// The slowest other GPU test measured is ~4 min on a packed pod
+/// (prefill_batchings_q8_1_5b, 235 s with 4 threads contending); a debug
+/// build on a laptop GPU can take a few times longer. The clock runs per
+/// holder, so waiting through a queue of other tests doesn't count.
 pub fn gpu() -> Option<crate::cuda::Gpu> {
+    let g = open_gpu()?;
+    serialize_gpu(&g);
+    Some(g)
+}
+
+/// GPU 0's compute capability, read without the GPU test lock (opening
+/// the device is what `gpu` does before it waits for the lock). For a test
+/// that runs its CPU half first and needs to know beforehand whether its
+/// GPU half can run at all (#232: `cuda::qwen2::tests::fp8`'s graded
+/// gate). Its GPU work still goes through `gpu`. None: skipped, as `gpu`
+/// skips (no usable GPU, AXON_SKIP_GPU_TESTS set).
+pub fn gpu_cc() -> Option<(u32, u32)> {
+    Some(open_gpu()?.info().unwrap().cc)
+}
+
+/// The device `gpu` and `gpu_cc` open: None (said so) if there is none and
+/// AXON_SKIP_GPU_TESTS is set, a panic if it isn't.
+fn open_gpu() -> Option<crate::cuda::Gpu> {
     match crate::cuda::Gpu::open() {
-        Ok(g) => {
-            serialize_gpu(&g);
-            Some(g)
-        }
+        Ok(g) => Some(g),
         Err(e) if std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
             eprintln!("skipping: no usable GPU ({e}) and AXON_SKIP_GPU_TESTS is set");
             None

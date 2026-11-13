@@ -52,6 +52,11 @@ the neighbours.
   reference once: `trace` + `compare_trace`, `compare_each!`, `compare_forced2` and `continuations_by` in
   `src/cuda/qwen2/tests.rs`. Each model under test still gets exactly the calls `compare` would make, and the
   reference makes the same calls once instead of once per model.
+- **CPU work before the GPU test lock.** A GPU test graded against a CPU reference runs the reference first and
+  calls `testutil::gpu()` after it (`numerics::reference`, then `Reference::grade` on the GPU net;
+  `testutil::gpu_cc` tells beforehand whether the GPU half will run at all). CPU work inside the lock makes every
+  other GPU test of the suite wait: the FP8 graded gate's CPU nets held it for over 2700 s on packed pods, and
+  about 90 GPU tests a suite failed on the lock timeout behind it (#232).
 - Don't load a model just to check that its file is there (use the `*_path()` helpers).
 - Don't shorten a prompt or a position range unless you can say why the assertion doesn't depend on its
   length. The 1200-token batchings exist to cross the max batch and the attention tiles.
