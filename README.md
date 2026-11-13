@@ -149,8 +149,9 @@ Axon's tokens at 128. On an RTX 4090, vLLM-AWQ is 13–24 % ahead at 8–32 requ
   binary covers them all.
 - **Reproducible bits.** By default a reply doesn't change with what it's batched with, how the prompt is chunked
   or whether drafting is on, and its `system_fingerprint` names what produced it. [More](docs/determinism.md)
-- **One binary, a one-second start.** No Python, no CUDA toolkit. Once its kernels are cached it starts in 1.0 s,
-  against 42–71 s for vLLM and SGLang on the same H100. The first GPU run compiles them.
+- **One binary, a one-second start.** No Python. Once its kernels are cached it starts in 1.0 s, against 42–71 s
+  for vLLM and SGLang on the same H100. The first GPU run compiles them with NVRTC, from a CUDA toolkit for now (a
+  start with only the driver is [planned](docs/roadmap.md#week-1-11-12-to-11-18)).
 - **Measured in the open.** Each board names its commit, hardware and job, and what lost or was dropped is written
   down too: [docs/experiments-rejected.md](docs/experiments-rejected.md).
 

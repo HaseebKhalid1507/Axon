@@ -30,4 +30,14 @@ was four times the 150-line cap the review asked for.
 ## What didn't work / left open
 - The 11-07 review and its 11-12 addendum are not in [reviews/](../reviews/README.md); a curated copy is the
   foreman's call (it holds personal and budget specifics).
-- `--cache-ram auto`'s "4 GiB or ¼ of free RAM" is written as given; the flip's PR should say which of the two wins.
+
+## Review
+shady 7/10 SHIP-AFTER-FIXES at 7e56ac9. The foreman's rulings, applied in the next commit: `--cache-ram auto` is the
+smaller of 4 GiB and ¼ of the RAM available after the model loads, off when a cgroup is the tighter bound; rules 2,
+3 and 5 are marked as set up in week 1, not yet running, with the second-family reviewer named; the golden check
+compares tokenization and the rendered prompt too; rule 4 names a flip's A/B cells and drops v1's A/B on every
+change; the sharing flip goes with the tier, plus a sharing-on, tier-off cell; AGENTS.md points at Process v2. The
+SHOULDs were applied in this PR too, on the foreman's ruling, so no follow-up issue: the replay's caveats and the
+tuned llama-server re-board with its 1.5× stop rule, what the tag waits on, the MoE resume and bella gpt-oss bars, a
+path-based full-tier trigger, v2's success measures, revert on red, the 150-line cap, sanitizer builds, a week for
+the safeguards, the unscheduled items, release-0.1's and the README's stale lines, and the v1 heading.

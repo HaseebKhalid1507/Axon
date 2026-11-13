@@ -9,33 +9,43 @@ reads the code. Process v1, below, still holds wherever v2 doesn't replace it; e
 *Superseded* note.
 
 1. **Per PR:** the fast tier plus the md5 of `gen` against main, on bella ([testing.md](testing.md#tiers)). The full
-   tier before merge when the PR changes kernel numerics, a cache layout, or the shared paths of `src/model.rs` (one
-   struct carries every architecture by flags). Both tiers run the release and the debug build
+   tier before merge when the diff touches `src/cuda/*.cu`, `src/model.rs` or `src/model/`, the KV and cache files
+   (`src/kv*.rs`, `src/serve/tier.rs`, `src/serve/prefix.rs`, `src/cuda/qwen2/{pages,slots,kvio}.rs`), or a head-size
+   or GQA path (shapes only the fast tier's skipped tests see). Both tiers run the release and the debug build
    (`-C debug-assertions -C overflow-checks`).
-2. **Nightly on main:** the full suite (`axon-postmerge`) and a golden check against llama.cpp on the compatibility
-   audit's top 10 models (`scripts/zoo.py`). md5 against main can't catch a model that was wrong from day one; the
-   golden check can. Red means revert or fix forward within a day.
-3. **Weekly:** a single-stream and agent board on a clean RTX 4090 pod (about $2), so the published numbers stay
-   current. The last single-stream board ran on `7f42c02`, 10-18 ([results.md](results.md)).
-4. **Speed and defaults.** A change with equal bits and no measured cell worse than 2 % may ship default-on without
-   a timing pre-registration. A speed claim still needs one clean A/B (interleaved, same host, medians; the
-   [benchmark protocol](#benchmark-protocol)), with its stop rule written in the PR body before it runs. The separate
-   registration ceremony (rules filed as their own issues, re-registered cells) goes.
+2. **Nightly on main** [set up in week 1 (case), not yet running]: the full suite (`axon-postmerge`) and a golden
+   check against llama.cpp on the compatibility audit's top 10 models. md5 against main can't catch a model that was
+   wrong from day one. `scripts/zoo.py` feeds Axon's token ids to llama.cpp, so it can't catch a tokenizer or
+   chat-template bug either: the golden check also compares the tokenization and the rendered prompt with
+   llama.cpp's. Red means revert; the foreman may choose to fix forward instead, within a day.
+3. **Weekly** [set up in week 1 (case), not yet running]: a single-stream and agent board on a clean RTX 4090 pod
+   (about $2), so the published numbers stay current. The last single-stream board ran on `7f42c02`, 10-18
+   ([results.md](results.md)).
+4. **Speed and defaults.** Only a speed claim or a default flip needs an A/B; v1's A/B against main on every change
+   ([the loop](#the-loop), step 7) goes. A speed claim needs one clean A/B (interleaved, same host, medians; the
+   [benchmark protocol](#benchmark-protocol)), with its stop rule written in the PR body before it runs. A default flip
+   with equal bits ships default-on if no cell of its A/B is more than 2 % worse: main vs candidate on bella,
+   interleaved, medians, for C=1 tg128 decode, ITL p99, and serve throughput at C=8 and C=16. No timing
+   pre-registration; the separate registration ceremony (rules filed as their own issues, re-registered cells) goes.
 5. **Review:** shady, the project's review agent, reviews every PR. A diff that touches `unsafe`, FFI, a parser of
    untrusted bytes (GGUF, safetensors, HTTP, session files, downloads) or network code also gets a reviewer from a
-   different model family.
+   different model family, `openai-codex/gpt-5.6-sol` [set up in week 1 (case), not yet running].
 6. **Findings:** MUSTs are fixed in the PR. SHOULDs go into one follow-up issue per PR, not a chain of PRs.
 7. **Docs:** one short engineering-log entry per PR ([log/README.md](log/README.md)). The README, roadmap, results and
-   history are refreshed only at release tags.
-8. **Safeguards, because no human reads the code.** Status at 11-12 in brackets:
-   - public CI runs real small-model tests against an independent reference [not yet: CI sets
-     `AXON_SKIP_MODEL_TESTS` and `AXON_SKIP_GPU_TESTS`];
-   - nightly fuzzing of every parser of untrusted bytes [not yet: `scripts/fuzz_gguf.py` and `scripts/fuzz_serve.py`
-     exist, CI runs neither];
+   history are refreshed only at release tags. The roadmap stays at most 150 lines.
+8. **Safeguards, because no human reads the code** (week 1, case; Windows and arm64 with the Distribution track).
+   Status at 11-12 in brackets:
+   - public CI, on Linux, Windows and arm64, runs real small-model tests against an independent reference [not yet:
+     CI sets `AXON_SKIP_MODEL_TESTS` and `AXON_SKIP_GPU_TESTS`, and has no Windows or arm64 job];
+   - nightly fuzzing, with sanitizer builds, of every parser of untrusted bytes [not yet: `scripts/fuzz_gguf.py` and
+     `scripts/fuzz_serve.py` cover GGUF and HTTP only, and CI runs neither; safetensors, session files and pull get
+     fuzzers];
    - a kill switch for every default-on feature [`AXON_SHARE_KV=0` and `--cache-ram 0` exist for the two pending
      flips];
    - a clean-machine install test for every release [not yet: no release exists].
 9. **Tracks:** at most three at once, each tied to a named metric ([roadmap](roadmap.md#tracks)).
+
+v2 is judged by two numbers, the review's: median idea-to-merge under a day, and docs-only commits under 15 %.
 
 What v2 supersedes in v1:
 
@@ -44,14 +54,14 @@ What v2 supersedes in v1:
 | 1 | the release and debug suites in full, on the exact tree, before every PR merges; testing.md's "full once, on the commit that gets merged" | [Gates](#gates), [testing.md](testing.md#tiers) |
 | 2 | `axon-postmerge` after each merge as the net on main; no recurring comparison against llama.cpp (the model zoo ran once, 10-18) | [Orchestration tools](#orchestration-tools-outside-the-repo), [testing.md](testing.md#gate-jobs-maintainers) |
 | 3 | a scoreboard when a round started from one (none since 10-18) | [The loop](#the-loop), step 1 |
-| 4 | pre-registered timing rules deciding defaults, filed and re-registered as their own issues (#187's clauses kept #207 opt-in; re-registered as #210, #211) | [The loop](#the-loop), steps 7 and 9 |
+| 4 | an A/B against main on every change; pre-registered timing rules deciding defaults, filed and re-registered as their own issues (#187's clauses kept #207 opt-in; re-registered as #210, #211) | [The loop](#the-loop), steps 7 and 9 |
 | 5 | one critic agent (Fable) reviews every change | [The loop](#the-loop), step 5 and "Who decides" |
 | 6 | review follow-ups as chains of PRs (#197, #199, #200: each from the previous PR's review) | [The loop](#the-loop), step 5 |
 | 7 | README, roadmap, results and history refreshed alongside the PRs | [Writing it down](#writing-it-down) |
 | 8 | public CI with model and GPU tests skipped | [Gates](#gates), the CI row |
 | 9 | no cap on this page (the 10-19 review proposed three, quoted in the roadmap at `213465a`) | [roadmap.md at `213465a`](https://github.com/HaseebKhalid1507/Axon/blob/213465a12e8402041e39b2d0a565de192f6c38c1/docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides) |
 
-## Process v1 (2026-10-13 to the 11-06 pause)
+## Process v1 (from 2026-10-13; in force where v2 doesn't replace it)
 
 This part describes the process behind every change on main from 2026-10-13 to the 11-06 pause: how work is picked,
 built, checked, measured, and then accepted or rejected. What happened, round by round, is in
@@ -102,8 +112,8 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    up in the test build (2026-10-14 06:22). Since then verifies only run on detached checkouts.
 7. **A/B vs main.** The candidate binary and main's binary run interleaved on the same host (protocol
    below). A change that isn't faster, or doesn't buy something else that was asked for, is rejected.
-   *Since [v2](#process-v2-2026-11-12) rule 4, equal bits and no measured cell worse than 2 % may ship default-on
-   without a timing pre-registration; a speed claim still needs one clean A/B.*
+   *Superseded by [v2](#process-v2-2026-11-12) rule 4: only a speed claim (one clean A/B) or a default flip (its
+   named cells, none more than 2 % worse) needs an A/B; other changes skip this step.*
 8. **Accept or reject.** Accepted work becomes a PR with an evidence table (gates, job IDs, numbers
    labelled MEASURED or ESTIMATED). CI has to pass, and then the foreman merges it. Rejected work is
    logged with its numbers (in PROGRESS.md, the builder's NOTES.md and, from now on,
@@ -183,8 +193,8 @@ still matched each other bit for bit.
 ### Gates
 
 *Superseded in part by [v2](#process-v2-2026-11-12) rules 1, 2 and 8: per PR the fast tier and md5; the full tier
-before merge only for kernel numerics, a cache layout or `src/model.rs`'s shared paths; the full suite nightly on
-main; public CI to run real small-model tests. The extra gates by kind of change, below, still apply.*
+before merge only when the diff touches kernels, `src/model.rs`, the KV and cache files or a head-size or GQA path
+(rule 1 lists them); the full suite nightly on main; public CI to run real small-model tests. The extra gates by kind of change, below, still apply.*
 
 Before a PR, on the exact tree that will merge (commits after the gated one may change docs only; `axon-mergeready`
 checks it):

@@ -13,7 +13,8 @@ to show it.
 Background, in this order: [README.md](README.md), [docs/START-HERE.md](docs/START-HERE.md),
 [docs/methodology.md](docs/methodology.md), [docs/roadmap.md](docs/roadmap.md). Before you start
 anything perf-related, read [docs/experiments-rejected.md](docs/experiments-rejected.md): it lists what
-was already tried and lost, with numbers.
+was already tried and lost, with numbers. How a PR is gated, measured and reviewed today is
+[Process v2](docs/methodology.md#process-v2-2026-11-12); where this file and Process v2 differ, Process v2 holds.
 
 ## Workflow
 
@@ -47,7 +48,7 @@ Breaking one of these gets the PR closed.
    (`forward`). SIMD equals scalar on the CPU. Float reductions run in a fixed order, with no atomics.
    The GPU is not bit-identical to the CPU, and that is expected. The full contract:
    [START-HERE](docs/START-HERE.md#the-design-contract-bit-identity), [determinism.md](docs/determinism.md).
-   - That rules out split-K, stream-K, split-KV, f16 accumulation and atomics in reductions, and context
+   - That rules out non-fixed-order split-K / stream-K, split-KV, f16 accumulation and atomics in reductions, and context
      shift ([roadmap: Not planned](docs/roadmap.md#not-planned-and-why)).
    - A feature that must change bits (a new flag such as `--kv q8` or `--rope-scaling`) changes them only
      when the flag is set. Default output stays byte-identical.
@@ -295,7 +296,8 @@ any AVX instruction leaking into the baseline build. Green CI does not mean the 
 7. **Log entry** in `docs/log/`, and docs updated if a flag or default changed.
 8. **Robustness:** GGUF files and HTTP requests are untrusted input. No panics, no unchecked sizes.
 
-Review findings come back as PR comments. Fix them on the same branch and answer each one. If you
+Review findings come back as PR comments. Fix every MUST on the same branch and answer each one; the
+SHOULDs go into one follow-up issue for the PR ([Process v2](docs/methodology.md#process-v2-2026-11-12) rule 6). If you
 rebase onto a newer `main`, rebuild, rerun the suites and the md5 gate, and say so: a rebase that
 wasn't compiled is not clean.
 
