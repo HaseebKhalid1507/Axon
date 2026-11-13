@@ -34,10 +34,18 @@ echo "$(sha256sum "$TGZ" | cut -c1-64)" | grep -q '^de67caf142984e7ba2fb2b5396d6
 # without chown (jade's job dir, 1113-004918-e28e).
 tar --no-same-owner --no-same-permissions -xzf "$TGZ" -C "$W/llama" || exit 2
 LS=$(find "$W/llama" -name llama-server -type f | head -1)
-echo "compat_audit: host $(hostname) work $W cpus $(nproc) ram $(free -g | awk '/Mem:/{print $2}')G disk $(df -h "$W" | awk 'NR==2{print $4}') free"
+# Threads for the CPU reference: nproc, capped by the cgroup's CPU quota (in a pod container nproc can report the
+# whole host's cores while the quota allows a fraction; llama-server oversubscribed crawls). --threads in "$@" wins.
+T=$(nproc); Q=
+if [ -r /sys/fs/cgroup/cpu.max ]; then read -r q p < /sys/fs/cgroup/cpu.max; [ "$q" != max ] && Q=$(( (q + p - 1) / p ))
+elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+  q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us); [ "$q" -gt 0 ] && Q=$(( (q + p - 1) / p ))
+fi
+[ -n "$Q" ] && [ "$Q" -ge 1 ] && [ "$Q" -lt "$T" ] && T=$Q
+echo "compat_audit: host $(hostname) work $W cpus $(nproc) (threads $T) ram $(free -g | awk '/Mem:/{print $2}')G disk $(df -h "$W" | awk 'NR==2{print $4}') free"
 echo "compat_audit: gpu $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null); axon $(sha256sum "$AX" | cut -c1-12); $("$LS" --version 2>&1 | head -1)"
 python3 "$D/zoo.py" run --axon "$(cd "$(dirname "$AX")" && pwd)/$(basename "$AX")" --llama-server "$LS" --list "$LIST" \
-  --dir "$W/models" --out "$W/zoo.json" --threads "$(nproc)" "$@"
+  --dir "$W/models" --out "$W/zoo.json" --threads "$T" "$@"
 rc=$?
 rm -rf "$W/models"
 exit $rc
