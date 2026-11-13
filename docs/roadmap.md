@@ -73,10 +73,10 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
    `scripts/examples/harness-repo/make_repo.py` already builds one such task.
 6. **`axon pull`:** Hugging Face files plus about ten checksummed aliases; no registry. HTTPS means `curl` or a TLS
    crate: none of the five in `Cargo.toml` speaks TLS (a dependency decision, [AGENTS.md](../AGENTS.md) hard rule 4).
-7. **v0.1.0, Linux only:** the tag, the boards re-run on its commit, a Linux binary. It waits on item 3 (else the
-   binary is a CPU engine), not on the two flips. The agent board's llama-server is tuned by someone arguing its side;
-   stop rule: within 1.5× on turn TTFT, the edge is thinner than claimed and MoE in the pool goes first; tag either way.
-   The release notes ([release-0.1.md](release-0.1.md)) say what waits: Windows, vision, embeddings, auto-update, signing.
+7. **v0.1.0, Linux only:** the tag, the boards re-run on its commit, a Linux binary. It waits on items 3 and 6 (both are
+   part of a one-command install), not on the two flips. The agent board's llama-server is tuned by someone arguing its
+   side; stop rule: within 1.5× on turn TTFT, the edge is thinner than claimed and MoE in the pool goes first; tag either
+   way. [release-0.1.md](release-0.1.md) says what waits: Windows, vision, embeddings, auto-update, signing.
 
 ### Weeks 2–3, and whatever the audit ranks
 
