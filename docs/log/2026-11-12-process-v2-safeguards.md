@@ -41,7 +41,7 @@ and the foreman is notified with the first bad sha.
 ## First results
 - **Fuzzers, first CI run** (PR run, ubuntu-latest, 4 jobs): `fuzz_gguf.py` 1762 mutants / 3524 runs (ok 389,
   refused 3135), `--safetensors` 311 mutants / 622 runs (ok 47, refused 575), `fuzz_serve.py` --slow / --ops /
-  --apis 117 + 349 + 302 checks: **0 findings**, 7 min 49 s in all. The run before it caught the harness's own bug
+  --apis 302 + 349 + 117 checks: **0 findings**, 7 min 49 s in all. The run before it caught the harness's own bug
   (copy_file_range across filesystems, EXDEV): the models now sit on the XFS image with the mutants.
 - **Per-PR wall time**: `check` 12 min, `model-oracles` 2 min in parallel. The nightly whole suite with the test
   models (`model-suite`): 12 min.
