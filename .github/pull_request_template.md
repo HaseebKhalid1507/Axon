@@ -66,6 +66,7 @@ Contexts tested: · Prompt lengths:
 | `cargo test` (debug assertions + overflow checks) | | |
 | `AXON_SIMD=scalar cargo test` | | |
 | GPU suite | <!-- yours, or "maintainer (run-gpu)" --> | |
+| FP8 gate's run of record (`gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`, bella): **required** if the diff touches `src/cuda/**/fp8*`, `batch::f8_route` or `src/quant/fp8.rs` (docs/testing.md), else n/a | | |
 
 | md5 set vs main @ <sha> (models × prompts × device, -n 64) | machine | identical |
 |---|---|---|

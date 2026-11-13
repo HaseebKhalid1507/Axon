@@ -481,12 +481,12 @@ fn gpu_fp8_graded_vs_fp8_ref() {
 
 /// The FP8 gate's run of record (docs/design/fp8-weights.md §6 B): every
 /// arm at >= 1000 positions (`Sizes::FP8`), graded. Its CPU reference takes
-/// several minutes alone and holds about 2.5 GB of logits, so it's out of
+/// about 20 minutes alone and keeps about 2.5 GB of logits, so it's out of
 /// the suites since #232 (it held the GPU test lock for over 2700 s on
-/// packed pods): run it by hand on a PR that changes the FP8 kernels or
-/// their routing,
-/// `axon-test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`
-/// (an `axon-run` job on bella).
+/// packed pods). It runs nightly on main (bella), and by hand on every PR
+/// that touches the FP8 kernels or their routing (docs/testing.md, "The FP8
+/// gate's run of record"):
+/// `axon-test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`.
 #[test]
 #[ignore]
 fn gpu_fp8_graded_vs_fp8_ref_1000() {

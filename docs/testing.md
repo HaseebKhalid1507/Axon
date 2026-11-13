@@ -99,6 +99,21 @@ those shapes.
 md5 per PR; the full tier before merge only when the diff touches `src/cuda/*.cu`, `src/model.rs`, the KV and cache
 files or a head-size or GQA path (rule 1 lists them); the full suite nightly on main.*
 
+### The FP8 gate's run of record
+
+`cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000` grades native FP8 (fast mode) against the CPU's fp8-ref
+at >= 1000 positions per arm (`Sizes::FP8`, docs/design/fp8-weights.md §6 B). It is `#[ignore]`d (#232). Its CPU
+reference alone takes about 20 minutes on bella and keeps about 2.5 GB of logits, which is too much for a suite
+that shares a pod. The suites run `gpu_fp8_graded_vs_fp8_ref`: the same bars on fewer positions (`Sizes::FP8_FAST`).
+The run of record runs:
+
+- **nightly on main**, on bella (axon-nightly, devstack), so a regression shows up within a day;
+- **by hand, on every PR that touches FP8 kernels or their routing**: `src/cuda/fp8.cu` or any other
+  `src/cuda/**/fp8*`, `batch::f8_route` (`src/cuda/qwen2/batch.rs`), the FP8 dequantizer or activation quantizer
+  (`src/quant/fp8.rs`, `model::with_fp8_cpu_qt`). On bella:
+  `axon-run --on bella --max-min 90 -- <axon-test> cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored`.
+  Its job ID and verdict go in the PR's gates table.
+
 ## Gate jobs (maintainers)
 
 The maintainers' gates run through tools outside the repo ([methodology](methodology.md#orchestration-tools-outside-the-repo)).
