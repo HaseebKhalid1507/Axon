@@ -90,6 +90,10 @@ a round changes a kernel's numerics, a cache layout, a head-size or GQA path, or
 contracts cover on more than one model, because the skipped bigger-model tests are the only ones that see
 those shapes.
 
+*Superseded in part by [Process v2](methodology.md#process-v2-2026-11-12) rule 1 (2026-11-12): the fast tier and
+md5 per PR; the full tier before merge only when the diff touches `src/cuda/*.cu`, `src/model.rs`, the KV and cache
+files or a head-size or GQA path (rule 1 lists them); the full suite nightly on main.*
+
 ## Gate jobs (maintainers)
 
 The maintainers' gates run through tools outside the repo ([methodology](methodology.md#orchestration-tools-outside-the-repo)).
