@@ -1,0 +1,7 @@
+# pod2 = pod hrexxs8fv4srip (NVIDIA L40S, community, image runpod/base:1.4.0-ubuntu2404); captured 2026-11-13 12:15:50 EST at pod setup by axon-pods
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz], pcie.link.gen.max, pcie.link.width.max
+NVIDIA L40S, 550.144.03, 95.02.66.00.02, 46068 MiB, 350.00 W, 2520 MHz, 9001 MHz, 4, 16
+| NVIDIA-SMI 550.144.03             Driver Version: 550.144.03     CUDA Version: 12.4     |
+cpu: AMD EPYC 7453 28-Core Processor x 112
+kernel: 6.8.0-52-generic
+nvrtc: nvrtc-12.4
