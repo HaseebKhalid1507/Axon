@@ -101,12 +101,20 @@ thread counts for a given answer to it.
 ### NVIDIA GPUs
 
 GPU (`--device cuda` or `AXON_DEVICE=cuda`): NVIDIA, Linux only. Nothing CUDA is needed
-to build. At run time axon loads the driver (`libcuda.so.1`) and NVRTC (`libnvrtc.so`,
-`.so.13` or `.so.12`, from the library path or the toolkit's `lib64` under `$CUDA_PATH`,
-`/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU on first use and
-caches them in `~/.cache/axon/cuda` (`$XDG_CACHE_HOME/axon/cuda`). The driver must
-support CUDA 12 or newer, and at least NVRTC's CUDA major version. A GPU newer than
-NVRTC gets PTX for the driver to compile. If the first NVRTC found can't target the GPU
+to build, and a release binary needs nothing but the NVIDIA driver (`libcuda.so.1`) to
+run: it carries its kernels precompiled (the kernel pack: `axon kernels build`, embedded
+with `--cfg axon_kernel_pack`) for sm_75, sm_80, sm_86, sm_89, sm_90 and sm_90a, and
+sm_120 (RTX 20/30/40/50, A100, H100), plus compute_120 PTX that the driver compiles for a
+newer GPU. Each is NVRTC's output for the same source and options as a run-time compile,
+so the same code. The pack needs a driver for its NVRTC's CUDA major (CUDA 13: driver
+R580 or newer). `axon kernels list` says what the binary carries and where this GPU's
+kernels come from; `AXON_KERNEL_PACK=0` turns the pack off ([environment.md](environment.md)).
+Otherwise (a source build, a GPU or driver the pack doesn't cover) axon loads NVRTC
+(`libnvrtc.so`, `.so.13` or `.so.12`, from the library path or the toolkit's `lib64`
+under `$CUDA_PATH`, `/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU
+on first use and caches them in `~/.cache/axon/cuda` (`$XDG_CACHE_HOME/axon/cuda`). The
+driver must support CUDA 12 or newer, and at least NVRTC's CUDA major version. A GPU
+newer than NVRTC gets PTX for the driver to compile. If the first NVRTC found can't target the GPU
 (NVRTC 13 dropped Pascal and Volta), the next one installed is tried, so a GTX 1050
 (sm_61) runs on NVRTC 12.x beside 13; a GPU no installed NVRTC can target is refused.
 The int8 tensor-core GEMMs (batched prefill, speculative verify) and the tensor-core
