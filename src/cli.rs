@@ -58,7 +58,7 @@ usage:
                                             /v1/chat/completions, /v1/completions; on cuda
                                             up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
-                                            time; README: axon serve)
+                                            time; docs/serving.md)
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -77,12 +77,13 @@ flags:
               \"auto\" picks the smallest GGUF next to the model, at most 1/8 its size, that
               can draft for it (none: drafting off)
   -k K        logits: how many logits to print (default 10)
-  --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; a model too big for its memory
-              is split: the last layers that fit on the GPU, the first ones on the CPU)
-  --gpu-layers N  gen, chat: with --device cuda, run the last N layers (and the output head) on
-              the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu; default: all
-              if they fit with 256 MiB to spare, else as many as fit with another 640 MiB left
-              for the desktop; an explicit N only needs the 256 MiB)
+  --device D  gen, chat, serve: cpu or cuda (an NVIDIA GPU; a model too big for its memory
+              is split: the last layers that fit on the GPU, the first ones on the CPU);
+              default: $AXON_DEVICE, else cpu
+  --gpu-layers N  gen, chat, serve: with --device cuda, run the last N layers (and the output
+              head) on the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu;
+              default: all if they fit with 256 MiB to spare, else as many as fit with another
+              640 MiB left for the desktop; an explicit N only needs the 256 MiB)
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
@@ -90,9 +91,9 @@ flags:
               routed experts of N layers (auto: as many as fit after the context's cache; smallest
               first) resident on the GPU instead of the CPU; same results (the GPU twins of the
               CPU's kernels); default 0; as AXON_GPU_EXPERTS
-  --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
-              position and head, half the memory; slightly different results; on a split, the
-              GPU layers' cache, so more layers fit); as AXON_KV
+  --kv T      gen, chat, serve: KV cache type, f16 (default) or q8 (cuda only: int8 with a
+              scale per position and head, half the memory; slightly different results; on a
+              split, the GPU layers' cache, so more layers fit); as AXON_KV
   --numerics M  gen, logits, chat, serve: exact (default) or fast. exact: decode == batched prefill ==
               verify, bit for bit, the same reply alone or batched (docs/determinism.md). fast: kernels
               that change the float order are allowed (results graded against exact, not equal) and
@@ -103,7 +104,8 @@ flags:
   --datacenter  serve: the datacenter bundle; today only --numerics fast (an explicit --numerics
               wins). Later it grows to what a datacenter deployment wants (tensor parallel, FP8)
   --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3/llama)
-  --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
+  --no-think  chat, serve: qwen3: answer without reasoning first (by default it thinks, as
+              ollama does; serve: for the requests that don't set enable_thinking)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
               split); when the conversation outgrows it, the oldest exchanges are forgotten
@@ -164,17 +166,14 @@ flags:
               before prefill (the rendered prompt: template and tool tokens count)
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
               and its slot freed, as if it had disconnected (default: off; at least 1000).
-              The clock starts once the client's receive buffer is full (README)
+              The clock starts once the client's receive buffer is full (docs/serving.md)
   --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
               or auto: half the RAM available, at most 8G) when their slot is reused, and copy
               them back on the next turn instead of prefilling again (same bits; default 0: off).
-              On the GPU the whole size is pinned (unswappable) RAM from start. Opt-in: the tier
-              copies pages as they fill, so it holds about its size, the GPU pool's pages included;
-              it helps only when the work written during a gap fits between the pool's size and
-              the tier's. Sizing: useful capacity ~ --cache-ram minus the GPU pool's KV bytes (7B
-              f16: 56 KiB a position; bella's pool ~5.4-6.0 GiB, so 6G buys almost nothing, about
-              20G is where it works). An exclusive tier is pending
-              (docs/design/agent-workload.md §6)
+              On the GPU the whole size is pinned (unswappable) RAM from start. The tier is
+              exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
+              still holds first, so its useful capacity is about its size (a 7B f16 position is
+              56 KiB). Off on a CPU/GPU split, several GPUs and MoE models (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
@@ -185,15 +184,16 @@ flags:
               --yarn-attn-factor); without --rope-scale, chat/serve take F = ceil(--ctx / N);
               --rope-scaling none drops a GGUF's own rope.scaling keys
 
-sampling flags (gen, chat; applied in this order, as llama.cpp):
+sampling flags (gen, chat, serve; applied in this order, as llama.cpp; serve: the defaults for
+the requests that don't set their own):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
-                      (default 1.1; 1 = off)
+                      (default 1.1, serve 1; 1 = off)
   --repeat-last-n N   how many tokens back the penalty looks, prompt included (default 64; 0 = off)
   --top-k K           keep the K most likely tokens (default 40; 0 = off: all of them, slower,
                       as is K > 256 on the GPU)
   --top-p P           then the fewest whose probability adds up to P (default 0.9; 1 = off)
   --min-p P           then those at least P times as likely as the top one (default 0 = off)
-  --temp T            then divide the logits by T and draw (default: gen 0, chat 0.8);
+  --temp T            then divide the logits by T and draw (default: gen 0, chat and serve 0.8);
                       0 = greedy: the highest logit, no penalty, no other flag applies
   --seed S            the random seed (default: a new one each run, printed by gen)
 
@@ -234,9 +234,16 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M),
-or, on the CPU, a Hugging Face checkpoint directory of one (config.json, tokenizer.json and
-model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of the same weights).";
+models (docs/models.md):
+  GGUF: qwen2, qwen3 and llama (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B, Llama-3.2-3B-Instruct, Q4_K_M);
+        gemma3 (Gemma 3 1B and 4B; on cuda the whole model on the GPU); mixture-of-experts models:
+        qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight) and gpt-oss
+        (gpt-oss-20b), whose experts run on the CPU under --device cuda (--gpu-experts moves
+        qwen3moe's and deepseek2's to the GPU)
+  a Hugging Face checkpoint directory of a qwen2, qwen3 or llama model (config.json, tokenizer.json,
+        model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
+        the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted
+        at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+)";
 
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
@@ -342,7 +349,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU and CUDA inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
+                "axon {}: CPU and CUDA inference for GGUF language models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -1912,6 +1919,41 @@ mod tests {
             format!("as many slots (2 to {reserved}) as fit"),
         ] {
             assert!(flat.contains(&want), "--help lacks {want:?}");
+        }
+    }
+
+    /// `--help` (#222): the RAM tier is exclusive since #201, not
+    /// "pending"; the model list names every architecture the loader takes
+    /// and FP8 on the GPU; no pointer into the README, whose reference
+    /// moved to docs/ in #223.
+    #[test]
+    fn help_is_current() {
+        let flat = super::USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            "The tier is exclusive",
+            "gemma3",
+            "qwen3moe",
+            "deepseek2",
+            "gpt-oss",
+            "FP8",
+            "natively with --numerics fast",
+            "time; docs/serving.md)",
+            // serve takes the placement, KV and sampling flags too (shady on #225).
+            "--device D gen, chat, serve: cpu or cuda",
+            "default: $AXON_DEVICE, else cpu",
+            "--gpu-layers N gen, chat, serve:",
+            "--kv T gen, chat, serve:",
+            "--no-think chat, serve:",
+            "sampling flags (gen, chat, serve;",
+            "(default 1.1, serve 1; 1 = off)",
+        ] {
+            assert!(flat.contains(want), "--help lacks {want:?}");
+        }
+        for stale in ["pending", "README"] {
+            assert!(!flat.contains(stale), "--help still says {stale:?}");
         }
     }
 
