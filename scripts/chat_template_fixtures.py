@@ -40,8 +40,8 @@ FAMILIES = {
     "qwen3": ("Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf", "Qwen/Qwen3-8B", ["chat", "think", "tools_str"]),
     "qwen3-coder": ("unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", "Qwen/Qwen3-Coder-30B-A3B-Instruct", ["chat"]),
     "llama3": ("bartowski/Meta-Llama-3-8B-Instruct-GGUF/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "NousResearch/Meta-Llama-3-8B-Instruct", ["chat"]),
-    "llama3.1": ("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "unsloth/Meta-Llama-3.1-8B-Instruct", ["chat", "tools_obj1"]),
-    "llama3.2": ("bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf", "unsloth/Llama-3.2-3B-Instruct", ["chat"]),
+    "llama3.1": ("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "unsloth/Meta-Llama-3.1-8B-Instruct", ["chat", "tools_obj1", "tools_nosys"]),
+    "llama3.2": ("bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf", "unsloth/Llama-3.2-3B-Instruct", ["chat", "tools_obj1", "tools_nosys"]),
     "gemma3": ("bartowski/google_gemma-3-4b-it-GGUF/google_gemma-3-4b-it-Q4_K_M.gguf", "unsloth/gemma-3-4b-it", ["chat"]),
     # Not Mistral v0.3: Axon frames it with mistral_common's tokens by design (src/chat.rs module doc), pinned by
     # chat.rs's mistral tests and tests/fixtures/tokens_mistral.json; its GGUF's older template disagrees with
@@ -81,6 +81,8 @@ T_ONE = [
     {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
     {"role": "tool", "tool_call_id": "c1", "content": "18C sunny"},
 ]
+# No system message: Llama 3.x's header with tools then has no system text (serve-md5's tools shape, 11-13).
+T_NOSYS = T_ONE[1:]
 T_MULTI = [
     {"role": "user", "content": "Paris and Rome?"},
     {"role": "assistant", "content": "Checking both.", "tool_calls": [
@@ -131,6 +133,8 @@ def cases_for(groups):
             out += [("tools_one", T_ONE, TOOLS), ("tools_multi", T_MULTI, TOOLS)]
         elif g == "tools_obj1":
             out += [("tools_one", T_ONE, TOOLS)]
+        elif g == "tools_nosys":
+            out += [("tools_nosys", T_NOSYS, TOOLS)]
         elif g == "tools_str":
             out += [("tools_one", stringify(T_ONE), TOOLS), ("tools_multi", stringify(T_MULTI), TOOLS)]
     return out

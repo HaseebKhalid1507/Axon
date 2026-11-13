@@ -135,7 +135,7 @@ fn chat_templates_match_hf() {
             }
         }
     }
-    assert!(n >= 65, "{n} cases");
+    assert!(n >= 68, "{n} cases");
     assert!(
         bad.is_empty(),
         "{} of {n} cases differ:\n{}",
