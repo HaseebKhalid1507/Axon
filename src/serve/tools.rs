@@ -882,7 +882,7 @@ pub fn render(
     };
     let mut k = Toks::new(tok, &MARKERS);
     match fam {
-        Family::Qwen3 | Family::Qwen25 => hermes(&mut k, fam, r)?,
+        Family::Qwen3 | Family::Qwen25 => hermes(&mut k, fam, r, t.default_system.as_deref())?,
         Family::Llama31 => llama(&mut k, t, r)?,
         Family::Harmony => unreachable!(),
     }
@@ -916,10 +916,17 @@ pub fn render(
 }
 
 /// Qwen3's and Qwen2.5's templates.
-fn hermes(k: &mut Toks, fam: Family, r: &ToolReq) -> Result<(), ApiError> {
+/// `default_sys`: the template's default system message (`Template`'s),
+/// used without tools (the tools block has Qwen2.5's own).
+fn hermes(
+    k: &mut Toks,
+    fam: Family,
+    r: &ToolReq,
+    default_sys: Option<&str>,
+) -> Result<(), ApiError> {
     let m = &r.msgs;
     let first_sys = m.first().filter(|x| x.role == TRole::System);
-    let default_sys = (fam == Family::Qwen25).then_some(chat::DEFAULT_SYSTEM);
+    let default_sys = default_sys.filter(|_| fam == Family::Qwen25);
     if !r.tools.is_empty() {
         k.lit("<|im_start|>system\n");
         match (fam, first_sys) {

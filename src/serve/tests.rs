@@ -893,7 +893,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let msg = |role, c: &str| Message {
         role,
         content: c.into(),
@@ -936,7 +936,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok3 = Tokenizer::from_gguf(&m3);
-    let t3 = Template::new(&tok3, &m3.arch).unwrap();
+    let t3 = Template::new(&tok3, &m3).unwrap();
     let msgs = [
         msg(Role::User, "a"),
         msg(Role::Assistant, "<think>\nhmm\n</think>\n\nb"),
@@ -958,7 +958,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tokl = Tokenizer::from_gguf(&ml);
-    let tl = Template::new(&tokl, &ml.arch).unwrap();
+    let tl = Template::new(&tokl, &ml).unwrap();
     assert!(!tl.thinks());
     let head = |sys: &str| {
         format!(
@@ -1018,7 +1018,7 @@ fn gemma3_template_matches_llama_cpp() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert!(!t.thinks());
     let (bos, eot) = (2u32, 106u32);
     assert!(t.stop().contains(&eot) && t.stop().contains(&tok.eos()));
@@ -1068,7 +1068,7 @@ fn text_out_reasoning_and_stops() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m3);
-    let t = Template::new(&tok, &m3.arch).unwrap();
+    let t = Template::new(&tok, &m3).unwrap();
     let think = t.think.as_ref().map(|&(o, c, _)| (o, c));
     let run = |text: &str, think, stops: &[&str]| {
         let mut out = super::TextOut {
@@ -4765,7 +4765,7 @@ fn harmony_calls_from_channels() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let render = |extra: &str| {
         let body = format!(
             r#"{{"messages": [{{"role": "user", "content": "Weather in Paris?"}}], "tools": [{{"type": "function", "function": {{"name": "get_weather", "parameters": {{"type": "object", "properties": {{"city": {{"type": "string"}}}}}}}}}}]{extra}}}"#

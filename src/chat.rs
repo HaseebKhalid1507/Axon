@@ -38,7 +38,19 @@
 //! ```
 //!
 //! (no newlines between the blocks; the system block is always there,
-//! messages are trimmed as the template trims them).
+//! messages are trimmed as the template trims them). Llama 3.0's template
+//! (a model file whose `tokenizer.chat_template` has no "Cutting Knowledge
+//! Date") has no date lines and a system block only for a system message:
+//! `<|begin_of_text|>[<|start_header_id|>system<|end_header_id|>\n\n
+//! {system}<|eot_id|>]<|start_header_id|>user...`.
+//!
+//! A vocabulary names the format; what a family's versions do differently
+//! within it comes from the model file's own template, by fixed substrings
+//! (`Framing::from_model`, `default_system`; no Jinja): Llama 3.0 vs 3.1,
+//! DeepSeek R1 vs V3.1, the default system message (Qwen2.5's, Qwen2's,
+//! none for Qwen1.5). tests/fixtures/chat_templates.json pins every family's
+//! prompts to Hugging Face's rendering of the file's template, id for id
+//! (serve/template_tests.rs).
 //!
 //! Mistral (a SentencePiece vocabulary with `[INST]`/`[/INST]` control
 //! tokens, v0.3). A deliberate hybrid of two references, and equal to
@@ -91,6 +103,12 @@
 //! ```text
 //! <｜begin▁of▁sentence｜>{system}<｜User｜>{message}<｜Assistant｜></think>{reply}<｜end▁of▁sentence｜>
 //! ```
+//!
+//! DeepSeek R1 (its distills and R1-0528 share the vocabulary; their
+//! templates have no `<｜Assistant｜></think>`) and V3: a reply after
+//! `<｜Assistant｜>` alone, so the model opens its own `<think>` block; BOS
+//! whenever the template writes `bos_token`, even if the file's
+//! `add_bos_token` is false (R1-0528's).
 //!
 //! gpt-oss's harmony format (a vocabulary with `<|start|>`, `<|message|>`,
 //! `<|channel|>`, `<|end|>` and `<|return|>`), its GGUF template without
@@ -157,6 +175,10 @@ pub enum Format {
         start: u32,
         end: u32,
         bos: Option<u32>,
+        /// 3.1/3.2's system block: always there, opened by the date lines
+        /// (`LLAMA3_SYSTEM_HEAD`). Llama 3.0's template has neither: a
+        /// system block only for a system message, no dates.
+        dated: bool,
     },
     /// Mistral's `[INST]` turns: `end` is `[/INST]`, the conversation
     /// starts with BOS if the model adds one, a reply ends with EOS.
@@ -176,13 +198,18 @@ pub enum Format {
         middle: u32,
     },
     /// DeepSeek V3's: `<｜User｜>{msg}`, a reply opened by `<｜Assistant｜>`
-    /// and `</think>` (`think_end`: its tokens) and closed by EOS.
+    /// and, in V3.1's non-thinking mode, `</think>` (`think_end`: its
+    /// tokens, `n_think` of them: 0 for R1 and V3, whose generation prompt
+    /// is `<｜Assistant｜>` alone), closed by EOS. `hist_think`: an earlier
+    /// reply opens with `think_end` too (V3.1's template), else with
+    /// `<｜Assistant｜>` alone.
     DeepSeek3 {
         user: u32,
         assistant: u32,
         bos: Option<u32>,
         think_end: [u32; 4],
         n_think: usize,
+        hist_think: bool,
     },
     /// gpt-oss's harmony messages: `<|start|>{role}<|message|>{text}<|end|>`
     /// (`im_start` / `im_end`), assistant messages on a channel.
@@ -254,11 +281,18 @@ impl Framing {
                     bos: tok.bos(),
                     think_end,
                     n_think,
+                    hist_think: true,
                 };
                 (f, user, tok.eos())
             } else if let (Some(start), Some(end), Some(eot)) = llama {
                 let bos = tok.bos();
-                (Format::Llama3 { start, end, bos }, start, eot)
+                let f = Format::Llama3 {
+                    start,
+                    end,
+                    bos,
+                    dated: true,
+                };
+                (f, start, eot)
             } else if let (Some(sot), Some(eot)) = (
                 special(tok, "<start_of_turn>"),
                 special(tok, "<end_of_turn>"),
@@ -293,6 +327,43 @@ impl Framing {
         })
     }
 
+    /// `new`, then what the model file's own chat template
+    /// (`tokenizer.chat_template`) says that the vocabulary can't, by
+    /// fixed substrings of the template (no Jinja): Llama 3.0's undated
+    /// system block, DeepSeek R1's generation prompt without `</think>` and
+    /// its BOS (written by the template when `add_bos_token` is false).
+    /// Without a template, `new`'s defaults (Llama 3.1, DeepSeek V3.1).
+    pub fn from_model(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Framing> {
+        let mut fr = Framing::new(tok)?;
+        let Some(t) = chat_template(m) else {
+            return Some(fr);
+        };
+        match &mut fr.format {
+            Format::Llama3 { dated, .. } => *dated = t.contains("Cutting Knowledge Date"),
+            Format::DeepSeek3 {
+                bos,
+                n_think,
+                hist_think,
+                ..
+            } => {
+                // V3.1's template (its `<｜Assistant｜></think>`) closes the
+                // reasoning block after `<｜Assistant｜>`, in the generation
+                // prompt (thinking off) and before each earlier reply; R1's
+                // and V3's open a reply with `<｜Assistant｜>` alone.
+                let v31 = t.contains("<｜Assistant｜></think>");
+                if !v31 {
+                    *n_think = 0;
+                }
+                *hist_think = v31 && *n_think > 0;
+                if bos.is_none() && t.contains("bos_token") {
+                    *bos = meta_u32(m, "tokenizer.ggml.bos_token_id");
+                }
+            }
+            _ => {}
+        }
+        Some(fr)
+    }
+
     /// A message: `<|im_start|>{role}\n{text}<|im_end|>\n`, then the opening
     /// of `next` if given. Llama 3: `<|start_header_id|>{role}
     /// <|end_header_id|>\n\n{text}<|eot_id|>` (text trimmed), then the
@@ -313,12 +384,24 @@ impl Framing {
             }
             return t;
         }
-        if let Format::DeepSeek3 { .. } = self.format {
-            // A reply: its text and EOS; a user message: after <｜User｜>;
-            // a system message: bare (`system`).
+        if let Format::DeepSeek3 {
+            assistant,
+            think_end,
+            n_think,
+            hist_think,
+            ..
+        } = self.format
+        {
+            // A reply: after <｜Assistant｜> (V3.1: and `</think>`), ended by
+            // EOS; a user message: after <｜User｜>; a system message: bare
+            // (`system`).
             let mut t = match role {
                 "assistant" => {
-                    let mut t = tok.encode(text);
+                    let mut t = vec![assistant];
+                    if hist_think {
+                        t.extend_from_slice(&think_end[..n_think]);
+                    }
+                    t.extend(tok.encode(text));
                     t.push(self.im_end);
                     t
                 }
@@ -442,7 +525,18 @@ impl Framing {
                 }
                 t
             }
-            Format::Llama3 { start, end, bos } => {
+            Format::Llama3 {
+                bos, dated: false, ..
+            } => {
+                let mut t: Vec<u32> = bos.into_iter().collect();
+                if let Some(s) = system {
+                    t.extend(self.frame(tok, "system", s, None));
+                }
+                t
+            }
+            Format::Llama3 {
+                start, end, bos, ..
+            } => {
                 let mut t: Vec<u32> = bos.into_iter().collect();
                 t.push(start);
                 t.extend(tok.encode("system"));
@@ -1099,23 +1193,72 @@ fn gemma_role(role: &str) -> &str {
     if role == "assistant" { "model" } else { role }
 }
 
-/// The system message a GGUF's chat template inserts when a conversation
-/// has none, if it is a fixed text in a Kimi-style system block
-/// (`<|im_system|>system<|im_middle|>TEXT<|im_end|>`): Moonlight's "You are
-/// a helpful assistant", Kimi K2's "You are Kimi, ...".
-pub fn template_default_system(m: &crate::gguf::Model) -> Option<String> {
-    let t = m
+/// The model file's chat template (`tokenizer.chat_template`), if it has one.
+pub fn chat_template(m: &crate::gguf::Model) -> Option<&str> {
+    match m
         .metadata
         .iter()
-        .find(|(k, _)| k == "tokenizer.chat_template")
-        .and_then(|(_, v)| match v {
-            crate::gguf::Val::Str(s) => Some(s.as_str()),
-            _ => None,
-        })?;
-    const OPEN: &str = "<|im_system|>system<|im_middle|>";
-    let rest = &t[t.find(OPEN)? + OPEN.len()..];
-    let text = &rest[..rest.find("<|im_end|>")?];
-    (!text.is_empty() && !text.contains(['{', '}'])).then(|| text.to_string())
+        .find(|(k, _)| k == "tokenizer.chat_template")?
+    {
+        (_, crate::gguf::Val::Str(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn meta_u32(m: &crate::gguf::Model, key: &str) -> Option<u32> {
+    let (_, v) = m.metadata.iter().find(|(k, _)| k == key)?;
+    v.as_f64()
+        .filter(|x| *x >= 0.0 && *x <= u32::MAX as f64)
+        .map(|x| x as u32)
+}
+
+/// The system message a GGUF's chat template inserts when a conversation
+/// has none, if it is a fixed text in a system block: Kimi-style
+/// (`<|im_system|>system<|im_middle|>TEXT<|im_end|>`: Moonlight's "You are
+/// a helpful assistant", Kimi K2's "You are Kimi, ...") or ChatML
+/// (`<|im_start|>system\nTEXT<|im_end|>`: Qwen2.5's "You are Qwen, created
+/// by Alibaba Cloud. ...", Qwen2's "You are a helpful assistant."). The first
+/// block whose text is fixed (no template code: no `{`, `}`, nor the quote
+/// of the string literal it sits in) after a test of a role against
+/// `'system'` (the "no system message" branch, not a tools-only one) counts.
+/// Qwen1.5's and Qwen3's templates have none.
+pub fn template_default_system(m: &crate::gguf::Model) -> Option<String> {
+    let t = chat_template(m)?;
+    const OPENS: [&str; 3] = [
+        "<|im_system|>system<|im_middle|>",
+        "<|im_start|>system\n",
+        "<|im_start|>system\\n",
+    ];
+    OPENS.iter().find_map(|open| {
+        t.match_indices(open).find_map(|(i, _)| {
+            let rest = &t[i + open.len()..];
+            let text = &rest[..rest.find("<|im_end|>")?];
+            let quote = t[..i]
+                .chars()
+                .next_back()
+                .filter(|c| matches!(c, '\'' | '"'));
+            let mut from = i.saturating_sub(300);
+            while !t.is_char_boundary(from) {
+                from -= 1;
+            }
+            let before = &t[from..i];
+            let fixed = !text.is_empty()
+                && !text.contains(['{', '}'])
+                && quote.is_none_or(|q| !text.contains(q));
+            let branch = before.contains("'system'") || before.contains("\"system\"");
+            // A Jinja string literal's escapes (`\n` written as two characters).
+            (fixed && branch).then(|| text.replace("\\n", "\n"))
+        })
+    })
+}
+
+/// The system message a conversation without one gets: the template's
+/// (`template_default_system`); with no template, Qwen2.5's for qwen2.
+pub fn default_system(m: &crate::gguf::Model) -> Option<String> {
+    match chat_template(m) {
+        Some(_) => template_default_system(m),
+        None => (m.arch == "qwen2").then(|| DEFAULT_SYSTEM.to_string()),
+    }
 }
 
 /// The id of a special token, if the vocabulary has it as one.
@@ -1133,17 +1276,32 @@ type Forgotten = (Vec<u32>, Vec<usize>, Vec<(String, usize)>);
 pub const FORGET_TO: f64 = 0.5;
 
 impl<'a, M: Lm> Chat<'a, M> {
-    /// A conversation with `system` as the system message (None: no system
-    /// block), in a cache of `ctx` positions. Err if the vocabulary has no
-    /// ChatML markers. The net and tokenizer are borrowed: conversations can
-    /// share them.
+    /// `with_framing` with the vocabulary's framing alone (`Framing::new`:
+    /// no template's details; tests).
+    #[cfg(test)]
     pub fn new(
         net: &'a M,
         tok: &'a Tokenizer,
         system: Option<&str>,
         ctx: usize,
     ) -> Result<Chat<'a, M>, String> {
-        let Some(fr) = Framing::new(tok) else {
+        Chat::with_framing(net, tok, Framing::new(tok), system, ctx)
+    }
+
+    /// A conversation with `system` as the system message (None: no system
+    /// block), in a cache of `ctx` positions, framed by `fr`
+    /// (`Framing::from_model`: the vocabulary's format with the model file's
+    /// template's details). Err if there is none (the vocabulary has no chat
+    /// markers). The net and tokenizer are borrowed: conversations can share
+    /// them.
+    pub fn with_framing(
+        net: &'a M,
+        tok: &'a Tokenizer,
+        fr: Option<Framing>,
+        system: Option<&str>,
+        ctx: usize,
+    ) -> Result<Chat<'a, M>, String> {
+        let Some(fr) = fr else {
             return Err(
                 "the vocabulary has no ChatML (<|im_start|>/<|im_end|>), Llama 3 \
                         (<|start_header_id|>/<|eot_id|>), Gemma (<start_of_turn>/<end_of_turn>) \

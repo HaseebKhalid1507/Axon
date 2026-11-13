@@ -196,15 +196,27 @@ pub struct Template {
     /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
     /// `enable_thinking: false` opens a reply with.
     think: Option<(u32, u32, Vec<u32>)>,
-    /// Used when the messages don't start with a system message (Qwen2.5's
-    /// template brings one, Qwen3's and Llama 3's none).
-    default_system: Option<&'static str>,
+    /// Used when the messages don't start with a system message: the
+    /// template's (`chat::default_system`: Qwen2.5's, Qwen2's; Qwen1.5's,
+    /// Qwen3's and Llama 3's have none).
+    default_system: Option<String>,
+    /// How an earlier reply of a thinking model is kept: its text after
+    /// `</think>`, leading newlines dropped (`Some(true)`: Qwen3's template)
+    /// or not (`Some(false)`: DeepSeek R1's); None: as it is (a template
+    /// that never mentions `</think>`, as Qwen3-Coder's).
+    think_strip: Option<bool>,
 }
 
 impl Template {
-    /// None if the vocabulary has no chat markers (no chat endpoint).
-    pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
-        let fr = Framing::new(tok)?;
+    /// None if the vocabulary has no chat markers (no chat endpoint). The
+    /// details come from the model file's own template
+    /// (`Framing::from_model`, `chat::default_system`).
+    pub fn new(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Template> {
+        let fr = Framing::from_model(tok, m)?;
+        let think_strip = match chat::chat_template(m) {
+            None => Some(true),
+            Some(t) => t.contains("</think>").then(|| t.contains("lstrip(")),
+        };
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -214,8 +226,8 @@ impl Template {
         Some(Template {
             fr,
             think,
-            // As `axon chat`: Qwen2.5's default system message for qwen2.
-            default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
+            default_system: chat::default_system(m),
+            think_strip,
         })
     }
 
@@ -229,18 +241,20 @@ impl Template {
     /// then the assistant's opening (with the empty reasoning block if
     /// `no_think` and the model thinks), as `axon chat` frames a
     /// conversation. An earlier reply of a thinking model is kept as its
-    /// text after `</think>`, leading newlines dropped, as the Qwen3
-    /// template (and `axon chat`) render it.
+    /// text after `</think>` (`think_strip`: leading newlines dropped, as the
+    /// Qwen3 template and `axon chat` render it; kept, as DeepSeek R1's).
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
         let (system, rest) = match msgs.split_first() {
             Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
-            _ => (self.default_system, msgs),
+            _ => (self.default_system.as_deref(), msgs),
         };
         let mut t = self.fr.system(tok, system);
         for (i, m) in rest.iter().enumerate() {
-            let text = match (m.role, &self.think) {
-                (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
-                    Some((_, c)) => c.trim_start_matches('\n'),
+            let strip = self.think.as_ref().and(self.think_strip);
+            let text = match (m.role, strip) {
+                (Role::Assistant, Some(lstrip)) => match m.content.rsplit_once("</think>") {
+                    Some((_, c)) if lstrip => c.trim_start_matches('\n'),
+                    Some((_, c)) => c,
                     None => &m.content,
                 },
                 _ => &m.content,
@@ -1198,7 +1212,7 @@ fn engine(
     if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
-    let template = Template::new(tok, &model.arch);
+    let template = Template::new(tok, &model);
     let kvs = match &net.0 {
         Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
@@ -3606,5 +3620,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod template_tests;
 #[cfg(test)]
 mod tests;
