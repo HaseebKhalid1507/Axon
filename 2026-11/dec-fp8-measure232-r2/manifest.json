@@ -1,0 +1,29 @@
+{
+ "label": "dec-fp8-measure232-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1113-013521-3de6",
+   "name": "dec-fp8-measure232-r2",
+   "rc": 143,
+   "verdict": "FAIL (rc 143)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794597181.3140407,
+   "ended": 1794604714.1158442,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "eaa2a47f4540cfe92d852b60bbd3ffa0bfb3d7cbacf64e9a94971f87e9ebea12",
+   "log_bytes": 3040
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 16:18:35 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

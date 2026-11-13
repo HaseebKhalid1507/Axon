@@ -1,0 +1,37 @@
+[axon-run 01:35:21] submitted 1113-013521-3de6 by /home/haseeb/.cache/axon-dec: /usr/bin/bash measure232-pod.sh ./axon-test-fp8m3 ./axon-test-0b22e9c
+[axon-run 14:13:01] scope axon-job-1113-013521-3de6-1794597181.scope in app-axonjobs.slice: MemoryMax 13024 MB, MemoryHigh 11721 MB, no swap, oomd pressure kill 80% (claim 8000 MB): an OOM here kills only this job
+[axon-run 14:13:01] job 1113-013521-3de6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-013521-3de6-1794597181 --slice=app-axonjobs.slice -p MemoryMax=13024M -p MemoryHigh=11721M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash measure232-pod.sh ./axon-test-fp8m3 ./axon-test-0b22e9c
+axon-q 14:13:01 start slot 16-23: /usr/bin/bash measure232-pod.sh ./axon-test-fp8m3 ./axon-test-0b22e9c
+/home/haseeb/.cache/axon-podjob/measure232-pod-d72dc3146f7b/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 1567 MiB, 16 %
+ 14:13:01 up 3 days,  3:31, 15 users,  load average: 7.15, 9.04, 9.71
+  new5a: MEASURE232 lock-taken t=0.33s threads=Some("5")
+  new5a: MEASURE232 loaded-x3 t=1.31s threads=Some("5")
+  new5a: MEASURE232 net-r t=1.38s threads=Some("5")
+  new5a: MEASURE232 net-f t=1.45s threads=Some("5")
+  new5a: MEASURE232 net-o t=1.89s threads=Some("5")
+  new5a: MEASURE232 graded t=2116.21s threads=Some("5")
+  new5a: MEASURE232 phases r=1032.27s f=1034.97s o=14.11s tally=32.37s positions=[1014, 1029, 1029, 1000]
+  new5a: MEASURE232 asserted t=2116.21s threads=Some("5")
+  new5a: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 903 filtered out; finished in 2116.25s
+measure232-pod.sh: line 23: bc: command not found
+measure232-pod.sh: line 23: printf: : invalid number
+RUN new5a bin=axon-test-fp8m3 threads=5 rc=0 wall_s=0.0 load=13.20 12.47 10.85
+  old5a: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 841 filtered out; finished in 2106.98s
+measure232-pod.sh: line 23: bc: command not found
+measure232-pod.sh: line 23: printf: : invalid number
+RUN old5a bin=axon-test-0b22e9c threads=5 rc=0 wall_s=0.0 load=5.83 7.12 9.21
+  new5b: MEASURE232 lock-taken t=0.40s threads=Some("5")
+  new5b: MEASURE232 loaded-x3 t=1.31s threads=Some("5")
+  new5b: MEASURE232 net-r t=1.35s threads=Some("5")
+  new5b: MEASURE232 net-f t=1.38s threads=Some("5")
+  new5b: MEASURE232 net-o t=1.74s threads=Some("5")
+  new5b: MEASURE232 graded t=2059.85s threads=Some("5")
+  new5b: MEASURE232 phases r=1012.64s f=1015.79s o=13.57s tally=15.60s positions=[1014, 1029, 1029, 1000]
+  new5b: MEASURE232 asserted t=2059.85s threads=Some("5")
+  new5b: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 903 filtered out; finished in 2059.88s
+measure232-pod.sh: line 23: bc: command not found
+measure232-pod.sh: line 23: printf: : invalid number
+RUN new5b bin=axon-test-fp8m3 threads=5 rc=0 wall_s=0.0 load=5.34 6.17 6.83
+[axon-run 16:18:31] signal 15: stopping the job
+[axon-run 16:18:31] exit 143 after 7530.0s (host bella)
