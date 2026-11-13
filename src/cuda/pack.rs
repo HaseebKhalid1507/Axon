@@ -41,6 +41,16 @@ const MAX_ENTRIES: usize = 1 << 14;
 const FATBIN_MAGIC: [u8; 4] = [0x50, 0xED, 0x55, 0xBA];
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 
+/// Whether `img` is a fatbin whose header's own size (headerSize u16 at
+/// byte 6, fatSize u64 at byte 8, which the driver trusts) lies inside it.
+fn fatbin_fits(img: &[u8]) -> bool {
+    img.len() >= 16 && img.starts_with(&FATBIN_MAGIC) && {
+        let head = u16::from_le_bytes([img[6], img[7]]) as u64;
+        head.checked_add(u64_at(img, 8))
+            .is_some_and(|end| head >= 16 && end <= img.len() as u64)
+    }
+}
+
 /// How an entry's image is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Form {
@@ -110,9 +120,16 @@ impl<'a> Pack<'a> {
         if nvrtc.0 > 1000 || nvrtc.1 > 1000 {
             return bad(format!("NVRTC version {}.{}", nvrtc.0, nvrtc.1));
         }
+        // Reserved bytes are zero, so a later format can use them.
+        if bytes[20..HEADER].iter().any(|&b| b != 0) {
+            return bad("reserved header bytes aren't zero".into());
+        }
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
             let e = &bytes[HEADER + i * ENTRY..HEADER + (i + 1) * ENTRY];
+            if e[20..24].iter().chain(&e[72..80]).any(|&b| b != 0) {
+                return bad(format!("entry {i}: reserved bytes aren't zero"));
+            }
             let arch = u16::from_le_bytes([e[18], e[19]]) as i32;
             let target = match (e[16], arch) {
                 (_, a) if !(30..=2000).contains(&a) => {
@@ -141,7 +158,7 @@ impl<'a> Pack<'a> {
             let (off, len) = (off as usize, len as usize);
             let img = &bytes[off..off + len];
             let looks = match (form, target) {
-                (Form::Fatbin, _) => img.starts_with(&FATBIN_MAGIC),
+                (Form::Fatbin, _) => fatbin_fits(img),
                 (Form::Raw, Target::Ptx(_)) => img.last() == Some(&0),
                 (Form::Raw, _) => img.starts_with(ELF_MAGIC),
             };
@@ -568,21 +585,42 @@ pub fn find_fatbinary() -> Option<PathBuf> {
         .find(|f| f.is_file())
 }
 
+/// How many of this build's modules (`product_modules`) `p` has code for,
+/// of how many: a pack from another commit of axon has fewer (each entry is
+/// keyed by its module's source and options).
+fn coverage(p: &Pack) -> (usize, usize) {
+    let product = super::product_modules();
+    let known = product
+        .iter()
+        .filter(|m| {
+            let h = super::module_hash(m.src, &m.opts);
+            p.entries.iter().any(|e| e.module == h)
+        })
+        .count();
+    (known, product.len())
+}
+
+/// Err when `p` lacks some of this build's modules (`coverage`): `axon
+/// kernels list` exits non-zero, so a release can't ship a stale pack.
+fn check_coverage(p: &Pack) -> Result<(), String> {
+    match coverage(p) {
+        (k, n) if k < n => Err(format!(
+            "the pack has kernels for {k} of this build's {n} modules: it was built from \
+             another version of axon's kernels, so NVRTC compiles the other {} (and a \
+             machine without NVRTC can't run them); rebuild it with axon kernels build",
+            n - k
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// What `p` holds, for `axon kernels list`: NVRTC, size, entries, modules
 /// and targets.
 pub fn describe(p: &Pack) -> String {
     let mut mods: Vec<u128> = p.entries.iter().map(|e| e.module).collect();
     mods.sort();
     mods.dedup();
-    let product = super::product_modules();
-    let known = mods
-        .iter()
-        .filter(|&&h| {
-            product
-                .iter()
-                .any(|m| super::module_hash(m.src, &m.opts) == h)
-        })
-        .count();
+    let (known, total) = coverage(p);
     let packed = p.entries.iter().all(|e| e.form == Form::Fatbin);
     format!(
         "NVRTC {}.{}, {:.1} MB ({}), {} entries: {} modules ({} of this build's {}), targets {}",
@@ -597,7 +635,7 @@ pub fn describe(p: &Pack) -> String {
         p.entries.len(),
         mods.len(),
         known,
-        product.len(),
+        total,
         p.targets()
             .iter()
             .map(|t| t.to_string())
@@ -631,31 +669,70 @@ pub fn kernels_cmd(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// `axon kernels list [FILE]`.
+/// `axon kernels list [FILE]`. Err (after the listing) when the pack lacks
+/// some of this build's modules (`check_coverage`).
 fn list(file: Option<&Path>) -> Result<(), String> {
-    match file {
+    let short = match file {
         Some(f) => {
             let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
             let p = Pack::parse(&b)?;
             println!("{}: {}", f.display(), describe(&p));
+            check_coverage(&p)
         }
         None => match active()? {
-            Some(p) => println!("precompiled kernels ({}): {}", active_source(), describe(p)),
-            None => println!("precompiled kernels: none in this build"),
+            Some(p) => {
+                println!("precompiled kernels ({}): {}", active_source(), describe(p));
+                check_coverage(p)
+            }
+            None => {
+                println!("precompiled kernels: none in this build");
+                Ok(())
+            }
         },
-    }
+    };
     match mode()? {
         Mode::On => {}
         Mode::Off => println!("AXON_KERNEL_PACK=0: not used (NVRTC only)"),
         Mode::Only => println!("AXON_KERNEL_PACK=only: no NVRTC"),
     }
     println!("{}", super::summary());
-    Ok(())
+    short
+}
+
+/// OUT of `axon kernels build`, refused unless it names a file that isn't a
+/// directory: `.`, `..`, `/` and `dir/..` have no file name, and the work
+/// directory beside OUT (`new_work`) is named after it.
+fn out_file(arg: &str) -> Result<PathBuf, String> {
+    let out = PathBuf::from(arg);
+    if arg.is_empty() || out.file_name().is_none() || arg.ends_with('/') {
+        return Err(format!(
+            "OUT '{arg}' names no file: give the pack's file name, e.g. axon.pack"
+        ));
+    }
+    if out.is_dir() {
+        return Err(format!(
+            "OUT '{arg}' is a directory: give the pack's file name inside it"
+        ));
+    }
+    Ok(out)
+}
+
+/// A new, empty directory beside `out` for one build's temp files, named
+/// `.OUT.axon-kernels-PID.work`: `create_dir` refuses one that exists, so
+/// the build only ever deletes a directory it made.
+fn new_work(out: &Path) -> Result<PathBuf, String> {
+    let name = out.file_name().ok_or("OUT names no file")?;
+    let mut w = std::ffi::OsString::from(".");
+    w.push(name);
+    w.push(format!(".axon-kernels-{}.work", std::process::id()));
+    let work = out.with_file_name(w);
+    std::fs::create_dir(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    Ok(work)
 }
 
 /// `axon kernels build OUT [--targets LIST] [--fatbinary PATH|none] [-j N]`.
 fn build_cmd(args: &[String]) -> Result<(), String> {
-    let out = PathBuf::from(&args[0]);
+    let out = out_file(&args[0])?;
     let (mut targets, mut fb, mut jobs) = (RELEASE_TARGETS.to_string(), None, 2usize);
     let mut i = 1;
     while i < args.len() {
@@ -689,18 +766,21 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         )?),
     };
     let n = ffi::nvrtc()?;
-    let work = out.with_extension("work");
-    std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let work = new_work(&out)?;
     let log = |s: &str| eprintln!("axon kernels: {s}");
-    let r = build(n, &targets, fb.as_deref(), &work, jobs, &log);
+    // The pack is written in `work` and renamed over OUT (same directory, so
+    // one filesystem); only `work`, which this build made, is removed.
+    let r = build(n, &targets, fb.as_deref(), &work, jobs, &log).and_then(|bytes| {
+        let p = Pack::parse(&bytes)?;
+        let line = format!("{}: {}", out.display(), describe(&p));
+        let tmp = work.join("pack");
+        std::fs::write(&tmp, &bytes)
+            .and_then(|()| std::fs::rename(&tmp, &out))
+            .map_err(|e| format!("{}: {e}", out.display()))?;
+        Ok(line)
+    });
     let _ = std::fs::remove_dir_all(&work);
-    let bytes = r?;
-    let p = Pack::parse(&bytes)?;
-    let tmp = out.with_extension("tmp");
-    std::fs::write(&tmp, &bytes)
-        .and_then(|()| std::fs::rename(&tmp, &out))
-        .map_err(|e| format!("{}: {e}", out.display()))?;
-    println!("{}: {}", out.display(), describe(&p));
+    println!("{}", r?);
     Ok(())
 }
 
@@ -867,10 +947,104 @@ mod tests {
             let (off, len) = (u64_at(b, entry(i) + 24), u64_at(b, entry(i) + 32));
             b[(off + len - 1) as usize] = b'x';
         });
+        refused("reserved header bytes", &|b| b[24] = 1);
+        refused("reserved entry bytes", &|b| b[entry(0) + 21] = 1);
+        refused("reserved entry tail", &|b| b[entry(0) + 75] = 1);
         refused("duplicate entry", &|b| {
             let (e0, e1) = (b[entry(0)..entry(1)].to_vec(), entry(1));
             b[e1..e1 + ENTRY].copy_from_slice(&e0);
         });
+    }
+
+    /// A fatbin image must hold the size its header gives (headerSize at
+    /// byte 6, fatSize at 8): the driver reads that many bytes.
+    #[test]
+    fn pack_fatbin_size_is_checked() {
+        let fat = |head: u16, size: u64, body: usize| {
+            let mut v = FATBIN_MAGIC.to_vec();
+            v.extend_from_slice(&1u16.to_le_bytes());
+            v.extend_from_slice(&head.to_le_bytes());
+            v.extend_from_slice(&size.to_le_bytes());
+            v.resize(16 + body, 7);
+            v
+        };
+        assert!(fatbin_fits(&fat(16, 100, 100)));
+        assert!(fatbin_fits(&fat(16, 90, 100)));
+        assert!(!fatbin_fits(&fat(16, 101, 100)), "fatSize past the image");
+        assert!(!fatbin_fits(&fat(8, 10, 100)), "headerSize under 16");
+        assert!(!fatbin_fits(&fat(16, u64::MAX, 100)), "fatSize wraps");
+        assert!(!fatbin_fits(&fat(16, 0, 0)[..12]), "shorter than a header");
+        let pack = |img: Vec<u8>| {
+            let built = [Built {
+                keys: vec![(1, Target::Cubin(89))],
+                target: Target::Cubin(89),
+                raw: elf(10, 1),
+            }];
+            write((13, 4), &built, &[(Form::Fatbin, img)])
+        };
+        assert!(Pack::parse(&pack(fat(16, 100, 100))).is_ok());
+        let e = Pack::parse(&pack(fat(16, 200, 100)))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.contains("isn't a Fatbin"), "{e}");
+    }
+
+    /// A pack from another version of the kernels (module hashes this
+    /// build doesn't have) fails `check_coverage`, so `axon kernels list`
+    /// exits non-zero on it.
+    #[test]
+    fn pack_coverage_names_a_stale_pack() {
+        let b = sample();
+        let p = Pack::parse(&b).unwrap();
+        let n = super::super::product_modules().len();
+        assert_eq!(coverage(&p), (0, n));
+        let e = check_coverage(&p).unwrap_err();
+        assert!(e.contains(&format!("0 of this build's {n} modules")), "{e}");
+    }
+
+    /// `axon kernels build OUT` refuses an OUT that names no file or is a
+    /// directory before it looks for NVRTC or fatbinary (#227 review: `.`
+    /// once meant `remove_dir_all(".")` after the build).
+    #[test]
+    fn pack_build_refuses_a_directory_out() {
+        let dir = std::env::temp_dir().join(format!("axon-pack-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap().to_string();
+        for out in [".", "..", "/", "foo/..", "", "x.pack/", d.as_str()] {
+            for extra in [&[][..], &["--fatbinary", "none"][..]] {
+                let mut args = vec!["build", out, "--targets", "sm_89"];
+                args.extend(extra);
+                let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                let e = kernels_cmd(&args).unwrap_err();
+                assert!(e.starts_with(&format!("OUT '{out}'")), "{out}: {e}");
+            }
+        }
+        assert!(dir.is_dir());
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// The work directory is new, beside OUT and named after it: an
+    /// existing one is an error, and nothing else there is touched.
+    #[test]
+    fn pack_build_work_is_fresh() {
+        let dir = std::env::temp_dir().join(format!("axon-pack-work-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("x.work")).unwrap();
+        std::fs::write(dir.join("x.work/keep"), b"k").unwrap();
+        let out = out_file(dir.join("x.pack").to_str().unwrap()).unwrap();
+        let w = new_work(&out).unwrap();
+        assert_eq!(w.parent(), Some(dir.as_path()));
+        assert_eq!(
+            w.file_name().unwrap().to_str().unwrap(),
+            format!(".x.pack.axon-kernels-{}.work", std::process::id())
+        );
+        assert!(w.is_dir() && std::fs::read_dir(&w).unwrap().next().is_none());
+        assert!(
+            new_work(&out).is_err(),
+            "an existing work directory is refused"
+        );
+        assert!(dir.join("x.work/keep").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Random damage never panics `parse`, and whatever it accepts has
