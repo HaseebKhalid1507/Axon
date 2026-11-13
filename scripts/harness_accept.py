@@ -733,7 +733,7 @@ class Rec:
     def __init__(self, route, body, label):
         self.d = dict(label, route=route, status=None, ttft_ms=None, total_ms=None, prompt_tokens=None,
                       completion_tokens=None, cached_tokens=None, tc=0, tc_badjson=0, tc_text=0, tc_text_r=0, empty=0,
-                      finish=None, err=None)
+                      finish=None, err=None, srv_prompt_n=None, srv_prompt_ms=None, srv_pred_n=None, srv_pred_ms=None)
         self.calls, self.text, self.rtext, self.first = {}, [], [], None
         b = body if isinstance(body, dict) else {}
         self.d.update(stream=bool(b.get("stream")), n_tools=len(b.get("tools") or []),
@@ -767,6 +767,13 @@ class Rec:
         if isinstance(o.get("error"), (dict, str)) and self.d["err"] is None:
             e = o["error"]
             self.d["err"] = (e.get("code") or e.get("type") or "") + ": " + str(e.get("message"))[:300] if isinstance(e, dict) else str(e)[:300]
+        # llama-server's `timings` (Axon emits the same object): the server's own prompt and decode times, so prefill
+        # is measured alike on both engines whatever the stream holds back (a reply that opens with a tool call).
+        for tm in (o.get("timings"), (o.get("response") or {}).get("timings") if isinstance(o.get("response"), dict)
+                   else None):
+            if isinstance(tm, dict) and tm.get("prompt_ms") is not None:
+                self.d.update(srv_prompt_n=tm.get("prompt_n"), srv_prompt_ms=tm.get("prompt_ms"),
+                              srv_pred_n=tm.get("predicted_n"), srv_pred_ms=tm.get("predicted_ms"))
         if self.d["route"] == "resp":
             ty = o.get("type", "")
             if ty in ("response.output_text.delta",):
@@ -831,6 +838,10 @@ class Rec:
         self.d.update(status=status, tc=n, tc_badjson=bad, tc_text=int(n == 0 and bool(TEXT_TC.search(text))),
                       tc_text_r=int(n == 0 and bool(TEXT_TC.search(rtext))), empty=int(n == 0 and not text.strip()),
                       ttft_ms=None if self.first is None else int((self.first - t0) * 1000), total_ms=int((t_end - t0) * 1000))
+        # held: a reply of 20+ tokens whose first token-bearing event came within 50 ms of the end (the server sent it
+        # all at once, e.g. a tool call it streams only when complete): its TTFT includes the whole generation.
+        self.d["held"] = int(self.d["ttft_ms"] is not None and (self.d.get("completion_tokens") or 0) >= 20
+                             and self.d["total_ms"] - self.d["ttft_ms"] < 50)
         if status >= 400 and self.d["err"] is None:
             self.d["err"] = (raw_err or b"")[:300].decode("utf-8", "replace")
         # an error is a 4xx/5xx, or an error event inside a 200 stream
@@ -1354,6 +1365,14 @@ def load_requests(paths):
     return out
 
 
+def held(r):
+    """A reply sent all at once (see Rec.close); computed for records written before the field existed."""
+    if "held" in r:
+        return r["held"]
+    return int(r.get("ttft_ms") is not None and (r.get("completion_tokens") or 0) >= 20
+               and (r.get("total_ms") or 0) - r["ttft_ms"] < 50)
+
+
 def latency_stats(reqs):
     """{(model, engine): stats} over the given request records."""
     groups = {}
@@ -1370,8 +1389,14 @@ def latency_stats(reqs):
 
         new = lambda r: (r.get("prompt_tokens") or 0) - (r.get("cached_tokens") or 0)
         big = [r for r in ok if new(r) >= PREFILL_MIN and r["ttft_ms"] > 0]
-        bigsolo = [r for r in big if solo(r)]
+        # client-side rate: solo and not held (a held reply's TTFT includes its whole generation)
+        bigsolo = [r for r in big if solo(r) and not held(r)]
         rate = lambda xs: [new(r) / (r["ttft_ms"] / 1000.0) for r in xs]
+        # server-side rate: the server's own prompt_n / prompt_ms, solo (in a batch prompt_ms includes others' steps)
+        srv = [r for r in ok if (r.get("srv_prompt_n") or 0) >= PREFILL_MIN and (r.get("srv_prompt_ms") or 0) > 0
+               and solo(r)]
+        srate = [r["srv_prompt_n"] / (r["srv_prompt_ms"] / 1000.0) for r in srv]
+        tcr = [r for r in ok if (r.get("tc") or 0) + (r.get("tc_text") or 0) > 0]
         dec = [r["completion_tokens"] / ((r["total_ms"] - r["ttft_ms"]) / 1000.0) for r in ok
                if (r.get("completion_tokens") or 0) >= 50 and (r.get("total_ms") or 0) > r["ttft_ms"]]
         sizes = [new(r) for r in ok]
@@ -1381,6 +1406,9 @@ def latency_stats(reqs):
             n_big=len(big), n_solo=len(bigsolo),
             pf_p50=pct(rate(bigsolo), 0.5), pf_p90=pct(rate(bigsolo), 0.9),
             pf_all_p50=pct(rate(big), 0.5),
+            n_srv=len(srv), spf_p50=pct(srate, 0.5), spf_p90=pct(srate, 0.9),
+            n_timings=sum(1 for r in ok if r.get("srv_prompt_ms") is not None),
+            held=sum(held(r) for r in ok), held_tc=sum(held(r) for r in tcr), n_tc=len(tcr),
             dec_p50=pct(dec, 0.5), n_dec=len(dec),
             sizes=[sum(1 for s in sizes if lo <= s < hi) for lo, hi in SIZE_BUCKETS],
             new_p50=pct(sizes, 0.5), new_p90=pct(sizes, 0.9), new_max=max(sizes or [0]))
@@ -1392,15 +1420,20 @@ def print_latency(reqs):
     if not st:
         return
     f = lambda x: "-" if x is None else "%d" % round(x)
-    print("LATENCY (TTFT ms over all requests; prefill tok/s = uncached prompt tokens / TTFT on solo requests with >= %d "
-          "uncached tokens; decode tok/s on replies of >= 50 tokens)" % PREFILL_MIN)
-    print("%-12s %-6s %5s %7s %7s %6s %8s %8s %6s %8s %8s %8s" % ("model", "engine", "n", "ttft50", "ttft90", "n_pf",
-                                                              "pf50", "pf90", "n_all", "pf50all", "dec50", "n_dec"))
+    print("LATENCY  ttft: client-seen time to the first token-bearing event, all requests (what the agent waits).")
+    print("  prefill srv: the server's own timings.prompt_n / prompt_ms, solo requests with >= %d fed tokens "
+          "(n_srv; n_tim = requests that carried timings at all)." % PREFILL_MIN)
+    print("  prefill cli: uncached tokens / ttft, solo and not held (n_cli). held: replies of 20+ tokens sent all at "
+          "once (held_tc of n_tc tool-call replies). dec: decode tok/s on replies of 50+ tokens.")
+    print("%-12s %-6s %5s %7s %7s | %5s %5s %7s %7s | %5s %7s %7s | %5s %9s | %6s" % (
+        "model", "engine", "n", "ttft50", "ttft90", "n_srv", "n_tim", "srv50", "srv90", "n_cli", "cli50", "cli90",
+        "held", "held_tc", "dec50"))
     for k in sorted(st):
         s = st[k]
-        print("%-12s %-6s %5d %7s %7s %6d %8s %8s %6d %8s %8s %8d" % (
-            k[0], k[1], s["n"], f(s["ttft_p50"]), f(s["ttft_p90"]), s["n_solo"], f(s["pf_p50"]), f(s["pf_p90"]),
-            s["n_big"], f(s["pf_all_p50"]), f(s["dec_p50"]), s["n_dec"]))
+        print("%-12s %-6s %5d %7s %7s | %5d %5d %7s %7s | %5d %7s %7s | %5d %4d/%-4d | %6s" % (
+            k[0], k[1], s["n"], f(s["ttft_p50"]), f(s["ttft_p90"]), s["n_srv"], s["n_timings"], f(s["spf_p50"]),
+            f(s["spf_p90"]), s["n_solo"], f(s["pf_p50"]), f(s["pf_p90"]), s["held"], s["held_tc"], s["n_tc"],
+            f(s["dec_p50"])))
     print("SIZES uncached prompt tokens per request, buckets " +
           " ".join("%d-%s" % (lo, "" if hi >= 10 ** 9 else hi) for lo, hi in SIZE_BUCKETS))
     for k in sorted(st):
@@ -1588,6 +1621,11 @@ def fake_upstream():
                 if mode == "text_tc":
                     ev({"choices": [{"delta": {"content": "<tool_call>{\"name\": \"bash\", \"arguments\": {\"c\""}}]})
                     ev({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+                elif mode == "held":   # a 25-token tool call sent in one go at the end, with the server's timings
+                    ev({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "x", "function": {"name": "bash", "arguments": "{\"c\": 1}"}}]}}]})
+                    ev({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+                    ev({"choices": [], "usage": {"prompt_tokens": 1300, "completion_tokens": 25, "prompt_tokens_details": {"cached_tokens": 100}},
+                        "timings": {"prompt_n": 1200, "prompt_ms": 400.0, "predicted_n": 25, "predicted_ms": 180.0}})
                 else:
                     ev({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "x", "function": {"name": "bash", "arguments": "{\"c\":"}}]}}]})
                     ev({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": " 1}" if mode != "badjson" else " 1"}}]}}]})
@@ -1638,10 +1676,12 @@ def cmd_selfcheck(a):
     px = Proxy(up.server_address[1])
     px.label = dict(task="self")
     cases = [("/v1/chat/completions", {"stream": True, "messages": [{"role": "user", "content": "x"}], "tools": [{}]},
-              dict(status=200, tc=1, tc_badjson=0, tc_text=0)),
+              dict(status=200, tc=1, tc_badjson=0, tc_text=0, held=0, srv_prompt_ms=None)),
              ("/v1/chat/completions", {"stream": True, "mode": "badjson", "messages": [{"role": "tool", "content": "Error: unknown tool foo"}]},
               dict(status=200, tc=1, tc_badjson=1, tool_res_err=1)),
              ("/v1/chat/completions", {"stream": True, "mode": "text_tc", "messages": []}, dict(status=200, tc=0, tc_text=1, empty=0)),
+             ("/v1/chat/completions", {"stream": True, "mode": "held", "messages": []},
+              dict(status=200, tc=1, held=1, cached_tokens=100, srv_prompt_n=1200, srv_prompt_ms=400.0, srv_pred_n=25)),
              ("/v1/chat/completions", {"mode": "ctx", "messages": []}, dict(status=400, ctx_overflow=1)),
              ("/v1/responses", {"stream": True, "input": "hi"}, dict(status=200, tc=1, prompt_tokens=50))]
     for path, body, want in cases:

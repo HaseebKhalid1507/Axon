@@ -452,6 +452,12 @@ def chat_compare(a, p, r, lchat):
         r.setdefault("problems_chat", []).append(why)
         r["chat"] = why
         return
+    if ax and all("error" in x for x in ax):
+        # Axon serves the model but refuses chat (no chat format for its vocabulary): not a prompt difference
+        m = re.search(r'"message":\s*"([^"]+)', ax[0]["error"])
+        r["chat"] = "axon refuses chat: " + (m.group(1) if m else ax[0]["error"])[:160]
+        r["chat_prompt_eq"] = "refused"
+        return
     rows = []
     for i, (x, y) in enumerate(zip(ax, lchat)):
         rows.append({"axon_tokens": x.get("prompt_tokens"), "llama_tokens": y.get("prompt_tokens"),
@@ -718,7 +724,9 @@ def audit_table(a):
         note = ""
         if axon == "runs":
             eq = r.get("chat_prompt_eq")
-            if eq:
+            if eq == "refused":
+                prompt = "chat refused: " + str(r.get("chat", "")).replace("axon refuses chat: ", "")[:60]
+            elif eq:
                 rows = r.get("chat_rows") or []
                 prompt = "same" if eq == f"{len(rows)}/{len(rows)}" else "differs (" + ", ".join(
                     f"{c['axon_tokens']} vs {c['llama_tokens']}" for c in rows if c["axon_tokens"] != c["llama_tokens"]) + " tokens)"
