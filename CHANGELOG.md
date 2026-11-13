@@ -6,6 +6,36 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
+- **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
+  `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
+  - **Llama 3.0** (#241): no "Cutting Knowledge Date" lines, and a system block only when a system message is given.
+    Llama 3.1, 3.2 and 3.3 are unchanged.
+  - **DeepSeek R1** (R1-0528, the distills) and **V3** (#238): a reply opens with `<｜Assistant｜>` alone, so R1
+    reasons. Before, they got V3.1's `</think>` and reasoning was switched off. BOS is written whenever the template
+    writes it.
+  - **Earlier replies:** each comes back as its text after the last `</think>`, newlines kept, in serve and in
+    `axon chat` alike.
+  - **DeepSeek multi-turn** (#240): an earlier reply is `<｜Assistant｜>{text}<｜end▁of▁sentence｜>`. Before, the
+    marker was missing and the reply was glued onto the user turn.
+- **The default system message is the template's** (#239): Qwen2's is "You are a helpful assistant.", and Qwen1.5, the
+  R1 distills and Qwen3 have none. Qwen2.5's "You are Qwen, ..." now comes only from its template, or for a `qwen2`
+  file without one. Any ChatML template with a fixed default gets that default whatever its architecture
+  (Qwen2.5-Math's, for example). A fine-tune whose template has no default loses Qwen2.5's.
+- **Tools need a template that renders them.** A request with tools, or a tool turn, for Qwen2, Qwen1.5 or Llama 3.0
+  is now a 400, as ollama refuses it. These used to render in Qwen2.5's or Llama 3.1's format.
+- **DeepSeek-R1's Qwen2.5 distills load** (#249): pre-tokenizer `deepseek-r1-qwen` is Qwen2's, as llama.cpp maps it.
+- **A broken `bos_token_id` or `eos_token_id`** (past the vocabulary) never reaches a prompt. A bad BOS is dropped,
+  as the tokenizer drops it. A bad EOS on a format that ends turns with EOS (DeepSeek, Mistral) leaves no chat
+  framing, so the chat endpoint gives a 400 and `axon chat` an error, instead of a panic in the model.
+- **Pinned by a fixture**, `tests/fixtures/chat_templates.json`, built by `scripts/chat_template_fixtures.py` from
+  pinned Hugging Face revisions: 16 families and 148 conversations, Axon's ids equal to `apply_chat_template`'s.
+  The conversations also run through `axon chat` turn by turn. Message text that spells special tokens stays text
+  in every family.
+- **Saved sessions:** a resumed `axon chat` session keeps its old tokens, and the new turns use the new framing. A
+  conversation that changed framing (Llama 3.0, R1, Qwen2 or Qwen1.5 without a system message) mixes the two.
+  Serve's prompt cache is keyed by tokens, so changed prompts only miss it.
+
 ### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
 - Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.
 - **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each wrote
