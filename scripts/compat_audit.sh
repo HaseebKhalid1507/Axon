@@ -19,7 +19,9 @@ W=${AXON_AUDIT_DIR:-$HOME/.cache/axon-eval/audit-run}/$(date +%m%d-%H%M%S)
 mkdir -p "$W/models" "$W/llama"
 echo "$(sha256sum "$TGZ" | cut -c1-64)" | grep -q '^de67caf142984e7ba2fb2b5396d6ea40f2946a512650d1f7e9d38ea1a6e5fac7$' ||
   { echo "compat_audit: $TGZ is not llama-b11580-bin-ubuntu-x64.tar.gz (sha256)"; exit 2; }
-tar xzf "$TGZ" -C "$W/llama" || exit 2
+# No owner/mode restore: as root (pods) tar would chown to the archive's uid 1001, which fails on filesystems
+# without chown (jade's job dir, 1113-004918-e28e).
+tar --no-same-owner --no-same-permissions -xzf "$TGZ" -C "$W/llama" || exit 2
 LS=$(find "$W/llama" -name llama-server -type f | head -1)
 echo "compat_audit: host $(hostname) work $W cpus $(nproc) ram $(free -g | awk '/Mem:/{print $2}')G disk $(df -h "$W" | awk 'NR==2{print $4}') free"
 echo "compat_audit: gpu $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null); axon $(sha256sum "$AX" | cut -c1-12); $("$LS" --version 2>&1 | head -1)"
