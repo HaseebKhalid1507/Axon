@@ -81,6 +81,8 @@ axon kernels list [PACK]                  the precompiled GPU kernels and where 
                                           come from (models.md, NVIDIA GPUs)
 axon kernels build OUT [--targets L] [--fatbinary P|none] [-j N]
                                           compile a kernel pack with NVRTC (release builds)
+axon pull NAME | OWNER/REPO/FILE.gguf      download a GGUF from Hugging Face, checked against its
+                                          SHA-256 (models.md, Getting models); axon pull --list
 axon --help | --version
 ```
 

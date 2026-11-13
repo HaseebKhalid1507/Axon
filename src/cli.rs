@@ -6,8 +6,8 @@
 use crate::generate::{GenOpts, generate};
 use crate::numerics::{self, Numerics};
 use crate::{
-    chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, rope, sample,
-    serve, spec, tokenizer,
+    chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, pull, rope,
+    sample, serve, spec, tokenizer,
 };
 use lm::{Backend, Device, Inner, Lm};
 use std::env;
@@ -60,6 +60,9 @@ usage:
                                             on the CPU or a --gpu-layers split one at a
                                             time; README: axon serve)
   axon kernels list | build ...             the precompiled GPU kernels (axon kernels --help)
+  axon pull <name | owner/repo/file.gguf>   download a GGUF from Hugging Face, checked against its
+                                            SHA-256, into the models directory (axon pull --list: the
+                                            names); gen, chat, serve and info then take the name
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -310,6 +313,13 @@ pub(crate) fn open_model_with(
     m
 }
 
+/// A model argument as a path: a name `axon pull` knows, a Hugging Face
+/// file or a pulled file's name in the models directory, else as given
+/// (`pull::resolve`); a usage error for a name that isn't pulled yet.
+pub(crate) fn model_arg(a: &str) -> String {
+    pull::resolve(a).unwrap_or_else(|e| fail(&e))
+}
+
 fn load_failed(path: &str, e: std::io::Error) -> ! {
     match e.kind() {
         std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
@@ -375,20 +385,28 @@ fn run() -> std::io::Result<()> {
         cuda::kernels_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
         return Ok(());
     }
+    if args[1] == "pull" {
+        pull::pull_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
+        return Ok(());
+    }
 
     // `axon info <model>`, or just `axon <model>`.
-    let path = match args[1].as_str() {
+    let path = &model_arg(match args[1].as_str() {
         "info" if args.len() >= 3 => &args[2],
         "info" => fail("usage: axon info <model.gguf | checkpoint dir> [rope flags]"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
         // A lone argument is a model to summarize, unless it can't be one.
-        p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
+        p if args.len() == 2
+            && (p.ends_with(".gguf")
+                || std::path::Path::new(p).exists()
+                || pull::alias(p).is_some()) =>
+        {
             &args[1]
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, chat, serve, info, kernels)"
+            "unknown command '{c}' (commands: gen, logits, chat, serve, info, kernels, pull)"
         )),
-    };
+    });
 
     // --rope-scaling and friends, as gen takes them: the fingerprints
     // below are for the model as those flags run it.
@@ -523,7 +541,9 @@ fn open_draft_model(
     tok: &tokenizer::Tokenizer,
 ) -> Option<draft::DraftModel> {
     let mut path = path.or_else(draft::model_env).filter(|_| k > 0)?;
-    if path == "auto" {
+    if path != "auto" {
+        path = model_arg(&path);
+    } else {
         match draft::auto_path(model_path, m, tok) {
             Some(p) => {
                 eprintln!("axon: --draft-model auto: {p}");
@@ -738,7 +758,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             if cmd == "gen" { "-n 32" } else { "-k 10" }
         ));
     }
-    let (path, prompt) = (&args[2], &args[3]);
+    let (path, prompt) = (&model_arg(&args[2]), &args[3]);
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
     let mut max_draft = None;
@@ -1258,6 +1278,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
+    let path = &model_arg(path);
     let mut system = None;
     let mut no_think = false;
     let mut ctx = None;

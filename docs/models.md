@@ -86,6 +86,23 @@ architectures are refused with a message (roadmap). The pre-tokenizer must be on
 Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
 `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 
+### Getting models: `axon pull`
+
+`axon pull NAME` downloads a GGUF from Hugging Face into the models directory: by a short name
+(`axon pull --list`: about ten models for local coding agents, from qwen2.5-coder and qwen3 4B/8B/14B
+to llama3.1-8b, gemma3-4b, gpt-oss-20b and the 30B-A3B mixtures of experts), each a fixed file at a
+pinned commit with its SHA-256, or any single-file GGUF as `OWNER/REPO/FILE.gguf` (or the file's
+`https://huggingface.co/OWNER/REPO/resolve/main/FILE` URL), checked against the SHA-256 Hugging Face
+publishes for it (the Git LFS oid). No registry. The models directory is `$AXON_MODELS_DIR`, else
+`$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`; a file lands in
+`OWNER/REPO/FILE` under it. The bytes come through `curl` (HTTPS only, redirects included), are hashed
+as they arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256
+match (a mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends. Gated repos
+need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line). `gen`, `chat`,
+`serve` and `info` take a pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf`
+or its file name, wherever they take a path; a name not pulled yet says the command that pulls it.
+Split GGUFs (`-00001-of-0000N.gguf`) are refused: axon loads single files.
+
 ## Hardware
 
 ### CPU
