@@ -1,0 +1,8 @@
+[axon-run 01:29:43] submitted 1113-012943-23d6 by /home/haseeb/.cache/axon-wt-safeguards: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-gptoss.sh
+[axon-run 14:12:32] scope axon-job-1113-012943-23d6-1794597152.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 14:12:32] job 1113-012943-23d6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1113-012943-23d6-1794597152 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-gptoss.sh
+axon-q 14:12:32 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-safeguards/golden-diag/run-gptoss.sh
+{"model": "gpt-oss-20b-MXFP4.gguf", "verdict": "ERROR", "tokenize": null, "chat": null, "agree": null, "clear": 0, "max_dlp": null, "kl_mean": null, "limits": {}, "secs": 24.4, "problems": ["llama.cpp reference backend (/home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server, -ngl 99): llama-server exited 1"]}
+GOLDEN 1 models: pass 0, FAIL 0, ERROR 1, missing 0, llama-error 0
+regate gpt-oss rc=2
+[axon-run 14:12:57] exit 0 after 24.6s (host bella)

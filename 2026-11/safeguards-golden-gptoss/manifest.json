@@ -1,0 +1,29 @@
+{
+ "label": "safeguards-golden-gptoss",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-012943-23d6",
+   "name": "safeguards-golden-gptoss",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794597152.6009355,
+   "ended": 1794597181.3140407,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a479ee43537a405c6dcc464b51f429b8fe3573f950f1b8190441310a148bb7d9",
+   "log_bytes": 1348
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 14:13:02 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
