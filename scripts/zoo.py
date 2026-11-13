@@ -5,6 +5,18 @@
     scripts/zoo.py run --axon BIN --llama-server BIN --dir D [--models-dir M] [--out zoo.json]
                        [--device cpu] [--only SUBSTR] [--prompts N]
     scripts/zoo.py table zoo.json                the markdown table for docs/hardening.md
+    scripts/zoo.py audit-table LOG|zoo.json...   the compatibility-audit table (docs/log/2026-11-13-compat-audit.md)
+
+  --list FILE (fetch, run): a JSON list of {repo, file, sha256, expect, why, ...} instead of ZOO (the audit's
+  scripts/examples/compat-audit/ollama-top30.json); --set golden: the nightly golden-model set (GOLDEN below).
+  run --fetch-each: download each missing file just before it runs (sha256 checked), --delete-after removes it
+  after, and the next file downloads while one runs. --sparse-first: for an `expect: refuse` entry, first a sparse
+  file (the real GGUF header from an HTTP range request, holes to the full size): Axon's support check reads metadata
+  only, so a clean refusal needs no download; anything else (it runs, an unclear error) falls back to the full file
+  (--no-full-fetch: record `needs-full` instead). --chat adds, per runnable file: each engine's own chat prompt for 2
+  conversations (Axon's built-in format vs llama.cpp's --jinja rendering of the GGUF template): prompt token counts
+  and the greedy reply's characters in common; and the plain prompts' token ids (Axon's vs llama.cpp's tokenizer).
+  Every result is also printed as one `ZOO-RESULT {json}` line (a pod job's results come back through its log).
 
 For every file:
   1. `axon info`: rc and the first lines.
@@ -68,6 +80,29 @@ ZOO = [
     ("Qwen/Qwen3-0.6B-GGUF", "local:Qwen3-0.6B-Q8_0.gguf", "run", "Qwen official Qwen3 Q8_0"),
 ]
 
+ENTRIES = ZOO
+EXTRA = {}   # file -> the --list entry (sha256, bytes, rank, ollama, ...)
+
+
+def load_entries(a):
+    """--list FILE / --set golden: the entries to fetch and run instead of ZOO."""
+    global ENTRIES
+    src = getattr(a, "list", None)
+    if getattr(a, "set", None) == "golden":
+        src = src or os.path.join(HERE, "examples", "compat-audit", "ollama-top30.json")
+    if not src:
+        return
+    rows = json.load(open(src))
+    if getattr(a, "set", None) == "golden":
+        rows = [x for x in rows if x.get("golden")]
+    ENTRIES = []
+    for x in rows:
+        if not x.get("file"):
+            continue
+        ENTRIES.append((x["repo"], x["file"], x.get("expect", "run"), x.get("why", x.get("ollama", ""))))
+        EXTRA[x["file"]] = x
+
+
 GEN_PROMPT = "The history of the printing press begins"
 KL_MAX, TIE = 0.02, 0.1
 
@@ -79,6 +114,10 @@ def path_of(e, a):
 
 def fetch(a):
     os.makedirs(a.dir, exist_ok=True)
+    if EXTRA:
+        bad = [f"{e[1]}: {why}" for e in ENTRIES if not e[1].startswith("local:") for why in [fetch_one(a, e)] if why]
+        print("\n".join(bad) or "fetched")
+        return 1 if bad else 0
     for repo, f, _, _ in ZOO:
         if f.startswith("local:"):
             continue
@@ -104,7 +143,7 @@ def sha256(p):
 
 
 def gguf_meta(p, want=("general.quantization_version", "general.file_type", "tokenizer.ggml.pre",
-                        "general.name")):
+                        "general.name", "general.architecture", "tokenizer.ggml.model")):
     """GGUF version and a few metadata values, read from the header (arrays skipped)."""
     import struct
     out = {}
@@ -185,16 +224,32 @@ def gen_text(out):
     return out[len(GEN_PROMPT):] if out.startswith(GEN_PROMPT) else out
 
 
-def llama_side(a, model, ids_list):
-    """llama-server (CPU): top-K after each prompt + greedy 64 tokens after GEN ids. None if it can't load."""
+CHATS = [
+    [{"role": "system", "content": "You are a terse assistant."},
+     {"role": "user", "content": "Name three primary colors."}],
+    [{"role": "user", "content": "Write a haiku about autumn."},
+     {"role": "assistant", "content": "Leaves fall, red and gold."},
+     {"role": "user", "content": "Now one about winter."}],
+]
+
+
+def chat_text(j):
+    m = ((j.get("choices") or [{}])[0]).get("message") or {}
+    return (m.get("reasoning_content") or "") + (m.get("content") or "")
+
+
+def llama_side(a, model, ids_list, texts=None):
+    """llama-server (CPU): top-K after each prompt + greedy 64 tokens after GEN ids. None if it can't load.
+    texts (the prompts' text, as ids_list): llama.cpp's own token ids for them; with --chat its chat prompt (the
+    GGUF template, --jinja) and greedy reply for each of CHATS."""
     import socket
     import time
     port = LL.free_port()
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = os.path.dirname(a.llama_server) + ":" + env.get("LD_LIBRARY_PATH", "")
     log = open(os.path.join(a.work, os.path.basename(model) + ".llama.log"), "w")
-    srv = subprocess.Popen([a.llama_server, "-m", model, "--port", str(port), "-c", "2048", "-np", "1",
-                            "--no-warmup", "-ngl", "0", "-t", str(a.threads)],
+    srv = subprocess.Popen([a.llama_server, "-m", model, "--port", str(port), "-c", "4096", "-np", "1",
+                            "--no-warmup", "-ngl", str(getattr(a, "llama_ngl", 0)), "-t", str(a.threads), "--jinja"],
                            env=env, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
     try:
@@ -210,8 +265,8 @@ def llama_side(a, model, ids_list):
         else:
             return None, "llama-server not healthy"
 
-        def post(body):
-            req = urllib.request.Request(url + "/completion", json.dumps(body).encode(),
+        def post(body, path="/completion"):
+            req = urllib.request.Request(url + path, json.dumps(body).encode(),
                                          {"Content-Type": "application/json"})
             return json.load(urllib.request.urlopen(req, timeout=600))
         tops = []
@@ -221,7 +276,21 @@ def llama_side(a, model, ids_list):
             tops.append([[t["id"], t["logprob"]] for t in cp["top_logprobs"]][:20])
         g = post({"prompt": ids_list[-1], "n_predict": 64, "temperature": 0, "top_k": 1,
                   "cache_prompt": False, "ignore_eos": False})
-        return {"tops": tops, "gen": g.get("content", "")}, None
+        res = {"tops": tops, "gen": g.get("content", "")}
+        if texts:
+            res["ids"] = [post({"content": t, "add_special": True}, "/tokenize").get("tokens") for t in texts]
+        if getattr(a, "chat", False):
+            res["chat"] = []
+            for conv in CHATS:
+                c = {}
+                try:
+                    c["template"] = post({"messages": conv}, "/apply-template").get("prompt", "")
+                    j = post({"messages": conv, "temperature": 0, "max_tokens": 48, "seed": 0}, "/v1/chat/completions")
+                    c.update(prompt_tokens=(j.get("usage") or {}).get("prompt_tokens"), reply=chat_text(j))
+                except Exception as ex:  # noqa: BLE001
+                    c["error"] = repr(ex)[:200]
+                res["chat"].append(c)
+        return res, None
     finally:
         srv.terminate()
         srv.wait()
@@ -299,7 +368,7 @@ def one(a, e):
         ids_list.append(ids)
         tops.append(top)
     if len(ids_list) == len(prompts) + 1:
-        ll, why_not = llama_side(a, p, ids_list)
+        ll, why_not = llama_side(a, p, ids_list, prompts + [GEN_PROMPT])
         if ll is None:
             r["llama"] = why_not
         else:
@@ -326,9 +395,195 @@ def one(a, e):
             r["gen_common_chars"] = common_prefix(text, ll["gen"])
             if clear or r["kl_mean"] > KL_MAX:
                 r["drift"] = True
+            if ll.get("ids"):
+                same = [i for i, x in enumerate(ll["ids"]) if x == ids_list[i]]
+                r["tok_agree"] = f"{len(same)}/{len(ids_list)}"
+                r["tok_differ"] = [{"prompt": (prompts + [GEN_PROMPT])[i][:40], "axon": ids_list[i][:12],
+                                    "llama": (ll["ids"][i] or [])[:12]} for i in range(len(ids_list)) if i not in same][:3]
+            if "chat" in ll:
+                chat_compare(a, p, r, ll["chat"])
     r["problems"] = problems
     r["verdict"] = "BUG" if problems else ("drift" if r.get("drift") else ("match" if "top1" in r else "runs"))
     return r
+
+
+def axon_chat(a, p):
+    """axon serve on p: usage.prompt_tokens and the greedy reply for each of CHATS (None, why if it won't serve)."""
+    import time
+    port = LL.free_port()
+    log = open(os.path.join(a.work, os.path.basename(p) + ".serve.log"), "w")
+    srv = subprocess.Popen([a.axon, "serve", p, "--device", a.device or "cpu", "--port", str(port), "--ctx", "4096"],
+                           stdout=log, stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(1200):
+            if srv.poll() is not None:
+                return None, f"axon serve exited {srv.returncode}"
+            try:
+                with urllib.request.urlopen(url + "/health", timeout=2) as r:
+                    if r.status == 200:
+                        break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.5)
+        else:
+            return None, "axon serve not healthy"
+        out = []
+        for conv in CHATS:
+            body = {"messages": conv, "temperature": 0, "max_tokens": 48, "seed": 0}
+            req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
+                                         {"Content-Type": "application/json"})
+            try:
+                j = json.load(urllib.request.urlopen(req, timeout=600))
+                out.append({"prompt_tokens": (j.get("usage") or {}).get("prompt_tokens"), "reply": chat_text(j)})
+            except urllib.error.HTTPError as ex:
+                out.append({"error": f"{ex.code} {ex.read()[:200]!r}"})
+        return out, None
+    finally:
+        srv.terminate()
+        srv.wait()
+
+
+def chat_compare(a, p, r, lchat):
+    """Each engine's own chat prompt for CHATS: token counts and the greedy replies' characters in common."""
+    ax, why = axon_chat(a, p)
+    if ax is None:
+        r.setdefault("problems_chat", []).append(why)
+        r["chat"] = why
+        return
+    rows = []
+    for i, (x, y) in enumerate(zip(ax, lchat)):
+        rows.append({"axon_tokens": x.get("prompt_tokens"), "llama_tokens": y.get("prompt_tokens"),
+                     "common_chars": common_prefix(x.get("reply", ""), y.get("reply", "")),
+                     "axon_reply": x.get("reply", x.get("error", ""))[:120], "llama_reply": y.get("reply", y.get("error", ""))[:120],
+                     "llama_template": (y.get("template") or "")[:400]})
+    r["chat_rows"] = rows
+    r["chat_prompt_eq"] = f"{sum(1 for c in rows if c['axon_tokens'] is not None and c['axon_tokens'] == c['llama_tokens'])}/{len(rows)}"
+    r["chat_common_chars"] = [c["common_chars"] for c in rows]
+
+
+def hf_url(e):
+    return f"https://huggingface.co/{e[0]}/resolve/main/{e[1]}"
+
+
+def header_bytes(url, start=8 << 20):
+    """The GGUF header (metadata + tensor infos, up to the data's start) by HTTP range requests."""
+    import struct
+    n = start
+    while True:
+        req = urllib.request.Request(url, headers={"Range": f"bytes=0-{n - 1}", "User-Agent": "axon-zoo"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            buf = r.read()
+        try:
+            return buf[:gguf_data_start(buf)]
+        except (struct.error, IndexError, ValueError):
+            if len(buf) < n or n >= 256 << 20:
+                raise
+            n *= 4
+
+
+def gguf_data_start(b):
+    """Offset of the tensor data in a GGUF whose first bytes are b (ValueError/struct.error if b is too short)."""
+    import struct
+    if b[:4] != b"GGUF":
+        raise ValueError("not GGUF")
+    pos = 8
+    nt, nkv = struct.unpack_from("<QQ", b, pos)
+    pos += 16
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    align = 32
+
+    def s(pos):
+        n, = struct.unpack_from("<Q", b, pos)
+        if pos + 8 + n > len(b):
+            raise ValueError("short")
+        return b[pos + 8:pos + 8 + n].decode("utf-8", "replace"), pos + 8 + n
+
+    def val(t, pos):
+        if t == 8:
+            return s(pos)
+        if t == 9:
+            et, n = struct.unpack_from("<IQ", b, pos)
+            pos += 12
+            if et == 8:
+                for _ in range(n):
+                    _, pos = s(pos)
+                return None, pos
+            return None, pos + sizes[et] * n
+        v, = struct.unpack_from("<" + {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q",
+                                       11: "q", 12: "d"}[t], b, pos)
+        return v, pos + sizes[t]
+    for _ in range(nkv):
+        k, pos = s(pos)
+        t, = struct.unpack_from("<I", b, pos)
+        v, pos = val(t, pos + 4)
+        if k == "general.alignment":
+            align = v
+    for _ in range(nt):
+        _, pos = s(pos)
+        nd, = struct.unpack_from("<I", b, pos)
+        pos += 4 + 8 * nd + 4 + 8
+    if pos > len(b):
+        raise ValueError("short")
+    return (pos + align - 1) // align * align
+
+
+def sparse_check(a, e):
+    """A sparse copy of e (real header, holes to the full size) through axon gen: the clean refusal, or None."""
+    ex = EXTRA.get(e[1], {})
+    p = os.path.join(a.dir, "sparse-" + os.path.basename(e[1]))
+    r = {"repo": e[0], "file": os.path.basename(e[1]), "expect": e[2], "why": e[3], "sparse": True}
+    r.update({k: ex[k] for k in ("rank", "ollama", "size", "ollama_arch", "ollama_quant", "ollama_params") if k in ex})
+    try:
+        h = header_bytes(hf_url(e))
+    except Exception as x:  # noqa: BLE001
+        r.update(verdict="fetch-failed", problems=[f"header: {x!r}"[:200]])
+        return r, None
+    with open(p, "wb") as f:
+        f.write(h)
+    os.truncate(p, ex.get("bytes") or len(h))
+    try:
+        r["meta"] = gguf_meta(p)
+        rc, out, err = run([a.axon, "info", p])
+        m = re.search(r"types? [^\n]*", out + err)
+        r["types"] = m.group(0)[:200] if m else ""
+        grc, gout, gerr = run([a.axon, "gen", p, "Hi", "-n", "1", "--device", "cpu"], timeout=a.sparse_timeout)
+        msg = refusal_line(grc, gout, gerr)
+        r["sparse_rc"] = grc
+        if msg:
+            r.update(verdict="refused", refusal=msg, problems=[], size_mb=round((ex.get("bytes") or 0) / 1e6),
+                     sha256=ex.get("sha256"))
+            return r, msg
+        r["sparse_out"] = (gerr or gout).strip()[-300:]
+        return r, None
+    finally:
+        os.remove(p)
+
+
+def fetch_one(a, e):
+    """Download e to its path (sha256 checked against the list). -> None, or why it failed."""
+    p = path_of(e, a)
+    if os.path.exists(p):
+        return None
+    ex = EXTRA.get(e[1], {})
+    tmp = p + ".part"
+    rc = subprocess.run(["curl", "-sSfL", "-C", "-", "--retry", "5", "-o", tmp, hf_url(e)]).returncode
+    if rc != 0:
+        return f"curl rc {rc}"
+    if ex.get("sha256"):
+        h = hashlib.sha256()
+        with open(tmp, "rb") as fh:
+            for b in iter(lambda: fh.read(1 << 22), b""):
+                h.update(b)
+        if h.hexdigest() != ex["sha256"]:
+            os.remove(tmp)
+            return f"sha256 {h.hexdigest()[:12]} != {ex['sha256'][:12]}"
+        open(p + ".sha256", "w").write(f"{ex['sha256']}  {os.path.basename(p)}\n")
+    os.rename(tmp, p)
+    return None
+
+
+def emit(r):
+    print("ZOO-RESULT " + json.dumps(r), flush=True)
 
 
 def do_run(a):
@@ -337,19 +592,62 @@ def do_run(a):
     if os.path.exists(a.out) and a.resume:
         res = json.load(open(a.out))
     done = {x["file"] for x in res}
-    for e in ZOO:
-        if a.only and a.only not in e[1]:
-            continue
-        if os.path.basename(e[1].replace("local:", "")) in done:
-            continue
-        r = one(a, e)
+    todo = [e for e in ENTRIES if not (a.only and a.only not in e[1])
+            and os.path.basename(e[1].replace("local:", "")) not in done]
+    os.makedirs(a.dir, exist_ok=True)
+    pool = None
+    if a.fetch_each:
+        import concurrent.futures
+        pool = concurrent.futures.ThreadPoolExecutor(1)
+    futs = {}
+
+    def full(e):
+        return not (a.sparse_first and e[2] == "refuse") and not e[1].startswith("local:")
+
+    def prefetch(i):
+        for e in todo[i:]:
+            if full(e) and e[1] not in futs and not os.path.exists(path_of(e, a)):
+                futs[e[1]] = pool.submit(fetch_one, a, e)
+                return
+    for i, e in enumerate(todo):
+        r = None
+        if a.fetch_each and a.sparse_first and e[2] == "refuse" and not os.path.exists(path_of(e, a)):
+            r, msg = sparse_check(a, e)
+            if msg is None and r.get("verdict") != "fetch-failed":
+                if a.no_full_fetch:
+                    r.update(verdict="needs-full", problems=["not refused on its header"])
+                else:
+                    r = None  # not a clean refusal on its header: test the real file
+        if r is None:
+            if a.fetch_each and not os.path.exists(path_of(e, a)):
+                f = futs.pop(e[1], None) or pool.submit(fetch_one, a, e)
+                prefetch(i + 1)
+                why = f.result()
+                if why:
+                    r = {"repo": e[0], "file": os.path.basename(e[1]), "expect": e[2], "why": e[3],
+                         "verdict": "fetch-failed", "problems": [why]}
+            elif a.fetch_each:
+                prefetch(i + 1)
+            if r is None:
+                r = one(a, e)
+                ex = EXTRA.get(e[1], {})
+                r.update({k: ex[k] for k in ("rank", "ollama", "size", "ollama_arch", "ollama_quant", "ollama_params")
+                          if k in ex})
+                if a.delete_after and not e[1].startswith("local:"):
+                    for x in (path_of(e, a), path_of(e, a) + ".sha256"):
+                        if os.path.exists(x):
+                            os.remove(x)
         res.append(r)
+        emit(r)
         print(json.dumps({k: r.get(k) for k in ("file", "verdict", "top1", "kl_mean", "gen_common_chars",
-                                                 "refusal", "problems")}), flush=True)
+                                                 "tok_agree", "chat_prompt_eq", "refusal", "problems")}), flush=True)
         json.dump(res, open(a.out, "w"), indent=1)
+    if pool:
+        pool.shutdown()
     bugs = [x for x in res if x["verdict"] in ("BUG",)]
     print(f"ZOO {len(res)} files: " + ", ".join(f"{v} {sum(x['verdict'] == v for x in res)}"
-                                              for v in ("match", "drift", "runs", "refused", "BUG", "missing")))
+                                              for v in ("match", "drift", "runs", "refused", "BUG", "missing",
+                                                        "needs-full", "fetch-failed")))
     return 1 if bugs else 0
 
 
@@ -372,11 +670,95 @@ def table(a):
               f"{note.replace('|', '/')[:220]} |")
 
 
+FTYPE = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1", 10: "Q2_K", 11: "Q3_K_S",
+         12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 32: "BF16",
+         38: "MXFP4"}
+
+
+def load_results(paths):
+    """ZOO-RESULT lines from job logs, or zoo.json lists; the last record per file wins."""
+    out = {}
+    for p in paths:
+        txt = open(p, errors="replace").read()
+        if txt.lstrip().startswith("["):
+            for r in json.loads(txt):
+                out[r["file"]] = r
+            continue
+        for ln in txt.splitlines():
+            if ln.startswith("ZOO-RESULT "):
+                r = json.loads(ln[11:])
+                out[r["file"]] = r
+    return sorted(out.values(), key=lambda r: (r.get("rank") or 999, r["file"]))
+
+
+def fix_key(r):
+    """The fix a refusal asks for, normalized: what one change would unlock."""
+    m = r.get("refusal") or ""
+    m = re.sub(r"^axon: [^:]*\.gguf: ", "", m)
+    for rx in (r"architecture '[^']+'", r"pre-tokenizer \S+", r"type \S+ \(\d+\)", r"RoPE scaling \S+"):
+        x = re.search(rx, m)
+        if x:
+            return x.group(0)
+    return m[:80]
+
+
+def audit_table(a):
+    rs = load_results(a.paths)
+    print("| # | ollama model | HF file | arch | quant | Axon | prompt vs llama.cpp | greedy vs llama.cpp | reason / note |")
+    print("|---:|---|---|---|---|---|---|---|---|")
+    for r in rs:
+        m = r.get("meta") or {}
+        arch = m.get("architecture") or r.get("ollama_arch") or "?"
+        q = FTYPE.get(m.get("file_type"), str(m.get("file_type", "?")))
+        v = r.get("verdict")
+        axon = {"match": "runs", "drift": "runs", "runs": "runs"}.get(v, v)
+        prompt = greedy = ""
+        note = ""
+        if axon == "runs":
+            eq = r.get("chat_prompt_eq")
+            if eq:
+                rows = r.get("chat_rows") or []
+                prompt = "same" if eq == f"{len(rows)}/{len(rows)}" else "differs (" + ", ".join(
+                    f"{c['axon_tokens']} vs {c['llama_tokens']}" for c in rows if c["axon_tokens"] != c["llama_tokens"]) + " tokens)"
+            elif r.get("chat"):
+                prompt = "n/a: " + str(r["chat"])[:40]
+            if "top1" in r:
+                greedy = ("agrees" if v == "match" else "drifts") + f" (top-1 {r['top1']}, KL {r['kl_mean']:.1e}, " \
+                    f"{r.get('gen_common_chars', '?')} chars)"
+            elif r.get("llama"):
+                greedy = "n/a: " + r["llama"][:40]
+            if r.get("tok_agree") and not r["tok_agree"].startswith(str(r["tok_agree"].split("/")[1]) + "/"):
+                note += f"tokenizer differs on {r['tok_agree']} prompts agreeing; "
+        elif axon == "refused":
+            note = re.sub(r" \(supported: [^)]*\)", "", re.sub(r"^axon: [^:]*\.gguf: ", "", r.get("refusal") or ""))
+        note += "; ".join(r.get("problems") or [])
+        name = f"{r.get('ollama', '')} {r.get('size', '')}".strip()
+        print(f"| {r.get('rank', '')} | {name} | {r['repo']}/{r['file']} | {arch} | {q} | {axon} | {prompt} | {greedy} | "
+              f"{note.replace('|', '/')[:200]} |")
+    fixes = {}
+    for r in rs:
+        if r.get("verdict") == "refused":
+            fixes.setdefault(fix_key(r), []).append(r)
+    if fixes:
+        print("\n| fix (refusal) | models it unlocks | ollama pulls (M) | models |")
+        print("|---|---:|---:|---|")
+        for k, v in sorted(fixes.items(), key=lambda kv: (-len(kv[1]), -sum(x.get("pulls_m") or 0 for x in kv[1]))):
+            print(f"| {k} | {len(v)} | {sum(x.get('pulls_m') or 0 for x in v):.1f} | "
+                  f"{', '.join(x.get('ollama') or x['file'] for x in v)} |")
+    tally = {}
+    for r in rs:
+        tally[r.get("verdict")] = tally.get(r.get("verdict"), 0) + 1
+    print("\nverdicts: " + ", ".join(f"{k} {n}" for k, n in sorted(tally.items(), key=lambda kv: str(kv[0]))))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch")
     f.add_argument("--dir", required=True)
+    f.add_argument("--list")
+    f.add_argument("--set", choices=["golden"])
     r = sub.add_parser("run")
     r.add_argument("--axon", required=True)
     r.add_argument("--llama-server", required=True)
@@ -388,9 +770,23 @@ def main():
     r.add_argument("--prompts", type=int, default=16)
     r.add_argument("--threads", type=int, default=8)
     r.add_argument("--resume", action="store_true")
+    r.add_argument("--list")
+    r.add_argument("--set", choices=["golden"])
+    r.add_argument("--llama-ngl", type=int, default=0)
+    r.add_argument("--chat", action="store_true")
+    r.add_argument("--fetch-each", action="store_true")
+    r.add_argument("--delete-after", action="store_true")
+    r.add_argument("--sparse-first", action="store_true")
+    r.add_argument("--no-full-fetch", action="store_true")
+    r.add_argument("--sparse-timeout", type=int, default=60)
     t = sub.add_parser("table")
     t.add_argument("file")
+    at = sub.add_parser("audit-table")
+    at.add_argument("paths", nargs="+")
     a = ap.parse_args()
+    if a.cmd == "audit-table":
+        return audit_table(a)
+    load_entries(a)
     if a.cmd == "fetch":
         return fetch(a)
     if a.cmd == "table":
