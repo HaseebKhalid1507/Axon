@@ -271,8 +271,28 @@ pub struct Framing {
 impl Framing {
     /// Llama 3 if the vocabulary has its header tokens, else Mistral if it
     /// has `[INST]`/`[/INST]`, else ChatML; None if it has none of them (not
-    /// an instruct model).
+    /// an instruct model), or if its end-of-turn marker is past the
+    /// vocabulary (`bad_end` says which).
     pub fn new(tok: &Tokenizer) -> Option<Framing> {
+        Framing::detect(tok).ok()
+    }
+
+    /// Why `new` is None for a vocabulary that has a chat format: its
+    /// end-of-turn marker is past the vocabulary. DeepSeek's and Mistral's
+    /// is the metadata's `eos_token_id`, which the tokenizer doesn't check.
+    /// None if the vocabulary has no chat tokens (or has a framing).
+    pub fn bad_end(tok: &Tokenizer) -> Option<String> {
+        let (format, end) = Framing::detect(tok).err()??;
+        Some(format!(
+            "eos_token_id {end} is past the vocabulary ({} tokens), and {format} ends every \
+             turn with it",
+            tok.vocab_len()
+        ))
+    }
+
+    /// `new`'s work. Err(None): no chat tokens; Err(Some((the format, its
+    /// end marker))): the end marker past the vocabulary (`bad_end`).
+    fn detect(tok: &Tokenizer) -> Result<Framing, Option<(&'static str, u32)>> {
         let llama = (
             special(tok, "<|start_header_id|>"),
             special(tok, "<|end_header_id|>"),
@@ -344,13 +364,18 @@ impl Framing {
             {
                 (Format::ChatMl, im_start, im_end)
             } else {
-                return None;
+                return Err(None);
             };
         // DeepSeek's and Mistral's end-of-turn marker is EOS, from the file's
         // metadata (unchecked by the tokenizer): one past the vocabulary
         // would go into every prompt, where the model can't embed it.
         if im_end as usize >= tok.vocab_len() {
-            return None;
+            let name = match format {
+                Format::DeepSeek3 { .. } => "DeepSeek's chat format",
+                Format::Mistral { .. } => "Mistral's chat format",
+                _ => "its chat format",
+            };
+            return Err(Some((name, im_end)));
         }
         // Harmony's `<|end|>` ends a message (the reasoning), not the reply.
         let mut stop = vec![tok.eos()];
@@ -362,7 +387,7 @@ impl Framing {
         stop.sort_unstable();
         stop.dedup();
         let ds3 = matches!(format, Format::DeepSeek3 { .. });
-        Some(Framing {
+        Ok(Framing {
             format,
             im_start,
             im_end,
@@ -1488,12 +1513,13 @@ impl<'a, M: Lm> Chat<'a, M> {
         ctx: usize,
     ) -> Result<Chat<'a, M>, String> {
         let Some(fr) = fr else {
-            return Err(
-                "the vocabulary has no ChatML (<|im_start|>/<|im_end|>), Llama 3 \
+            return Err(match Framing::bad_end(tok) {
+                Some(why) => format!("no chat framing: {why}"),
+                None => "the vocabulary has no ChatML (<|im_start|>/<|im_end|>), Llama 3 \
                         (<|start_header_id|>/<|eot_id|>), Gemma (<start_of_turn>/<end_of_turn>) \
                         or Mistral ([INST]/[/INST]) chat tokens; chat needs an instruct model"
                     .into(),
-            );
+            });
         };
         // Qwen3's thinking blocks (DeepSeek V3.1's are its framing's).
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {

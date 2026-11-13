@@ -2442,10 +2442,12 @@ pub fn start(o: Opts) -> io::Result<Server> {
         eprintln!(
             "axon serve: {model_id} ({}) on http://{addr}/v1{}",
             l.banner,
-            if l.template.is_none() {
-                " (no chat tokens: /v1/completions only)"
-            } else {
-                ""
+            match &l.template {
+                Some(_) => String::new(),
+                None => match Framing::bad_end(l.tok) {
+                    Some(why) => format!(" (no chat framing: {why}: /v1/completions only)"),
+                    None => " (no chat tokens: /v1/completions only)".into(),
+                },
             }
         );
         eprintln!("axon serve: identity {}", l.identity.line());
@@ -2892,16 +2894,17 @@ fn run_request(
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return out.err(
-                    c,
-                    ApiError::new(
-                        400,
-                        "invalid_request_error",
+                let msg = match Framing::bad_end(m.tok) {
+                    Some(why) => {
+                        format!("this model has no chat framing: {why}; use /v1/completions")
+                    }
+                    None => {
                         "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma); use \
-                         /v1/completions",
-                    ),
-                    keep,
-                );
+                             /v1/completions"
+                            .into()
+                    }
+                };
+                return out.err(c, ApiError::new(400, "invalid_request_error", msg), keep);
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
             channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);

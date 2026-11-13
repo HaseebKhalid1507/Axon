@@ -300,7 +300,8 @@ fn family_with(name: &str, edit: impl FnOnce(&mut serde_json::Map<String, Value>
 /// writes `bos_token` (its `add_bos_token` is false), so the framing takes
 /// the id from the metadata, as the tokenizer would: none, never the broken
 /// id (the model can't embed it). And one whose `eos_token_id` is: DeepSeek
-/// ends every turn with EOS, so there is no chat framing (no panic either).
+/// ends every turn with EOS, so there is no chat framing (no panic either),
+/// and the reason names the id.
 #[test]
 fn broken_special_ids_never_reach_a_prompt() {
     let f = family_with("deepseek-r1-0528-qwen3", |meta| {
@@ -327,8 +328,21 @@ fn broken_special_ids_never_reach_a_prompt() {
     let tok = Tokenizer::from_gguf(&m);
     assert!(Framing::from_model(&tok, &m).is_none());
     assert!(Template::new(&tok, &m).is_none());
+    // The reason names the id (not "no chat tokens": it has them).
+    let why = Framing::bad_end(&tok).expect("a bad end marker is named");
+    assert!(
+        why.starts_with("eos_token_id 4000000 is past the vocabulary")
+            && why.contains("DeepSeek's chat format"),
+        "{why}"
+    );
     let net = Script::new(&tok);
-    assert!(Chat::with_framing(&net, &tok, Framing::from_model(&tok, &m), None, 64).is_err());
+    match Chat::with_framing(&net, &tok, Framing::from_model(&tok, &m), None, 64) {
+        Err(e) => assert_eq!(e, format!("no chat framing: {why}")),
+        Ok(_) => panic!("a chat with a broken eos_token_id"),
+    }
+    // A framed vocabulary has no bad end marker.
+    let ok = model(&family_with("deepseek-r1-0528-qwen3", |_| {}));
+    assert_eq!(Framing::bad_end(&Tokenizer::from_gguf(&ok)), None);
 }
 
 /// Message text that spells special tokens (each family's control tokens,
