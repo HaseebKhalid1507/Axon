@@ -1,5 +1,7 @@
 #!/bin/bash
 # compat_triage.sh GOLDEN_PY ZOO_PY LLAMA_LOGITS_PY LIST_JSON AXON LLAMA_CPU LLAMA_CUDA [MODELS_DIR]
+#   LLAMA_CPU / LLAMA_CUDA: a llama-server binary or its build's bin/ directory (two staged files both named
+#   llama-server would collide in axon-podjob's job dir; a directory is passed through as is).
 #
 # The 11-13 compatibility audit's two greedy drifts, bracketed by llama.cpp's own spread (docs/compat-audit-2026-11-13.md):
 # DeepSeek-R1-0528-Qwen3-8B (YaRN factor 4: KL 0.021, 2 flips at 0.20 nats) and Qwen2.5-7B (1 flip at 0.25 nats), with
@@ -13,7 +15,8 @@
 # into the job's work dir and deleted at the end; the other two are read from MODELS_DIR after a sha256 check.
 set -euo pipefail
 GOLDEN=$(readlink -f "$1"); ZOO=$(readlink -f "$2"); LLPY=$(readlink -f "$3"); LIST=$(readlink -f "$4")
-AX=$(readlink -f "$5"); LCPU=$(readlink -f "$6"); LCUDA=$(readlink -f "$7"); MD=${8:-$HOME/Projects/axon/models}
+AX=$(readlink -f "$5"); LCPU=$(readlink -f "$6"); LCUDA=$(readlink -f "$7"); MD=$(readlink -f "${8:-${AXON_MODELS:-models}}")
+[ -d "$LCPU" ] && LCPU=$LCPU/llama-server; [ -d "$LCUDA" ] && LCUDA=$LCUDA/llama-server
 W=$HOME/.cache/axon-eval/triage-$(date +%m%d-%H%M%S); mkdir -p "$W/models" "$W/oracle"
 trap 'rm -rf "$W/models"' EXIT
 cp "$ZOO" "$W/zoo.py"; cp "$LLPY" "$W/oracle/llama_logits.py"; cp "$GOLDEN" "$W/golden.py"
