@@ -1,0 +1,29 @@
+{
+ "label": "chat-5c00ed9-fast-rel-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-042851-16ef",
+   "name": "chat-5c00ed9-fast-rel-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-13_04:28.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "5c00ed9",
+   "binary": "axon-test-5c00ed9",
+   "started": 1794562131.871734,
+   "ended": 1794564017.1828628,
+   "attempts": 1,
+   "remote_job": "20261113-092859-axon-test-5c00ed9-125442",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f47bb4ac45c21d0fee36bce7450ca1eb17039381fb5a2888d17cf3c1b1140bdb",
+   "log_bytes": 59134
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 05:00:18 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
