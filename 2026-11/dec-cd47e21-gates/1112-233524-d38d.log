@@ -1,0 +1,189 @@
+[axon-run 23:35:24] submitted 1112-233524-d38d by /home/haseeb/.cache/axon-dec: /usr/bin/bash abshare.sh ./axon-base-213465a ./axon-cd47e21 ./serve_load.py 5
+[axon-run 23:42:08] timing job 1112-233524-d38d rerouted bella → 4090 by hand after 6m queued (dec-cd47e21-ab). Its numbers are 4090 numbers, not bella's.
+[axon-run 23:44:11] job 1112-233524-d38d -> pod1 [RTX 4090 sm_89 secure] (pod u2r5zm5bp0nvw0): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 11000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/abshare-377ad5aa4aa9 /usr/bin/bash abshare.sh ./axon-base-213465a ./axon-cd47e21 ./serve_load.py 5
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (034812e6456efe03786ebed8) + source of /home/haseeb/.cache/axon-podjob/abshare-377ad5aa4aa9 (delta vs 3 earlier upload(s) there)
+
+sent 3,805,189 bytes  received 113 bytes  217,445.83 bytes/sec
+total size is 24,615,455  speedup is 6.47
+
+sent 58 bytes  received 19 bytes  22.00 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261113-044439-bash-8752 on pod1 (GPU, 11000 MB)
+[axon-node 04:44:39] GPU EXCLUSIVE taken; job wants 11000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 04:44:39] run bash (034812e6456efe03786ebed8) as /home/haseeb/.cache/axon-podjob/abshare-377ad5aa4aa9 on aaefc182fbd3, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07, 1 MiB, 0 %
+== 04:44:39 round 0 (warm-up) main
+[axon-run 23:44:59] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 23:45:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 23:46:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+   main r0: KV RAM tier: none
+[axon-run 23:46:41] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:46:42 round 0 (warm-up) both
+   both r0: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:46:58 round 0 (warm-up) share
+   share r0: KV RAM tier: none, shared prefix KV pages on
+== 04:47:08 round 0 (warm-up) tier
+   tier r0: KV RAM tier 4.00 GiB (pinned by a thread from start)
+[axon-run 23:47:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:47:25 round 1 both gpu 0 %, 1 MiB
+   both r1: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:47:50 round 1 share gpu 0 %, 1 MiB
+   share r1: KV RAM tier: none, shared prefix KV pages on
+[axon-run 23:47:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:48:09 round 1 tier gpu 0 %, 1 MiB
+   tier r1: KV RAM tier 4.00 GiB (pinned by a thread from start)
+[axon-run 23:48:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:48:34 round 1 main gpu 0 %, 1 MiB
+   main r1: KV RAM tier: none
+[axon-run 23:48:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:48:54 round 2 share gpu 0 %, 1 MiB
+   share r2: KV RAM tier: none, shared prefix KV pages on
+== 04:49:13 round 2 tier gpu 0 %, 1 MiB
+   tier r2: KV RAM tier 4.00 GiB (pinned by a thread from start)
+[axon-run 23:49:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:49:38 round 2 main gpu 0 %, 1 MiB
+   main r2: KV RAM tier: none
+[axon-run 23:49:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:49:58 round 2 both gpu 0 %, 1 MiB
+   both r2: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:50:23 round 3 tier gpu 0 %, 1 MiB
+   tier r3: KV RAM tier 4.00 GiB (pinned by a thread from start)
+[axon-run 23:50:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:50:47 round 3 main gpu 0 %, 1 MiB
+   main r3: KV RAM tier: none
+[axon-run 23:51:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:51:07 round 3 both gpu 0 %, 1 MiB
+   both r3: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:51:32 round 3 share gpu 0 %, 1 MiB
+   share r3: KV RAM tier: none, shared prefix KV pages on
+[axon-run 23:51:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:51:51 round 4 main gpu 0 %, 1 MiB
+   main r4: KV RAM tier: none
+== 04:52:10 round 4 both gpu 0 %, 1 MiB
+[axon-run 23:52:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+   both r4: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:52:36 round 4 share gpu 0 %, 1 MiB
+   share r4: KV RAM tier: none, shared prefix KV pages on
+[axon-run 23:52:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:52:56 round 4 tier gpu 0 %, 1 MiB
+   tier r4: KV RAM tier 4.00 GiB (pinned by a thread from start)
+[axon-run 23:53:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+== 04:53:20 round 5 both gpu 0 %, 1 MiB
+   both r5: KV RAM tier 4.00 GiB (pinned by a thread from start), shared prefix KV pages on
+== 04:53:45 round 5 share gpu 0 %, 1 MiB
+   share r5: KV RAM tier: none, shared prefix KV pages on
+== 04:54:05 round 5 tier gpu 0 %, 1 MiB
+   tier r5: KV RAM tier 4.00 GiB (pinned by a thread from start)
+== 04:54:29 round 5 main gpu 0 %, 1 MiB
+   main r5: KV RAM tier: none
+RUN warm main r0 agg_tok_s=167.0 itl_ms_p50=5.41 itl_ms_p99=5.61 ttft_ms_p50=42.1 errors=[]
+RUN warm main r0 c16 agg_tok_s=1525.9 itl_ms_p50=8.27 itl_ms_p99=69.76 ttft_ms_p50=139.2 errors=[]
+RUN warm both r0 agg_tok_s=17.1 itl_ms_p50=5.42 itl_ms_p99=9.58 ttft_ms_p50=3409.0 errors=[]
+RUN warm both r0 c16 agg_tok_s=1494.7 itl_ms_p50=8.39 itl_ms_p99=71.55 ttft_ms_p50=143.6 errors=[]
+RUN warm share r0 agg_tok_s=166.5 itl_ms_p50=5.41 itl_ms_p99=5.52 ttft_ms_p50=43.1 errors=[]
+RUN warm share r0 c16 agg_tok_s=1525.9 itl_ms_p50=8.27 itl_ms_p99=69.97 ttft_ms_p50=139.6 errors=[]
+RUN warm tier r0 agg_tok_s=17.1 itl_ms_p50=5.42 itl_ms_p99=5.62 ttft_ms_p50=3403.2 errors=[]
+RUN warm tier r0 c16 agg_tok_s=1493.8 itl_ms_p50=8.39 itl_ms_p99=71.39 ttft_ms_p50=142.1 errors=[]
+RUN warm both r1 agg_tok_s=17.4 itl_ms_p50=5.42 itl_ms_p99=5.57 ttft_ms_p50=3333.7 errors=[]
+RUN both r1 c1 agg_tok_s=175.3 itl_ms_p50=5.41 itl_ms_p99=5.56 ttft_ms_p50=41.9 errors=[]
+RUN both r1 c8 agg_tok_s=1021.3 itl_ms_p50=7.19 itl_ms_p99=10.41 ttft_ms_p50=151.4 errors=[]
+RUN both r1 c16 agg_tok_s=1509.0 itl_ms_p50=8.39 itl_ms_p99=71.37 ttft_ms_p50=142.8 errors=[]
+RUN warm share r1 agg_tok_s=166.9 itl_ms_p50=5.41 itl_ms_p99=5.49 ttft_ms_p50=42.1 errors=[]
+RUN share r1 c1 agg_tok_s=175.3 itl_ms_p50=5.41 itl_ms_p99=5.53 ttft_ms_p50=42.0 errors=[]
+RUN share r1 c8 agg_tok_s=1033.2 itl_ms_p50=7.14 itl_ms_p99=8.25 ttft_ms_p50=148.9 errors=[]
+RUN share r1 c16 agg_tok_s=1544.0 itl_ms_p50=8.29 itl_ms_p99=70.44 ttft_ms_p50=140.2 errors=[]
+RUN warm tier r1 agg_tok_s=17.3 itl_ms_p50=5.43 itl_ms_p99=5.58 ttft_ms_p50=3353.5 errors=[]
+RUN tier r1 c1 agg_tok_s=175.5 itl_ms_p50=5.41 itl_ms_p99=5.52 ttft_ms_p50=41.4 errors=[]
+RUN tier r1 c8 agg_tok_s=1021.2 itl_ms_p50=7.19 itl_ms_p99=9.03 ttft_ms_p50=151.2 errors=[]
+RUN tier r1 c16 agg_tok_s=1511.5 itl_ms_p50=8.39 itl_ms_p99=72.02 ttft_ms_p50=143.6 errors=[]
+RUN warm main r1 agg_tok_s=166.6 itl_ms_p50=5.42 itl_ms_p99=5.49 ttft_ms_p50=42.3 errors=[]
+RUN main r1 c1 agg_tok_s=175.1 itl_ms_p50=5.42 itl_ms_p99=5.52 ttft_ms_p50=42.2 errors=[]
+RUN main r1 c8 agg_tok_s=1033.3 itl_ms_p50=7.15 itl_ms_p99=8.42 ttft_ms_p50=148.7 errors=[]
+RUN main r1 c16 agg_tok_s=1544.3 itl_ms_p50=8.27 itl_ms_p99=70.52 ttft_ms_p50=140.5 errors=[]
+RUN warm share r2 agg_tok_s=166.1 itl_ms_p50=5.42 itl_ms_p99=6.04 ttft_ms_p50=42.9 errors=[]
+RUN share r2 c1 agg_tok_s=175.1 itl_ms_p50=5.41 itl_ms_p99=6.13 ttft_ms_p50=42.3 errors=[]
+RUN share r2 c8 agg_tok_s=1031.4 itl_ms_p50=7.16 itl_ms_p99=8.25 ttft_ms_p50=147.9 errors=[]
+RUN share r2 c16 agg_tok_s=1542.0 itl_ms_p50=8.28 itl_ms_p99=70.8 ttft_ms_p50=141.2 errors=[]
+RUN warm tier r2 agg_tok_s=17.5 itl_ms_p50=5.43 itl_ms_p99=5.61 ttft_ms_p50=3315.2 errors=[]
+RUN tier r2 c1 agg_tok_s=175.2 itl_ms_p50=5.42 itl_ms_p99=5.53 ttft_ms_p50=42.1 errors=[]
+RUN tier r2 c8 agg_tok_s=1012.0 itl_ms_p50=7.19 itl_ms_p99=9.82 ttft_ms_p50=150.7 errors=[]
+RUN tier r2 c16 agg_tok_s=1483.3 itl_ms_p50=8.42 itl_ms_p99=71.51 ttft_ms_p50=143.6 errors=[]
+RUN warm main r2 agg_tok_s=166.6 itl_ms_p50=5.41 itl_ms_p99=5.53 ttft_ms_p50=42.6 errors=[]
+RUN main r2 c1 agg_tok_s=175.1 itl_ms_p50=5.42 itl_ms_p99=5.72 ttft_ms_p50=42.2 errors=[]
+RUN main r2 c8 agg_tok_s=1031.5 itl_ms_p50=7.16 itl_ms_p99=8.06 ttft_ms_p50=148.2 errors=[]
+RUN main r2 c16 agg_tok_s=1542.2 itl_ms_p50=8.29 itl_ms_p99=70.51 ttft_ms_p50=140.5 errors=[]
+RUN warm both r2 agg_tok_s=17.9 itl_ms_p50=5.46 itl_ms_p99=5.52 ttft_ms_p50=3229.7 errors=[]
+RUN both r2 c1 agg_tok_s=175.4 itl_ms_p50=5.41 itl_ms_p99=5.51 ttft_ms_p50=41.5 errors=[]
+RUN both r2 c8 agg_tok_s=1020.3 itl_ms_p50=7.18 itl_ms_p99=10.17 ttft_ms_p50=151.2 errors=[]
+RUN both r2 c16 agg_tok_s=1509.0 itl_ms_p50=8.41 itl_ms_p99=71.86 ttft_ms_p50=143.6 errors=[]
+RUN warm tier r3 agg_tok_s=18.1 itl_ms_p50=5.42 itl_ms_p99=5.58 ttft_ms_p50=3200.0 errors=[]
+RUN tier r3 c1 agg_tok_s=175.1 itl_ms_p50=5.42 itl_ms_p99=6.18 ttft_ms_p50=42.4 errors=[]
+RUN tier r3 c8 agg_tok_s=1019.6 itl_ms_p50=7.19 itl_ms_p99=10.27 ttft_ms_p50=151.2 errors=[]
+RUN tier r3 c16 agg_tok_s=1507.3 itl_ms_p50=8.41 itl_ms_p99=71.89 ttft_ms_p50=143.0 errors=[]
+RUN warm main r3 agg_tok_s=166.0 itl_ms_p50=5.41 itl_ms_p99=5.78 ttft_ms_p50=43.6 errors=[]
+RUN main r3 c1 agg_tok_s=174.9 itl_ms_p50=5.42 itl_ms_p99=5.93 ttft_ms_p50=42.5 errors=[]
+RUN main r3 c8 agg_tok_s=1032.9 itl_ms_p50=7.15 itl_ms_p99=8.62 ttft_ms_p50=148.3 errors=[]
+RUN main r3 c16 agg_tok_s=1542.8 itl_ms_p50=8.28 itl_ms_p99=70.51 ttft_ms_p50=140.8 errors=[]
+RUN warm both r3 agg_tok_s=17.9 itl_ms_p50=5.43 itl_ms_p99=5.55 ttft_ms_p50=3223.7 errors=[]
+RUN both r3 c1 agg_tok_s=175.0 itl_ms_p50=5.42 itl_ms_p99=6.13 ttft_ms_p50=42.2 errors=[]
+RUN both r3 c8 agg_tok_s=1020.5 itl_ms_p50=7.19 itl_ms_p99=10.3 ttft_ms_p50=150.6 errors=[]
+RUN both r3 c16 agg_tok_s=1506.6 itl_ms_p50=8.41 itl_ms_p99=71.9 ttft_ms_p50=144.2 errors=[]
+RUN warm share r3 agg_tok_s=166.7 itl_ms_p50=5.41 itl_ms_p99=5.57 ttft_ms_p50=42.2 errors=[]
+RUN share r3 c1 agg_tok_s=175.1 itl_ms_p50=5.42 itl_ms_p99=5.52 ttft_ms_p50=42.3 errors=[]
+RUN share r3 c8 agg_tok_s=1031.6 itl_ms_p50=7.15 itl_ms_p99=8.32 ttft_ms_p50=149.3 errors=[]
+RUN share r3 c16 agg_tok_s=1541.6 itl_ms_p50=8.29 itl_ms_p99=70.88 ttft_ms_p50=141.2 errors=[]
+RUN warm main r4 agg_tok_s=166.2 itl_ms_p50=5.41 itl_ms_p99=6.18 ttft_ms_p50=42.9 errors=[]
+RUN main r4 c1 agg_tok_s=174.9 itl_ms_p50=5.42 itl_ms_p99=5.54 ttft_ms_p50=42.3 errors=[]
+RUN main r4 c8 agg_tok_s=1030.3 itl_ms_p50=7.16 itl_ms_p99=9.12 ttft_ms_p50=149.1 errors=[]
+RUN main r4 c16 agg_tok_s=1539.0 itl_ms_p50=8.3 itl_ms_p99=70.84 ttft_ms_p50=140.8 errors=[]
+RUN warm both r4 agg_tok_s=14.7 itl_ms_p50=5.45 itl_ms_p99=5.78 ttft_ms_p50=4014.1 errors=[]
+RUN both r4 c1 agg_tok_s=174.5 itl_ms_p50=5.42 itl_ms_p99=5.66 ttft_ms_p50=43.6 errors=[]
+RUN both r4 c8 agg_tok_s=1013.4 itl_ms_p50=7.2 itl_ms_p99=9.21 ttft_ms_p50=121.3 errors=[]
+RUN both r4 c16 agg_tok_s=1481.2 itl_ms_p50=8.44 itl_ms_p99=71.86 ttft_ms_p50=143.8 errors=[]
+RUN warm share r4 agg_tok_s=166.0 itl_ms_p50=5.42 itl_ms_p99=5.59 ttft_ms_p50=43.3 errors=[]
+RUN share r4 c1 agg_tok_s=175.0 itl_ms_p50=5.42 itl_ms_p99=5.52 ttft_ms_p50=42.4 errors=[]
+RUN share r4 c8 agg_tok_s=1032.2 itl_ms_p50=7.15 itl_ms_p99=8.02 ttft_ms_p50=149.6 errors=[]
+RUN share r4 c16 agg_tok_s=1544.4 itl_ms_p50=8.28 itl_ms_p99=70.96 ttft_ms_p50=140.8 errors=[]
+RUN warm tier r4 agg_tok_s=18.0 itl_ms_p50=5.42 itl_ms_p99=8.27 ttft_ms_p50=3216.7 errors=[]
+RUN tier r4 c1 agg_tok_s=174.8 itl_ms_p50=5.42 itl_ms_p99=5.53 ttft_ms_p50=43.1 errors=[]
+RUN tier r4 c8 agg_tok_s=1021.3 itl_ms_p50=7.19 itl_ms_p99=9.02 ttft_ms_p50=150.5 errors=[]
+RUN tier r4 c16 agg_tok_s=1509.3 itl_ms_p50=8.41 itl_ms_p99=71.71 ttft_ms_p50=143.2 errors=[]
+RUN warm both r5 agg_tok_s=16.2 itl_ms_p50=5.43 itl_ms_p99=12.58 ttft_ms_p50=3598.4 errors=[]
+RUN both r5 c1 agg_tok_s=175.1 itl_ms_p50=5.41 itl_ms_p99=5.58 ttft_ms_p50=42.7 errors=[]
+RUN both r5 c8 agg_tok_s=1020.5 itl_ms_p50=7.19 itl_ms_p99=9.87 ttft_ms_p50=150.5 errors=[]
+RUN both r5 c16 agg_tok_s=1505.7 itl_ms_p50=8.43 itl_ms_p99=71.84 ttft_ms_p50=142.8 errors=[]
+RUN warm share r5 agg_tok_s=165.9 itl_ms_p50=5.41 itl_ms_p99=5.58 ttft_ms_p50=43.9 errors=[]
+RUN share r5 c1 agg_tok_s=175.0 itl_ms_p50=5.42 itl_ms_p99=5.55 ttft_ms_p50=42.2 errors=[]
+RUN share r5 c8 agg_tok_s=1032.9 itl_ms_p50=7.15 itl_ms_p99=8.2 ttft_ms_p50=149.0 errors=[]
+RUN share r5 c16 agg_tok_s=1544.8 itl_ms_p50=8.27 itl_ms_p99=70.46 ttft_ms_p50=140.6 errors=[]
+RUN warm tier r5 agg_tok_s=18.1 itl_ms_p50=5.43 itl_ms_p99=5.54 ttft_ms_p50=3192.7 errors=[]
+RUN tier r5 c1 agg_tok_s=175.0 itl_ms_p50=5.42 itl_ms_p99=5.6 ttft_ms_p50=42.4 errors=[]
+RUN tier r5 c8 agg_tok_s=1021.3 itl_ms_p50=7.19 itl_ms_p99=9.29 ttft_ms_p50=151.0 errors=[]
+RUN tier r5 c16 agg_tok_s=1505.4 itl_ms_p50=8.42 itl_ms_p99=72.08 ttft_ms_p50=143.4 errors=[]
+RUN warm main r5 agg_tok_s=165.9 itl_ms_p50=5.42 itl_ms_p99=7.01 ttft_ms_p50=43.6 errors=[]
+RUN main r5 c1 agg_tok_s=174.9 itl_ms_p50=5.42 itl_ms_p99=5.52 ttft_ms_p50=42.0 errors=[]
+RUN main r5 c8 agg_tok_s=1032.0 itl_ms_p50=7.16 itl_ms_p99=8.01 ttft_ms_p50=152.2 errors=[]
+RUN main r5 c16 agg_tok_s=1539.5 itl_ms_p50=8.29 itl_ms_p99=70.85 ttft_ms_p50=141.3 errors=[]
+cell  metric       main med [min-max]         both med [min-max]         both/main  share med [min-max]        share/main tier med [min-max]         tier/main 
+c1    agg_tok_s       174.90 [174.90-175.10]        175.10 [174.50-175.40]     1.001 ok    175.10 [175.00-175.30]     1.001 ok    175.10 [174.80-175.50]     1.001 ok
+c1    itl_ms_p99        5.54 [5.52-5.93]          5.58 [5.51-6.13]     1.007 ok      5.53 [5.52-6.13]     0.998 ok      5.53 [5.52-6.18]     0.998 ok
+c1    itl_ms_p50        5.42 [5.42-5.42]          5.41 [5.41-5.42]     0.998      5.42 [5.41-5.42]     1.000      5.42 [5.41-5.42]     1.000
+c1    ttft_ms_p50      42.20 [42.00-42.50]         42.20 [41.50-43.60]     1.000     42.30 [42.00-42.40]     1.002     42.40 [41.40-43.10]     1.005
+c8    agg_tok_s      1032.00 [1030.30-1033.30]       1020.50 [1013.40-1021.30]     0.989 ok   1032.20 [1031.40-1033.20]     1.000 ok   1021.20 [1012.00-1021.30]     0.990 ok
+c8    itl_ms_p99        8.42 [8.01-9.12]         10.17 [9.21-10.41]     1.208 FAIL      8.25 [8.02-8.32]     0.980 ok      9.29 [9.02-10.27]     1.103 FAIL
+c8    itl_ms_p50        7.16 [7.15-7.16]          7.19 [7.18-7.20]     1.004      7.15 [7.14-7.16]     0.999      7.19 [7.19-7.19]     1.004
+c8    ttft_ms_p50     148.70 [148.20-152.20]        150.60 [121.30-151.40]     1.013    149.00 [147.90-149.60]     1.002    151.00 [150.50-151.20]     1.015
+c16   agg_tok_s      1542.20 [1539.00-1544.30]       1506.60 [1481.20-1509.00]     0.977 FAIL   1544.00 [1541.60-1544.80]     1.001 ok   1507.30 [1483.30-1511.50]     0.977 FAIL
+c16   itl_ms_p99       70.52 [70.51-70.85]         71.86 [71.37-71.90]     1.019 ok     70.80 [70.44-70.96]     1.004 ok     71.89 [71.51-72.08]     1.019 ok
+c16   itl_ms_p50        8.29 [8.27-8.30]          8.41 [8.39-8.44]     1.014      8.28 [8.27-8.29]     0.999      8.41 [8.39-8.42]     1.014
+c16   ttft_ms_p50     140.80 [140.50-141.30]        143.60 [142.80-144.20]     1.020    140.80 [140.20-141.20]     1.000    143.40 [143.00-143.60]     1.018
+ABSHARE CLAUSES both: FAIL both c8 itl_ms_p99 1.208; both c16 agg_tok_s 0.977
+ABSHARE CLAUSES share: PASS
+ABSHARE CLAUSES tier: FAIL tier c8 itl_ms_p99 1.103; tier c16 agg_tok_s 0.977
+ABSHARE-DONE 88 runs
+[axon-node 04:54:49] exit 0 after 609.7s
+[axon-node 04:54:49] peak RSS 4342 MB (job process tree PSS, 2 s samples x298)
+[axon-run 23:54:53] exit 0 after 641.4s (host pod1)
+[axon-run 23:54:53] FOREIGN_GPU max=0% mean=0.0% samples=18
+[axon-run 23:54:53] TIMING CLASS: ran on pod1 (4090) (ran on 4090: bella reroute; not comparable to bella numbers)
