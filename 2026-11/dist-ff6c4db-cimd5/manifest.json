@@ -1,0 +1,29 @@
+{
+ "label": "dist-ff6c4db-cimd5",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-005958-caad",
+   "name": "dist-ff6c4db-cimd5",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "ff6c4db",
+   "binary": "bash",
+   "started": 1794553634.3059218,
+   "ended": 1794553926.5626783,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6cf264c70cbfdb44de9eba7e27c4d583994a547a54c71127211d0367b718b27a",
+   "log_bytes": 5330
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:12:08 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
