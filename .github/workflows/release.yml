@@ -128,7 +128,7 @@ jobs:
           test -f home/.local/share/doc/axon/THIRD_PARTY_LICENSES.txt
           mkdir bad && cp dist/* bad/ && printf x >> bad/axon-x86_64-linux.tar.gz
           if AXON_INSTALL_URL="file://$PWD/bad" sh install.sh; then echo "installed a tampered tarball"; exit 1; fi
-      - name: smoke, no GPU (the installed binary as a user runs it: axon pull, then gen on the CPU)
+      - name: 'smoke, no GPU: the installed binary as a user runs it (axon pull, then gen on the CPU)'
         run: |
           export HOME=$PWD/home PATH=$PWD/home/.local/bin:$PATH
           axon pull qwen2.5-0.5b
