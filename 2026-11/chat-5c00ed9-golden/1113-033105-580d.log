@@ -1,0 +1,26 @@
+[axon-run 03:31:05] submitted 1113-033105-580d by /home/haseeb: /usr/bin/bash golden-top10.sh ./golden-fddac98.py ./ollama-top30.json ./axon-golden-75a33ef ./llama-b11580-bin-ubuntu-x64.tar.gz ./llama-server
+[axon-run 03:41:55] job 1113-033105-580d -> pod2 [RTX 4090 sm_89 secure] (pod hqwgkemb0h5vhp): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod2 --vram 16000 --src /home/haseeb/.cache/axon-podjob/golden-top10-b5c09f77ad36 /usr/bin/bash golden-top10.sh ./golden-fddac98.py ./ollama-top30.json ./axon-golden-75a33ef ./llama-b11580-bin-ubuntu-x64.tar.gz ./llama-server
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (a236ac95ffd3114c1c172281) + source of /home/haseeb/.cache/axon-podjob/golden-top10-b5c09f77ad36 (delta vs 1 earlier upload(s) there)
+
+sent 68,985,106 bytes  received 187 bytes  304,570.83 bytes/sec
+total size is 110,746,104  speedup is 1.61
+
+sent 186 bytes  received 30,324 bytes  61,020.00 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261113-084545-bash-7226 on pod2 (GPU, 16000 MB)
+[axon-node 08:45:45] GPU slot taken; job wants 16000 MB; nvidia-smi used/total 420/24564 MB; sharing with 20261113-084151-axon-test-54f1005-1008 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 08:45:45] run bash (a236ac95ffd3114c1c172281) as /home/haseeb/.cache/axon-podjob/golden-top10-b5c09f77ad36 on 2679e3cf136e, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23664 MB of 24564 (used 420); GPU processes pid:MB 1023:410
+golden-top10: libcudart.so.12 libcublas.so.12 missing: pip wheels
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+golden-top10: host 2679e3cf136e threads 128 axon ba69f03ec0fa llama version: 0.6.0-dev (build 11580, commit 4413a1924) ref /root/axon-node/store/a236ac95ffd3114c1c172281/tree/llama-server
+NVIDIA GeForce RTX 4090, 595.91.07, 24564 MiB
+  GOLDEN 1 models: pass 0, FAIL 0, ERROR 0, missing 0, llama-error 1
+GOLDEN-MODEL llama3.1 Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf rc=2 llama-error chat=None at= axon_len= llama_len= (971 s)
+| Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf | llama-error | / |  | / | 0 (0) |  () |  () |
+GOLDEN-JSON llama3.1 {"axon": "/root/axon-node/store/a236ac95ffd3114c1c172281/tree/axon-golden-75a33ef", "axon_version": "axon 0.1.0", "llama_server": "/root/axon-node/store/a236ac95ffd3114c1c172281/tree/gw/llama/llama-b11580/llama-server", "llama_version": ["version: 0.6.0-dev (build 11580, commit 4413a1924)", "built with GNU 11.4.0 for Linux x86_64"], "device": "cuda", "n": 64, "started": "2026-11-13 08:46:00", "models": [{"model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", "checks": {}, "problems": ["llama.cpp: timed out"], "size_mb": 4921, "verdict": "llama-error", "secs": 971.1}]}
+golden-top10: DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf downloaded in 34 s
+[axon-run 04:04:25] signal 15: stopping the job
+
+axon-remote: signal 15, killing remote job 20261113-084545-bash-7226
+[axon-run 04:04:32] exit 130 after 1356.8s (host pod2)
