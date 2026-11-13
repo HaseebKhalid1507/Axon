@@ -1,0 +1,49 @@
+{
+ "label": "safeguards-292018f-golden",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1112-232326-f651",
+   "name": "safeguards-292018f-golden-cpu",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "292018f",
+   "binary": "python3",
+   "started": 1794548683.070305,
+   "ended": 1794548700.774083,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f0fc6ee1df0a22b77ac89fff35873b672b4bc9b65b0c221b5cd3500a095f1431",
+   "log_bytes": 2084
+  },
+  {
+   "job": "1112-230701-3acb",
+   "name": "safeguards-292018f-golden-smoke",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "292018f",
+   "binary": "python3",
+   "started": 1794548758.4381773,
+   "ended": 1794548803.895302,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "467e9cb8b7d0b1574ea0e6ddb739e3f98cfbfe30977877265e9240becec01196",
+   "log_bytes": 2466
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 00:46:45 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
