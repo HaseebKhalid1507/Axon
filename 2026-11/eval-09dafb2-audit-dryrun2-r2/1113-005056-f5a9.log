@@ -1,0 +1,22 @@
+[axon-run 00:50:56] submitted 1113-005056-f5a9 by /home/haseeb/.cache/axon-wt-eval: /usr/bin/bash compat_audit.sh ./zoo.py ./llama_logits.py ./dryrun2.json ./axon-3014eeb ./llama-b11580-bin-ubuntu-x64.tar.gz --device cpu --chat --fetch-each --delete-after --sparse-first --prompts 8
+[axon-run 00:50:59] job 1113-005056-f5a9 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/compat_audit-f1a3f61a0065 --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash compat_audit.sh ./zoo.py ./llama_logits.py ./dryrun2.json ./axon-3014eeb ./llama-b11580-bin-ubuntu-x64.tar.gz --device cpu --chat --fetch-each --delete-after --sparse-first --prompts 8 --test-threads 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (d142fad12a80c679286881d2) + source of /home/haseeb/.cache/axon-podjob/compat_audit-f1a3f61a0065
+
+sent 21,516,738 bytes  received 163 bytes  8,606,760.40 bytes/sec
+total size is 30,070,061  speedup is 1.40
+
+sent 169 bytes  received 35 bytes  408.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261113-005105-bash-2371877 on jade (CPU-only)
+[axon-node 00:51:05] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 00:51:05] run bash (d142fad12a80c679286881d2) as /home/haseeb/.cache/axon-podjob/compat_audit-f1a3f61a0065 on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 00:51:05] memory cap (scope MemoryMax) 2780 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 00:51:05] MemAvailable 4316 MB, load ['1.55', '0.96', '0.85']; nice -n 19 ionice -c3 taskset -c 0-7
+compat_audit: host jade work /home/haseeb/.cache/axon-eval/audit-run/1113-005105 cpus 8 ram 7G disk 80G free
+compat_audit: gpu NVIDIA GeForce GTX 1050, 3072 MiB; axon cd8677999905; version: 0.6.0-dev (build 11580, commit 4413a1924)
+usage: zoo.py [-h] {fetch,run,table,audit-table} ...
+zoo.py: error: unrecognized arguments: --test-threads 1
+[axon-node 00:51:09] exit 2 after 3.5s; lowest MemAvailable seen 4259 MB
+[axon-node 00:51:09] peak RSS 0 MB (job process tree PSS, 2 s samples x1)
+[axon-run 00:51:10] exit 2 after 10.6s (host jade)
