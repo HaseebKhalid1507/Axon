@@ -127,6 +127,16 @@ jobs:
           test -f home/.local/share/doc/axon/THIRD_PARTY_LICENSES.txt
           mkdir bad && cp dist/* bad/ && printf x >> bad/axon-x86_64-linux.tar.gz
           if AXON_INSTALL_URL="file://$PWD/bad" sh install.sh; then echo "installed a tampered tarball"; exit 1; fi
+      - name: smoke, no GPU (the installed binary as a user runs it: axon pull, then gen on the CPU)
+        run: |
+          export HOME=$PWD/home PATH=$PWD/home/.local/bin:$PATH
+          axon pull qwen2.5-0.5b
+          axon gen qwen2.5-0.5b "The capital of France is" -n 16 | tee gen.txt
+          test -s gen.txt
+          # --device cuda without a GPU: refused with a message, not a crash.
+          if axon gen qwen2.5-0.5b Hi -n 2 --device cuda 2> cuda.err; then echo "cuda ran without a GPU?"; exit 1; fi
+          cat cuda.err
+          ! grep -q panicked cuda.err
       - uses: actions/upload-artifact@v4
         with:
           name: axon-x86_64-linux
