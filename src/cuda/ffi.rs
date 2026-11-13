@@ -325,13 +325,68 @@ pub fn driver() -> Result<&'static Driver, String> {
             open_lib(&["libcuda.so.1".into()]).map_err(|e| format!("no NVIDIA driver: {e}"))?;
         // SAFETY: lib is the CUDA driver, whose exports have the
         // signatures in `Driver` (cuda.h, versioned names).
-        let d = unsafe { Driver::resolve(lib)? };
+        let d = match unsafe { Driver::resolve(lib) } {
+            Ok(d) => d,
+            // A driver older than CUDA 12 lacks entry points axon needs
+            // (cuLaunchKernelEx): one line that says so, not the symbol.
+            // SAFETY: lib is the CUDA driver (above).
+            Err(e) => {
+                return Err(unsafe { lib_cuda_version(lib) }
+                    .and_then(|v| {
+                        super::old_api(v, driver_release().as_deref(), super::driver_need())
+                    })
+                    .unwrap_or(e));
+            }
+        };
         // SAFETY: cuInit with flags 0 is the documented first call.
         let r = unsafe { (d.cuInit)(0) };
         check(&d, r, "cuInit")?;
         Ok(d)
     });
     l.as_ref().map_err(Clone::clone)
+}
+
+/// The CUDA version driver library `lib` supports, from its
+/// cuDriverGetVersion alone (which works before cuInit and has been there
+/// since CUDA 2.2), None if it can't say: for the error when the rest of
+/// `Driver` isn't there.
+///
+/// # Safety
+/// `lib` is a live dlopen handle of the CUDA driver.
+unsafe fn lib_cuda_version(lib: *mut c_void) -> Option<(i32, i32)> {
+    let p = sym(lib, "cuDriverGetVersion\0").ok()?;
+    // SAFETY: p is the non-null address of cuDriverGetVersion, whose C
+    // signature is CUresult cuDriverGetVersion(int *) (cuda.h).
+    let f = unsafe {
+        std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut c_int) -> CUresult>(p)
+    };
+    let mut v: c_int = 0;
+    // SAFETY: writes one c_int.
+    let r = unsafe { f(&mut v) };
+    (r == 0 && v > 0).then_some((v / 1000, v % 1000 / 10))
+}
+
+/// The NVIDIA driver's version, e.g. "570.86.15", from
+/// /proc/driver/nvidia/version (`parse_driver_release`); None if unknown.
+/// For people: what to compare with a driver branch (R580).
+pub fn driver_release() -> Option<String> {
+    parse_driver_release(&std::fs::read_to_string("/proc/driver/nvidia/version").ok()?)
+}
+
+/// `driver_release` from the text of /proc/driver/nvidia/version: the first
+/// word of its "NVRM version:" line made of digits and dots, with a dot
+/// ("... Kernel Module  570.86.15  ...", "... Open Kernel Module for x86_64
+/// 620.70.06  Release Build ..."), at most 32 bytes.
+pub fn parse_driver_release(s: &str) -> Option<String> {
+    let line = s.lines().find(|l| l.starts_with("NVRM version:"))?;
+    line.split_whitespace()
+        .find(|w| {
+            w.len() <= 32
+                && w.contains('.')
+                && w.starts_with(|c: char| c.is_ascii_digit())
+                && w.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .map(str::to_string)
 }
 
 /// The CUDA version the driver supports, (major, minor).

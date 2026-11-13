@@ -983,7 +983,18 @@ mod tests {
         ));
         let no_nvrtc = || Err("NVRTC not found".to_string());
         let never = || -> Result<_, String> { panic!("NVRTC asked") };
-        let new = (13, 5);
+        // The driver's release is read only for the "too old" line.
+        fn unasked() -> Option<String> {
+            panic!("driver release asked")
+        }
+        fn r570() -> Option<String> {
+            Some("570.86.15".into())
+        }
+        fn unknown() -> Option<String> {
+            None
+        }
+        let new = ((13, 5), unasked as fn() -> Option<String>);
+        let old = ((12, 8), r570 as fn() -> Option<String>);
         let pick = |r: Result<(Code, Target), String>| match r {
             Ok((Code::Pack(_), t)) => Ok(format!("pack {t}")),
             Ok((Code::Nvrtc(_), t)) => Ok(format!("nvrtc {t}")),
@@ -997,18 +1008,30 @@ mod tests {
             pick(code_from(Mode::Only, Ok(Some(p)), 89, new, true, never)),
             Ok("pack sm_89".into())
         );
+        // A driver older than the pack's CUDA major and no NVRTC: one line,
+        // the driver found, the branch needed, the way out.
+        let too_old = "NVIDIA driver 570.86.15 (CUDA 12.8) is too old: axon's GPU kernels need \
+                       R580+ (CUDA 13); update the driver, or run on the CPU with --device cpu";
+        assert_eq!(
+            pick(code_from(Mode::On, Ok(Some(p)), 89, old, true, no_nvrtc)),
+            Err(too_old.into())
+        );
+        assert_eq!(
+            pick(code_from(Mode::Only, Ok(Some(p)), 89, old, true, never)),
+            Err(format!("AXON_KERNEL_PACK=only: {too_old}"))
+        );
         assert_eq!(
             pick(code_from(
                 Mode::On,
                 Ok(Some(p)),
                 89,
-                (12, 8),
+                ((11, 4), unknown),
                 true,
                 no_nvrtc
             )),
             Err(
-                "precompiled kernels: NVRTC 13.4 needs a CUDA 13 driver, have 12.8; update the \
-                 NVIDIA driver or point CUDA_PATH at a CUDA 12 toolkit; NVRTC not found"
+                "the NVIDIA driver (CUDA 11.4) is too old: axon's GPU kernels need R580+ \
+                 (CUDA 13); update the driver, or run on the CPU with --device cpu"
                     .into()
             )
         );
@@ -1031,6 +1054,18 @@ mod tests {
             pick(code_from(Mode::On, Ok(None), 89, new, true, no_nvrtc)),
             Err("this build has no precompiled kernels; NVRTC not found".into())
         );
+        // No pack: an old driver is NVRTC's business (check_versions).
+        assert_eq!(
+            pick(code_from(
+                Mode::On,
+                Ok(None),
+                89,
+                ((12, 8), unasked),
+                true,
+                no_nvrtc
+            )),
+            Err("this build has no precompiled kernels; NVRTC not found".into())
+        );
         assert_eq!(
             pick(code_from(
                 Mode::On,
@@ -1044,9 +1079,62 @@ mod tests {
         );
         // The kill switch: no pack reason, NVRTC's own error.
         assert_eq!(
-            pick(code_from(Mode::Off, Ok(Some(p)), 89, new, true, no_nvrtc)),
+            pick(code_from(Mode::Off, Ok(Some(p)), 89, old, true, no_nvrtc)),
             Err("NVRTC not found".into())
         );
+    }
+
+    /// The driver's release from /proc/driver/nvidia/version (proprietary
+    /// and open kernel modules), and the one-line refusal of a driver older
+    /// than CUDA 12, whose API axon can't load (`ffi::driver`).
+    #[test]
+    fn pack_old_driver_lines() {
+        use super::super::{old_api, old_driver};
+        let closed = "NVRM version: NVIDIA UNIX x86_64 Kernel Module  570.86.15  Tue Jan  7 \
+                      23:03:26 UTC 2025\nGCC version:  gcc version 12.2.0\n";
+        let open = "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  620.70.06  Release \
+                    Build  (notroot@)  Sat Nov  7 14:23:54 UTC 2026\nGCC version:  Selected \
+                    multilib: .;@m64\n";
+        assert_eq!(
+            ffi::parse_driver_release(closed).as_deref(),
+            Some("570.86.15")
+        );
+        assert_eq!(
+            ffi::parse_driver_release(open).as_deref(),
+            Some("620.70.06")
+        );
+        for bad in [
+            "",
+            "GCC version: 12.2.0\n",
+            "NVRM version: NVIDIA UNIX x86_64 Kernel Module\n",
+            "NVRM version: x 570 .5 5.x\n",
+        ] {
+            assert_eq!(ffi::parse_driver_release(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            old_api((11, 4), Some("470.256.02"), 13).as_deref(),
+            Some(
+                "NVIDIA driver 470.256.02 (CUDA 11.4) is too old: axon's GPU kernels need R580+ \
+                 (CUDA 13); update the driver, or run on the CPU with --device cpu"
+            )
+        );
+        // A build without a pack needs CUDA 12 (with an NVRTC of its own).
+        assert_eq!(
+            old_api((11, 8), None, 12).as_deref(),
+            Some(
+                "the NVIDIA driver (CUDA 11.8) is too old: axon's GPU kernels need R525+ \
+                 (CUDA 12); update the driver, or run on the CPU with --device cpu"
+            )
+        );
+        assert_eq!(old_api((12, 0), Some("525.60.13"), 13), None);
+        assert!(old_driver((14, 0), None, 15).contains("need a CUDA 15 driver;"));
+        // One line, always.
+        for s in [
+            old_driver((12, 8), Some("570.86.15"), 13),
+            old_driver((11, 0), None, 12),
+        ] {
+            assert!(!s.contains('\n'), "{s}");
+        }
     }
 
     /// The module the test model runs (`module_spec` as `module_for_mode`

@@ -57,7 +57,7 @@ against three independent oracles (gguf-py, Hugging Face's tokenizer, Ollama's g
 
 ## Known limits
 
-- Throughput at high concurrency on datacenter GPUs (above); the plan is in [roadmap.md](roadmap.md).
+- Throughput at high concurrency on datacenter GPUs (above); that tier is [shelved](roadmap.md#shelved-for-now).
 - MoE experts run on the CPU; no MoE CPU/GPU layer split, multi-GPU or MoE draft model.
 - Gemma 3 on the GPU must fit whole; 27B is refused.
 - CUDA is Linux only. Built and tested on x86-64 Linux only (scalar, AVX2 and AVX-VNNI kernels picked at run

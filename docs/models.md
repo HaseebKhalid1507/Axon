@@ -26,7 +26,7 @@ layout; stage 2, [log](log/2026-10-17-moe-stage2.md)). Both: decode == batched
 prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
 split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
 bytes per token. `--gpu-experts N|auto` keeps the experts of N MoE layers on the GPU too,
-with the same bits (below; [roadmap](roadmap.md#mixture-of-experts)).
+with the same bits (below; [roadmap](roadmap.md#tracks)).
 
 `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
 Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
@@ -123,8 +123,10 @@ run: it carries its kernels precompiled (the kernel pack: `axon kernels build`, 
 with `--cfg axon_kernel_pack`) for sm_75, sm_80, sm_86, sm_89, sm_90 and sm_90a, and
 sm_120 (RTX 20/30/40/50, A100, H100), plus compute_120 PTX that the driver compiles for a
 newer GPU. Each is NVRTC's output for the same source and options as a run-time compile,
-so the same code. The pack needs a driver for its NVRTC's CUDA major (CUDA 13: driver
-R580 or newer). `axon kernels list` says what the binary carries and where this GPU's
+so the same code. The pack needs a driver for its NVRTC's CUDA major: CUDA 13, driver
+R580 or newer. On an older driver `--device cuda` compiles with NVRTC if a CUDA 12 toolkit
+is installed, and otherwise stops with one line: the driver it found, that the kernels
+need R580+, and `--device cpu` to run on the CPU instead. `axon kernels list` says what the binary carries and where this GPU's
 kernels come from; `AXON_KERNEL_PACK=0` turns the pack off ([environment.md](environment.md)).
 Otherwise (a source build, a GPU or driver the pack doesn't cover) axon loads NVRTC
 (`libnvrtc.so`, `.so.13` or `.so.12`, from the library path or the toolkit's `lib64`

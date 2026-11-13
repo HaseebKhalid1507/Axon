@@ -1840,6 +1840,44 @@ fn pick_target(cc: i32, archs: &[i32], nvrtc: (i32, i32), hopper: bool) -> Resul
     ))
 }
 
+/// One line for a CUDA `driver` older than CUDA major `need`, for the user:
+/// the driver found (`release`, e.g. "570.86.15", when known:
+/// `ffi::driver_release`), the driver branch needed and the way out. axon
+/// prints it after "--device cuda: ".
+pub(crate) fn old_driver(driver: (i32, i32), release: Option<&str>, need: i32) -> String {
+    let found = match release {
+        Some(r) => format!("NVIDIA driver {r} (CUDA {}.{})", driver.0, driver.1),
+        None => format!("the NVIDIA driver (CUDA {}.{})", driver.0, driver.1),
+    };
+    // The first Linux driver branch of each CUDA major.
+    let branch = match need {
+        13 => "R580+ (CUDA 13)".to_string(),
+        12 => "R525+ (CUDA 12)".to_string(),
+        n => format!("a CUDA {n} driver"),
+    };
+    format!(
+        "{found} is too old: axon's GPU kernels need {branch}; update the driver, \
+         or run on the CPU with --device cpu"
+    )
+}
+
+/// `old_driver` for a driver whose CUDA version `v` is older than 12 (the
+/// oldest whose API axon loads: `ffi::driver`), None for a newer one. `need`:
+/// `driver_need`.
+pub(crate) fn old_api(v: (i32, i32), release: Option<&str>, need: i32) -> Option<String> {
+    (v.0 < 12).then(|| old_driver(v, release, need.max(12)))
+}
+
+/// The CUDA major this binary's GPU kernels need of the driver: its pack's
+/// NVRTC's (a release: 13, R580), else 12 (axon compiles them with an NVRTC
+/// of the driver's major or older: `check_versions`).
+pub(crate) fn driver_need() -> i32 {
+    match pack::mode() {
+        Ok(pack::Mode::Off) | Err(_) => 12,
+        _ => pack::active().ok().flatten().map_or(12, |p| p.nvrtc().0),
+    }
+}
+
 /// Err if NVRTC is from a newer CUDA major than the driver supports: what it
 /// builds may not load there.
 fn check_versions(driver: (i32, i32), nvrtc: (i32, i32)) -> Result<(), String> {
@@ -1905,21 +1943,26 @@ fn code_for(cc: i32, driver: (i32, i32), hopper: bool) -> Result<(Code, Target),
         pack::Mode::Off => Ok(None),
         _ => pack::active(),
     };
-    code_from(mode, p, cc, driver, hopper, || {
+    code_from(mode, p, cc, (driver, ffi::driver_release), hopper, || {
         nvrtc_for(cc, driver, hopper)
     })
 }
 
-/// `code_for` with AXON_KERNEL_PACK's `mode`, the pack `p` (`pack::active`'s)
-/// and `nvrtc` for `nvrtc_for` (tests).
+/// `code_for` with AXON_KERNEL_PACK's `mode`, the pack `p` (`pack::active`'s),
+/// the driver's CUDA version and a way to its release (`ffi::driver_release`),
+/// and `nvrtc` for `nvrtc_for` (tests). A driver older than the pack's CUDA
+/// major with no NVRTC to fall back on is one line (`old_driver`): the driver
+/// found, the branch the pack needs, update or --device cpu.
 fn code_from(
     mode: pack::Mode,
     p: Result<Option<&'static pack::Pack<'static>>, String>,
     cc: i32,
-    driver: (i32, i32),
+    (driver, release): ((i32, i32), impl FnOnce() -> Option<String>),
     hopper: bool,
     nvrtc: impl FnOnce() -> Result<(&'static ffi::Nvrtc, Target), String>,
 ) -> Result<(Code, Target), String> {
+    // The pack's CUDA major when the driver is older than it.
+    let mut too_old = None;
     let why_not = match p {
         _ if mode == pack::Mode::Off => None,
         Err(e) => Some(e),
@@ -1931,7 +1974,10 @@ fn code_from(
                 pack::pick(cc, hopper, &targets),
             ) {
                 (Ok(()), Some(t)) => return Ok((Code::Pack(p), t)),
-                (Err(e), _) => Some(format!("precompiled kernels: {e}")),
+                (Err(e), _) => {
+                    too_old = Some(p.nvrtc().0);
+                    Some(format!("precompiled kernels: {e}"))
+                }
                 (Ok(()), None) => Some(format!(
                     "no precompiled kernels for sm_{cc} (the pack has {})",
                     targets
@@ -1944,16 +1990,18 @@ fn code_from(
         }
     };
     if mode == pack::Mode::Only {
-        return Err(format!(
-            "AXON_KERNEL_PACK=only: {}",
-            why_not.unwrap_or_default()
-        ));
+        let why = match too_old {
+            Some(need) => old_driver(driver, release().as_deref(), need),
+            None => why_not.unwrap_or_default(),
+        };
+        return Err(format!("AXON_KERNEL_PACK=only: {why}"));
     }
     nvrtc()
         .map(|(n, t)| (Code::Nvrtc(n), t))
-        .map_err(|e| match why_not {
-            Some(w) => format!("{w}; {e}"),
-            None => e,
+        .map_err(|e| match (too_old, why_not) {
+            (Some(need), _) => old_driver(driver, release().as_deref(), need),
+            (None, Some(w)) => format!("{w}; {e}"),
+            (None, None) => e,
         })
 }
 
