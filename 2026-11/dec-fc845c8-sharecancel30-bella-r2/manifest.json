@@ -1,0 +1,29 @@
+{
+ "label": "dec-fc845c8-sharecancel30-bella-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-015252-7c83",
+   "name": "dec-fc845c8-sharecancel30-bella-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fc845c8",
+   "binary": "bash",
+   "started": 1794604714.1158442,
+   "ended": 1794604794.7001088,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ebff9adef35ac83b896065f72d068160e78c1c66369b3f2a09c0afa6ebb9656b",
+   "log_bytes": 5802
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 16:19:56 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
