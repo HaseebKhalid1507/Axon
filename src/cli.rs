@@ -52,7 +52,7 @@ usage:
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
-            [--cache-ram BYTES|auto]
+            [--cache-ram BYTES|auto|off]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -165,9 +165,11 @@ flags:
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
               and its slot freed, as if it had disconnected (default: off; at least 1000).
               The clock starts once the client's receive buffer is full (docs/serving.md)
-  --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
-              or auto: half the RAM available, at most 8G) when their slot is reused, and copy
-              them back on the next turn instead of prefilling again (same bits; default 0: off).
+  --cache-ram BYTES|auto|off  serve: keep conversations' KV pages in host RAM when their slot
+              is reused, and copy them back on the next turn instead of prefilling again (same
+              bits). Default auto: the smaller of 4G and a quarter of the RAM available after the
+              model, off under a memory cgroup limit tighter than the host's free RAM (the banner
+              says why); BYTES (K/M/G) sets the size, under a cgroup too; 0 or off: no tier.
               On the GPU the whole size is pinned (unswappable) RAM from start. The tier is
               exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
               still holds first, so its useful capacity is about its size (a 7B f16 position is
@@ -1931,6 +1933,8 @@ mod tests {
             .join(" ");
         for want in [
             "The tier is exclusive",
+            "Default auto: the smaller of 4G and a quarter of the RAM available after the model",
+            "0 or off: no tier",
             "gemma3",
             "qwen3moe",
             "deepseek2",

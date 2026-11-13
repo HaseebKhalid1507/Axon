@@ -163,10 +163,9 @@ pub struct Opts {
     /// is cancelled (its slot freed), as if it had disconnected. The CLI
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
-    /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
-    /// default; opt-in until the tier is exclusive: it is written as pages
-    /// fill, so it holds about its own size, the GPU pool's pages included,
-    /// agent-workload.md §6 row B's result).
+    /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off; the
+    /// CLI's default is `auto`: the smaller of 4 GiB and a quarter of the
+    /// RAM available after the model, off under a binding cgroup limit).
     pub cache_ram: tier::CacheRam,
     /// How its page-locked memory is taken (AXON_KV_RAM_ALLOC).
     pub cache_ram_alloc: tier::Alloc,
@@ -1448,12 +1447,14 @@ fn engine(
     // 2-6 s instead of 2 (MEASURED 1027-134559-a975, 20G; the suspect, not
     // proven). The identity doesn't depend on the tier.
     let identity = crate::identity::of(&o.path, &model, &net);
-    // The KV RAM tier (`--cache-ram`): sized against the RAM available now
-    // (the model loaded). On the GPU the whole size is page-locked from
-    // here on, by a thread (or before the server answers, with
-    // AXON_KV_RAM_ALLOC=start), used or not; a CPU's pages are ordinary
-    // memory, taken as pages are stored.
-    let ram = match o.cache_ram.bytes(crate::gguf::mem_available()) {
+    // The KV RAM tier (`--cache-ram`, default auto): sized against the RAM
+    // available now (the model loaded), and what bounds it (auto is off
+    // under a binding cgroup limit). On the GPU the whole size is
+    // page-locked from here on, by a thread (or before the server answers,
+    // with AXON_KV_RAM_ALLOC=start), used or not; a CPU's pages are
+    // ordinary memory, taken as pages are stored.
+    let avail = crate::gguf::mem::avail();
+    let ram = match o.cache_ram.bytes(avail.as_ref()) {
         Ok(n) => n,
         Err(why) => {
             let _ = ready.send(Err(Refused(why)));
@@ -1461,9 +1462,10 @@ fn engine(
         }
     };
     let tier_note = match ram {
-        0 if o.cache_ram == tier::CacheRam::Auto => {
-            Some(", KV RAM tier off (--cache-ram auto: RAM available unknown)".to_string())
-        }
+        0 if o.cache_ram == tier::CacheRam::Auto => Some(format!(
+            ", KV RAM tier off (--cache-ram auto: {})",
+            tier::CacheRam::auto_off(avail.as_ref()).unwrap_or_else(|| "under a page".into())
+        )),
         0 => None,
         n => {
             let on = match batch.as_mut() {
@@ -3347,7 +3349,7 @@ fn stream(
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto] \
+     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto|off] \
      [--numerics exact|fast] [--datacenter] [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
@@ -3415,7 +3417,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
-        cache_ram: tier::CacheRam::Bytes(0),
+        cache_ram: tier::CacheRam::Auto,
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
     };

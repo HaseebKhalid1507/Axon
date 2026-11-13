@@ -6,6 +6,14 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `axon serve --cache-ram auto` is the default, capped at 4 GiB (11-12 decision)
+- **The KV RAM tier is on by default**: `auto`, the smaller of 4 GiB and a quarter of the RAM available after the
+  model. It was off (`0`) by default, and `auto` was half that RAM, up to 8 GiB, page-locked from start.
+- **Off under a binding memory cgroup** (a container or systemd scope whose limit is tighter than the host's free
+  RAM): pinned memory counts against the limit. The banner says why; an explicit `--cache-ram SIZE` still turns it on.
+- **Kill switch:** `--cache-ram 0`, or the new `--cache-ram off`. Same bits either way: the tier moves rows, it
+  doesn't recompute them.
+
 ### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
 - Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.
 - **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each wrote
