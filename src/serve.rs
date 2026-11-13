@@ -41,7 +41,7 @@ mod responses;
 mod tier;
 pub mod tools;
 
-use crate::chat::{self, Framing, special};
+use crate::chat::{self, Format, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
@@ -200,11 +200,9 @@ pub struct Template {
     /// template's (`chat::default_system`: Qwen2.5's, Qwen2's; Qwen1.5's,
     /// Qwen3's and Llama 3's have none).
     default_system: Option<String>,
-    /// How an earlier reply of a thinking model is kept: its text after
-    /// `</think>`, leading newlines dropped (`Some(true)`: Qwen3's template)
-    /// or not (`Some(false)`: DeepSeek R1's); None: as it is (a template
-    /// that never mentions `</think>`, as Qwen3-Coder's).
-    think_strip: Option<bool>,
+    /// Whether the template renders tools (`<tool_call>` in ChatML, Llama
+    /// 3.1's `ipython`; harmony always), or the file has no template.
+    pub(crate) tools: bool,
 }
 
 impl Template {
@@ -213,10 +211,11 @@ impl Template {
     /// (`Framing::from_model`, `chat::default_system`).
     pub fn new(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Template> {
         let fr = Framing::from_model(tok, m)?;
-        let think_strip = match chat::chat_template(m) {
-            None => Some(true),
-            Some(t) => t.contains("</think>").then(|| t.contains("lstrip(")),
-        };
+        let tools = chat::chat_template(m).is_none_or(|t| match fr.format {
+            Format::ChatMl => t.contains("<tool_call>"),
+            Format::Llama3 { .. } => t.contains("ipython"),
+            _ => true,
+        });
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -227,7 +226,7 @@ impl Template {
             fr,
             think,
             default_system: chat::default_system(m),
-            think_strip,
+            tools,
         })
     }
 
@@ -240,9 +239,9 @@ impl Template {
     /// else the default one; Llama 3 always has one), each message framed,
     /// then the assistant's opening (with the empty reasoning block if
     /// `no_think` and the model thinks), as `axon chat` frames a
-    /// conversation. An earlier reply of a thinking model is kept as its
-    /// text after `</think>` (`think_strip`: leading newlines dropped, as the
-    /// Qwen3 template and `axon chat` render it; kept, as DeepSeek R1's).
+    /// conversation. An earlier reply of a thinking model is kept as the
+    /// framing's `think_strip` says (its text after `</think>`, as the
+    /// template and `axon chat` render it).
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
         let (system, rest) = match msgs.split_first() {
             Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
@@ -250,13 +249,9 @@ impl Template {
         };
         let mut t = self.fr.system(tok, system);
         for (i, m) in rest.iter().enumerate() {
-            let strip = self.think.as_ref().and(self.think_strip);
+            let strip = self.think.as_ref().and(self.fr.think_strip);
             let text = match (m.role, strip) {
-                (Role::Assistant, Some(lstrip)) => match m.content.rsplit_once("</think>") {
-                    Some((_, c)) if lstrip => c.trim_start_matches('\n'),
-                    Some((_, c)) => c,
-                    None => &m.content,
-                },
+                (Role::Assistant, Some(how)) => how.apply(&m.content),
                 _ => &m.content,
             };
             // Mistral's first user message carries the system message

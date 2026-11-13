@@ -223,11 +223,17 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
     out
 }
 
-/// `axon chat --temp 0`'s first reply to `msg` on `net`, at most `n`
-/// tokens, with run_chat's default system message for `arch`.
-fn chat_text<M: Lm>(net: &M, tok: &Tokenizer, arch: &str, msg: &str, n: usize) -> String {
-    let system = (arch == "qwen2").then_some(crate::chat::DEFAULT_SYSTEM);
-    let mut c = crate::chat::Chat::new(net, tok, system, 256).unwrap();
+/// `axon chat --temp 0`'s first reply to `msg` on `net` (model `m`), at
+/// most `n` tokens, with run_chat's default system message (the template's).
+fn chat_text<M: Lm>(
+    net: &M,
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    msg: &str,
+    n: usize,
+) -> String {
+    let system = crate::chat::default_system(m);
+    let mut c = crate::chat::Chat::new(net, tok, m, system.as_deref(), 256).unwrap();
     c.max_reply = n;
     let mut text = Utf8Stream::default();
     let mut out = String::new();
@@ -279,7 +285,7 @@ fn serve_matches_gen_and_chat(path: &str, device: Device) {
         .unwrap();
         (
             gen_text(&net, &tok, PROMPT, 32),
-            chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
+            chat_text(&net, &tok, &m, CHAT_MSG, 24),
         )
     };
     serve_checks(path, device, &gen_ref, &chat_ref);

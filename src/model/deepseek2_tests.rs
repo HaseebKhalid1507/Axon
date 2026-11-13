@@ -1075,7 +1075,7 @@ fn deepseek2_moonlight_bits() {
     use crate::chat::Chat;
     let sys = crate::chat::template_default_system(&m);
     assert_eq!(sys.as_deref(), Some("You are a helpful assistant"));
-    let mut chat = Chat::new(&net, &tok, sys.as_deref(), 512).unwrap();
+    let mut chat = Chat::new(&net, &tok, &m, sys.as_deref(), 512).unwrap();
     chat.max_reply = 12;
     let never = || false;
     let r1 = chat
@@ -1084,7 +1084,7 @@ fn deepseek2_moonlight_bits() {
     let r2 = chat
         .reply("And another one?", &never, &mut |_| Ok(()))
         .unwrap();
-    let mut fresh = Chat::new(&net, &tok, sys.as_deref(), 512).unwrap();
+    let mut fresh = Chat::new(&net, &tok, &m, sys.as_deref(), 512).unwrap();
     fresh.max_reply = 12;
     let f1 = fresh
         .reply("Name a color.", &never, &mut |_| Ok(()))

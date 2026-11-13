@@ -869,6 +869,14 @@ pub fn render(
             "tool calling is not supported for this model's chat format",
         ));
     };
+    // A template without tools (Qwen2's, Qwen1.5's, Llama 3.0's): no format
+    // to render them in, as ollama refuses them.
+    if !t.tools {
+        return Err(bad(
+            "tools",
+            "tool calling is not supported: this model's chat template has no tools",
+        ));
+    }
     if fam == Family::Harmony {
         return harmony(t, tok, r);
     }
@@ -917,7 +925,8 @@ pub fn render(
 
 /// Qwen3's and Qwen2.5's templates.
 /// `default_sys`: the template's default system message (`Template`'s),
-/// used without tools (the tools block has Qwen2.5's own).
+/// Qwen2.5's (the same in its tools block); with tools, Qwen2.5's when the
+/// template has none of its own.
 fn hermes(
     k: &mut Toks,
     fam: Family,
@@ -936,7 +945,8 @@ fn hermes(
             }
             (Family::Qwen3, None) => {}
             (_, s) => {
-                k.text(s.map_or(chat::DEFAULT_SYSTEM, |s| &s.content));
+                let default = default_sys.unwrap_or(chat::DEFAULT_SYSTEM);
+                k.text(s.map_or(default, |s| &s.content));
                 k.lit("\n\n");
             }
         }
