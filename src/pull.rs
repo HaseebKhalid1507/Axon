@@ -428,67 +428,71 @@ fn is_hex(s: &str, n: usize) -> bool {
 }
 
 /// The checksum, size and commit of a Hugging Face file from the response
-/// headers of its URL (`curl -I`, no redirects followed: Hugging Face's own
-/// response, a 302 to its CDN for an LFS file): `x-linked-etag` (the LFS
-/// oid: SHA-256), `x-linked-size`, `x-repo-commit`. Err for a refusal
-/// (401/403: a gated or private repo; 404) or headers that don't say.
+/// headers of its URL (`Curl::head`: `curl -I -L`, every response's headers
+/// in order: a renamed repo's 307 to its new name, Hugging Face's 302 to its
+/// CDN for an LFS file, the CDN's answer). The first of Hugging Face's
+/// responses that names the file (`x-linked-etag`: the LFS oid, its
+/// SHA-256) gives it, with that response's `x-linked-size` and
+/// `x-repo-commit`. Err for a refusal before it (401/403: a gated or
+/// private repo; 404) or headers that don't say.
 pub fn parse_head(text: &str) -> Result<Head, String> {
-    let mut status = None;
-    let (mut sha, mut size, mut commit) = (None, None, None);
+    // Each response: its status and headers (lowercase names).
+    type Response = (Option<u32>, Vec<(String, String)>);
+    let mut resps: Vec<Response> = Vec::new();
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
-        if status.is_none() && line.starts_with("HTTP/") {
-            status = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|c| c.parse::<u32>().ok());
-            continue;
+        if line.starts_with("HTTP/") {
+            let code = line.split_whitespace().nth(1).and_then(|c| c.parse().ok());
+            resps.push((code, Vec::new()));
+        } else if let (Some(r), Some((k, v))) = (resps.last_mut(), line.split_once(':')) {
+            r.1.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
-        let Some((k, v)) = line.split_once(':') else {
+    }
+    let mut last = None;
+    for (code, hs) in &resps {
+        match code {
+            Some(401 | 403) => {
+                return Err(
+                    "Hugging Face refused it (401/403): a gated or private repo; accept its \
+                            license on the website and set HF_TOKEN to an access token"
+                        .into(),
+                );
+            }
+            Some(404) => return Err("Hugging Face has no such file (404)".into()),
+            Some(200..=399) => {}
+            Some(c) => return Err(format!("Hugging Face answered HTTP {c}")),
+            None => return Err("a malformed HTTP status line".into()),
+        }
+        last = *code;
+        let get = |k: &str| hs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        let Some(etag) = get("x-linked-etag") else {
             continue;
         };
-        let v = v.trim();
-        match k.trim().to_ascii_lowercase().as_str() {
-            "x-linked-etag" if sha.is_none() => {
-                let e = v
-                    .trim_start_matches("W/")
-                    .trim_matches('"')
-                    .to_ascii_lowercase();
-                sha = Some(e);
-            }
-            "x-linked-size" if size.is_none() => size = Some(v.to_string()),
-            "x-repo-commit" if commit.is_none() => commit = Some(v.to_ascii_lowercase()),
-            _ => {}
-        }
+        let sha = etag
+            .trim_start_matches("W/")
+            .trim_matches('"')
+            .to_ascii_lowercase();
+        let sha = Some(sha)
+            .filter(|s| is_hex(s, 64))
+            .ok_or("its SHA-256 (x-linked-etag) isn't 64 hex digits")?;
+        let size = get("x-linked-size")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&s| s > 0 && s < 1 << 40)
+            .ok_or("no valid size for it (x-linked-size)")?;
+        let commit = get("x-repo-commit")
+            .map(|c| c.to_ascii_lowercase())
+            .filter(|c| is_hex(c, 40))
+            .ok_or("no commit for it (x-repo-commit)")?;
+        return Ok(Head {
+            sha256: sha,
+            size,
+            commit,
+        });
     }
-    match status {
-        Some(200..=399) => {}
-        Some(401 | 403) => {
-            return Err(
-                "Hugging Face refused it (401/403): a gated or private repo; accept its \
-                        license on the website and set HF_TOKEN to an access token"
-                    .into(),
-            );
-        }
-        Some(404) => return Err("Hugging Face has no such file (404)".into()),
-        Some(c) => return Err(format!("Hugging Face answered HTTP {c}")),
-        None => return Err("no HTTP response".into()),
+    match last {
+        None => Err("no HTTP response".into()),
+        Some(_) => Err("no SHA-256 for it (x-linked-etag): not a Git LFS file".into()),
     }
-    let sha = sha
-        .filter(|s| is_hex(s, 64))
-        .ok_or("no SHA-256 for it (x-linked-etag): not a Git LFS file")?;
-    let size = size
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&s| s > 0 && s < 1 << 40)
-        .ok_or("no valid size for it (x-linked-size)")?;
-    let commit = commit
-        .filter(|c| is_hex(c, 40))
-        .ok_or("no commit for it (x-repo-commit)")?;
-    Ok(Head {
-        sha256: sha,
-        size,
-        commit,
-    })
 }
 
 /// Where download bytes come from: a stream of the file from `offset` on.
@@ -576,9 +580,20 @@ impl Curl {
         Ok(child)
     }
 
-    /// The response headers of `url` (`parse_head`'s input).
+    /// The response headers of `url`, redirects followed (`parse_head`'s
+    /// input).
     pub fn head(url: &str) -> Result<String, String> {
-        let child = Self::spawn(Self::command(&["--head", "--max-time", "60"], url))?;
+        let child = Self::spawn(Self::command(
+            &[
+                "--head",
+                "--location",
+                "--max-redirs",
+                "5",
+                "--max-time",
+                "60",
+            ],
+            url,
+        ))?;
         let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
         if !out.status.success() {
             return Err(format!(
@@ -670,8 +685,12 @@ struct Progress {
     verb: String,
 }
 
+/// A size for people: GB from 1 GB up, else MB.
 fn gb(b: u64) -> String {
-    format!("{:.2} GB", b as f64 / 1e9)
+    match b >= 1_000_000_000 {
+        true => format!("{:.2} GB", b as f64 / 1e9),
+        false => format!("{:.1} MB", b as f64 / 1e6),
+    }
 }
 
 impl Progress {
@@ -1264,9 +1283,26 @@ mod tests {
         for b in bad {
             assert!(parse_head(&b).is_err(), "{b}");
         }
-        // The first value of each wins (a later response can't override it).
+        // The first response that names the file wins (the CDN's after it
+        // can't override it).
         let two = format!("{ok}HTTP/2 200\r\nx-linked-size: 1\r\n\r\n");
         assert_eq!(parse_head(&two).unwrap().size, 5_027_783_488);
+        // A renamed repo: its 307 first, then the file's 302, then the CDN.
+        let moved = format!(
+            "HTTP/2 307 \r\nlocation: /o/r-moved/resolve/main/m.gguf\r\n\r\n{ok}HTTP/2 200 \r\n\
+             content-length: 5027783488\r\n\r\n"
+        );
+        assert_eq!(parse_head(&moved).unwrap(), parse_head(ok).unwrap());
+        // ... but a refusal on the way is one.
+        let gated = "HTTP/2 307 \r\nlocation: /x\r\n\r\nHTTP/2 401 \r\n\r\n";
+        assert!(parse_head(gated).unwrap_err().contains("HF_TOKEN"));
+        // A 200 without the LFS headers: not an LFS file.
+        let plain = "HTTP/2 200 \r\ncontent-length: 12\r\n\r\n";
+        assert!(
+            parse_head(plain)
+                .unwrap_err()
+                .contains("not a Git LFS file")
+        );
     }
 
     /// A file-backed `Source`: serves `data` from the offset asked, failing
