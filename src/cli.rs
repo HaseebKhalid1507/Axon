@@ -58,7 +58,7 @@ usage:
                                             /v1/chat/completions, /v1/completions; on cuda
                                             up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
-                                            time; README: axon serve)
+                                            time; docs/serving.md)
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -164,17 +164,14 @@ flags:
               before prefill (the rendered prompt: template and tool tokens count)
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
               and its slot freed, as if it had disconnected (default: off; at least 1000).
-              The clock starts once the client's receive buffer is full (README)
+              The clock starts once the client's receive buffer is full (docs/serving.md)
   --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
               or auto: half the RAM available, at most 8G) when their slot is reused, and copy
               them back on the next turn instead of prefilling again (same bits; default 0: off).
-              On the GPU the whole size is pinned (unswappable) RAM from start. Opt-in: the tier
-              copies pages as they fill, so it holds about its size, the GPU pool's pages included;
-              it helps only when the work written during a gap fits between the pool's size and
-              the tier's. Sizing: useful capacity ~ --cache-ram minus the GPU pool's KV bytes (7B
-              f16: 56 KiB a position; bella's pool ~5.4-6.0 GiB, so 6G buys almost nothing, about
-              20G is where it works). An exclusive tier is pending
-              (docs/design/agent-workload.md §6)
+              On the GPU the whole size is pinned (unswappable) RAM from start. The tier is
+              exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
+              still holds first, so its useful capacity is about its size (a 7B f16 position is
+              56 KiB). Off on a CPU/GPU split, several GPUs and MoE models (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
@@ -234,9 +231,16 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M),
-or, on the CPU, a Hugging Face checkpoint directory of one (config.json, tokenizer.json and
-model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of the same weights).";
+models (docs/models.md):
+  GGUF: qwen2, qwen3 and llama (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B, Llama-3.2-3B-Instruct, Q4_K_M);
+        gemma3 (Gemma 3 1B and 4B; on cuda the whole model on the GPU); mixture-of-experts models:
+        qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight) and gpt-oss
+        (gpt-oss-20b), whose experts run on the CPU under --device cuda (--gpu-experts moves
+        qwen3moe's and deepseek2's to the GPU)
+  a Hugging Face checkpoint directory of a qwen2, qwen3 or llama model (config.json, tokenizer.json,
+        model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
+        the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted
+        at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+)";
 
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
@@ -342,7 +346,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU and CUDA inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
+                "axon {}: CPU and CUDA inference for GGUF language models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -1912,6 +1916,33 @@ mod tests {
             format!("as many slots (2 to {reserved}) as fit"),
         ] {
             assert!(flat.contains(&want), "--help lacks {want:?}");
+        }
+    }
+
+    /// `--help` (#222): the RAM tier is exclusive since #201, not
+    /// "pending"; the model list names every architecture the loader takes
+    /// and FP8 on the GPU; no pointer into the README, whose reference
+    /// moved to docs/ in #223.
+    #[test]
+    fn help_is_current() {
+        let flat = super::USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            "The tier is exclusive",
+            "gemma3",
+            "qwen3moe",
+            "deepseek2",
+            "gpt-oss",
+            "FP8",
+            "natively with --numerics fast",
+            "time; docs/serving.md)",
+        ] {
+            assert!(flat.contains(want), "--help lacks {want:?}");
+        }
+        for stale in ["pending", "README"] {
+            assert!(!flat.contains(stale), "--help still says {stale:?}");
         }
     }
 
