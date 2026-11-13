@@ -1,0 +1,591 @@
+[axon-run 01:50:43] submitted 1113-015043-c7ee by /home/haseeb/.cache/axon-dec: /usr/bin/bash sharecancel30.sh ./axon-test-fc845c8 30
+[axon-run 01:50:44] job 1113-015043-c7ee -> pod2 [RTX 4090 sm_89 secure] (pod 6peqhwssswqg8d): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 3000 --src /home/haseeb/.cache/axon-podjob/sharecancel30-8098f92d5dbc /usr/bin/bash sharecancel30.sh ./axon-test-fc845c8 30
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (16cbd474c2b4d937558050a0) + source of /home/haseeb/.cache/axon-podjob/sharecancel30-8098f92d5dbc (delta vs 15 earlier upload(s) there)
+
+sent 7,818,930 bytes  received 94 bytes  2,234,006.86 bytes/sec
+total size is 25,389,695  speedup is 3.25
+
+sent 57 bytes  received 19 bytes  50.67 bytes/sec
+total size is 89  speedup is 1.17
+axon-remote: job 20261113-065059-bash-189149 on pod2 (GPU, 3000 MB)
+[axon-node 06:50:59] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 7261/24564 MB; sharing with 20261113-063537-bash-166802, 20261113-064737-axon-test-a09b1bd-188069 (slots 3, budget 23064 MB, vCPU 15.3)
+[axon-node 06:50:59] run bash (16cbd474c2b4d937558050a0) as /home/haseeb/.cache/axon-podjob/sharecancel30-8098f92d5dbc on e7a80a4d7508, AXON_THREADS=5 RUST_TEST_THREADS=4; free 16823 MB of 24564 (used 7261); GPU processes pid:MB 166839:1094,188088:6152
+-rw-r--r-- 1 root root 491400032 Nov 13 04:24 /root/axon-node/store/16cbd474c2b4d937558050a0/tree/models/qwen2.5-0.5b-q4_k_m.gguf
+NVIDIA GeForce RTX 4090, 7261 MiB, 1 %
+ 06:50:59 up 24 days,  9:19,  0 user,  load average: 21.41, 22.55, 25.84
+128
+ITER 1 rc=0 ok=0 wall_s=2 load=21.41 22.55 25.84
+ITER-FAIL-BEGIN 1
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.28s
+
+ITER-FAIL-END 1
+ITER 2 rc=0 ok=0 wall_s=3 load=21.45 22.55 25.82
+ITER-FAIL-BEGIN 2
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 2
+ITER 3 rc=0 ok=0 wall_s=2 load=21.45 22.55 25.82
+ITER-FAIL-BEGIN 3
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 3
+ITER 4 rc=0 ok=0 wall_s=3 load=21.50 22.54 25.80
+ITER-FAIL-BEGIN 4
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.29s
+
+ITER-FAIL-END 4
+ITER 5 rc=0 ok=0 wall_s=2 load=21.50 22.54 25.80
+ITER-FAIL-BEGIN 5
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.29s
+
+ITER-FAIL-END 5
+ITER 6 rc=0 ok=0 wall_s=2 load=21.50 22.54 25.80
+ITER-FAIL-BEGIN 6
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 6
+ITER 7 rc=0 ok=0 wall_s=3 load=21.70 22.56 25.79
+ITER-FAIL-BEGIN 7
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 7
+ITER 8 rc=0 ok=0 wall_s=2 load=21.70 22.56 25.79
+ITER-FAIL-BEGIN 8
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 8
+ITER 9 rc=0 ok=0 wall_s=3 load=21.56 22.52 25.76
+ITER-FAIL-BEGIN 9
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.29s
+
+ITER-FAIL-END 9
+ITER 10 rc=0 ok=0 wall_s=2 load=21.56 22.52 25.76
+ITER-FAIL-BEGIN 10
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.25s
+
+ITER-FAIL-END 10
+ITER 11 rc=0 ok=0 wall_s=3 load=21.52 22.49 25.73
+ITER-FAIL-BEGIN 11
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.31s
+
+ITER-FAIL-END 11
+ITER 12 rc=0 ok=0 wall_s=2 load=21.52 22.49 25.73
+ITER-FAIL-BEGIN 12
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.23s
+
+ITER-FAIL-END 12
+ITER 13 rc=0 ok=0 wall_s=2 load=21.39 22.45 25.70
+ITER-FAIL-BEGIN 13
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.31s
+
+ITER-FAIL-END 13
+ITER 14 rc=0 ok=0 wall_s=3 load=21.39 22.45 25.70
+ITER-FAIL-BEGIN 14
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 14
+ITER 15 rc=0 ok=0 wall_s=2 load=21.12 22.38 25.66
+ITER-FAIL-BEGIN 15
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.26s
+
+ITER-FAIL-END 15
+ITER 16 rc=0 ok=0 wall_s=3 load=21.12 22.38 25.66
+ITER-FAIL-BEGIN 16
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 16
+ITER 17 rc=0 ok=0 wall_s=2 load=21.11 22.35 25.64
+ITER-FAIL-BEGIN 17
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 17
+ITER 18 rc=0 ok=0 wall_s=2 load=21.11 22.35 25.64
+ITER-FAIL-BEGIN 18
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.20s
+
+ITER-FAIL-END 18
+ITER 19 rc=0 ok=0 wall_s=3 load=20.94 22.30 25.60
+ITER-FAIL-BEGIN 19
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.28s
+
+ITER-FAIL-END 19
+ITER 20 rc=0 ok=0 wall_s=2 load=20.94 22.30 25.60
+ITER-FAIL-BEGIN 20
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.25s
+
+ITER-FAIL-END 20
+ITER 21 rc=0 ok=0 wall_s=3 load=20.87 22.26 25.57
+ITER-FAIL-BEGIN 21
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.25s
+
+ITER-FAIL-END 21
+ITER 22 rc=0 ok=0 wall_s=2 load=20.87 22.26 25.57
+ITER-FAIL-BEGIN 22
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.23s
+
+ITER-FAIL-END 22
+ITER 23 rc=0 ok=0 wall_s=2 load=20.56 22.17 25.52
+ITER-FAIL-BEGIN 23
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 23
+ITER 24 rc=0 ok=0 wall_s=3 load=20.56 22.17 25.52
+ITER-FAIL-BEGIN 24
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.25s
+
+ITER-FAIL-END 24
+ITER 25 rc=0 ok=0 wall_s=2 load=20.19 22.07 25.47
+ITER-FAIL-BEGIN 25
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.24s
+
+ITER-FAIL-END 25
+ITER 26 rc=0 ok=0 wall_s=3 load=20.19 22.07 25.47
+ITER-FAIL-BEGIN 26
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 26
+ITER 27 rc=0 ok=0 wall_s=2 load=20.02 22.00 25.43
+ITER-FAIL-BEGIN 27
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.25s
+
+ITER-FAIL-END 27
+ITER 28 rc=0 ok=0 wall_s=2 load=20.02 22.00 25.43
+ITER-FAIL-BEGIN 28
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.28s
+
+ITER-FAIL-END 28
+ITER 29 rc=0 ok=0 wall_s=3 load=20.02 21.97 25.40
+ITER-FAIL-BEGIN 29
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.27s
+
+ITER-FAIL-END 29
+ITER 30 rc=0 ok=0 wall_s=2 load=20.02 21.97 25.40
+ITER-FAIL-BEGIN 30
+
+running 1 test
+test serve::tests::serve_share_cancel_frees ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 907 tok
+axon serve: #2 prefill: single-stream, 337 tok
+axon serve: #3 prefill: single-stream, 907 tok
+axon serve: context 1536 tokens: the KV pages that fit in GPU memory hold 1536 tokens, of the model's 2048 (--kv q8 holds twice as many)
+axon serve: #1 prefill: single-stream, 341 tok
+axon serve: #3 prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding
+axon serve: #2 prefill: single-stream, 341 tok
+axon serve: #4 prefill: single-stream, 907 tok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 906 filtered out; finished in 2.32s
+
+ITER-FAIL-END 30
+SHARECANCEL 0/30 passed
+[axon-node 06:52:11] exit 1 after 72.4s
+[axon-node 06:52:11] peak RSS 251 MB (job process tree PSS, 2 s samples x35)
+[axon-run 01:52:13] exit 1 after 89.6s (host pod2)
