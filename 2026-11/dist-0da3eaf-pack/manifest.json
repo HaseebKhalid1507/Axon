@@ -1,0 +1,49 @@
+{
+ "label": "dist-0da3eaf-pack",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1112-234746-4bc9",
+   "name": "dist-0da3eaf-packtest",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "0da3eaf",
+   "binary": "axon-test-0da3eaf",
+   "started": 1794552552.3816025,
+   "ended": 1794552936.156623,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "4a24a66d6f35a70332e711951bb7bcd5f9f86fb8774f62087de55a78e9086b79",
+   "log_bytes": 1772
+  },
+  {
+   "job": "1112-234755-9882",
+   "name": "dist-0da3eaf-md5",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "0da3eaf",
+   "binary": "bash",
+   "started": 1794552936.156623,
+   "ended": 1794553219.7548053,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "eee715211e3af4b758588ec38be106634441881db53e813550b3c78bfda942a2",
+   "log_bytes": 5312
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 02:00:21 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
