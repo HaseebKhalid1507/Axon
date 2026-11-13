@@ -1,0 +1,29 @@
+{
+ "label": "dec-67bbe1b-dbg-fp8-gpu-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-121349-b16c",
+   "name": "dec-67bbe1b-dbg-fp8-gpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-13_12:28.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "67bbe1b",
+   "binary": "axon-test-dbg-67bbe1b",
+   "started": 1794590935.0949178,
+   "ended": 1794591105.4318836,
+   "attempts": 1,
+   "remote_job": "20261113-172943-axon-test-dbg-67bbe1b-28058",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "0d7a500cbfd6ff9db8f709cfba8c78e5bb170a6f21b0d8428c9e0709321dd36f",
+   "log_bytes": 13708
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 12:31:47 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
