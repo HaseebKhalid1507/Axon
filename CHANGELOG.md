@@ -77,6 +77,14 @@ measurements behind them.
   with its own tarball; it now only builds. The release job also refuses when a release for the tag, draft or
   published, exists already, so "Re-run all jobs" on the tag's run can't add one either. The `kernels-pack`
   artifact is kept 30 days (was 7), for releasing.md step 1.
+- **The draft is made only while the tag names the commit the run built** (#261, the must-fix in #258, from
+  shady's review of #257). A tag moved while its first run was still building used to let that stale run make
+  the draft, holding the old commit's tarball; the new commit's run then hit the one-release check. The pack
+  job now records the commit it checked out, and the build job checks it built the same one. Before
+  `gh release create`, the release job asks GitHub which commit the tag names (`commits/refs/tags/<tag>`, which
+  peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
+  draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
+  every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
 - **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
