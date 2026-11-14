@@ -137,6 +137,9 @@ pub struct Opts {
     /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, off unless
     /// "1": opt-in, #207's timing clauses; a paged pool only).
     pub share: Option<bool>,
+    /// Tool calls streamed as they are generated on OpenAI's APIs (None:
+    /// AXON_TOOL_STREAM, on unless "0"; #260).
+    pub tool_stream: Option<bool>,
     /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
     /// with Some(false)).
     pub paged: Option<bool>,
@@ -323,6 +326,8 @@ struct Job {
     /// gpt-oss (harmony): the analysis channel to reasoning, the final
     /// channel to content, the markers nowhere.
     channels: Option<chat::Channels>,
+    /// Harmony with tools: stream calls (`TextOut::stream_calls`).
+    stream_calls: bool,
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
@@ -362,6 +367,8 @@ struct Shared {
     path: String,
     no_think: bool,
     think_inline: bool,
+    /// Tool calls streamed on OpenAI's APIs (`Opts::tool_stream`).
+    tool_stream: bool,
     sample: SampleArgs,
     max_tokens: Option<usize>,
     /// The `extra` header lines of every response (CORS).
@@ -513,6 +520,9 @@ struct TextOut<'t> {
     call: CallState,
     /// Counts dropped calls (`axon_tool_calls_dropped_total`).
     metrics: Option<Arc<ops::Metrics>>,
+    /// Harmony with tools: stream a call's arguments as they come (#260;
+    /// the job's `stream_calls`), framed once they open with `{`.
+    stream_calls: bool,
 }
 
 /// A harmony reply's call, as `TextOut` reads it.
@@ -520,8 +530,10 @@ struct TextOut<'t> {
 enum CallState {
     #[default]
     None,
-    /// Open: its recipient, its arguments' text so far and their scan.
-    Open(String, String, tools::ArgScan),
+    /// Open: its recipient, its arguments' text so far, their scan, and
+    /// whether its frame went out (stream mode: its arguments opened with
+    /// `{`, and it is a call whatever follows).
+    Open(String, String, tools::ArgScan, bool),
     /// Made: the reply is over.
     Done,
 }
@@ -581,9 +593,9 @@ impl TextOut<'_> {
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, String::new(), true);
             }
@@ -592,13 +604,16 @@ impl TextOut<'_> {
         let mut r = String::new();
         if !now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.finish();
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, r, true);
             }
-            r = self.call_dropped();
+            match self.call_cut() {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
         }
         if ch.ended() {
             // `<|call|>`: the reply is over.
@@ -641,7 +656,8 @@ impl TextOut<'_> {
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
             Some(to) if matches!(self.call, CallState::None) => {
-                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
+                self.call =
+                    CallState::Open(to.to_string(), String::new(), Default::default(), false);
                 tools::harmony_text(&self.stop.finish())
             }
             _ => String::new(),
@@ -652,7 +668,7 @@ impl TextOut<'_> {
     /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
     fn call_push(&mut self, t: &str) -> bool {
         match &mut self.call {
-            CallState::Open(_, args, scan) => {
+            CallState::Open(_, args, scan, _) => {
                 args.push_str(t);
                 scan.feed(t)
             }
@@ -663,7 +679,7 @@ impl TextOut<'_> {
     /// The open call's frame, if its arguments are a whole JSON object:
     /// parsed once, when the scan closes the top-level object.
     fn call_made(&mut self) -> Option<String> {
-        let CallState::Open(to, args, scan) = &mut self.call else {
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
             return None;
         };
         let a = args.trim();
@@ -671,9 +687,50 @@ impl TextOut<'_> {
             scan.kill();
             return None;
         }
-        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        let f = if *framed {
+            // Stream mode: its frame and arguments went out as they came.
+            tools::HARMONY_CALL_END.to_string()
+        } else {
+            tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END
+        };
         self.call = CallState::Done;
         Some(f)
+    }
+
+    /// Stream mode: what of the open call goes out with `t` (just added to
+    /// its arguments): nothing until they open with `{`, then its frame
+    /// and the arguments from that `{`, then each piece as it comes.
+    fn call_stream(&mut self, t: &str) -> String {
+        if !self.stream_calls {
+            return String::new();
+        }
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
+            return String::new();
+        };
+        if *framed {
+            return tools::harmony_text(t);
+        }
+        let name = to.strip_prefix("functions.").unwrap_or(to);
+        if !scan.began() || name.is_empty() {
+            return String::new();
+        }
+        *framed = true;
+        let a = &args[args.find('{').unwrap_or(0)..];
+        tools::harmony_call_open(to) + &tools::harmony_text(a)
+    }
+
+    /// Stream mode: an open call whose frame went out ends without its
+    /// arguments being a whole object (a header, its `<|call|>`, the token
+    /// limit): still a call, so its end frame (the parser counts it in
+    /// `axon_tool_calls_invalid_total`). None if its frame didn't go out.
+    fn call_cut(&mut self) -> Option<String> {
+        match self.call {
+            CallState::Open(_, _, _, true) => {
+                self.call = CallState::None;
+                Some(tools::HARMONY_CALL_END.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// The open call isn't one: its text (reasoning). Counted, and logged
@@ -681,7 +738,7 @@ impl TextOut<'_> {
     /// "the model didn't call".
     fn call_dropped(&mut self) -> String {
         match std::mem::take(&mut self.call) {
-            CallState::Open(to, args, _) => {
+            CallState::Open(to, args, _, _) => {
                 if let Some(m) = &self.metrics {
                     m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -718,14 +775,15 @@ impl TextOut<'_> {
         if matches!(self.call, CallState::Open(..)) {
             // The reply ended inside the call (the token limit).
             let t = self.utf8.finish();
-            let made = if self.call_push(&t) {
-                self.call_made()
-            } else {
-                None
-            };
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            let made = if closed { self.call_made() } else { None };
             match made {
                 Some(f) => c.push_str(&f),
-                None => r = self.call_dropped(),
+                None => match self.call_cut() {
+                    Some(f) => c.push_str(&f),
+                    None => r = self.call_dropped(),
+                },
             }
         }
         let unheaded = ch.take_unheaded();
@@ -800,6 +858,13 @@ fn debug() -> bool {
     *D.get_or_init(|| std::env::var_os("AXON_SERVE_DEBUG").is_some_and(|v| v == "1"))
 }
 
+/// AXON_TOOL_STREAM: tool calls streamed as they are generated on OpenAI's
+/// APIs (#260), on unless "0", the kill switch: then every call goes out
+/// whole once decided, as before #260.
+fn tool_stream_env() -> bool {
+    std::env::var_os("AXON_TOOL_STREAM").is_none_or(|v| v != "0")
+}
+
 /// The detokenizer and stop matcher of `job`'s reply.
 fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
@@ -813,6 +878,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> T
         stop: StopMatcher::new(job.stops.clone()),
         call: CallState::None,
         metrics: Some(metrics.clone()),
+        stream_calls: job.stream_calls,
     }
 }
 
@@ -2420,6 +2486,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         alias: o.alias,
         no_think: o.no_think,
         think_inline: o.think_inline,
+        tool_stream: o.tool_stream.unwrap_or_else(tool_stream_env),
         sample,
         max_tokens: o.max_tokens,
         extra,
@@ -2997,6 +3064,12 @@ fn run_request(
     if sh.max_prompt_tokens.is_some_and(|max| prompt.len() > max) {
         return out.err(c, over_max(format!("{} tokens", prompt.len())), keep);
     }
+    // OpenAI's APIs stream a call as it is generated (#260); ollama's calls
+    // are whole objects, so its replies decide each call whole.
+    let stream_calls = parser.is_some() && sh.tool_stream && !matches!(out, Out::Ollama(_));
+    if let Some(p) = parser.as_mut() {
+        p.configure(stream_calls, Some(sh.metrics.clone()));
+    }
     let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -3012,6 +3085,7 @@ fn run_request(
         stops: g.stop.clone(),
         think,
         channels,
+        stream_calls,
         cancel: cancel.clone(),
         tx,
         id: n,
@@ -3251,6 +3325,8 @@ fn whole(
                         match piece {
                             tools::Piece::Text(t) => text.push_str(&t),
                             tools::Piece::Call(c) => calls.push(c),
+                            // A streamed call's pieces: its `Call` is whole.
+                            tools::Piece::Head(_) | tools::Piece::Args(_) => {}
                         }
                     }
                     let h = api::head(id, "chat.completion", created, model.0, &model.1);
@@ -3317,17 +3393,30 @@ fn stream(
         c.send(api::sse(&u(api::chat_chunk(&h, true, "", "", None))).as_bytes())?;
     }
     let mut buf = String::new();
-    // Tools: the content and calls the parser has decided, as chunks.
+    // Tools: the content and calls the parser has decided, as chunks. A
+    // streamed call: a chunk with its id and name, then one per piece of its
+    // arguments (OpenAI's shape); a call decided whole: the same two chunks
+    // at once.
     let mut ncalls = 0;
+    let mut streaming = false;
     let mut pieces = |buf: &mut String, ps: Vec<tools::Piece>| {
         for p in ps {
             match p {
                 tools::Piece::Text(t) => {
                     buf.push_str(&api::sse(&u(api::chat_chunk(&h, false, &t, "", None))));
                 }
+                tools::Piece::Head(call) => {
+                    buf.push_str(&api::sse(&u(tools::call_head_chunk(&h, ncalls, &call))));
+                    streaming = true;
+                }
+                tools::Piece::Args(a) => {
+                    buf.push_str(&api::sse(&u(tools::call_args_chunk(&h, ncalls, &a))));
+                }
                 tools::Piece::Call(call) => {
-                    for j in tools::call_chunks(&h, ncalls, &call) {
-                        buf.push_str(&api::sse(&u(j)));
+                    if !std::mem::replace(&mut streaming, false) {
+                        for j in tools::call_chunks(&h, ncalls, &call) {
+                            buf.push_str(&api::sse(&u(j)));
+                        }
                     }
                     ncalls += 1;
                 }
@@ -3468,6 +3557,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         slot_ctx: None,
         kv_pages: None,
         share: None,
+        tool_stream: None,
         paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,

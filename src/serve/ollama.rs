@@ -712,6 +712,9 @@ pub(super) fn stream(
             let v = match p {
                 Piece::Text(t) => line(x, &model, &t, "", &[]),
                 Piece::Call(call) => line(x, &model, "", "", &[call]),
+                // ollama's calls are whole objects: its replies decide each
+                // call whole, so there are no streamed pieces.
+                Piece::Head(_) | Piece::Args(_) => continue,
             };
             push(buf, v);
         }

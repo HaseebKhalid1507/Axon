@@ -40,7 +40,13 @@
 //! its prompt is the one main renders, byte for byte.
 //!
 //! **Output.** `Parser` turns the reply's text into content and calls,
-//! incrementally for streaming:
+//! incrementally for streaming. Two modes: stream mode (OpenAI's chat
+//! completions and Responses, unless AXON_TOOL_STREAM=0) sends a call's id
+//! and name, then its arguments' text, as they are generated (`stream.rs`,
+//! #260: when it commits to a call, and what a call that goes bad after
+//! that is). Decide-whole mode (ollama, whose calls are whole objects, and
+//! AXON_TOOL_STREAM=0) sends a call once its block is decided, as described
+//! here:
 //!
 //! - Hermes: text outside `<tool_call>...</tool_call>` is content. Anything
 //!   that may be the start of `<tool_call>` is held back until decided, so
@@ -61,8 +67,10 @@
 //!   reply: one call per reply. A call that ends otherwise is no call, and
 //!   its text is reasoning (never content).
 //!
-//! **Invalid JSON policy.** A block is a call only if it parses as a JSON
-//! object with a string `"name"`. Otherwise the whole block, tags included,
+//! **Invalid JSON policy** (decide-whole mode; stream mode decides the same
+//! way up to its commit point, and after it the call is a call: #260). A
+//! block is a call only if it parses as a JSON object with a string
+//! `"name"`. Otherwise the whole block, tags included,
 //! is returned as content, verbatim. So `tool_calls[].function.arguments`
 //! is always valid JSON (an object, or whatever JSON value the model gave;
 //! a string value is used as the arguments if it is itself JSON, else it is
@@ -1214,6 +1222,11 @@ impl ArgScan {
         closed
     }
 
+    /// The arguments opened with `{` (stream mode frames the call then).
+    pub fn began(&self) -> bool {
+        self.began
+    }
+
     /// The parse refused the closed object: stop scanning.
     pub fn kill(&mut self) {
         self.dead = true;
@@ -1579,6 +1592,13 @@ pub struct Call {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Piece {
     Text(String),
+    /// Stream mode: a call begins: its id and name (`args` empty). Its
+    /// arguments follow as `Args`, and it ends with `Call`.
+    Head(Call),
+    /// Stream mode: more of the open call's arguments.
+    Args(String),
+    /// A call, whole: in stream mode its end (the same id as its `Head`,
+    /// its `args` the `Args` joined); in decide-whole mode the only piece.
     Call(Call),
 }
 
@@ -1644,8 +1664,27 @@ fn call_of(body: &str) -> Option<Call> {
 }
 
 /// Reads a reply into content and calls as its text arrives.
+///
+/// Two modes. Decide-whole (`new`; ollama, whose calls are whole objects,
+/// and everything with AXON_TOOL_STREAM=0): a call goes out once its block
+/// is decided, under the policy in this module's doc. Stream (`stream`;
+/// OpenAI's chat completions and Responses): a call's head and arguments go
+/// out as they are generated (`stream.rs`, #260).
 pub struct Parser {
     kind: Kind,
+    /// Stream mode.
+    stream: bool,
+    /// Stream mode: the open block (Hermes) or object (Llama).
+    blk: Option<stream::Block>,
+    /// Stream mode, harmony: the call being streamed, and how much of its
+    /// arguments (`hargs`) went out (trailing blanks wait).
+    hcall: Option<Call>,
+    hsent: usize,
+    /// Blocks returned as content, calls whose arguments aren't a JSON
+    /// object (`axon_tool_calls_dropped_total`, `_invalid_total`).
+    n_dropped: usize,
+    n_invalid: usize,
+    metrics: Option<std::sync::Arc<super::ops::Metrics>>,
     /// Hermes: inside a block. Json: holding the reply.
     inside: bool,
     /// Json: the reply's first non-blank character is still to come.
@@ -1670,6 +1709,13 @@ impl Parser {
     fn new(kind: Kind) -> Parser {
         Parser {
             kind,
+            stream: false,
+            blk: None,
+            hcall: None,
+            hsent: 0,
+            n_dropped: 0,
+            n_invalid: 0,
+            metrics: None,
             inside: false,
             undecided: kind == Kind::Json,
             buf: String::new(),
@@ -1706,6 +1752,47 @@ impl Parser {
         self.calls
     }
 
+    /// Before any text: stream calls (`stream`, else decide each whole),
+    /// and count into `m`'s /metrics.
+    pub fn configure(&mut self, stream: bool, m: Option<std::sync::Arc<super::ops::Metrics>>) {
+        self.stream = stream;
+        self.metrics = m;
+    }
+
+    /// Stream mode.
+    pub fn streams(&self) -> bool {
+        self.stream
+    }
+
+    /// Blocks returned as content (not a JSON object with a string name).
+    #[cfg(test)]
+    pub fn dropped_blocks(&self) -> usize {
+        self.n_dropped
+    }
+
+    /// Calls returned whose arguments aren't a JSON object.
+    #[cfg(test)]
+    pub fn invalid_calls(&self) -> usize {
+        self.n_invalid
+    }
+
+    /// A block (`text`: its body) returned as content: counted, and logged
+    /// with AXON_SERVE_DEBUG=1, so that "axon dropped it" can be told from
+    /// "the model didn't call".
+    fn dropped(&mut self, text: &str) {
+        self.n_dropped += 1;
+        if let Some(m) = &self.metrics {
+            m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        if super::debug() {
+            eprintln!(
+                "axon serve: a tool call block ({} bytes) is not a JSON object with a string \
+                 \"name\": returned as content",
+                text.len()
+            );
+        }
+    }
+
     fn content(&mut self, t: &str, out: &mut Vec<Piece>) {
         let body = t.trim_end();
         if body.is_empty() {
@@ -1725,6 +1812,20 @@ impl Parser {
     }
 
     fn call(&mut self, c: Call, out: &mut Vec<Piece>) {
+        if !matches!(parse_json(&c.args), Some(J::Obj(_))) {
+            self.n_invalid += 1;
+            if let Some(m) = &self.metrics {
+                m.tool_calls_invalid.fetch_add(1, Ordering::Relaxed);
+            }
+            if super::debug() {
+                eprintln!(
+                    "axon serve: a call to {} returned with arguments ({} bytes) that are not a \
+                     JSON object (cut off, or not valid JSON)",
+                    c.name,
+                    c.args.len()
+                );
+            }
+        }
         self.ws.clear();
         self.calls += 1;
         self.after_call = true;
@@ -1736,6 +1837,7 @@ impl Parser {
         let mut out = Vec::new();
         self.buf.push_str(s);
         match self.kind {
+            Kind::Hermes if self.stream => self.hermes_stream(&mut out),
             Kind::Hermes => self.hermes(&mut out),
             Kind::Harmony => self.harmony(&mut out),
             Kind::Json => {
@@ -1747,8 +1849,18 @@ impl Parser {
                     }
                     self.undecided = false;
                     self.inside = t.starts_with('{');
+                    if self.inside && self.stream {
+                        // The object streams from its `{`; the text before it
+                        // is content only if the object isn't a call.
+                        let at = self.buf.len() - t.len();
+                        let pre: String = self.buf.drain(..at).collect();
+                        self.blk = Some(stream::Block::new(Kind::Json, pre));
+                    }
                 }
-                if !self.inside {
+                if self.inside && self.stream {
+                    let t = std::mem::take(&mut self.buf);
+                    self.feed_block(&t, &mut out);
+                } else if !self.inside {
                     let b = std::mem::take(&mut self.buf);
                     if !b.is_empty() {
                         out.push(Piece::Text(b));
@@ -1802,6 +1914,7 @@ impl Parser {
         match call_of(body) {
             Some(c) => self.call(c, out),
             None => {
+                self.dropped(body);
                 let raw = format!("{OPEN}{body}{}", if closed { CLOSE } else { "" });
                 let ws = std::mem::take(&mut self.ws);
                 self.after_call = false;
@@ -1838,7 +1951,23 @@ impl Parser {
                     self.hname.clear();
                     self.hargs.clear();
                 }
-                '2' => self.undecided = false,
+                '2' => {
+                    self.undecided = false;
+                    let name = self.hname.strip_prefix("functions.").unwrap_or(&self.hname);
+                    if self.stream && !name.is_empty() {
+                        // Stream mode: `TextOut` frames a call once its
+                        // arguments open with `{`, and then it is a call.
+                        let c = Call {
+                            id: call_id(),
+                            name: name.to_string(),
+                            args: String::new(),
+                        };
+                        out.push(Piece::Head(c.clone()));
+                        self.hcall = Some(c);
+                        self.hsent = 0;
+                    }
+                }
+                '3' if self.inside && self.hcall.is_some() => self.harmony_stream_end(out),
                 '3' if self.inside => self.harmony_end(true, out),
                 _ => {}
             }
@@ -1854,7 +1983,41 @@ impl Parser {
         match (self.inside, self.undecided) {
             (false, _) => self.content(t, out),
             (true, true) => self.hname.push_str(t),
-            (true, false) => self.hargs.push_str(t),
+            (true, false) => {
+                self.hargs.push_str(t);
+                if self.hcall.is_some() {
+                    self.harmony_args(out);
+                }
+            }
+        }
+    }
+
+    /// Stream mode: the streamed call's arguments that went out, trimmed as
+    /// a decided call's are (blanks at the end wait).
+    fn harmony_args(&mut self, out: &mut Vec<Piece>) {
+        let lead = self.hargs.len() - self.hargs.trim_start().len();
+        let end = self.hargs.trim_end().len();
+        let from = self.hsent.max(lead);
+        if end > from {
+            let s = self.hargs[from..end].to_string();
+            if let Some(c) = self.hcall.as_mut() {
+                c.args.push_str(&s);
+            }
+            out.push(Piece::Args(s));
+            self.hsent = end;
+        }
+    }
+
+    /// Stream mode: the streamed call ends (its end frame, or the reply's
+    /// end): a call, whatever its arguments are.
+    fn harmony_stream_end(&mut self, out: &mut Vec<Piece>) {
+        self.inside = false;
+        self.undecided = false;
+        self.hname.clear();
+        self.hargs.clear();
+        self.hsent = 0;
+        if let Some(c) = self.hcall.take() {
+            self.call(c, out);
         }
     }
 
@@ -1891,7 +2054,10 @@ impl Parser {
             Kind::Harmony => {
                 self.buf = buf;
                 self.harmony(&mut out);
-                if self.inside {
+                if self.inside && self.hcall.is_some() {
+                    // Stream mode, no end frame: the call as written.
+                    self.harmony_stream_end(&mut out);
+                } else if self.inside {
                     // No end frame: cut off.
                     self.harmony_end(false, &mut out);
                 }
@@ -1900,6 +2066,10 @@ impl Parser {
                 if !rest.is_empty() {
                     self.content(&rest, &mut out);
                 }
+            }
+            Kind::Hermes | Kind::Json if self.inside && self.stream => {
+                self.buf = buf;
+                self.finish_stream_block(&mut out);
             }
             Kind::Hermes if self.inside => {
                 self.inside = false;
@@ -1931,7 +2101,10 @@ impl Parser {
                                 self.call(c, &mut out);
                             }
                         }
-                        _ => out.push(Piece::Text(buf)),
+                        _ => {
+                            self.dropped(t);
+                            out.push(Piece::Text(buf));
+                        }
                     }
                 } else if !buf.is_empty() {
                     out.push(Piece::Text(buf));
@@ -1958,24 +2131,42 @@ fn call_json(c: &Call) -> String {
     )
 }
 
-/// The two stream chunks of call `index`: its id and name (empty
-/// arguments), then its arguments.
-pub fn call_chunks(head: &str, index: usize, c: &Call) -> [String; 2] {
-    let wrap = |tc: String| {
+fn tool_chunk(head: &str, tc: String) -> String {
+    format!(
+        "{{{head},\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{tc}]}},\"logprobs\":null,\"finish_reason\":null}}]}}"
+    )
+}
+
+/// The stream chunk that opens call `index`: its id and name (empty
+/// arguments).
+pub fn call_head_chunk(head: &str, index: usize, c: &Call) -> String {
+    tool_chunk(
+        head,
         format!(
-            "{{{head},\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{tc}]}},\"logprobs\":null,\"finish_reason\":null}}]}}"
-        )
-    };
-    [
-        wrap(format!(
             "{{\"index\":{index},\"id\":{},\"type\":\"function\",\"function\":{{\"name\":{},\"arguments\":\"\"}}}}",
             quote(&c.id),
             quote(&c.name)
-        )),
-        wrap(format!(
+        ),
+    )
+}
+
+/// A stream chunk of call `index`'s arguments.
+pub fn call_args_chunk(head: &str, index: usize, args: &str) -> String {
+    tool_chunk(
+        head,
+        format!(
             "{{\"index\":{index},\"function\":{{\"arguments\":{}}}}}",
-            quote(&c.args)
-        )),
+            quote(args)
+        ),
+    )
+}
+
+/// The two stream chunks of call `index`: its id and name (empty
+/// arguments), then its arguments.
+pub fn call_chunks(head: &str, index: usize, c: &Call) -> [String; 2] {
+    [
+        call_head_chunk(head, index, c),
+        call_args_chunk(head, index, &c.args),
     ]
 }
 
@@ -2007,6 +2198,8 @@ pub fn chat_response(
         u.timings()
     )
 }
+
+mod stream;
 
 #[cfg(test)]
 mod tests;

@@ -39,8 +39,12 @@
 //! `response.output_item.done`, `response.completed`, or
 //! `response.incomplete` when cut off by `max_output_tokens` or the
 //! context, `error` + `response.failed` on an engine error), each with a
-//! `sequence_number`. Function calls are sent when the reply ends, after
-//! the message item (the parser decides a call whole anyway).
+//! `sequence_number`. A function call is its own item where it comes: its
+//! `output_item.added` once the parser has its name, an arguments delta per
+//! piece as it is generated, then `.done` and `output_item.done` (#260; text
+//! after a call is a new message item, and the whole response orders its
+//! items the same way). With AXON_TOOL_STREAM=0 calls are decided whole and
+//! sent when the reply ends, after the message item, as before.
 
 use super::api::{self, ApiError, GenReq, Usage};
 use super::tools::{self, Call, J, Piece};
@@ -688,17 +692,27 @@ fn call_item(c: &Call, status: &str, args: &str) -> Value {
 
 /// A reply's text through the tool parser (if any): content, calls.
 pub(super) fn split(parser: Option<tools::Parser>, content: String) -> (String, Vec<Call>) {
-    let Some(mut p) = parser else {
-        return (content, Vec::new());
-    };
     let (mut text, mut calls) = (String::new(), Vec::new());
-    for piece in p.push(&content).into_iter().chain(p.finish()) {
+    for piece in pieces(parser, content).1 {
         match piece {
             Piece::Text(t) => text.push_str(&t),
             Piece::Call(c) => calls.push(c),
+            // A streamed call's pieces: its `Call` is whole.
+            Piece::Head(_) | Piece::Args(_) => {}
         }
     }
     (text, calls)
+}
+
+/// A reply's text through the tool parser (if any), in order; whether it
+/// streams calls.
+fn pieces(parser: Option<tools::Parser>, content: String) -> (bool, Vec<Piece>) {
+    let Some(mut p) = parser else {
+        return (false, vec![Piece::Text(content)]);
+    };
+    let mut v = p.push(&content);
+    v.extend(p.finish());
+    (p.streams(), v)
 }
 
 /// Keep the conversation with its reply (`store`).
@@ -763,17 +777,59 @@ pub(super) fn whole(
                 return super::api_err(c, ApiError::new(500, "server_error", m), keep_alive);
             }
             Some(Event::Done { usage, finish }) => {
-                let (text, calls) = split(parser, content);
+                let (streams, ps) = pieces(parser, content);
                 let mut out = Vec::new();
                 if !reasoning.is_empty() {
                     out.push(reasoning_item(&item_id("rs", id, 0), &reasoning));
                 }
-                if !text.is_empty() || calls.is_empty() {
-                    let st = status_of(finish);
-                    out.push(message_item(&item_id("msg", id, 0), &text, st));
-                }
-                for call in &calls {
-                    out.push(call_item(call, "completed", &call.args));
+                let (mut text, mut calls) = (String::new(), Vec::new());
+                if streams {
+                    // As the stream sends them (#260): each call its item
+                    // where it came, text between calls its own message.
+                    let mut run = String::new();
+                    let mut msgs = 0;
+                    let n = ps.iter().filter(|p| matches!(p, Piece::Call(_))).count();
+                    for p in ps {
+                        match p {
+                            Piece::Text(t) => {
+                                text.push_str(&t);
+                                run.push_str(&t);
+                            }
+                            Piece::Call(c) => {
+                                if !run.is_empty() {
+                                    let iid = item_id("msg", id, msgs);
+                                    out.push(message_item(
+                                        &iid,
+                                        &std::mem::take(&mut run),
+                                        "completed",
+                                    ));
+                                    msgs += 1;
+                                }
+                                out.push(call_item(&c, "completed", &c.args));
+                                calls.push(c);
+                            }
+                            Piece::Head(_) | Piece::Args(_) => {}
+                        }
+                    }
+                    if !run.is_empty() || n == 0 {
+                        let st = status_of(finish);
+                        out.push(message_item(&item_id("msg", id, msgs), &run, st));
+                    }
+                } else {
+                    for p in ps {
+                        match p {
+                            Piece::Text(t) => text.push_str(&t),
+                            Piece::Call(c) => calls.push(c),
+                            Piece::Head(_) | Piece::Args(_) => {}
+                        }
+                    }
+                    if !text.is_empty() || calls.is_empty() {
+                        let st = status_of(finish);
+                        out.push(message_item(&item_id("msg", id, 0), &text, st));
+                    }
+                    for call in &calls {
+                        out.push(call_item(call, "completed", &call.args));
+                    }
                 }
                 keep(x, id, &text, &reasoning, &calls);
                 let r = response(
@@ -817,8 +873,34 @@ impl Sse {
 /// The item being streamed.
 enum Open {
     None,
-    Reasoning { id: String, text: String },
-    Message { id: String, text: String },
+    Reasoning {
+        id: String,
+        text: String,
+    },
+    Message {
+        id: String,
+        text: String,
+    },
+    /// A function call streamed as it is generated (#260): its item id, and
+    /// the call so far.
+    Call {
+        fid: String,
+        call: Call,
+    },
+}
+
+/// What a streamed response has sent so far.
+#[derive(Default)]
+struct Acc {
+    text: String,
+    reasoning: String,
+    /// Every call, in order (`store`).
+    calls: Vec<Call>,
+    /// Calls decided whole (decide-whole mode): sent at the end, after the
+    /// text, as before #260.
+    late: Vec<Call>,
+    /// Reasoning that came while a call was open: sent after it.
+    wait: String,
 }
 
 /// A streamed response.
@@ -848,13 +930,31 @@ pub(super) fn stream(
 
     let mut out: Vec<Value> = Vec::new();
     let mut open = Open::None;
-    let mut calls: Vec<Call> = Vec::new();
-    let (mut all_text, mut all_reasoning) = (String::new(), String::new());
+    let mut acc = Acc::default();
     // `status`: the message item's (the response's, at its end).
     let close = |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>, status: &str| {
         let n = out.len();
         match std::mem::replace(open, Open::None) {
             Open::None => {}
+            Open::Call { fid, call } => {
+                // Only an error ends a call before its `Piece::Call`.
+                let st = if status == "completed" {
+                    "completed"
+                } else {
+                    "incomplete"
+                };
+                sse.ev(
+                    "response.function_call_arguments.done",
+                    json!({"item_id": fid, "output_index": n, "name": call.name,
+                           "arguments": call.args}),
+                );
+                let item = call_item(&call, st, &call.args);
+                sse.ev(
+                    "response.output_item.done",
+                    json!({"output_index": n, "item": item}),
+                );
+                out.push(item);
+            }
             Open::Reasoning { id: iid, text } => {
                 sse.ev(
                     "response.reasoning_text.done",
@@ -938,6 +1038,48 @@ pub(super) fn stream(
             );
         }
     };
+    // A piece of the reply. A streamed call (#260) is its own item, where it
+    // comes: `output_item.added`, an arguments delta per piece, then
+    // `function_call_arguments.done` and `output_item.done`.
+    let piece =
+        |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>, acc: &mut Acc, p: Piece| match p {
+            Piece::Text(t) => {
+                acc.text.push_str(&t);
+                text_delta(sse, open, out, &t);
+            }
+            Piece::Head(h) => {
+                close(sse, open, out, "completed");
+                let fid = format!("fc_{}", h.id.trim_start_matches("call_"));
+                sse.ev(
+                    "response.output_item.added",
+                    json!({"output_index": out.len(), "item": call_item(&h, "in_progress", "")}),
+                );
+                *open = Open::Call { fid, call: h };
+            }
+            Piece::Args(a) => {
+                if let Open::Call { fid, call } = open {
+                    call.args.push_str(&a);
+                    sse.ev(
+                        "response.function_call_arguments.delta",
+                        json!({"item_id": fid, "output_index": out.len(), "delta": a}),
+                    );
+                }
+            }
+            Piece::Call(c) => {
+                acc.calls.push(c.clone());
+                match open {
+                    Open::Call { call, .. } if call.id == c.id => {
+                        *call = c;
+                        close(sse, open, out, "completed");
+                        if !acc.wait.is_empty() {
+                            let r = std::mem::take(&mut acc.wait);
+                            reasoning_delta(sse, open, out, &r);
+                        }
+                    }
+                    _ => acc.late.push(c),
+                }
+            }
+        };
     let mut checked = Instant::now();
     let mut e = ev.next(c, &mut checked);
     loop {
@@ -946,8 +1088,12 @@ pub(super) fn stream(
             match event {
                 Event::Text { content, reasoning } => {
                     if !reasoning.is_empty() {
-                        all_reasoning.push_str(&reasoning);
-                        reasoning_delta(&mut sse, &mut open, &mut out, &reasoning);
+                        acc.reasoning.push_str(&reasoning);
+                        if matches!(open, Open::Call { .. }) {
+                            acc.wait.push_str(&reasoning);
+                        } else {
+                            reasoning_delta(&mut sse, &mut open, &mut out, &reasoning);
+                        }
                     }
                     let pieces = match parser.as_mut() {
                         Some(p) => p.push(&content),
@@ -955,13 +1101,7 @@ pub(super) fn stream(
                         None => vec![Piece::Text(content)],
                     };
                     for p in pieces {
-                        match p {
-                            Piece::Text(t) => {
-                                all_text.push_str(&t);
-                                text_delta(&mut sse, &mut open, &mut out, &t);
-                            }
-                            Piece::Call(call) => calls.push(call),
-                        }
+                        piece(&mut sse, &mut open, &mut out, &mut acc, p);
                     }
                 }
                 Event::Error(m) => {
@@ -977,23 +1117,21 @@ pub(super) fn stream(
                 }
                 Event::Done { usage, finish } => {
                     for p in parser.as_mut().map(|p| p.finish()).unwrap_or_default() {
-                        match p {
-                            Piece::Text(t) => {
-                                all_text.push_str(&t);
-                                text_delta(&mut sse, &mut open, &mut out, &t);
-                            }
-                            Piece::Call(call) => calls.push(call),
-                        }
+                        piece(&mut sse, &mut open, &mut out, &mut acc, p);
                     }
-                    if calls.is_empty()
+                    if !acc.wait.is_empty() {
+                        let r = std::mem::take(&mut acc.wait);
+                        reasoning_delta(&mut sse, &mut open, &mut out, &r);
+                    }
+                    if acc.calls.is_empty()
                         && !matches!(open, Open::Message { .. })
-                        && all_text.is_empty()
+                        && acc.text.is_empty()
                     {
                         // An empty reply is still one message item.
                         text_delta(&mut sse, &mut open, &mut out, "");
                     }
                     close(&mut sse, &mut open, &mut out, status_of(finish));
-                    for call in &calls {
+                    for call in &acc.late {
                         let n = out.len();
                         let fid = format!("fc_{}", call.id.trim_start_matches("call_"));
                         sse.ev(
@@ -1016,7 +1154,7 @@ pub(super) fn stream(
                         );
                         out.push(item);
                     }
-                    keep(x, id, &all_text, &all_reasoning, &calls);
+                    keep(x, id, &acc.text, &acc.reasoning, &acc.calls);
                     let status = status_of(finish);
                     let r = response(
                         x,
@@ -1027,7 +1165,7 @@ pub(super) fn stream(
                         &out,
                         Some((
                             &usage,
-                            reasoning_tokens(tok, &all_reasoning, usage.completion_tokens),
+                            reasoning_tokens(tok, &acc.reasoning, usage.completion_tokens),
                         )),
                         Some(finish),
                     );

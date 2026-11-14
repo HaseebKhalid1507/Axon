@@ -47,6 +47,7 @@ in [serving.md](serving.md).
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_API_KEY=KEY` | `serve`: same as `--api-key KEY`, kept out of `ps`; `--api-key` wins ([serving.md](serving.md#operations-auth-metrics-slots)) |
 | `AXON_SHARE_KV=1` | `serve`, the GPU's paged pool: requests share the KV pages of a common prompt prefix, same bits (opt-in, off by default; [serving.md](serving.md#operations-auth-metrics-slots)) |
+| `AXON_TOOL_STREAM=0` | `serve`: tool calls go out whole once decided (two chunks; on `/v1/responses` at the reply's end), and a `<tool_call>` block that isn't valid JSON is returned as content, as before #260. Default: a call streams as it is generated, its id and name first, then its arguments, on chat completions and Responses ([serving.md](serving.md#tool-calling)) |
 | `AXON_PAGED_KV=0` | `serve`: the old pool of slots each reserved at the full context, instead of 64-position pages shared by every slot |
 | `AXON_KV_PAGES=N` | `serve`: size the paged pool to N pages (at most what fits), for testing a server under memory pressure |
 | `AXON_KV_RAM_ALLOC=start` | `serve --cache-ram` on the GPU: pin the whole tier before the server answers, instead of in 64 MiB pieces while it runs |

@@ -194,7 +194,10 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
   `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
   `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`,
-  `axon_tool_calls_dropped_total` (gpt-oss calls begun but not finished as a JSON object), and the histograms
+  `axon_tool_calls_dropped_total` (tool calls begun but returned as no call: a `<tool_call>` block or
+  Llama JSON reply that isn't a JSON object with a string name, as content, or a gpt-oss call whose arguments
+  never opened as an object, as reasoning), `axon_tool_calls_invalid_total` (calls returned whose `arguments`
+  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value), and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). The scheduler's (#131): `axon_waiting_requests`,
@@ -303,25 +306,49 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>{args}<|call|>`).
   Other chat formats answer a tool request with a 400. A request without tools or tool
   turns is rendered exactly as before.
-- The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
-  Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
-  first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
-  Text outside the blocks streams as `content`. Nothing of a block reaches `content`
-  while it is still being decided, and blank lines that only separate text from calls are
-  dropped. Not streamed: `message.tool_calls`, with `content` null if there was no text.
-  Call ids are `call_` plus 24 hex digits.
-- A block that isn't a JSON object with a string `"name"` (invalid JSON, or the reply was
-  cut off mid-call) is not a call: it is returned as `content`, tags and all. So
-  `arguments` is always valid JSON. A string `arguments` value is used as the arguments if
-  it is itself JSON, else returned as its JSON string literal. Qwen3's reasoning still
-  comes as `reasoning_content`. gpt-oss is stricter: arguments must be a JSON object, and a
-  call that ends without one (a header, its `<|call|>`, the token limit) is not a call. Its
-  text comes back as `reasoning_content` (it was on the commentary channel), never as
-  `content`, and is counted in `axon_tool_calls_dropped_total`.
-- The parser reads tags, not prose or JSON. `<tool_call>` written in ordinary text opens a
+- The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`
+  (`"length"` if the token limit cut the reply). Text outside the blocks streams as `content`,
+  and blank lines that only separate text from calls are dropped. Not streamed:
+  `message.tool_calls`, with `content` null if there was no text. Call ids are `call_` plus
+  24 hex digits.
+- **Streamed, a call goes out as it is generated** (#260), as OpenAI and llama-server send it:
+  a `delta.tool_calls` chunk with `index`, `id`, `type` and `function.name` as soon as the
+  call's name is read and its arguments open with `{`, then a chunk of `function.arguments`
+  per piece of text. On `/v1/responses` the call is its own item at that point
+  (`response.output_item.added`, then `response.function_call_arguments.delta` events). So a
+  call that runs on (a looping argument, and no `max_tokens`) is visible from its first
+  tokens; before, nothing of it went out until its block closed, and a client with an idle
+  timeout hung up (codex's is 300 s: #260's runaway call was silent for 340 s).
+- **Which blocks are calls.** Up to that point a block is held, and decided as soon as its text
+  can't begin a JSON object any more: then it is not a call, and it comes back as `content`,
+  tags and all, from there on. A block whose object closes without arguments that open with
+  `{` (a string or array `arguments`, or the name after them) is decided whole: a call if it
+  is a JSON object with a string `"name"`, else content. A string `arguments` value is used as
+  the arguments if it is itself JSON, else returned as its JSON string literal.
+- **Once a call's head is out it is a call**, as in OpenAI's API, where `arguments` is the
+  model's text and clients check it. Arguments that stop being JSON (an unescaped quote, a raw
+  newline, a bad escape: #259's failures) are returned as written up to the block's end, less
+  the object's closing `}`. A reply cut off mid-call is a call with what was written. Either
+  way `arguments` isn't a valid JSON object, and the call is counted in
+  `axon_tool_calls_invalid_total`. A harness then reports the call as failed to the model,
+  which can try again; before, the block came back as text, which ended codex's turn. Other
+  text after the call's object ends the block there: `<tool_call>` opens the next call
+  (#259's "a valid object followed by a second `<tool_call>`"), anything else is content.
+- **`AXON_TOOL_STREAM=0`** turns this off: every call goes out once its block is decided, as
+  two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
+  text when the reply ends), and a block that isn't a JSON object with a string `"name"`
+  (invalid JSON, or cut off mid-call) is returned as `content`, so `arguments` is always
+  valid JSON. The ollama routes always work this way (an ollama call is a whole object).
+- Qwen3's reasoning still comes as `reasoning_content`. gpt-oss: its calls stream the same
+  way once their arguments open with `{`. A call whose arguments never do (a number, an
+  array, nothing) is not a call: its text comes back as `reasoning_content` (it was on the
+  commentary channel), never as `content`, and is counted in `axon_tool_calls_dropped_total`.
+  With `AXON_TOOL_STREAM=0` that also holds for a call that ends without a whole JSON
+  object (a header, its `<|call|>`, the token limit).
+- The parser reads tags and JSON, not prose. `<tool_call>` written in ordinary text opens a
   block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
-  JSON string value ends the block early (the call then fails to parse and is returned
-  as content).
+  JSON string value ends the block early (streamed, the call is cut there; with
+  `AXON_TOOL_STREAM=0` it fails to parse and is returned as content).
 - The format is chosen per model family from the vocabulary (ChatML with or without
   `<think>`, or Llama 3's headers), not read from the GGUF's template. Models of a known
   family with a different tool format, such as Qwen3-Coder's XML `<function=...>` calls,
