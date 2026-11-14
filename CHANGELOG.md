@@ -6,6 +6,33 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Tool calls stream as they are generated (#260)
+- **Streamed, a call's head goes out as soon as its name is read and its arguments open with `{`**, then its
+  arguments a piece at a time: `delta.tool_calls` chunks on `/v1/chat/completions`, a `function_call` item with
+  `response.function_call_arguments.delta` events on `/v1/responses`. Before, nothing of a call went out until its
+  block closed. In #260 a looping call (codex, Qwen2.5-7B, job 1113-010041-0dce) sent nothing for 340 s, so codex's
+  300 s idle timeout fired, and its retry decoded at half speed beside the runaway.
+- **A block is decided as soon as it can't be a call** (its text stops being a prefix of a JSON object), and streams
+  as content from there, where it used to be held to its end.
+- **Changed: once its head is out, a call is a call.** Arguments that go bad after that point (#259's unescaped
+  quotes, raw newlines, bad escapes) come back as written, and a reply cut off mid-call comes back as a call with what
+  was written. Either way `arguments` isn't valid JSON, as OpenAI's API allows, and the call is counted in the new
+  `axon_tool_calls_invalid_total`. Before, such a block came back as content, which ended codex's turn. This applies
+  streamed or not: a `"stream": false` reply decides calls the same way. Other text after a call's object ends its
+  block: a `<tool_call>` there opens the next call, and the block's own `</tool_call>`, if it comes later, is dropped
+  rather than shown as content.
+- On `/v1/responses` a call cut off by the token limit has item `status: "incomplete"` (it was `completed`).
+- In a call's arguments a `</tool_call>` inside a JSON string is the string's text (it used to cut the call there).
+- gpt-oss: a call is framed only when nothing but blanks comes before its arguments' `{`, where the call is parsed
+  from (other text first: reasoning, as before).
+- Llama 3.1/3.2's JSON calls and gpt-oss's calls stream the same way (gpt-oss once its arguments open with `{`).
+- `axon_tool_calls_dropped_total` now also counts `<tool_call>` blocks and Llama JSON replies returned as content.
+  It used to count gpt-oss calls only.
+- **Kill switch `AXON_TOOL_STREAM=0`:** calls decided whole and sent once decided, as before, on every route. The
+  ollama routes always work this way (an ollama call is a whole object).
+- The output tokens are unchanged. What changes is how the text is split into content and calls, and when it is
+  sent.
+
 ### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
 - **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
   `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
