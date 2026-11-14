@@ -20,9 +20,9 @@ realistic mix until the deadline:
   oversize                   a prompt past the context: must be a 4xx, never a 5xx
   invalid                    malformed JSON / bad params / wrong method: must be a 4xx
   burst                      every ~2 min one client fires 3x the slot count at once (503 allowed)
-  hog (--hogs K)             K more clients, each a count that doesn't stop (2000-3000 tokens, greedy)
-                             after a prefix they share, back to back: the pool preempts (see Client.hog);
-                             every hog reply must be a prefix of the longest (HogRef)
+  hog (--hogs K)             K more clients, each a count of its own that doesn't stop (2000-3000
+                             tokens, greedy) after a prefix they share, back to back: the pool preempts
+                             (see Client.hog); each hog's replies must be prefixes of its longest (HogRef)
 
 Every --sample-s seconds one CSV row (DIR/samples.csv, also printed as `CSV,...`
 on stdout so a remote log keeps it) records: server RSS, VRAM (nvidia-smi
@@ -46,10 +46,10 @@ Verdict (summary.json, exit 0 = PASS):
     up for a day, well above allocator noise (see docs/hardening.md).
   - after the load stops and the server idles, fds and threads are back at
     the pre-load baseline (+2 fds of slack for a lingering keep-alive).
-  - with --hogs: every hog reply is a prefix of the longest one (the same
-    prompt, greedy: the requests that get preempted, unfed and refed have
-    checked output; a mismatch is class hog-mismatch, failing), and at
-    least 2 were compared. And the pool really was under pressure. At the end /slots'
+  - with --hogs: every hog reply is a prefix of the longest one of that hog
+    (its own prompt each time, greedy: the requests that get preempted, unfed
+    and refed have checked output; a mismatch is class hog-mismatch,
+    failing), and some hog's replies were compared (2 or more of them). And the pool really was under pressure. At the end /slots'
     preempted and prefills_unfed and /metrics' axon_refeed_shared_tokens_total
     (sharing on) are all above 0, else the run is INCONCLUSIVE ("not
     evidence"): a soak meant to exercise preemption that never preempted
@@ -208,32 +208,38 @@ CLASSES = ["ok", "4xx-expected", "503", "cancelled", "accepted-unsupported"] + s
 
 
 class HogRef:
-    """--hogs: the hogs' replies against each other (shady's review of #228). Every hog sends the same prompt,
-    greedy, with max_tokens 2000-3000, so in exact mode each reply is a prefix of the longest one so far, or that
-    one is a prefix of it (it becomes the longest). Anything else is a mismatch: Outcome hog-mismatch, failing.
-    The hogs are the requests that get preempted, unfed and refed, so this checks their output, not just that the
-    pressure happened."""
+    """--hogs: each hog's replies against each other (shady's review of #228). A hog sends its own prompt every
+    time (Client.hog), greedy, with max_tokens 2000-3000, so in exact mode each of its replies is a prefix of its
+    longest one so far, or that one is a prefix of it (it becomes the longest). Anything else is a mismatch:
+    Outcome hog-mismatch, failing. The hogs are the requests that get preempted, unfed and refed, so this checks
+    their output, not just that the pressure happened. `compared` counts the replies checked against an earlier
+    one of the same hog (a hog's first reply only sets its reference)."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.longest, self.n, self.mismatches = "", 0, 0
+        self.longest, self.n, self.compared, self.mismatches = {}, 0, 0, 0
 
-    def check(self, text):
+    def check(self, text, key=0):
         with self.lock:
             self.n += 1
-            a, b = (text, self.longest) if len(text) <= len(self.longest) else (self.longest, text)
+            if key in self.longest:
+                self.compared += 1
+            ref = self.longest.get(key, "")
+            a, b = (text, ref) if len(text) <= len(ref) else (ref, text)
             if b.startswith(a):
-                self.longest = b
+                self.longest[key] = b
                 return
             self.mismatches += 1
             i = next(k for k in range(len(a)) if a[k] != b[k])
-            detail = (f"hog reply of {len(text)} chars differs from the longest ({len(self.longest)}) at char {i}: "
-                      f"{text[max(0, i - 40):i + 40]!r} vs {self.longest[max(0, i - 40):i + 40]!r}")
+            detail = (f"hog {key}'s reply of {len(text)} chars differs from its longest ({len(ref)}) at char {i}: "
+                      f"{text[max(0, i - 40):i + 40]!r} vs {ref[max(0, i - 40):i + 40]!r}")
         raise Outcome("hog-mismatch", detail)
 
     def summary(self):
         with self.lock:
-            return {"compared": self.n, "longest_chars": len(self.longest), "mismatches": self.mismatches}
+            return {"replies": self.n, "compared": self.compared, "hogs": len(self.longest),
+                    "longest_chars": {str(k): len(v) for k, v in sorted(self.longest.items())},
+                    "mismatches": self.mismatches}
 
 
 # The documented back-pressure 503s (serve.rs): anything else is 503-undocumented.
@@ -404,11 +410,20 @@ class Client:
         (engine.rs `admit_check`), so only replies past that, several at once on a pool smaller than their sum,
         make the engine preempt the youngest, unfeed prefills and refeed what it preempted (claiming its warm
         pages again). The default mix's replies are too short: #228's soaks (4.6 h each on 128 pages) evicted
-        thousands of warm pages and preempted nothing. The count is serve_paged_pressure's prompt. Every reply
-        goes to HogRef: a prefix of the longest one, or a mismatch (failing)."""
-        body = {"model": MODEL[0], "prompt": self.cfg.hog_prefix + "Count: 1, 2, 3, 4, 5,",
+        thousands of warm pages and preempted nothing.
+        Each hog counts from its own start (hog 0 from 1: serve_paged_pressure's prompt; hog k from 1000 k + 1),
+        so the hogs' replies differ. With one count for all (#228's 40 min soak a8b5), their greedy replies
+        were the same tokens, and sharing (#213) swaps every whole page a slot decodes that the index already
+        has for the index's page: the hogs held one copy of their replies between them, 4 replies of 2000-3000
+        tokens fit in 128 pages, and the run preempted nothing (its idle hog slots held 129 pages of a pool
+        with 45 free). Every reply goes to HogRef under its hog: a prefix of that hog's longest, or a mismatch
+        (failing)."""
+        k = self.i - self.cfg.clients
+        a = 1000 * k + 1
+        count = "Count: " + ", ".join(str(a + j) for j in range(5)) + ","
+        body = {"model": MODEL[0], "prompt": self.cfg.hog_prefix + count,
                 "max_tokens": self.rng.randint(2000, 3000), "temperature": 0}
-        self.stream("/v1/completions", body, "hog", check=self.cfg.hog_ref.check)
+        self.stream("/v1/completions", body, "hog", check=lambda t: self.cfg.hog_ref.check(t, k))
 
     def disconnect(self):
         msgs = [{"role": "user", "content": "Count slowly from one to two hundred."}]
@@ -778,7 +793,7 @@ def verdict(rows, summary, cfg):
         checks["slots_idle"] = dict(sl, pass_=st(sl.get("busy", 1) == 0 and sl.get("queue_depth", 1) == 0))
     h = summary.get("hog_replies")
     if h is not None:
-        checks["hog_replies"] = dict(h, pass_="FAIL" if h["mismatches"] else "PASS" if h["compared"] >= 2
+        checks["hog_replies"] = dict(h, pass_="FAIL" if h["mismatches"] else "PASS" if h["compared"] >= 1
                                      else "INCONCLUSIVE")
     p = summary.get("pressure")
     if p is not None:
@@ -842,14 +857,19 @@ def selftest():
     r = HogRef()
     for t in ("1, 2, 3", "1, 2, 3, 4, 5", "1, 2", "1, 2, 3, 4, 5", ""):
         r.check(t)
-    assert r.summary() == {"compared": 5, "longest_chars": 13, "mismatches": 0}, r.summary()
-    for bad in ("1, 2, 4", "1, 2, 3, 4, 5, 6, 7".replace("4", "9")):
+    # Another hog's count is its own: no mismatch against hog 0's.
+    for t in ("1001, 1002", "1001, 1002, 1003"):
+        r.check(t, 1)
+    want = {"replies": 7, "compared": 5, "hogs": 2, "longest_chars": {"0": 13, "1": 16}, "mismatches": 0}
+    assert r.summary() == want, r.summary()
+    for bad, key in (("1, 2, 4", 0), ("1, 2, 3, 4, 5, 6, 7".replace("4", "9"), 0), ("1001, 1003", 1)):
         try:
-            r.check(bad)
+            r.check(bad, key)
             raise AssertionError(f"no mismatch for {bad!r}")
         except Outcome as o:
             assert o.cls == "hog-mismatch" and "at char" in o.detail, o
-    assert r.summary() == {"compared": 7, "longest_chars": 13, "mismatches": 2}, r.summary()
+    want.update(replies=10, compared=8, mismatches=3)
+    assert r.summary() == want, r.summary()
     print("selftest ok")
     return 0
 
@@ -903,8 +923,9 @@ def main():
     ap.add_argument("--no-prime", dest="prime", action="store_false",
                     help="skip priming every batch mix before the load (see prime())")
     ap.add_argument("--hogs", type=int, default=0,
-                    help="this many more clients, each a reply that doesn't stop (2000-3000 tokens) back to back, "
-                         "so the pool preempts; the run must then show preemption, unfeeds and refeed claims")
+                    help="this many more clients, each a reply that doesn't stop (2000-3000 tokens, a count of its "
+                         "own) back to back, so the pool preempts; the run must then show preemption, unfeeds and "
+                         "refeed claims")
     ap.add_argument("--vram-card", action="store_true",
                     help="judge VRAM on the card's total when nvidia-smi doesn't list the server pid "
                          "(only on a GPU nothing else uses)")
