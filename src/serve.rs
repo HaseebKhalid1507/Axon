@@ -134,8 +134,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: AXON_KV_PAGES, else as many as fit;
     /// tests squeeze the pool with it).
     pub kv_pages: Option<usize>,
-    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, off unless
-    /// "1": opt-in, #207's timing clauses; a paged pool only).
+    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, on unless
+    /// "0", the kill switch, and off while fast kernels run unless "1":
+    /// `share_on`; a paged pool only).
     pub share: Option<bool>,
     /// Tool calls streamed as they are generated on OpenAI's APIs (None:
     /// AXON_TOOL_STREAM, on unless "0"; #260).
@@ -858,7 +859,10 @@ fn or_exit<T>(what: &str, f: impl FnOnce() -> T) -> T {
                 .map(String::as_str)
                 .or_else(|| p.downcast_ref::<&str>().copied())
                 .unwrap_or("?");
-            eprintln!("axon serve: the engine failed on {what}: {msg}; exiting");
+            eprintln!(
+                "axon serve: the engine failed on {what}: {msg}; exiting{}",
+                share_hint()
+            );
             std::process::exit(70);
         }
     }
@@ -1570,9 +1574,15 @@ fn engine(
             b.set_grow_tokens(g);
         }
         b.metrics = Some(o.metrics.clone());
-        // Shared prefixes (a paged pool's): said at start when on.
-        if b.set_share(o.share.unwrap_or_else(share_env)) && o.log {
-            eprintln!("axon serve: shared prefix KV pages on (AXON_SHARE_KV=1)");
+        // Shared prefixes (a paged pool's; on by default, off under fast
+        // kernels): said at start, on with the kill switch, off with why.
+        let fast = net.fast_kernels();
+        let env = std::env::var("AXON_SHARE_KV").ok();
+        let env = o.share.is_none().then_some(env).flatten();
+        let on = b.set_share(o.share.unwrap_or_else(|| share_on(env.as_deref(), fast)));
+        SHARING.store(on, Ordering::Relaxed);
+        if o.log && b.pages().is_some() {
+            eprintln!("axon serve: {}", share_line(on, env.as_deref(), fast));
         }
         b
     });
@@ -1933,7 +1943,10 @@ fn admit_order(b: &Batch, waiting: &VecDeque<Job>, age_ms: u64) -> Vec<u64> {
 /// A device error in the batch: every request in it (and `tx`'s) gets it,
 /// then the process exits (CUDA errors are sticky; see `or_exit`).
 fn fatal(b: &mut Batch, err: &str, tx: Option<mpsc::Sender<Event>>) -> ! {
-    eprintln!("axon serve: the engine failed: {err}; exiting");
+    eprintln!(
+        "axon serve: the engine failed: {err}; exiting{}",
+        share_hint()
+    );
     b.fail_all(err);
     if let Some(tx) = tx {
         let _ = tx.send(Event::Error(err.to_string()));
@@ -2051,16 +2064,65 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
-/// AXON_SHARE_KV: shared prefix KV pages, off unless "1" (`share_on`).
-fn share_env() -> bool {
-    share_on(std::env::var("AXON_SHARE_KV").ok().as_deref())
+/// AXON_SHARE_KV's value `v` read, `fast` whether the backend runs fast
+/// kernels (`Backend::fast_kernels`): on unless "0" (the kill switch;
+/// spaces around it are trimmed), so `false` or `off` read as on. Opt-in
+/// ("1" only) until the 11-12 decision: same bits in every gate, no
+/// measured cell worse (#210, #211), #218 fixed and a soak under pool
+/// pressure (docs/log/2026-11-12-share-default.md).
+///
+/// Under fast kernels (an FP8 checkpoint under `--numerics fast`, which
+/// `--datacenter` implies) off unless "1" (#228's review): their rows
+/// change with how a prompt is chunked, so two requests' copies of a
+/// block can differ in their bytes, and a request that maps another's
+/// page reads KV it didn't compute. That is within fast mode's tolerance,
+/// as a cached prefix is there (docs/determinism.md), but it isn't the
+/// byte equality sharing rests on in exact mode, which no gate holds
+/// fast mode to.
+fn share_on(v: Option<&str>, fast: bool) -> bool {
+    match v.map(str::trim) {
+        Some("0") => false,
+        Some("1") => true,
+        _ => !fast,
+    }
 }
 
-/// AXON_SHARE_KV's value read: on for "1" only, opt-in. #187 ships sharing
-/// off by default if any of its timing clauses fails, and #207's did (the
-/// fan-out's siblings and s4's TTFT-new; docs/log/2026-11-06-shared-prefix-pages-c3.md).
-fn share_on(v: Option<&str>) -> bool {
-    v.is_some_and(|v| v.trim() == "1")
+/// serve's start line about shared prefix KV pages (a paged pool's): `on`
+/// whether they are, `v` AXON_SHARE_KV's value (None: unset, or `Opts`
+/// decided), `fast` as `share_on`'s. On: with the kill switch, and a value
+/// that isn't 0 or 1 echoed, since it reads as on. Off: why.
+fn share_line(on: bool, v: Option<&str>, fast: bool) -> String {
+    const ON: &str = "shared prefix KV pages on";
+    match (on, v.map(str::trim)) {
+        (true, Some("1")) if fast => format!(
+            "{ON} under fast kernels (AXON_SHARE_KV=1): a request may read a block's KV as \
+             another request's chunking computed it, within fast mode's tolerance; \
+             AXON_SHARE_KV=0 turns them off"
+        ),
+        (true, None | Some("" | "1")) => format!("{ON} (AXON_SHARE_KV=0 turns them off)"),
+        (true, Some(v)) => format!("{ON} (AXON_SHARE_KV={v:?} reads as on: only 0 turns them off)"),
+        (false, Some("0")) => "shared prefix KV pages off (AXON_SHARE_KV=0)".into(),
+        (false, _) if fast => "shared prefix KV pages off: fast kernels can give two requests' \
+                               copies of a block different bytes (AXON_SHARE_KV=1 shares them \
+                               anyway)"
+            .into(),
+        (false, _) => "shared prefix KV pages off".into(),
+    }
+}
+
+/// Whether this process's server shares prefix KV pages, for the exit
+/// lines (`share_hint`). Set once at start; one server per process outside
+/// the tests.
+static SHARING: AtomicBool = AtomicBool::new(false);
+
+/// What the engine's exit lines (`or_exit`, `fatal`) add while shared
+/// prefix KV pages are on: their kill switch, so that whoever reads a
+/// crash can rule sharing out (#228's review).
+fn share_hint() -> &'static str {
+    match SHARING.load(Ordering::Relaxed) {
+        true => " (shared prefix KV pages are on; AXON_SHARE_KV=0 turns them off)",
+        false => "",
+    }
 }
 
 /// AXON_KV_PAGES=N: a paged pool of N KV pages at most (None: unset). Not

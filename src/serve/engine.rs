@@ -542,12 +542,16 @@ pub(super) struct Batch<'a, 't> {
     /// take, a key collision): it waits, as with no backlog, until the
     /// batch steps, admits or the tier grows.
     stalled: bool,
-    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV unset or not "1",
+    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV=0,
     /// or a plain pool, and every path below is main's, decision for
     /// decision).
     share: Option<Share>,
     /// Prompt tokens admissions mapped from the prefix index so far.
     pub shared_tokens: u64,
+    /// Tokens refed prefills (preempted or unfed: their prompt and what
+    /// they generated) mapped from the prefix index again so far
+    /// (`refeed_claim`; apart from `shared_tokens`, #219).
+    pub refeed_shared_tokens: u64,
     /// Pages the prefix index gave up for room so far (`evict_warm`).
     pub evicted: u64,
 }
@@ -855,13 +859,14 @@ impl<'a, 't> Batch<'a, 't> {
             stalled: false,
             share: None,
             shared_tokens: 0,
+            refeed_shared_tokens: 0,
             evicted: 0,
         }
     }
 
-    /// Shared prefixes on or off (`AXON_SHARE_KV=1`), before any request: on
-    /// for a paged pool only (a plain one has no pages to share). Whether
-    /// they are on.
+    /// Shared prefixes on or off (`AXON_SHARE_KV`, `serve::share_on`),
+    /// before any request: on for a paged pool only (a plain one has no
+    /// pages to share). Whether they are on.
     pub fn set_share(&mut self, on: bool) -> bool {
         assert!(self.idle(), "set_share: the batch is running");
         self.share = (on && self.pages().is_some()).then(|| Share {
@@ -975,12 +980,15 @@ impl<'a, 't> Batch<'a, 't> {
     /// positions of `prompt`; it gives up the rest of its rows, and maps the
     /// index's pages of the prompt where the index knows more
     /// (`plan_claim`, design §3.4). The positions it holds after (`held`
-    /// says so). Sharing off: main's (it keeps `min(common, last)`).
+    /// says so). Sharing off: main's (it keeps `min(common, last)`). A
+    /// refed prefill's claim (`refeed`: `prompt` is its tokens so far, the
+    /// generated ones included) counts its pages apart (#219).
     fn claim_prefix(
         &mut self,
         slot: usize,
         prompt: &[u32],
         common: usize,
+        refeed: bool,
     ) -> Result<usize, String> {
         let last = prompt.len() - 1;
         let Some(sh) = self.share.as_mut() else {
@@ -1008,9 +1016,16 @@ impl<'a, 't> Batch<'a, 't> {
         }
         self.held[slot] = prompt[..cl.reuse].to_vec();
         let n = (cl.map.len() * PAGE) as u64;
-        self.shared_tokens += n;
+        match refeed {
+            false => self.shared_tokens += n,
+            true => self.refeed_shared_tokens += n,
+        }
         if let Some(m) = &self.metrics {
-            m.shared_tokens.fetch_add(n, Ordering::Relaxed);
+            match refeed {
+                false => &m.shared_tokens,
+                true => &m.refeed_shared_tokens,
+            }
+            .fetch_add(n, Ordering::Relaxed);
         }
         Ok(cl.reuse)
     }
@@ -1056,9 +1071,23 @@ impl<'a, 't> Batch<'a, 't> {
             return Ok(());
         }
         let mut pages = self.net.slot_pages(&self.pool, slot);
-        let mut swaps = Vec::new();
+        // This call's keys, in block order, the swaps (#213) and the
+        // swapped blocks' keys. The index holds a page for each slot that
+        // maps it (`release_rows` lets go by page), so a new block is held
+        // at once (its page is the slot's own), but a swapped block only
+        // once `replace_pages` has mapped the index's page into the slot,
+        // and the keys are listed then too (#218): an error before that (a
+        // later block's `pin_page`, debug's `same_page_bytes`, the swap
+        // itself) leaves no hold on a page the slot doesn't map, and the
+        // slot's list where it was (a later call offers the blocks again;
+        // its new blocks are then `Have`s at its own pages).
+        let (mut keys, mut swaps, mut swapped) = (Vec::new(), Vec::new(), Vec::new());
         for i in sh.keys[slot].len()..whole {
-            let parent = sh.keys[slot].last().copied().unwrap_or(ROOT);
+            let parent = keys
+                .last()
+                .or(sh.keys[slot].last())
+                .copied()
+                .unwrap_or(ROOT);
             let block = &self.held[slot][i * PAGE..(i + 1) * PAGE];
             let ok = i == 0 || sh.index.page(parent) == Some(pages[i - 1]);
             let ins = match ok {
@@ -1069,19 +1098,24 @@ impl<'a, 't> Batch<'a, 't> {
                 Ins::New(k) => {
                     sh.index.hold(k);
                     self.net.pin_page(&mut self.pool, pages[i])?;
-                    sh.keys[slot].push(k);
+                    keys.push(k);
                 }
-                // The slot holds the index's page of the block elsewhere
-                // already (a chain-key collision): its own copy stays, as
-                // a block the index can't take.
-                Ins::Have(k, other) if pages.contains(&other) => sh.keys[slot].push(k),
+                // The index's page of the block is one the slot maps
+                // already: the call after an error offering the blocks
+                // again (#218), whose new blocks were indexed at the
+                // slot's own pages. Listed, with no second hold.
+                Ins::Have(k, other) if pages.contains(&other) => keys.push(k),
                 Ins::Have(k, other) => {
                     // Debug builds: the bytes are the same (§2's runtime
                     // proof; what sharing rests on, and what makes the
-                    // swap read what the slot wrote).
+                    // swap read what the slot wrote). Not under fast
+                    // kernels, whose rows change with the chunking: there
+                    // sharing is on only by AXON_SHARE_KV=1, within fast
+                    // mode's tolerance (`serve::share_on`).
                     #[cfg(debug_assertions)]
                     assert!(
-                        self.net.same_page_bytes(&self.pool, pages[i], other)?,
+                        self.net.fast_kernels()
+                            || self.net.same_page_bytes(&self.pool, pages[i], other)?,
                         "slot {slot} page {i} ({}): block {k:#x}'s bytes differ from page {other}'s",
                         pages[i]
                     );
@@ -1090,20 +1124,24 @@ impl<'a, 't> Batch<'a, 't> {
                     // page is whole: the slot never writes it again.
                     swaps.push((i, other));
                     pages[i] = other;
-                    sh.index.hold(k);
-                    sh.keys[slot].push(k);
+                    swapped.push(k);
+                    keys.push(k);
                 }
-                Ins::No => sh.keys[slot].push(chain(parent, block)),
+                Ins::No => keys.push(chain(parent, block)),
             }
         }
-        if swaps.is_empty() {
-            return Ok(());
+        if !swaps.is_empty() {
+            self.net.replace_pages(&mut self.pool, slot, &swaps)?;
+            #[cfg(test)]
+            if let Some(m) = &self.metrics {
+                m.swapped.fetch_add(swaps.len() as u64, Ordering::Relaxed);
+            }
         }
-        self.net.replace_pages(&mut self.pool, slot, &swaps)?;
-        #[cfg(test)]
-        if let Some(m) = &self.metrics {
-            m.swapped.fetch_add(swaps.len() as u64, Ordering::Relaxed);
+        let sh = self.share.as_mut().expect("sharing");
+        for k in swapped {
+            sh.index.hold(k);
         }
+        sh.keys[slot].extend(keys);
         Ok(())
     }
 
@@ -1566,7 +1604,7 @@ impl<'a, 't> Batch<'a, 't> {
         // its last conversation's), its pages free (a paged pool); with
         // shared prefixes, the index's pages of the prompt are mapped if it
         // knows more of it.
-        let reuse = self.claim_prefix(slot, p, common)?;
+        let reuse = self.claim_prefix(slot, p, common, false)?;
         let reuse = self.restore(slot, p, reuse)?;
         self.index_pages(slot)?;
         if super::debug() {
@@ -1639,7 +1677,10 @@ impl<'a, 't> Batch<'a, 't> {
         let mut moved = false;
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
-                moved |= self.feed(i, n)? > 0;
+                // Fed tokens are progress; a refeed claim alone (it took no
+                // free page) only if it finished the prompt (#218).
+                let f = self.feed(i, n)?;
+                moved |= f > 0 || self.pre[i].fed == self.pre[i].seq.hist.len() - 1;
             }
         }
         // Nothing decodes and no prompt has the pages to go on: the
@@ -1671,14 +1712,14 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Feed the next `n` tokens of prefill `i`'s prompt into its slot (a
     /// paged pool: as many as there are pages for, beside a page for each
-    /// running request's growth; none: it waits, decode first).
-    /// Its progress: the positions it holds now that it didn't (fed, or
-    /// claimed again: `refeed_claim`).
+    /// running request's growth; none: it waits, decode first), after
+    /// claiming its prefix again if it was refed (`refeed_claim`). The
+    /// tokens fed: a claim's positions don't count (it takes no free page,
+    /// so it isn't the progress `prefill` asks about).
     fn feed(&mut self, i: usize, n: usize) -> Result<usize, String> {
-        let got = match self.pre[i].refeed {
-            true => self.refeed_claim(i)?,
-            false => 0,
-        };
+        if self.pre[i].refeed {
+            self.refeed_claim(i)?;
+        }
         let f = &self.pre[i];
         let n = n.min(f.seq.hist.len() - 1 - f.fed);
         let n = match n {
@@ -1686,7 +1727,7 @@ impl<'a, 't> Batch<'a, 't> {
             n => self.feedable(i, n)?,
         };
         if n == 0 {
-            return Ok(got);
+            return Ok(0);
         }
         let f = &mut self.pre[i];
         let s = f.seq.slot;
@@ -1705,7 +1746,7 @@ impl<'a, 't> Batch<'a, 't> {
         f.fed += n;
         self.fed_now += n;
         self.index_pages(s)?;
-        Ok(got + n)
+        Ok(n)
     }
 
     /// Prefill `i` was preempted or unfed (`refeed`), and its slot holds
@@ -1726,7 +1767,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
         let s = f.seq.slot;
         let hist = f.seq.hist.clone();
-        let reuse = self.claim_prefix(s, &hist, 0)?;
+        let reuse = self.claim_prefix(s, &hist, 0, true)?;
         let f = &mut self.pre[i];
         f.fed = reuse;
         f.seq.cached = reuse.min(f.seq.job.prompt.len() - 1);
@@ -1792,7 +1833,7 @@ impl<'a, 't> Batch<'a, 't> {
             }
             // As `admit`'s: the index's pages of the prompt mapped if it
             // knows more of it (the slot then holds no row past them).
-            Some(_) => self.claim_prefix(slot, prompt, common)?,
+            Some(_) => self.claim_prefix(slot, prompt, common, false)?,
         };
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
         let short = self.make_room(slot, want)?;

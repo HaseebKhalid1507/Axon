@@ -2518,7 +2518,7 @@ fn serve_paged_pressure() {
         .iter()
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
-    // Shared prefixes (off unless the run sets AXON_SHARE_KV=1): no page
+    // Shared prefixes (on unless the run sets AXON_SHARE_KV=0): no page
     // is shared (the prompts differ from their first page on), and the
     // index's warm pages (a preempted request's) are neither held nor free.
     let warm = sl.get("pages_warm").map_or(0, |w| w.as_u64().unwrap());
@@ -7853,18 +7853,100 @@ fn wait_idle(a: SocketAddr) {
     });
 }
 
-/// AXON_SHARE_KV is opt-in (#207's timing clauses failed, so #187 ships
-/// sharing off by default): on for "1" only; unset, "0" or anything else
-/// is off, main's paths.
+/// AXON_SHARE_KV is on by default (the 11-12 decision): "0" is the kill
+/// switch, main's paths; unset or any other value is on ("1" as when it
+/// was opt-in). Under fast kernels it is off unless "1" (#228's review).
+/// The start line says which, the kill switch when on, and echoes a value
+/// that reads as on without being 1.
 #[test]
-fn share_kv_is_opt_in() {
-    use super::share_on;
-    assert!(!share_on(None));
-    for v in ["", "0", "true", "yes", "2", "on"] {
-        assert!(!share_on(Some(v)), "{v:?}");
+fn share_kv_is_on_by_default() {
+    use super::{share_line, share_on};
+    assert!(share_on(None, false));
+    for v in ["1", " 1\n", "", "true", "on", "off", "2"] {
+        assert!(share_on(Some(v), false), "{v:?}");
     }
-    assert!(share_on(Some("1")));
-    assert!(share_on(Some(" 1\n")));
+    assert!(!share_on(Some("0"), false));
+    assert!(!share_on(Some(" 0\n"), false));
+    // Fast kernels: "1" only.
+    assert!(!share_on(None, true));
+    for v in ["", "true", "on", "2", "0", " 0\n"] {
+        assert!(!share_on(Some(v), true), "fast {v:?}");
+    }
+    assert!(share_on(Some("1"), true));
+    assert!(share_on(Some(" 1\n"), true));
+    let on = "shared prefix KV pages on (AXON_SHARE_KV=0 turns them off)";
+    assert_eq!(share_line(true, None, false), on);
+    assert_eq!(share_line(true, Some("1"), false), on);
+    assert_eq!(share_line(true, Some(""), false), on);
+    assert_eq!(
+        share_line(true, Some("off"), false),
+        "shared prefix KV pages on (AXON_SHARE_KV=\"off\" reads as on: only 0 turns them off)"
+    );
+    assert_eq!(
+        share_line(false, Some(" 0\n"), false),
+        "shared prefix KV pages off (AXON_SHARE_KV=0)"
+    );
+    assert_eq!(
+        share_line(false, Some("0"), true),
+        "shared prefix KV pages off (AXON_SHARE_KV=0)"
+    );
+    let fast_off = share_line(false, None, true);
+    assert!(
+        fast_off.contains("fast kernels") && fast_off.contains("AXON_SHARE_KV=1"),
+        "{fast_off}"
+    );
+    assert_eq!(share_line(false, Some("on"), true), fast_off);
+    let fast_on = share_line(true, Some("1"), true);
+    assert!(
+        fast_on.contains("fast kernels") && fast_on.contains("AXON_SHARE_KV=0"),
+        "{fast_on}"
+    );
+    assert_eq!(share_line(false, None, false), "shared prefix KV pages off");
+}
+
+/// Shared prefix KV pages are off by default while fast kernels run
+/// (`share_on`): the FP8 checkpoint under `--numerics fast` on a GPU with
+/// e4m3 tensor cores, a paged pool of 2 slots, AXON_SHARE_KV unset: /slots
+/// has no prefix-index counts (they show only while sharing is on). The
+/// same server in exact mode (the checkpoint's exact kernels) has them.
+#[test]
+fn serve_share_off_under_fast_kernels() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    if !fast_kernels_on(p, Device::Cuda) {
+        crate::testutil::skip_note(format_args!(
+            "no fast kernels on this GPU (FP8's are sm_89 and later)"
+        ));
+        return;
+    }
+    if let Ok(v) = std::env::var("AXON_SHARE_KV") {
+        crate::testutil::skip_note(format_args!(
+            "AXON_SHARE_KV={v:?} is set: the default isn't what runs"
+        ));
+        return;
+    }
+    let body = json!({"prompt": "The lighthouse keeper wrote", "max_tokens": 8, "temperature": 0});
+    for (num, share) in [(Numerics::Fast, false), (Numerics::Exact, true)] {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.numerics = num;
+        });
+        let r = call(s.addr, "POST", "/v1/completions", &body.to_string());
+        assert_eq!(r.status, 200, "{num}: {}", r.body);
+        wait_idle(s.addr);
+        let sl = call(s.addr, "GET", "/slots", "").json();
+        assert!(
+            sl.get("pages_total").is_some(),
+            "{num}: no paged pool: {sl}"
+        );
+        assert_eq!(sl.get("pages_warm").is_some(), share, "{num}: {sl}");
+    }
 }
 
 /// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
@@ -8061,6 +8143,11 @@ fn serve_share_pressure() {
         };
         let v0 = victims(a);
         let (rc0, rt0) = s.refeed_claims();
+        let refed = |a: SocketAddr| {
+            let m = call(a, "GET", "/metrics", "").body;
+            metric(&m, "axon_refeed_shared_tokens_total").unwrap()
+        };
+        let rm0 = refed(a);
         // Again, its prefix now in the index (warm or held): each request
         // maps it when admitted. One preempted or unfed after that claims
         // it again when it is fed again (`refeed_claim`, #212): the oldest
@@ -8092,6 +8179,13 @@ fn serve_share_pressure() {
             "{what}: again: {v} victims, {} refed claims of {} tokens",
             rc - rc0,
             rt - rt0
+        );
+        // #219: the refed claims' pages have their own counter (a refed
+        // prefill holds nothing, so all it claims is mapped pages).
+        assert_eq!(
+            refed(a) - rm0,
+            rt - rt0,
+            "{what}: axon_refeed_shared_tokens_total"
         );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;
@@ -8465,10 +8559,19 @@ fn serve_share_cancel_frees() {
         "{}And then?",
         "The storm came from the west and stayed. ".repeat(30)
     );
-    let g1 = g.load(Ordering::Relaxed);
+    // Gone once admitted: its admission maps the prefix's pages (counted
+    // then), and its private part is fed a chunk a step after. Waiting on
+    // the others' tokens instead (as before #228's review) let it be
+    // dropped before its admission now and then (a09b1bd's one red).
+    let shared = || {
+        let m = call(a, "GET", "/metrics", "").body;
+        metric(&m, "axon_prompt_shared_tokens_total").unwrap()
+    };
+    let pages = (n - 1) / 64;
+    let s0 = shared();
     let c3 = stream(&long, 50);
-    wait_for("its prompt being fed", || {
-        g.load(Ordering::Relaxed) >= g1 + 6
+    wait_for("the third's admission, mapping the prefix's pages", || {
+        shared() >= s0 + 64 * pages
     });
     drop(c3);
     drop(cs);
@@ -8477,11 +8580,5 @@ fn serve_share_cancel_frees() {
     assert_eq!(t, want, "the pool-sized request after the cancels");
     wait_idle(a);
     let m = call(a, "GET", "/metrics", "").body;
-    let pages = (n - 1) / 64;
-    let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
-    assert!(
-        shared >= 64 * pages,
-        "the third maps the prefix's {pages} pages: {shared}: {m}"
-    );
     assert!(metric(&m, "axon_pages_evicted_total").unwrap() > 0, "{m}");
 }

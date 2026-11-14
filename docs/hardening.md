@@ -31,8 +31,28 @@ threads until the deadline. Each client picks from a weighted mix and waits up t
 | slow-reader | 4 | a stream read 64 bytes at a time with 20–100 ms pauses through a 4 KiB `SO_RCVBUF`. Since this PR's review round: ~1500 tokens (~300 KB of SSE, well past the kernel socket buffers, so the server's writer really blocks), and with several slots a concurrent probe (greedy, 4 tokens) must get its first bytes within `--probe-ttft-s` (30 s), else `slow-blocks-others` (failing). **Harness changed, not yet exercised on a GPU soak** (the runs below used `max_tokens` 96, ~30 KB, which the socket buffers absorb: they tested a slow *client*, not server write back-pressure) |
 | oversize | 3 | a prompt of 1.3× the context: must be a 4xx |
 | burst | every 2 min | client 0 fires 3× the slot count of streams at once (503 back-pressure allowed) |
+| hog (`--hogs K`, default 0) | K more clients | each a count of its own that doesn't stop (hog k: `Count: 1000k+1, …, 1000k+5,`, greedy, 2000–3000 tokens) after a prefix the hogs share, back to back |
 
 A client that gets a 503 backs off 1–3 s, as a real one would.
+
+**Preemption needs hogs.** Admission reserves pages for at most 1024 of a running request's tokens to come
+(`GROW_TOKENS`, engine.rs `admit_check`), so a paged pool preempts only when several replies grow past that at once
+on a pool smaller than their sum. The mix above never does: #228's two soaks (4.6 h each, 128 pages, 12 clients)
+evicted thousands of warm pages and preempted nothing. `--hogs K` (K ≥ 3, with `AXON_KV_PAGES` under K × 45) adds
+those replies, and the verdict then also requires the pressure to have happened: at the end, `/slots`' `preempted`
+and `prefills_unfed` and `/metrics`' `axon_refeed_shared_tokens_total` (sharing on) above 0. Otherwise the check
+`pressure` is INCONCLUSIVE, "not evidence": the run says nothing about preemption, whatever else passed. The hogs'
+replies are checked too (shady's review of #228): a hog sends its own prompt every time, greedy, so each of its
+replies must be a prefix of its longest (`HogRef`; else class `hog-mismatch`, failing), and check `hog_replies`
+needs a reply checked against an earlier one. Those are the requests that get preempted, unfed and refed, so their
+output is checked, not only that the pressure happened. `scripts/soak.py selftest` checks the rule without a server.
+
+**Each hog counts from its own start.** With one count for every hog (#228's 40 min soak `a8b5`), the hogs'
+greedy replies were the same tokens, and with sharing on the engine swaps every whole page a slot decodes that the
+index already has for the index's page (#213): the hogs held one copy of their replies between them. Four replies
+of 2000–3000 tokens (~3.85 running at any time, by the server's own request times) fit in 128 pages, the run
+preempted nothing, and at its end three idle hog slots mapped 129 pages of a pool with 45 free. Hog k now counts
+from 1000k + 1 (hog 0 from 1), so the replies differ and so do their pages.
 
 **Priming** (default; `--no-prime` skips it). Before the reference identity run, the harness sends every batch mix
 the slots can form: for nb = 1..S concurrent streams, with ng = 0..nb of them greedy, twice each. On CUDA the

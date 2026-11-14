@@ -55,15 +55,14 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
 
 1. **Process v2** ([methodology](methodology.md#process-v2-2026-11-12)). Its jobs and safeguards (builder: case):
    rules 2, 3 and 5 first, then rule 8's CI model tests and fuzzers (Windows and arm64 CI come with Distribution).
-2. **Decisions** (a flip's A/B cells: Process v2 rule 4):
-   - Shared prefix pages go default-on together with `--cache-ram auto`, once #218 is fixed and a soak of 4 h or more
-     passes with sharing on under a small pool, plus one sharing-on, tier-off cell (the tier is off under a cgroup).
-     `AXON_SHARE_KV=0` stays the kill switch. #210 and #211 passed at #216's code (jobs 1106-170837-edc9,
-     1106-173522-297a); the flip's PR says the board trace shares only 4–7 %: the win is subagent fan-out.
-   - `--cache-ram auto` goes default-on: the smaller of 4 GiB and ¼ of the RAM available after the model loads
-     (`mem_available()`, already cgroup-capped); off when a cgroup limit is the tighter bound, and the banner says so.
-     An explicit `--cache-ram N` is unchanged; `0` is the kill switch. The 0.3 s resume clause is waived (17–24× on
-     bella). Today `auto` is half the RAM left after the model, up to 8 GiB, page-locked from start.
+2. **Decisions** (a flip's A/B cells: Process v2 rule 4). The two flips are decoupled (the lead, 11-13):
+   - Shared prefix pages go default-on on their own evidence (#228), once #218 is fixed, the A/B's sharing-alone arm
+     is within 2 % and a soak of 4 h or more passes under a small pool (debug build). They don't wait on #233 or #234.
+     `AXON_SHARE_KV=0` is the kill switch. The win is subagent fan-out (#211: TTFT 0.591×); the board shares 4–7 %.
+   - `--cache-ram auto` is the smaller of 4 GiB and ¼ of the RAM available after the model, and off when a cgroup is
+     the tighter bound, the banner saying so (#226). Its default-on flip failed its A/B (4090: C=16 tok/s 0.977×, C=8
+     ITL p99 1.103×) and waits on #233 (the first request after a start waits 3.2–4.0 s) and #234 (the write-behind:
+     2–3 % tok/s, ITL p99), then a new A/B. `--cache-ram off` is the kill switch.
    - FP8 fast mode is parked (#194 closed 11-12); #222 (`--help` is stale) is fixed.
 3. **A GPU start with only the driver:** embed the kernels as PTX, which the driver compiles itself, so no NVRTC is
    needed. Main already sends PTX to a GPU newer than its NVRTC ([models.md](models.md#nvidia-gpus)).
@@ -111,7 +110,8 @@ At most three at once (Process v2 rule 9), each tied to its metric; week 1's dec
 ## Open follow-ups
 
 The live list is `gh issue list` ([issues](https://github.com/HaseebKhalid1507/Axon/issues)). At 11-12:
-- **Week 1:** #222 (`--help`), #218 (blocks the sharing flip), #219 (the shared-tokens counter), #210, #211 (close with the flip).
+- **Week 1:** #222 (`--help`), #218 (blocks the sharing flip), #219 (the shared-tokens counter), #210, #211 (close with the flip);
+  #233, #234 (block the tier's flip).
 - **Agent API:** #116 (`tool_choice: required` with several tools on gpt-oss).
 - **gpt-oss / MoE:** #121 (the MoE-resident twins' hardening).
 - **No track:** #188 (shared pages C4: prefill once, join many), #189 (the replay harness's provenance), #217, #220,

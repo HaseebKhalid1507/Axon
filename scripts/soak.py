@@ -2,8 +2,9 @@
 """Multi-hour soak of `axon serve` (stdlib only).
 
     scripts/soak.py <axon binary> <model.gguf> --hours H [--clients N] [--out DIR]
-                    [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [-- serve flags]
+                    [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [--hogs K] [-- serve flags]
     scripts/soak.py report DIR            (re-read DIR/summary.json, print the verdict)
+    scripts/soak.py selftest              (the hog-reply check's rule, no server)
     scripts/soak.py summarise FILE [MIN]  (a markdown table of samples.csv or a job log, MIN-minute buckets)
 
 Starts `axon serve` itself (so it knows the pid), then N client threads run a
@@ -19,6 +20,9 @@ realistic mix until the deadline:
   oversize                   a prompt past the context: must be a 4xx, never a 5xx
   invalid                    malformed JSON / bad params / wrong method: must be a 4xx
   burst                      every ~2 min one client fires 3x the slot count at once (503 allowed)
+  hog (--hogs K)             K more clients, each a count of its own that doesn't stop (2000-3000
+                             tokens, greedy) after a prefix they share, back to back: the pool preempts
+                             (see Client.hog); each hog's replies must be prefixes of its longest (HogRef)
 
 Every --sample-s seconds one CSV row (DIR/samples.csv, also printed as `CSV,...`
 on stdout so a remote log keeps it) records: server RSS, VRAM (nvidia-smi
@@ -42,6 +46,14 @@ Verdict (summary.json, exit 0 = PASS):
     up for a day, well above allocator noise (see docs/hardening.md).
   - after the load stops and the server idles, fds and threads are back at
     the pre-load baseline (+2 fds of slack for a lingering keep-alive).
+  - with --hogs: every hog reply is a prefix of the longest one of that hog
+    (its own prompt each time, greedy: the requests that get preempted, unfed
+    and refed have checked output; a mismatch is class hog-mismatch,
+    failing), and some hog's replies were compared (2 or more of them). And the pool really was under pressure. At the end /slots'
+    preempted and prefills_unfed and /metrics' axon_refeed_shared_tokens_total
+    (sharing on) are all above 0, else the run is INCONCLUSIVE ("not
+    evidence"): a soak meant to exercise preemption that never preempted
+    passed nothing about it (#228's review).
 """
 
 import argparse
@@ -189,10 +201,47 @@ class Stats:
 
 # Classes that fail the soak.
 BAD = {"5xx", "unexpected-4xx", "unexpected-200", "dropped", "bad-body", "timeout", "other-status",
-       "503-undocumented", "slow-blocks-others"}
+       "503-undocumented", "slow-blocks-others", "hog-mismatch"}
 # accepted-unsupported: a request for a feature serve refuses today (n > 1, logit_bias) got a 200:
 # the feature shipped and the harness should move the case; reported, not failing.
 CLASSES = ["ok", "4xx-expected", "503", "cancelled", "accepted-unsupported"] + sorted(BAD)
+
+
+class HogRef:
+    """--hogs: each hog's replies against each other (shady's review of #228). A hog sends its own prompt every
+    time (Client.hog), greedy, with max_tokens 2000-3000, so in exact mode each of its replies is a prefix of its
+    longest one so far, or that one is a prefix of it (it becomes the longest). Anything else is a mismatch:
+    Outcome hog-mismatch, failing. The hogs are the requests that get preempted, unfed and refed, so this checks
+    their output, not just that the pressure happened. `compared` counts the replies checked against an earlier
+    one of the same hog (a hog's first reply only sets its reference)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.longest, self.n, self.compared, self.mismatches = {}, 0, 0, 0
+
+    def check(self, text, key=0):
+        with self.lock:
+            self.n += 1
+            if key in self.longest:
+                self.compared += 1
+            ref = self.longest.get(key, "")
+            a, b = (text, ref) if len(text) <= len(ref) else (ref, text)
+            if b.startswith(a):
+                self.longest[key] = b
+                return
+            self.mismatches += 1
+            i = next(k for k in range(len(a)) if a[k] != b[k])
+            detail = (f"hog {key}'s reply of {len(text)} chars differs from its longest ({len(ref)}) at char {i}: "
+                      f"{text[max(0, i - 40):i + 40]!r} vs {ref[max(0, i - 40):i + 40]!r}")
+        raise Outcome("hog-mismatch", detail)
+
+    def summary(self):
+        with self.lock:
+            return {"replies": self.n, "compared": self.compared, "hogs": len(self.longest),
+                    "longest_chars": {str(k): len(v) for k, v in sorted(self.longest.items())},
+                    "mismatches": self.mismatches}
+
+
 # The documented back-pressure 503s (serve.rs): anything else is 503-undocumented.
 BACKPRESSURE = (b"too many queued requests", b"too many connections")
 
@@ -231,8 +280,8 @@ TOOLS = [{"type": "function", "function": {
 
 
 class Client:
-    def __init__(self, i, cfg, stats, stop_at):
-        self.i, self.cfg, self.stats, self.stop_at = i, cfg, stats, stop_at
+    def __init__(self, i, cfg, stats, stop_at, only=None):
+        self.i, self.cfg, self.stats, self.stop_at, self.only = i, cfg, stats, stop_at, only
         self.rng = random.Random(cfg.seed * 1000 + i)
         self.port = cfg.port
         # ~1.3 tokens per WORDS word (measured on qwen tokenizers: mostly 1).
@@ -247,7 +296,7 @@ class Client:
         b.update(kw)
         return b
 
-    def stream(self, path, body, kind, close_after=None, slow=False):
+    def stream(self, path, body, kind, close_after=None, slow=False, check=None):
         t0 = time.perf_counter()
         s = None
         if slow:
@@ -265,7 +314,7 @@ class Client:
             r = c.getresponse()
             if r.status != 200:
                 classify_status(r.status, r.read(), True)
-            n, done, finish, usage = 0, False, None, None
+            n, done, finish, usage, text = 0, False, None, None, []
             rd = (lambda: (time.sleep(self.rng.uniform(0.02, 0.1)), r.read1(64))[1]) if slow else None
             for ev in sse_events(r, rd):
                 if ev == "[DONE]":
@@ -281,11 +330,15 @@ class Client:
                                          or ch.get("text")):
                         ttft = time.perf_counter() - t0
                     n += 1
+                    if check is not None:
+                        text.append(ch.get("text") or dl.get("content") or "")
                     finish = ch.get("finish_reason") or finish
                 if close_after is not None and n >= close_after:
                     raise Outcome("cancelled")
             if not done or finish is None or usage is None:
                 raise Outcome("bad-body", f"stream ended early: done={done} finish={finish} usage={usage}")
+            if check is not None:
+                check("".join(text))
             self.stats.add(kind, "ok", time.perf_counter() - t0, ttft)
         finally:
             c.close()
@@ -350,6 +403,27 @@ class Client:
             turns.append({"role": "user", "content": "Task: " + words(self.rng, self.rng.randint(5, 20))})
             j = self.whole("/v1/chat/completions", self.chat_body(turns, max_tokens=32), "agent")
             turns.append({"role": "assistant", "content": j["choices"][0]["message"].get("content") or ""})
+
+    def hog(self):
+        """--hogs: a reply that doesn't stop (a count, greedy, 2000-3000 tokens) after a prefix every hog
+        shares. Admission reserves pages for at most GROW_TOKENS = 1024 of a running request's tokens to come
+        (engine.rs `admit_check`), so only replies past that, several at once on a pool smaller than their sum,
+        make the engine preempt the youngest, unfeed prefills and refeed what it preempted (claiming its warm
+        pages again). The default mix's replies are too short: #228's soaks (4.6 h each on 128 pages) evicted
+        thousands of warm pages and preempted nothing.
+        Each hog counts from its own start (hog 0 from 1: serve_paged_pressure's prompt; hog k from 1000 k + 1),
+        so the hogs' replies differ. With one count for all (#228's 40 min soak a8b5), their greedy replies
+        were the same tokens, and sharing (#213) swaps every whole page a slot decodes that the index already
+        has for the index's page: the hogs held one copy of their replies between them, 4 replies of 2000-3000
+        tokens fit in 128 pages, and the run preempted nothing (its idle hog slots held 129 pages of a pool
+        with 45 free). Every reply goes to HogRef under its hog: a prefix of that hog's longest, or a mismatch
+        (failing)."""
+        k = self.i - self.cfg.clients
+        a = 1000 * k + 1
+        count = "Count: " + ", ".join(str(a + j) for j in range(5)) + ","
+        body = {"model": MODEL[0], "prompt": self.cfg.hog_prefix + count,
+                "max_tokens": self.rng.randint(2000, 3000), "temperature": 0}
+        self.stream("/v1/completions", body, "hog", check=lambda t: self.cfg.hog_ref.check(t, k))
 
     def disconnect(self):
         msgs = [{"role": "user", "content": "Count slowly from one to two hundred."}]
@@ -458,7 +532,9 @@ class Client:
         weights = [w for _, w in self.MIX]
         last_burst = time.time() + self.rng.uniform(30, 120)
         while time.time() < self.stop_at:
-            if self.i == 0 and time.time() - last_burst > 120:
+            if self.only:
+                kind = self.only
+            elif self.i == 0 and time.time() - last_burst > 120:
                 kind, last_burst = "burst", time.time()
             else:
                 kind = self.rng.choices(names, weights)[0]
@@ -673,6 +749,24 @@ def memory_checks(rows, cfg):
     return out
 
 
+def pressure_counts(cfg):
+    """--hogs: the pool's pressure counters at the end (/slots, /metrics), for the pressure check."""
+    out = {}
+    try:
+        _, _, rb = request(cfg.port, "GET", "/slots", None, timeout=10)
+        j = json.loads(rb)
+        out["preempted"], out["prefills_unfed"] = j.get("preempted"), j.get("prefills_unfed")
+        out["pages_total"] = j.get("pages_total")
+        _, _, rb = request(cfg.port, "GET", "/metrics", None, timeout=10)
+        for ln in rb.decode("utf-8", "replace").splitlines():
+            k, _, v = ln.partition(" ")
+            if k in ("axon_refeed_shared_tokens_total", "axon_prompt_shared_tokens_total", "axon_pages_evicted_total"):
+                out[k[5:-6] if k.endswith("_total") else k] = int(float(v))
+    except Exception as e:  # noqa: BLE001
+        out["error"] = repr(e)
+    return out
+
+
 def verdict(rows, summary, cfg):
     """Fill summary['checks'] and summary['verdict'] (PASS / FAIL / INCONCLUSIVE) from the samples."""
     checks = {k: dict(v, pass_=v["status"]) for k, v in memory_checks(rows, cfg).items()}
@@ -697,6 +791,16 @@ def verdict(rows, summary, cfg):
     sl = summary.get("slots_after")
     if sl is not None:
         checks["slots_idle"] = dict(sl, pass_=st(sl.get("busy", 1) == 0 and sl.get("queue_depth", 1) == 0))
+    h = summary.get("hog_replies")
+    if h is not None:
+        checks["hog_replies"] = dict(h, pass_="FAIL" if h["mismatches"] else "PASS" if h["compared"] >= 1
+                                     else "INCONCLUSIVE")
+    p = summary.get("pressure")
+    if p is not None:
+        need = ("preempted", "prefills_unfed", "refeed_shared_tokens")
+        short = [k for k in need if not (p.get(k) or 0) > 0]
+        checks["pressure"] = dict(p, pass_="INCONCLUSIVE" if short else "PASS",
+                                  why=f"not evidence: {', '.join(short)} not above 0" if short else "")
     c = summary.get("cancels")
     if c is not None:
         checks["cancels"] = dict(c, pass_="REPORTED")
@@ -748,6 +852,28 @@ def summarise(path, bucket_min=30):
               f"{med('ttft_p50_ms'):.0f} |")
 
 
+def selftest():
+    """`soak.py selftest`: HogRef's rule without a server (prefixes and extensions pass, a difference fails)."""
+    r = HogRef()
+    for t in ("1, 2, 3", "1, 2, 3, 4, 5", "1, 2", "1, 2, 3, 4, 5", ""):
+        r.check(t)
+    # Another hog's count is its own: no mismatch against hog 0's.
+    for t in ("1001, 1002", "1001, 1002, 1003"):
+        r.check(t, 1)
+    want = {"replies": 7, "compared": 5, "hogs": 2, "longest_chars": {"0": 13, "1": 16}, "mismatches": 0}
+    assert r.summary() == want, r.summary()
+    for bad, key in (("1, 2, 4", 0), ("1, 2, 3, 4, 5, 6, 7".replace("4", "9"), 0), ("1001, 1003", 1)):
+        try:
+            r.check(bad, key)
+            raise AssertionError(f"no mismatch for {bad!r}")
+        except Outcome as o:
+            assert o.cls == "hog-mismatch" and "at char" in o.detail, o
+    want.update(replies=10, compared=8, mismatches=3)
+    assert r.summary() == want, r.summary()
+    print("selftest ok")
+    return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "summarise":
         summarise(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 30)
@@ -759,6 +885,8 @@ def main():
         v = s.get("verdict", "PASS" if s["pass"] else "FAIL")
         print(v, s.get("verdict_note", ""))
         return {"PASS": 0, "FAIL": 1}.get(v, 2)
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        return selftest()
     if len(sys.argv) > 1 and sys.argv[1] == "rejudge":
         a = sys.argv[2:]
         w = float(a[1]) if len(a) > 1 else 20
@@ -794,6 +922,10 @@ def main():
     ap.add_argument("--vram-floor-mib", type=float, default=16)
     ap.add_argument("--no-prime", dest="prime", action="store_false",
                     help="skip priming every batch mix before the load (see prime())")
+    ap.add_argument("--hogs", type=int, default=0,
+                    help="this many more clients, each a reply that doesn't stop (2000-3000 tokens, a count of its "
+                         "own) back to back, so the pool preempts; the run must then show preemption, unfeeds and "
+                         "refeed claims")
     ap.add_argument("--vram-card", action="store_true",
                     help="judge VRAM on the card's total when nvidia-smi doesn't list the server pid "
                          "(only on a GPU nothing else uses)")
@@ -802,11 +934,14 @@ def main():
     os.makedirs(cfg.out, exist_ok=True)
     rng = random.Random(cfg.seed)
     cfg.agent_prefix = ("You are an agent with these rules. " + words(rng, cfg.ctx // 4))
+    # Its own generator: the default mix's draws stay what they were without --hogs.
+    cfg.hog_prefix = "Notes before counting. " + words(random.Random(cfg.seed + 7), 300) + "\n"
+    cfg.hog_ref = HogRef()
     sargs = ["--ctx", str(cfg.ctx)] + (["--parallel", str(cfg.slots)] if cfg.slots > 1 else [])
     srv = Server(cfg.axon, cfg.model, cfg.port, sargs + extra, cfg.out)
     print(f"loaded in {srv.load_s:.1f}s, pid {srv.pid}", flush=True)
     MODEL[0] = json.loads(request(cfg.port, "GET", "/v1/models", None)[2])["data"][0]["id"]
-    summary = {"args": {k: v for k, v in vars(cfg).items() if k != "agent_prefix"}, "extra": extra,
+    summary = {"args": {k: v for k, v in vars(cfg).items() if k not in ("agent_prefix", "hog_prefix", "hog_ref")}, "extra": extra,
                "load_s": round(srv.load_s, 1), "identity_runs": 0, "identity_mismatches": []}
     t_start = time.time()
     rows = []
@@ -825,6 +960,7 @@ def main():
         stats = Stats()
         stop_at = t_start + cfg.hours * 3600
         clients = [Client(i, cfg, stats, stop_at) for i in range(cfg.clients)]
+        clients += [Client(cfg.clients + k, cfg, stats, stop_at, only="hog") for k in range(cfg.hogs)]
         ths = [threading.Thread(target=c.run, daemon=True) for c in clients]
         for t in ths:
             t.start()
@@ -885,6 +1021,9 @@ def main():
                                  "threads": d1.get("Threads", -1), "fds": d1.get("fds", -1),
                                  "hwm_mib": mib(d1, "VmHWM")}
         summary["slots_after"] = slots_idle(cfg)
+        if cfg.hogs:
+            summary["pressure"] = pressure_counts(cfg)
+            summary["hog_replies"] = cfg.hog_ref.summary()
         summary["totals"] = dict(sorted(stats.total.items()))
         summary["requests"] = stats.requests
         summary["lat_max_s"] = stats.lat_max

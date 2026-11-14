@@ -21,7 +21,9 @@
     `PoolPages` fields (`BatchLm::pages` runs several times a step).
   - Not in C3: in-flight dedupe (C4, #188), a preempted or unfed prefill re-claiming its warm pages (#212),
     copy-on-write. A duplicate block keeps its slot's later pages out of the index (#213).
-  - Off by default, opt-in with `AXON_SHARE_KV=1` (open question 4's answer): #207's timing round on an RTX 4090
+  - *Superseded by #228: on by default since the 11-12 decision, `AXON_SHARE_KV=0` the kill switch, off under fast
+    kernels unless `AXON_SHARE_KV=1` (docs/log/2026-11-12-share-default.md).* As C3 landed: off by default, opt-in
+    with `AXON_SHARE_KV=1` (open question 4's answer): #207's timing round on an RTX 4090
     failed two of #187's clauses, the fan-out siblings' increment (0.26× idle, 0.49× busy, against ≤ 0.25×) and s4's
     TTFT-new (1.00×, against ≤ 0.6×); warm/GB was untestable there (docs/log/2026-11-06-shared-prefix-pages-c3.md).
     What leads to a default-on decision: warm/GB measured where the pool fills (#210), and a subagent-start TTFT
