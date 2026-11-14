@@ -1,0 +1,16 @@
+[axon-run 13:41:16] submitted 1114-134116-ed03 by /home/haseeb/.cache/axon-train: /home/haseeb/.cache/axon-train/bin/axon-test-dbg-45b1f24 serve::tests::serve_sjf_long_prompt_admitted_within_age_bound --exact --nocapture
+[axon-run 13:41:16] job 1114-134116-ed03 -> pod1 [RTX 4090 sm_89 secure] (pod ct0a0ov1orv0bm): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 3000 --src /home/haseeb/.cache/axon-train/wt /home/haseeb/.cache/axon-train/bin/axon-test-dbg-45b1f24 serve::tests::serve_sjf_long_prompt_admitted_within_age_bound --exact --nocapture
+axon-remote: job 20261114-184120-axon-test-dbg-45b1f24-162578 on pod1 (GPU, 3000 MB)
+[axon-node 18:41:20] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 970/24564 MB; sharing with 20261114-182320-axon-test-dbg-45b1f24-142891 (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 18:41:20] run axon-test-dbg-45b1f24 (01a40a604ee6536a490cdc27) as /home/haseeb/.cache/axon-train/wt on b60a65b6b4d5, AXON_THREADS=5 RUST_TEST_THREADS=4; free 23114 MB of 24564 (used 970); GPU processes pid:MB 142906:434
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+long prompt admitted after waiting ~1014 ms under short traffic (bound 2000 ms)
+test serve::tests::serve_sjf_long_prompt_admitted_within_age_bound ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 974 filtered out; finished in 2.78s
+
+[axon-node 18:41:23] exit 0 after 2.9s
+[axon-node 18:41:23] peak RSS 237 MB (job process tree PSS, 2 s samples x1)
+[axon-run 13:41:25] exit 0 after 8.7s (host pod1)
