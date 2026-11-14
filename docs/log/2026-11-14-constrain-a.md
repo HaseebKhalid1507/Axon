@@ -73,6 +73,30 @@ through axon-run. "pod1"/"pod2" are RTX 4090 (sm_89) pods; bella is an RTX 5070 
 | model-gated contract, Qwen2.5-7B-Instruct Q4_K_M | 3 passed | 1114-073601-8253 (pod1) |
 | serve end to end + identity tests | 12 passed | 1114-074910-f297 (pod1) |
 
+### Fix round (reviews of cc0f74e: shady 8.5/10, Fable 8/10, no MUSTs)
+Commits 7294a18 (fixes) and 67cb85e (a unit test). What changed:
+- The masked CUDA verify runs in passes of at most 16 rows, not row by row past 16.
+- The pipeline and the CPU/GPU split verify a constrained draft in their own batched passes (`lm::verify_masked_via`).
+  When too few allowed tokens are among the CAND_MAX best, the row's position runs again for its logits.
+- The banner says whether constrained tool calls are on. A refusal prints one line saying why.
+- A guess with an empty mask after it stops the draft.
+- The docs say what PR A doesn't fix.
+
+| gate | result | job ID / log |
+|---|---|---|
+| clippy -D warnings (both cfgs), rustfmt | clean | axon-gate `constrain-67cb85e-fast-clippy.log` |
+| fast tier, release suite | 881 passed, 0 failed, 65 ignored | 1114-095719-fc83 (pod1) |
+| model-gated, 0.5B (`constrain::`, `serve_constrained_tool_calls`) | 14 passed, 0 failed, incl. `split_backends_constrained_contract`, `masked_via_rows`, verify chunks of 17 and all rows | 1114-095441-3f2f (pod1) |
+| model-gated, Qwen2.5-7B-Instruct Q4_K_M (`constrain::model_tests`) | 4 passed, 0 failed (CPU, CUDA, split backends, real vocab) | 1114-095442-d621 (pod1) |
+| serve A/B, base 0497708 vs 67cb85e, `AXON_CONSTRAIN` unset; chat, multi-turn, sampled, 4 tool requests, completions; whole and streamed; one at a time and 16 at once on CUDA | 288 of 288 identical (fingerprints included); with the variable set, the 144 requests without tools == base | 1114-102136-6c91 (0.5B, Qwen3-0.6B, Llama-3.2-1B; CPU, CUDA, CUDA `--draft 4`), 1114-102136-d95a (7B; CUDA, CUDA draft) |
+
+The serve A/B's constrained arm on the 7B (dumped in 1114-103013-31f9):
+- **The #259-shaped prompt, greedy.** main's `sed` call had invalid escapes (`\(`, `\'`, `\{`), so it came back as text,
+  and only a second `echo done` call was parsed. Constrained, the call is valid and complete.
+- **The same prompt sampled at T 0.7, seed 7.** Constrained, an unescaped quote ended the string early, and the model
+  wrote whitespace in the frame position until `max_tokens`, so no call came back. Main's call was malformed too.
+  That is the runaway case deferred to PR B.
+
 ## Results
 MEASURED. Host and job named per line.
 
