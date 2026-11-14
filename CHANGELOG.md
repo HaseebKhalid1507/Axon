@@ -85,15 +85,22 @@ measurements behind them.
   peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
   draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
   every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
-- **The tag check runs again right before Publish** (#265, shady's review of #261). releasing.md ran it only
-  first, hours before publishing; it now runs first and last. A 422 (the tag is gone) means don't publish: the
-  draft's target is main, so publishing would create the tag at main's tip with the old commit's tarball.
-  The release job:
+- **Publishing is one checked command, and the draft's title fails closed** (#265, shady's reviews of #261 and
+  #265). releasing.md ran the tag check only first, hours before publishing. Now `scripts/release/publish.sh
+  vX.Y.Z` is the publish step. Right before `gh release edit --tag --verify-tag --draft=false`, it checks:
+  one draft for the tag, titled `Axon vX.Y.Z`, with its three assets uploaded, and the tag naming the commit
+  in its notes. `--check` runs the same checks first, before the hand checks. When the tag is gone (a 422) it
+  refuses: the draft's target is main, so publishing would create the tag at main's tip, with the old commit's
+  tarball. The release job:
   - says "re-run this job" when GitHub gave no commit for the tag (a transient error, or the tag deleted),
     not "the other run makes the draft";
-  - retitles the draft "DO NOT PUBLISH: …" before failing when the tag moved or went during the upload;
+  - creates the draft titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)", and retitles it `Axon vX.Y.Z` only
+    after the tag check after the upload passes. A failed, cancelled or lost job leaves a draft that says not
+    to publish it;
   - runs one at a time per tag (a `concurrency` group, never cancelling the running one).
 
+  `scripts/release/test_draft_guards.sh` now pins the create's and the edit's exact arguments (`--draft`,
+  `--verify-tag`, both titles, `--repo`) and tests publish.sh.
   No `--target` on the create: GITHUB_TOKEN can't create a release whose target's workflows differ from main's.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)

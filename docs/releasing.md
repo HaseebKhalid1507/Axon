@@ -33,13 +33,18 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`:
      add a second draft.
 
    One release job per tag runs at a time (a `concurrency` group). A waiting one isn't cancelled, but a third
-   cancels the second, which then made nothing: re-run it if its run built the commit the tag names.
+   cancels the second, which then made nothing: re-run it if its run built the commit the tag names. A tag
+   deleted and pushed again at the same commit gives one expected red run: the second release job waits for
+   the first, finds its draft and refuses. Check the first run's draft.
 
-   After the upload it checks the tag again. If the tag moved, or GitHub gave no commit, it retitles the draft
-   "DO NOT PUBLISH: …" and fails; the job's log says whether to delete the draft or, after a transient error
-   with the tag unmoved, to set the title back. The draft's notes name the commit it was built from. If the
-   upload step fails partway, the half-made draft stays (`gh release create --draft` doesn't remove it): delete
-   it (`gh release delete vX.Y.Z --yes`; the tag stays), then "Re-run failed jobs".
+   The draft is created titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)". After the upload the job checks the
+   tag again, and only if it still names the run's commit does the job retitle the draft `Axon vX.Y.Z`. A job
+   that fails, is cancelled or dies after the create leaves a draft whose title says not to publish it, and
+   `publish.sh` refuses any other title. If the check fails (the tag moved, or GitHub gave no commit), the
+   job fails and its log says whether to delete the draft or, after a transient error with the tag unmoved, to
+   retitle it. The draft's notes name the commit it was built from. If the upload fails partway, the half-made
+   draft stays (`gh release create --draft` doesn't remove it): delete it (`gh release delete vX.Y.Z --yes`;
+   the tag stays), then "Re-run failed jobs".
 
 The workflow never checks the GPU side. No runner has a GPU, so the draft's kernels have run nowhere yet.
 
@@ -49,22 +54,23 @@ The workflow never checks the GPU side. No runner has a GPU, so the draft's kern
 - CHANGELOG: the Unreleased entries move under `## X.Y.Z (date)`. Release notes: `docs/release-0.1.md` for 0.1.
 - main is green (CI and the post-merge suites) at the commit you tag.
 
-## Before publishing the draft
+## Checking and publishing the draft
 
 Run every check on **the draft's own tarball**: `gh release download vX.Y.Z -p 'axon-x86_64-linux.tar.gz*'`,
 then `sha256sum -c axon-x86_64-linux.tar.gz.sha256`. Write its SHA-256 next to each result.
 
-**The tag check, first and last.** The tag must still name the commit in the draft's notes ("Built from commit
-…"): `gh api repos/HaseebKhalid1507/Axon/commits/refs/tags/vX.Y.Z --jq .sha` prints it. Run it first, so you
-don't spend hours on a stale draft, and **again right before clicking Publish**: the checks below take hours,
-and no workflow sees a tag moved after the draft was made. Publish only if it prints the draft's commit and the
-draft is titled `Axon vX.Y.Z`:
-- another commit: the tag moved, and the draft holds the old commit's tarball. Delete the draft.
-- `No commit found for SHA: refs/tags/vX.Y.Z (HTTP 422)`: the tag is gone. **Don't publish.** The draft's
-  target is main, so publishing would create `vX.Y.Z` at main's tip, holding the old commit's tarball. Delete
-  the draft (`gh release delete vX.Y.Z --yes` finds a draft by its tag name even with the tag gone).
-- a title starting "DO NOT PUBLISH": the release job couldn't confirm the tag after the upload; its log says
-  what to do.
+**First, `scripts/release/publish.sh --check vX.Y.Z`**, so you don't spend hours on a stale draft. It runs the
+checks of the Publish step (5, below) and publishes nothing. If it refuses, it says why:
+- the tag names another commit: the tag moved, and the draft holds the old commit's tarball. Delete the draft
+  (`gh release delete vX.Y.Z --yes`; the tag stays). The run that built the commit the tag names now makes the
+  draft. If its release job already refused, because this draft existed, re-run it ("Re-run failed jobs").
+  The checks below start over, on the new draft's tarball.
+- GitHub gave no commit (`No commit found for SHA: refs/tags/vX.Y.Z (HTTP 422)`): the tag is gone. **Don't
+  publish.** The draft's target is main, so publishing would create `vX.Y.Z` at main's tip, holding the old
+  commit's tarball. Delete the draft (`gh release delete vX.Y.Z --yes` finds a draft by its tag name even with
+  the tag gone).
+- the title isn't `Axon vX.Y.Z` (it starts "DO NOT PUBLISH"): the release job didn't confirm the tag after the
+  upload, or didn't finish. Its log says what to do.
 
 1. **The pack is NVRTC's output, byte for byte.** Download the tag run's `kernels-pack` artifact (kept 30
    days): the draft's binary embeds exactly this pack, because the build job takes it from the same run. On
@@ -89,8 +95,18 @@ draft is titled `Axon vX.Y.Z`:
 
 If any check fails, delete the draft and the tag, fix the problem on main, and tag again.
 
-Publish it as a full release, not a pre-release: install.sh installs GitHub's `latest`, which never points at a
-pre-release.
+5. **Publish: `scripts/release/publish.sh vX.Y.Z`.** Not the web page's Publish button, and not a bare
+   `gh release edit --draft=false`: neither checks anything. Right before it publishes, the script checks,
+   and refuses on any miss (the list above says what to do):
+   - there is exactly one release for the tag, a draft, titled exactly `Axon vX.Y.Z`;
+   - its notes name one commit, and its assets are exactly the tarball, its `.sha256` and `install.sh`, all
+     uploaded;
+   - the tag names that commit now. This runs last, so a tag moved during the hours of checks above is caught.
+
+   Then it runs `gh release edit vX.Y.Z --tag vX.Y.Z --verify-tag --draft=false --prerelease=false`. That makes a
+   full release, not a pre-release, because install.sh installs GitHub's `latest`, which never points at a
+   pre-release. If you ever run that line by hand, keep `--tag`: in gh 2.102.1, `--verify-tag` checks the tag
+   only when `--tag` is given too.
 
 ## After publishing
 

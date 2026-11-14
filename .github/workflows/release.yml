@@ -2,8 +2,8 @@ name: Release
 
 # Builds the Linux x86-64 release tarball: `axon` with its GPU kernels precompiled (the kernel pack,
 # docs/models.md "NVIDIA GPUs") and the license notices. A pushed tag `vX.Y.Z` uploads it to a draft GitHub
-# release for that tag, if the tag still names the commit it built; a maintainer publishes it after the hand
-# checks in docs/releasing.md. Any other run
+# release for that tag, if the tag still names the commit it built; a maintainer publishes it with
+# scripts/release/publish.sh after the hand checks in docs/releasing.md. Any other run
 # (workflow_dispatch, on a tag too, or a pull request that touches the release files) only builds it, tests
 # install.sh against it, and keeps it as a workflow artifact.
 #
@@ -55,7 +55,7 @@ jobs:
           dash -n install.sh
       - name: rust_licenses.py self-test
         run: python3 scripts/release/rust_licenses.py --self-test
-      - name: the draft step's checks, against a stub gh
+      - name: the draft step's and publish.sh's checks, against a stub gh
         run: bash scripts/release/test_draft_guards.sh
       # The pack depends only on the kernel sources, the module list, the targets and NVRTC. A stale pack can't ship
       # anyway: the build job checks it holds every module this build loads. (Cache keys can't hold commas.)
@@ -276,25 +276,28 @@ jobs:
             exit 1
           fi
           # No --target: the draft's target stays main, which only matters if the tag is gone when the draft is
-          # published (publishing would create the tag at main's tip; docs/releasing.md checks the tag right before).
+          # published (publishing would create the tag at main's tip; scripts/release/publish.sh checks the tag first).
           # --target "$BUILT" would make this call 404 whenever the tagged commit's .github/workflows differ from
           # main's: GITHUB_TOKEN can't be authorized for that (REST docs, "Create a release").
+          # The title fails closed: the draft is created "DO NOT PUBLISH: ... (unchecked)" and titled "Axon <tag>"
+          # only after the check below passes. A job that fails, is cancelled or dies after this call leaves a draft
+          # whose title says not to publish it, and publish.sh refuses any other title.
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "Axon $GITHUB_REF_NAME" \
+            --title "DO NOT PUBLISH: Axon $GITHUB_REF_NAME (unchecked)" \
             --notes "Linux x86-64. Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh\` (this version: \`curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/install.sh | AXON_VERSION=$GITHUB_REF_NAME sh\`). SHA-256 of the tarball: $(cut -d' ' -f1 dist/axon-x86_64-linux.tar.gz.sha256). Built from commit $BUILT." \
             dist/axon-x86_64-linux.tar.gz dist/axon-x86_64-linux.tar.gz.sha256 dist/install.sh
           # Again: the tag can move, or be deleted, while the files upload. Then the draft is wrong, or can't be
-          # shown right: retitle it, so nobody publishes it without opening this run, and fail.
+          # shown right: it keeps its DO NOT PUBLISH title, and the job fails.
           check=0
           tag_names_built || check=$?
-          if [ "$check" != 0 ]; then
-            if [ "$check" = 1 ]; then why="$tag moved during the upload"; else why="$tag unchecked after the upload"; fi
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "DO NOT PUBLISH: $why" > /dev/null ||
-              echo "couldn't retitle the draft either: it is still titled Axon $tag" >&2
-            if [ "$check" = 1 ]; then
-              echo "the draft for $tag holds $BUILT's tarball: delete it (gh release delete $tag --yes; the tag stays), then re-run the release job of the run that built the commit the tag names" >&2
-            else
-              echo "if $tag still names $BUILT (a transient error), the draft is right: gh release edit $tag --title 'Axon $tag'. If the tag is gone, delete the draft (gh release delete $tag --yes): publishing it would create $tag at main's tip" >&2
-            fi
+          if [ "$check" = 1 ]; then
+            echo "the draft for $tag holds $BUILT's tarball and stays titled DO NOT PUBLISH: delete it (gh release delete $tag --yes; the tag stays). The run that built the commit $tag names makes the draft; if its release job already refused, because this draft existed, re-run it" >&2
+            exit 1
+          elif [ "$check" != 0 ]; then
+            echo "the draft for $tag stays titled DO NOT PUBLISH. If gh api repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag --jq .sha prints $BUILT (a transient error), the draft is right: gh release edit $tag --repo $GITHUB_REPOSITORY --title 'Axon $tag'. If the tag is gone, delete the draft (gh release delete $tag --yes): publishing it would create $tag at main's tip" >&2
             exit 1
           fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "Axon $tag" > /dev/null || {
+            echo "the draft for $tag is right ($tag names $BUILT) but couldn't be retitled, so it is still titled DO NOT PUBLISH: gh release edit $tag --repo $GITHUB_REPOSITORY --title 'Axon $tag'" >&2
+            exit 1
+          }
