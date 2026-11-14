@@ -83,3 +83,28 @@ Gated code fc845c8.
 - **The soak harness failed first** (11-13). The first smoke and soak died at load: `soakshare.sh` passed no
   `--device`, and serve's default device is the CPU, which refuses `--parallel 8`. Fixed with `--device cuda` and
   rerun (smoke 1dd6, then the two soaks).
+
+## Review round (11-14)
+shady 8/10 SHIP and Fable (second family) 8/10 APPROVE at `bf45114`, no MUSTs. Fixed in `e07adff` (code), `56d01d7`
+(docs) and `8d4fef0` (the soak harness); what was left out is in #267, each with its reason.
+- **Fast kernels** (shady): under `--numerics fast` on an FP8 checkpoint (which `--datacenter` implies) the rows
+  change with a prompt's chunking, so two requests' copies of a block can differ in their bytes. Debug builds assert
+  byte equality on every duplicate block, and no gate held fast mode and sharing together. Sharing is now off there
+  unless `AXON_SHARE_KV=1` (then within fast mode's tolerance, the debug check skipped).
+  `serve_share_off_under_fast_kernels` pins the default on an sm_89+ GPU.
+- **The kill switch where it's needed** (shady): an engine failure's exit line adds "(shared prefix KV pages are on;
+  `AXON_SHARE_KV=0` turns them off)" while sharing is on. The start line says off too, and why, and echoes a value
+  that reads as on without being `1` (`off`, `false`).
+- **`cached_tokens`** (Fable): it now counts pages another client computed. serving.md says what a client can learn
+  from it and when to set `AXON_SHARE_KV=0`. A per-key salt is #267.
+- **`serve_share_cancel_frees`** (Fable): it dropped the third request after the others generated 6 more tokens,
+  which doesn't prove the third was admitted (a09b1bd's one red). It now waits for the third's admission (the
+  shared-tokens counter's delta).
+- **Docs that still said opt-in** (both): START-HERE.md, results.md, methodology.md and the design.
+- **A soak that preempts** (both). shady worked out why the two soaks couldn't: admission reserves pages for at most
+  1024 of a running request's tokens to come (`GROW_TOKENS`), and the mix's replies are shorter, so 128 pages only
+  meant more evictions. `scripts/soak.py --hogs K` adds replies that don't stop (a count, 2000–3000 tokens), and
+  the verdict then needs `preempted`, `prefills_unfed` and `axon_refeed_shared_tokens_total` above 0 at the end
+  (else INCONCLUSIVE, "not evidence"). The CPU smoke (one slot, no pages) ran the hogs and read INCONCLUSIVE, as it
+  should. The soak itself (`soakpreempt.sh`: 4.5 h, 4 hogs + 12 clients, 128 pages, debug build, sharing on, tier
+  off) is queued at `--low` on bella; it isn't a gate of this round, and its result goes on the PR.
