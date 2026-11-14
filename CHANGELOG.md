@@ -24,11 +24,25 @@ measurements behind them.
   CUDA, `--no-think` on a model without `<think>`. `axon serve` still exits 2 with the same message; a process that
   starts servers itself (the test binary) keeps running. It came up when the debug test binary exited 2 in the
   middle of the share gates with its message captured and lost (1114-174039-9861).
-- **An unsupported model is refused before its weights are read**, by the CLI, `serve::start` and `axon::load`.
-  The support check's answer now stops the load: nothing copied, no rope unpermute, no read-ahead thread, and a
-  safetensors checkpoint isn't converted or FP8-scanned. `axon::load` used to load the whole model (a checkpoint
-  converted in full) before returning the refusal; the CLI exited from inside the check, which a refusal returned
-  as an error can't do.
+- **An unsupported main model given no rope flag is refused before its weights are read**, by the CLI (`gen`,
+  `logits`, `chat`, `serve`), `serve::start` and `axon::load` (which takes no rope flags). The support check's
+  answer now stops the load: nothing copied, no rope unpermute, no read-ahead thread, and a safetensors checkpoint
+  isn't converted or FP8-scanned. `axon::load` used to load the whole model (a checkpoint converted in full) before
+  returning the refusal; the CLI exited from inside the check, which a refusal returned as an error can't do. Two
+  refusals still check a model that is already loaded, as they did before:
+  - **With a rope flag** (`--rope-scaling`, `--rope-scale`, `--yarn-*`) the check waits until the flags are written
+    into the loaded model's metadata (`cli::try_open_model_with`). On CUDA the file is mapped and its read-ahead
+    thread started first, and the thread goes on reading the whole file after the refusal (dropping the model
+    doesn't stop it). On the CPU the model is copied in full first when the copy pays (else mapped and read ahead,
+    as on CUDA). A safetensors checkpoint is converted first on either.
+  - **A `--draft-model`** is opened in full (`DraftModel::open`: `gguf::load_with`) before its support and
+    vocabulary checks. On the CPU the whole draft is copied into RAM (unless `AXON_MMAP` or the memory guard maps
+    it); on CUDA it is mapped and its rope unpermuted. No read-ahead thread on this path. A safetensors draft is
+    converted first.
+
+  `axon gen`, `logits`, `chat` and `serve` exit on either refusal, as before, so the read-ahead and the copy end
+  with the process. Only a process that calls `serve::start` itself and outlives a refused start (the test binary)
+  keeps paying them. A stop flag for the read-ahead thread is a follow-up on #267.
 - **Tests.** `serve_share_on_under_fast_kernels`: sharing on under FP8 fast kernels (`AXON_SHARE_KV=1`), the path
   where a debug build's duplicate-page byte check is skipped, with duplicates swapped (skipped without e4m3
   tensor cores). `serve_share_cancel_frees` now proves its third request is dropped while being fed: a test-only
