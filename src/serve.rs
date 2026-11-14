@@ -89,6 +89,12 @@ const ACCEPT_DRAIN: usize = 64 << 10;
 /// `axon serve`'s settings.
 pub struct Opts {
     pub path: String,
+    /// The model's id (/v1/models, a request's `model`) when it isn't
+    /// `path`'s file stem: the name `axon serve` was given when `axon pull`
+    /// resolved it to `path` (an alias, OWNER/REPO/FILE.gguf, a pulled
+    /// file's name), so a client asks for the model by the name it was
+    /// served as. None (a path): the stem.
+    pub name: Option<String>,
     pub host: String,
     pub port: u16,
     pub device: Device,
@@ -1172,7 +1178,7 @@ fn engine(
     }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
-        crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
+        crate::draft::DraftModel::open(&crate::model_arg(p), crate::copy_for(device), &model, tok)
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
@@ -2389,9 +2395,11 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let engine = std::thread::Builder::new()
         .name("axon-engine".into())
         .spawn(move || engine(eo, ready_tx, jobs_rx, stop2))?;
-    let model_id = std::path::Path::new(&o.path)
-        .file_stem()
-        .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned());
+    let model_id = o.name.clone().unwrap_or_else(|| {
+        std::path::Path::new(&o.path)
+            .file_stem()
+            .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned())
+    });
     // A request's own repetition_penalty, else the server's flag, else 1
     // (off, as OpenAI and llama-server; `axon chat`'s 1.1 would quietly
     // penalize the punctuation and indentation of code and JSON).
@@ -2468,8 +2476,13 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
     l.identity = l.identity.with_serve(serve);
     if o.log {
+        // A pulled model's name, then its file.
+        let file = match o.name {
+            Some(_) => format!("{}, ", o.path),
+            None => String::new(),
+        };
         eprintln!(
-            "axon serve: {model_id} ({}) on http://{addr}/v1{}",
+            "axon serve: {model_id} ({file}{}) on http://{addr}/v1{}",
             l.banner,
             match &l.template {
                 Some(_) => String::new(),
@@ -3427,8 +3440,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         crate::fail(SERVE_USAGE);
     };
+    // `model_arg` returns a path that exists as given; anything else it
+    // returns is what `axon pull` resolved the name to.
+    let resolved = crate::model_arg(path);
     let mut o = Opts {
-        path: path.clone(),
+        name: (resolved != *path).then(|| path.clone()),
+        path: resolved,
         host: "127.0.0.1".into(),
         port: 8080,
         device: crate::device_env(),

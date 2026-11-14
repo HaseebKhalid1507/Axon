@@ -73,11 +73,13 @@ mod model;
 mod moe;
 mod numerics;
 mod pool;
+mod pull;
 mod quant;
 mod rope;
 mod safetensors;
 mod sample;
 mod serve;
+mod sha256;
 mod spec;
 #[cfg(test)]
 mod testutil;
@@ -95,7 +97,8 @@ pub use tokenizer::{Tokenizer, Utf8Stream};
 // ...), from before the library split, when they lived in main.rs.
 pub(crate) use cli::{
     DEFAULT_CHAT_CTX, backend_and_drafter, check_stream_decode, copy_for, device_env, draft_env,
-    draft_env_set, fail, kv_env, kv_flag, numerics_flag, open_model_with, placement, round_draft,
+    draft_env_set, fail, kv_env, kv_flag, model_arg, numerics_flag, open_model_with, placement,
+    round_draft,
 };
 pub(crate) use generate::{PREFILL_BATCH, argmax};
 

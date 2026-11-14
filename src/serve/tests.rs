@@ -31,6 +31,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
 fn test_opts(path: &str, device: Device) -> Opts {
     Opts {
         path: path.into(),
+        name: None,
         host: "127.0.0.1".into(),
         port: 0,
         device,
@@ -1925,6 +1926,50 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
             assert_eq!(t, s1, "{what} stagger {stagger} ms: request {i}");
         }
     }
+}
+
+/// A model `axon serve` was given by a name `axon pull` resolved (#231
+/// review): the name is its id in /v1/models and a request naming it is
+/// served; given by path, the id is the file's stem, as before.
+#[test]
+fn serve_pulled_name_is_the_model_id() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let s = server_with(p, Device::Cpu, |o| {
+        o.name = Some("qwen2.5-0.5b".into());
+        o.alias = None;
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], "qwen2.5-0.5b", "{v}");
+    assert_eq!(v["data"].as_array().unwrap().len(), 1, "{v}");
+    let ask = |model: &str| {
+        post(
+            a,
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 2, "temperature": 0}),
+        )
+    };
+    let r = ask("qwen2.5-0.5b");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["model"], "qwen2.5-0.5b");
+    let stem = std::path::Path::new(p)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        ask(stem).status,
+        404,
+        "the file's stem is not a name it was given"
+    );
+    drop(s);
+    let s = server_with(p, Device::Cpu, |o| o.alias = None);
+    let v = call(s.addr, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], stem, "a path keeps its stem: {v}");
 }
 
 /// A pool whose slots are shorter than the context (`slot_ctx`, as when
