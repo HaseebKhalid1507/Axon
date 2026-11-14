@@ -228,9 +228,11 @@ impl Constraint {
         matches!(self.phase, Phase::On { .. })
     }
 
-    /// Engaged inside a JSON string: what PR B's Parser asks to tell a
-    /// spelled `</tool_call>` in a string value from the call's real close
-    /// (the maintainer's ruling 5 on the spec's §6).
+    /// Engaged inside a JSON string: tells a spelled `</tool_call>` in a
+    /// string from the call's real close (the maintainer's ruling 5 on the
+    /// spec's §6). #260's Parser already reads it as text inside a string
+    /// in a call's arguments, from its own scan; in the name string, and
+    /// when calls are decided whole, the tag still ends the block (PR B).
     #[cfg_attr(not(test), allow(dead_code))] // PR B
     pub fn in_string(&self) -> bool {
         match &self.phase {

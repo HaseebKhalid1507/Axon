@@ -15,9 +15,13 @@ measurements behind them.
   there (`"cmd": "echo '{"` and then a forced `,` or `}`), so the call parses but may not be what was meant.
 - **What it doesn't fix yet.**
   - `max_tokens` can still cut a call short. Inside a call EOS is banned, so `max_tokens` is the only stop, and
-    there is no bound on a runaway call yet (PR B).
-  - The grammar allows `</tool_call>` spelled out inside a string (it is string text there), but main's tool-call
-    Parser still splits the reply at it, and the call arrives as text, until #262 lands.
+    there is no bound on a runaway call yet (PR B). Cut once its arguments have opened, a call comes back as a call
+    (#260's rules, below) whose `arguments` aren't valid JSON, counted in `axon_tool_calls_invalid_total`. Cut
+    earlier, or with `AXON_TOOL_STREAM=0`, it comes back as content.
+  - The grammar allows `</tool_call>` spelled out inside any string (it is string text there). Since #260 the
+    Parser agrees inside a string in the call's arguments. It still ends the block at the tag inside the name
+    string, and anywhere with `AXON_TOOL_STREAM=0` or on the ollama routes (decided whole). There the block is cut
+    at the tag, isn't a call, and comes back as content (PR B, ruling 5).
 - **Unchanged.** Requests without tools and every request with the variable unset are unchanged, bit for bit.
   Text before a call too. After a call the position takes the unconstrained head again (the text differs only
   because the call did).

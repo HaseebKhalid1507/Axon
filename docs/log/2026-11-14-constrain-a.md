@@ -1,11 +1,12 @@
 # Constrained decoding, PR A: Hermes tool calls held to JSON behind `AXON_CONSTRAIN=1` (PR #264)
 
-- Date: 2026-11-14. Branch: feat/constrain-a. Base: main 0497708. Status: open (PR #264).
+- Date: 2026-11-14. Branch: feat/constrain-a. Base: main 0497708, rebased onto #262's head 1acf2ed (stacked: the two
+  land in one merge train). Status: open (PR #264).
 - Pick / design: specs/constrained-decoding.md (overnight workspace) §5 row A, for #259 (malformed Hermes calls from
   Qwen2.5-7B under codex) and #116. The maintainer's rulings on the spec's §6 are built in where PR A touches them:
   (1) no global `NUMERICS_VERSION_EXACT` bump, the constraint goes in the request's `serve` identity field;
-  (2) lazy re-arm after `</tool_call>`; (5) the Parser is to read `</tool_call>` inside a JSON string as text (PR B),
-  and PR A exposes the state it needs (`Constraint::in_string`). (3) and (4) are PR C's.
+  (2) lazy re-arm after `</tool_call>`; (5) the Parser is to read `</tool_call>` inside a JSON string as text: #262 does
+  for a call's arguments, the rest is PR B's, and PR A exposes the state it needs (`Constraint::in_string`). (3) and (4) are PR C's.
 
 ## What changed
 - **`src/constrain/`** (new).
@@ -143,7 +144,9 @@ random tokens, and assert the counter grew.
   requires `Vocab::byte_complete`, and the toy vocabularies got the bytes.
 - **The first oracle for "every call parses" scanned the text for `</tool_call>`.** That split calls whose string
   values spell `</tool_call>`: 4 of 88 on the toy model. The automaton reads them as string content, so the test now
-  takes the call's end from a shadow `Constraint`. That is ruling 5's case, for PR B's Parser.
+  takes the call's end from a shadow `Constraint`. That is ruling 5's case. #262 (#260's fix) made the Parser read
+  the tag as text inside a string in a call's arguments; the name string, and decide-whole mode
+  (`AXON_TOOL_STREAM=0`, ollama), still end the block there, for PR B.
 - **Observed, not fixed here:** a 0.5B call sampled at temperature 1.2 with top_k off ran into spaces inside a
   string until `max_tokens` (finish_reason `length`). The grammar guarantees a call is valid JSON, not that it
   ends. #262 (#260's fix) chose streaming and left a runaway bound out, so the bound is on PR B's list (whitespace

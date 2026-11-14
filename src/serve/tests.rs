@@ -2157,8 +2157,8 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
 /// without tools gets the same reply and fingerprint from a server with
 /// constraints on or off; a tools request (tool_choice auto) gets its own
 /// `system_fingerprint` (`identity::constrain_field`), and every call it
-/// makes has arguments that parse, with no `<tool_call>` block left in the
-/// content of a reply that stopped; on CUDA, tools requests and plain ones
+/// makes has arguments that parse (but a call cut by `max_tokens`), with no
+/// `<tool_call>` block left in the content of a reply that stopped; on CUDA, tools requests and plain ones
 /// sent together get what each gets alone (handing over to the batch
 /// partway too, with drafting).
 #[test]
@@ -2221,9 +2221,18 @@ fn serve_constrained_tool_calls() {
             assert_ne!(vfp, fp, "{dev:?}: a constrained reply's fingerprint");
             cfps.push(vfp);
             let ch = &v["choices"][0];
-            for c in ch["message"]["tool_calls"].as_array().into_iter().flatten() {
+            let cut = ch["finish_reason"] == "length";
+            let cs = ch["message"]["tool_calls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for (i, c) in cs.iter().enumerate() {
                 let args = c["function"]["arguments"].as_str().unwrap();
-                serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                // A call cut by max_tokens comes back as a call with what
+                // was written (#260): only the reply's last call can be.
+                if !(cut && i + 1 == cs.len()) {
+                    serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                }
                 calls += 1;
             }
             if ch["finish_reason"] != "length" {
