@@ -1,0 +1,49 @@
+{
+ "label": "constrain-4af6874-fast",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-074845-c0fd",
+   "name": "constrain-4af6874-fast-rel",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-14_08:11.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "4af6874",
+   "binary": "axon-test",
+   "started": 1794661871.299586,
+   "ended": 1794664267.905418,
+   "attempts": 1,
+   "remote_job": "20261114-131129-axon-test-1093",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ef4a800f9459e260d455ce7c7e3d504cd4c12a6e8b354aa4d61198f00aa48836",
+   "log_bytes": 63057
+  },
+  {
+   "job": "1114-074845-6d78",
+   "name": "constrain-4af6874-fast-dbg-cpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-11-14_07:56.txt",
+   "gpu": "CPU only (pod2; GPU hidden)",
+   "driver": "595.91.07",
+   "sha": "4af6874",
+   "binary": "axon-test-dbg",
+   "started": 1794660982.1779022,
+   "ended": 1794661563.5978057,
+   "attempts": 1,
+   "remote_job": "20261114-125629-axon-test-dbg-38556",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2fd596ceea47d182c1fac412439271de921a8b9fc1b3c109105cd9b2ba9626ec",
+   "log_bytes": 59480
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 08:51:11 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
