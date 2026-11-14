@@ -1,0 +1,25 @@
+[axon-run 00:40:55] submitted 1114-004055-08e3 by /home/haseeb/.cache/axon-wt-gojo-246: /home/haseeb/.cache/axon-dist/bin/axon-test-a008758 cuda::qwen2::tests::fp8::gpu_fp8_fast_vs_exact_sanity --exact
+[axon-run 00:40:55] job 1114-004055-08e3 -> pod1 [RTX 4090 sm_89 secure] (pod qxz8fcpzd3khvl): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-gojo-246 /home/haseeb/.cache/axon-dist/bin/axon-test-a008758 cuda::qwen2::tests::fp8::gpu_fp8_fast_vs_exact_sanity --exact
+axon-remote: uploading axon-test-a008758 (d9e23eef6f7c999871b6425f) + source of /home/haseeb/.cache/axon-wt-gojo-246 (delta vs 5 earlier upload(s) there)
+
+sent 37,496 bytes  received 9,264 bytes  18,704.00 bytes/sec
+total size is 9,489,924  speedup is 202.95
+
+sent 7,882,773 bytes  received 42 bytes  1,433,239.09 bytes/sec
+total size is 26,212,800  speedup is 3.33
+axon-remote: job 20261114-054111-axon-test-a008758-15020 on pod1 (GPU, 5000 MB)
+[axon-node 05:41:12] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with 20261114-053828-bash-13022 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 05:41:12] run axon-test-a008758 (d9e23eef6f7c999871b6425f) as /home/haseeb/.cache/axon-wt-gojo-246 on 3aef96ddda0d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::fp8::gpu_fp8_fast_vs_exact_sanity has been running for over 60 seconds
+fp8 fast vs exact on the GPU: 116.9 s
+test cuda::qwen2::tests::fp8::gpu_fp8_fast_vs_exact_sanity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 914 filtered out; finished in 117.61s
+
+[axon-node 05:43:10] exit 0 after 117.9s
+[axon-node 05:43:10] peak RSS 3539 MB (job process tree PSS, 2 s samples x57)
+[axon-run 00:43:12] exit 0 after 136.8s (host pod1)
+[axon-run 00:43:15] EXPECT ok: output matches /^test result: ok\. 1 passed/
