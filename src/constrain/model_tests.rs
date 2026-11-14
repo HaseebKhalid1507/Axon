@@ -667,12 +667,14 @@ fn mask_cost_real() {
 }
 
 /// What a constrained token costs a decode step on CUDA, end to end: along
-/// one constrained greedy reply (engaged from its first token), each
-/// position run three ways on three caches fed the same tokens: the
-/// greedy step (`forward_argmax`), a sampled step (`forward_cands`, k 40)
-/// and the constrained step (`Constraint::mask`, `forward_cands_masked`:
-/// the device's CAND_MAX best, the allowed kept, `accept`). Medians per
-/// token over 5 rounds. `--ignored --nocapture` to see.
+/// one constrained greedy reply (engaged from its first token, until the
+/// call closes or 64 tokens), each position run three ways on three caches
+/// fed the same tokens (the constrained step's picks): the greedy step
+/// (`forward_argmax`), a sampled step (`forward_cands`, k 40) and the
+/// constrained step (`Constraint::mask`, `forward_cands_masked` with
+/// `GREEDY_SPEC`: the device's CAND_MAX best, the allowed kept, then
+/// `accept`). Every round must pick the same tokens. Medians per token over
+/// 10 rounds. `--ignored --nocapture` to see.
 #[test]
 #[ignore]
 fn constrained_step_cost_cuda() {
@@ -688,8 +690,6 @@ fn constrained_step_cost_cuda() {
     let net = CudaQwen2::new(&gpu, &km, &m, ctx).unwrap();
     let (tok, g) = grammar(&m, net.vocab());
     let (prompt, after) = prompts(tok)[1].clone();
-    let (ids, _, engaged) = decode(&net, &g, &prompt, after, 64, &[]);
-    let n = engaged.min(ids.len());
     let k40 = CandSpec {
         k: 40,
         penalty: 1.0,
@@ -697,7 +697,8 @@ fn constrained_step_cost_cuda() {
     };
     let f0 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     let (mut ta, mut ts, mut tm) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..5 {
+    let mut first: Option<Vec<u32>> = None;
+    for _ in 0..10 {
         let mut cs: Vec<_> = (0..3).map(|_| net.new_cache(ctx)).collect();
         let (&last, rest) = prompt.split_last().unwrap();
         for c in cs.iter_mut() {
@@ -706,7 +707,8 @@ fn constrained_step_cost_cuda() {
         let mut con = constraint_at(&g, &prompt, after);
         let mut hist = prompt.clone();
         let mut t = last;
-        for &next in &ids[..n] {
+        let mut ids = Vec::new();
+        while con.engaged() && ids.len() < 64 {
             let pos = hist.len() - 1;
             let t0 = std::time::Instant::now();
             std::hint::black_box(net.forward_argmax(t, pos, &mut cs[0]));
@@ -716,31 +718,41 @@ fn constrained_step_cost_cuda() {
             let mask = con.mask().unwrap().unwrap();
             let c =
                 net.forward_cands_masked(t, pos, &mut cs[2], &sample::GREEDY_SPEC, &hist, &mask);
-            assert!(con.accept(c[0].id));
+            let next = c[0].id;
+            assert!(con.accept(next));
             let t3 = std::time::Instant::now();
             ta.push((t1 - t0).as_secs_f64() * 1e3);
             ts.push((t2 - t1).as_secs_f64() * 1e3);
             tm.push((t3 - t2).as_secs_f64() * 1e3);
-            assert_eq!(c[0].id, next);
+            ids.push(next);
             hist.push(next);
             t = next;
         }
+        match &first {
+            None => first = Some(ids),
+            Some(f) => assert_eq!(&ids, f, "a round picked other tokens"),
+        }
     }
+    let ids = first.unwrap();
     let f1 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     let med = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v[v.len() / 2]
     };
     let (a, s, c) = (med(&mut ta), med(&mut ts), med(&mut tm));
+    eprintln!("constrained greedy reply: {:?}", tok.decode(&ids));
     eprintln!(
-        "constrained step cost ({} params, {n} engaged tokens x 5): greedy {a:.3} ms, sampled k40 \
-         {s:.3} ms ({:+.1}%), constrained {c:.3} ms ({:+.1}% vs greedy, {:+.1}% vs sampled); \
+        "constrained step cost ({}, {} params, {} engaged tokens x 10): greedy {a:.3} ms, sampled \
+         k40 {s:.3} ms ({:+.1}%), constrained {c:.3} ms ({:+.1}% vs greedy, {:+.1}% vs sampled); \
          fallbacks {} of {}",
+        std::env::var("AXON_CONSTRAIN_TEST_MODEL")
+            .unwrap_or_else(|_| crate::testutil::MODEL.into()),
         m.total_params(),
+        ids.len(),
         100.0 * (s - a) / a,
         100.0 * (c - a) / a,
         100.0 * (c - s) / s,
         f1 - f0,
-        5 * n
+        10 * ids.len()
     );
 }
