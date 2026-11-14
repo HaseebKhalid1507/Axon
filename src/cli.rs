@@ -296,30 +296,44 @@ pub(crate) fn open_model_with(
     copy: Option<bool>,
     rope: &rope::RopeArgs,
 ) -> gguf::Model {
+    try_open_model_with(path, copy, rope).unwrap_or_else(|e| fail(&e))
+}
+
+/// `open_model_with` as a Result: Err is the message it exits with
+/// (serve's engine refuses its start with it instead: a server started in
+/// a process, a test's, must not exit that process, #269).
+pub(crate) fn try_open_model_with(
+    path: &str,
+    copy: Option<bool>,
+    rope: &rope::RopeArgs,
+) -> Result<gguf::Model, String> {
     // The CPU kernels' environment, before anything is read (as `load`).
-    if let Err(e) = crate::quant::env_check() {
-        fail(&e);
-    }
-    let mut m = gguf::load_to_run(path, copy, |m| {
+    crate::quant::env_check()?;
+    // An unsupported model: said once the load returns (the check runs
+    // before the weights are copied or read: mapped only, then dropped).
+    let mut bad = None;
+    let m = gguf::load_to_run(path, copy, |m| {
         // With rope flags the check waits for them (below).
         if rope.is_empty()
             && let Err(e) = model::check_supported(m)
         {
-            fail(&format!("{path}: {e}"));
+            bad = Some(format!("{path}: {e}"));
+            return gguf::CopyWish::MapOnly;
         }
         // A MoE file is always mapped (`reads_matrices_in_place`'s note).
         model::cpu_copy_wish(m)
-    })
-    .unwrap_or_else(|e| load_failed(path, e));
+    });
+    if let Some(e) = bad {
+        return Err(e);
+    }
+    let mut m = m.map_err(|e| load_message(path, &e))?;
     if !rope.is_empty() {
-        for line in rope.apply(&mut m).unwrap_or_else(|e| fail(&e)) {
+        for line in rope.apply(&mut m)? {
             eprintln!("axon: {line}");
         }
-        if let Err(e) = model::check_supported(&m) {
-            fail(&format!("{path}: {e}"));
-        }
+        model::check_supported(&m).map_err(|e| format!("{path}: {e}"))?;
     }
-    m
+    Ok(m)
 }
 
 /// A model argument as a path: a name `axon pull` knows, a Hugging Face
@@ -330,9 +344,14 @@ pub(crate) fn model_arg(a: &str) -> String {
 }
 
 fn load_failed(path: &str, e: std::io::Error) -> ! {
+    fail(&load_message(path, &e))
+}
+
+/// `load_failed`'s message.
+fn load_message(path: &str, e: &std::io::Error) -> String {
     match e.kind() {
-        std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
-        _ => fail(&format!("cannot load '{path}': {e}")),
+        std::io::ErrorKind::NotFound => format!("cannot open '{path}': no such file"),
+        _ => format!("cannot load '{path}': {e}"),
     }
 }
 
@@ -573,7 +592,7 @@ fn open_draft_model(
     )
 }
 
-/// `backend` with the draft model `dm`'s VRAM held while the main model is
+/// The model (`try_backend`) with the draft model `dm`'s VRAM held while it is
 /// placed (`draft::load_pair`: for a `draft_ctx`-token cache), then the
 /// drafter for its context (at most draft_ctx).
 #[allow(clippy::too_many_arguments)]
@@ -588,13 +607,40 @@ pub(crate) fn backend_and_drafter<'a>(
     place: lm::Placing,
     draft_ctx: usize,
 ) -> (Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>) {
+    try_backend_and_drafter(
+        model, dm, device, ctx, gpu_layers, kv, fit, place, draft_ctx,
+    )
+    .unwrap_or_else(|e| fail(&e))
+}
+
+/// `backend_and_drafter` as a Result: Err is the message it exits with
+/// (serve's engine refuses its start with it instead, as
+/// `try_open_model_with`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_backend_and_drafter<'a>(
+    model: &'a gguf::Model,
+    dm: Option<&draft::DraftModel>,
+    device: Device,
+    ctx: usize,
+    gpu_layers: Option<usize>,
+    kv: kv::KvType,
+    fit: bool,
+    place: lm::Placing,
+    draft_ctx: usize,
+) -> Result<(Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>), String> {
     draft::load_pair(dm, device, ctx, draft_ctx, kv, || {
-        backend(model, device, ctx, gpu_layers, kv, fit, place)
+        try_backend(model, device, ctx, gpu_layers, kv, fit, place)
     })
-    .unwrap_or_else(|e| match device {
-        Device::Cuda => fail(&format!("--device cuda: --draft-model: {e}")),
-        Device::Cpu => fail(&format!("--draft-model: {e}")),
-    })
+    .map_err(|e| device_message(device, e))
+}
+
+/// A backend's or drafter's error as the CLI says it: `--device cuda: `
+/// first on the GPU.
+fn device_message(device: Device, e: String) -> String {
+    match device {
+        Device::Cuda => format!("--device cuda: {e}"),
+        Device::Cpu => e,
+    }
 }
 
 /// --gpu-experts' value: a count or "auto" (a usage error otherwise).
@@ -641,13 +687,15 @@ pub(crate) fn device_env() -> Device {
     Device::from_env().unwrap_or_else(|e| fail(&e))
 }
 
-/// $AXON_GPU_LAYERS (--gpu-layers' default on CUDA), if set.
-fn gpu_layers_env() -> Option<usize> {
-    let v = env::var("AXON_GPU_LAYERS").ok()?;
-    Some(
-        v.parse::<usize>()
-            .unwrap_or_else(|_| fail(&format!("AXON_GPU_LAYERS needs a whole number, got '{v}'"))),
-    )
+/// $AXON_GPU_LAYERS (--gpu-layers' default on CUDA), if set; Err: not a
+/// whole number.
+fn gpu_layers_var() -> Result<Option<usize>, String> {
+    let Ok(v) = env::var("AXON_GPU_LAYERS") else {
+        return Ok(None);
+    };
+    v.parse::<usize>()
+        .map(Some)
+        .map_err(|_| format!("AXON_GPU_LAYERS needs a whole number, got '{v}'"))
 }
 
 /// --device and --gpu-layers (else $AXON_GPU_LAYERS on CUDA) as the
@@ -655,20 +703,33 @@ fn gpu_layers_env() -> Option<usize> {
 /// 0 GPU layers is the plain CPU backend (loaded as --device cpu loads it,
 /// see `copy_for`). Before `open_model_with`.
 pub(crate) fn placement(device: Device, gpu_layers: Option<usize>) -> (Device, Option<usize>) {
+    try_placement(device, gpu_layers).unwrap_or_else(|e| fail(&e))
+}
+
+/// `placement` as a Result: Err is the message it exits with (as
+/// `try_open_model_with`).
+pub(crate) fn try_placement(
+    device: Device,
+    gpu_layers: Option<usize>,
+) -> Result<(Device, Option<usize>), String> {
     if device == Device::Cpu && gpu_layers.is_some() {
-        fail("--gpu-layers needs --device cuda");
+        return Err("--gpu-layers needs --device cuda".into());
     }
-    let gpu_layers = gpu_layers.or_else(|| (device == Device::Cuda).then(gpu_layers_env)?);
-    match gpu_layers {
+    let g = match gpu_layers {
+        None if device == Device::Cuda => gpu_layers_var()?,
+        g => g,
+    };
+    Ok(match g {
         Some(0) => (Device::Cpu, None),
         g => (device, g),
-    }
+    })
 }
 
 /// The model on `device` with room for `ctx` tokens, split as `gpu_layers`
-/// says (`placement`'s) and `place` (`Backend::new_capped`); a usage error
-/// if the GPU can't be used (no driver or device, too little memory, ...).
-fn backend<'a>(
+/// says (`placement`'s) and `place` (`Backend::new_capped`); Err if the GPU
+/// can't be used (no driver or device, too little memory, ...), without
+/// the CLI's `--device cuda: ` (`device_message`).
+fn try_backend<'a>(
     model: &'a gguf::Model,
     device: Device,
     ctx: usize,
@@ -676,17 +737,13 @@ fn backend<'a>(
     kv: kv::KvType,
     fit: bool,
     place: lm::Placing,
-) -> Backend<'a> {
-    let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place);
-    let net = net.unwrap_or_else(|e| match device {
-        Device::Cuda => fail(&format!("--device cuda: {e}")),
-        Device::Cpu => fail(&e),
-    });
+) -> Result<Backend<'a>, String> {
+    let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place)?;
     // --numerics fast where no fast kernel exists yet: said once, here.
     if let Some(note) = numerics::fast_note(&net) {
         eprintln!("{note}");
     }
-    net
+    Ok(net)
 }
 
 /// The copy-vs-map choice for loading a model for `device`: the GPU reads

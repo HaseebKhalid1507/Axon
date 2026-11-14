@@ -238,7 +238,7 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
 - **Shared prefix KV pages** (the GPU's paged pool; on by default, `AXON_SHARE_KV=0` turns them off and
   `AXON_SHARE_KV=1` turns them on; unset or empty is the default; any other value, `false` or `off` say, refuses
   to start, naming the valid ones, #267). The start line says on or off and what decided it: the default, the
-  variable, or fast kernels' default (below); it prints under `--quiet` too when the variable is set or fast kernels
+  variable, or fast kernels' default (below); it prints under `--quiet` too when the variable is set to `0` or `1`, or fast kernels
   turned sharing off. A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills

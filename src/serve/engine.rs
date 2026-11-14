@@ -1674,18 +1674,6 @@ impl<'a, 't> Batch<'a, 't> {
         for (f, s) in self.pre.iter_mut().zip(starve(&plan, &rem, &starved, idle)) {
             f.starved = s;
         }
-        // Tests: no prompt fed past `Metrics::feed_cap` tokens (a request
-        // held mid-feed: `serve_share_cancel_frees`).
-        #[cfg(test)]
-        let plan: Vec<usize> = match self.metrics.as_ref() {
-            Some(m) => {
-                let cap = m.feed_cap.load(Ordering::Relaxed);
-                (plan.iter().zip(&fed))
-                    .map(|(&n, &f)| n.min(cap.saturating_sub(f)))
-                    .collect()
-            }
-            None => plan,
-        };
         let mut moved = false;
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
@@ -1734,6 +1722,14 @@ impl<'a, 't> Batch<'a, 't> {
         }
         let f = &self.pre[i];
         let n = n.min(f.seq.hist.len() - 1 - f.fed);
+        // Tests: not past `Metrics::feed_cap` tokens (a request held
+        // mid-feed: `serve_share_cancel_frees`), counted after a refeed's
+        // claim (which may itself have mapped up to or past it).
+        #[cfg(test)]
+        let n = match self.metrics.as_ref() {
+            Some(m) => n.min(m.feed_cap.load(Ordering::Relaxed).saturating_sub(f.fed)),
+            None => n,
+        };
         let n = match n {
             0 => 0,
             n => self.feedable(i, n)?,

@@ -59,7 +59,13 @@ fn test_opts(path: &str, device: Device) -> Opts {
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         step_ms: super::engine::STEP_MS,
-        sched: super::engine::Sched::default(),
+        // As `Sched::default`, but a bad AXON_ADMIT fails the test instead
+        // of exiting the test process (#269).
+        sched: super::engine::Sched::from_env(
+            std::env::var("AXON_ADMIT").ok().as_deref(),
+            std::env::var("AXON_STEP_COST").ok().as_deref(),
+        )
+        .expect("AXON_ADMIT"),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -3096,6 +3102,38 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
         "the long prompt waited {waited} ms: past 2 x {age} ms"
     );
     assert_eq!(text, solo, "the long prompt's reply == alone");
+}
+
+/// Refusals on the engine thread come back from `start` as its error
+/// (#269), not as an exit: `--ctx` past the trained context, `--gpu-layers`
+/// without CUDA, a model file that isn't there. Each used to call
+/// `crate::fail` (exit 2), which ended a test binary in the middle of its
+/// run with the message captured and lost (1114-174039-9861). The test
+/// process is still here to check the messages: the ones `axon serve`
+/// exits 2 with.
+#[test]
+fn serve_start_refusals_dont_exit() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let refused = |what: &str, f: &dyn Fn(&mut Opts)| -> String {
+        let mut o = test_opts(p, Device::Cpu);
+        f(&mut o);
+        match start(o) {
+            Ok(_) => panic!("{what}: the server started"),
+            Err(e) => {
+                assert!(super::is_refused(&e), "{what}: not a refusal: {e}");
+                e.to_string()
+            }
+        }
+    };
+    let e = refused("--ctx", &|o| o.ctx = Some(1 << 22));
+    assert!(e.starts_with("--ctx 4194304 is past the "), "{e}");
+    let e = refused("--gpu-layers", &|o| o.gpu_layers = Some(2));
+    assert_eq!(e, "--gpu-layers needs --device cuda");
+    let e = refused("no file", &|o| o.path = "/nonexistent/axon-269.gguf".into());
+    assert_eq!(e, "cannot open '/nonexistent/axon-269.gguf': no such file");
 }
 
 /// GET /slots's `waiting` is the engine's waiting list: empty once a
@@ -7899,7 +7937,7 @@ fn wait_idle(a: SocketAddr) {
 /// off). The start line says which, what decided it, and the other way.
 #[test]
 fn share_kv_is_on_by_default() {
-    use super::{ShareSet, share_env, share_line, share_on};
+    use super::{ShareSet, share_env, share_line, share_on, share_said};
     assert_eq!(share_env(None), Ok(None));
     for v in ["", " ", "\n"] {
         assert_eq!(share_env(Some(v)), Ok(None), "{v:?}");
@@ -7953,6 +7991,12 @@ fn share_kv_is_on_by_default() {
         share_line(ShareSet::Opts(false), true),
         "shared prefix KV pages off (set by the caller)"
     );
+    // Under --quiet: said when the variable set it or fast kernels turned
+    // the default off; not for the plain default, nor `Opts::share`.
+    assert!(share_said(ShareSet::Env(false), false));
+    assert!(share_said(ShareSet::Default, true));
+    assert!(!share_said(ShareSet::Default, false));
+    assert!(!share_said(ShareSet::Opts(true), true));
 }
 
 /// Shared prefix KV pages are off by default while fast kernels run
@@ -8643,13 +8687,16 @@ fn serve_share_dup_swapped() {
 /// (design §5.3 `serve_share_cancel`) give their pages back: a request then
 /// needing 20 of the pool's 24 pages is admitted, the idle slots' rows and
 /// the index's warm pages giving theirs up (some evicted), and gets the
-/// reply it gets with sharing off. The one cancelled while being fed is
-/// held mid-feed (`Server::feed_cap`): its admission maps the prefix's
-/// pages, it is fed two pages past them and no further, and the engine
-/// drops it from its prompts being fed (`Server::reaped_fed`; #267: until
-/// then the step budget could feed its private part before the drop was
-/// seen, so it may have been decoding). Debug builds check the pool, the
-/// index and their holds against each other after every step.
+/// reply it gets with sharing off. Two streams of 600 tokens share the
+/// prefix: the first decodes, the second waits for pages (the first's
+/// admission reserves them for its reply; it may start once there are).
+/// A third, a long private part after the prefix, is held mid-feed
+/// (`Server::feed_cap`): its admission maps the prefix's pages, it is fed
+/// two pages past them and no further, and the engine drops it from its
+/// prompts being fed (`Server::reaped_fed`; #267: until then the step
+/// budget could feed its private part before the drop was seen, so it may
+/// have been decoding). Debug builds check the pool, the index and their
+/// holds against each other after every step.
 #[test]
 fn serve_share_cancel_frees() {
     let Some(_) = crate::testutil::gpu() else {
@@ -8713,7 +8760,26 @@ fn serve_share_cancel_frees() {
         .iter()
         .map(|q| stream(q, 600))
         .collect();
-    wait_for("both decoding", || g.load(Ordering::Relaxed) >= g0 + 40);
+    // The two streams' request ids, once the engine has both: the first
+    // decoding (40 tokens out), the second decoding or waiting for pages.
+    let known = || {
+        let sl = call(a, "GET", "/slots", "").json();
+        let busy = (sl["slots"].as_array().unwrap().iter())
+            .filter(|x| x["busy"] == true)
+            .map(|x| x["request_id"].clone());
+        let waiting = (sl["waiting"].as_array().unwrap().iter()).map(|x| x["id"].clone());
+        let mut v: Vec<Value> = Vec::new();
+        for id in busy.chain(waiting).filter(|v| !v.is_null()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+        v
+    };
+    wait_for("the first decoding, the engine holding both", || {
+        g.load(Ordering::Relaxed) >= g0 + 40 && known().len() == 2
+    });
+    let running = known();
     // Its admission maps the prefix's pages, and it is fed from there two
     // pages and no further (`feed_cap`; the others decode on), so it is
     // surely mid-feed when its client goes. Waiting on the others' tokens
@@ -8726,13 +8792,6 @@ fn serve_share_cancel_frees() {
         n3 > cap + 64,
         "the third: {n3} prompt tokens, held at {cap}"
     );
-    let running: Vec<Value> = (call(a, "GET", "/slots", "").json()["slots"].as_array())
-        .unwrap()
-        .iter()
-        .filter(|x| x["busy"] == true)
-        .map(|x| x["request_id"].clone())
-        .collect();
-    assert_eq!(running.len(), 2, "the two decoding: {running:?}");
     let shared = || {
         let m = call(a, "GET", "/metrics", "").body;
         metric(&m, "axon_prompt_shared_tokens_total").unwrap()
@@ -8757,13 +8816,11 @@ fn serve_share_cancel_frees() {
     s.feed_cap(usize::MAX);
     let fed = s.reaped_fed();
     assert_eq!(fed.len(), 1, "{fed:?}");
-    // Its admission mapped the prefix's pages, and it went after some of
-    // its private part was fed, before the rest.
+    // Its admission mapped the prefix's pages, and it went with two pages
+    // of its private part fed (the cap), before the rest.
     assert!(shared() >= s0 + 64 * pages, "the third mapped no prefix");
-    assert!(
-        fed[0].0 > 64 * pages as usize && fed[0].0 < fed[0].1,
-        "fed {fed:?}, the prefix's pages {pages}"
-    );
+    assert_eq!(fed[0].0, cap, "fed {fed:?}, the prefix's pages {pages}");
+    assert!(fed[0].1 > cap, "fed {fed:?}: its whole prompt");
     drop(cs);
     wait_idle(a);
     let (t, _) = share_reply(a, &big);
