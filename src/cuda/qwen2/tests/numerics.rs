@@ -775,6 +775,7 @@ fn walk<F: Lm>(
                                 head: RowHead::Sample {
                                     spec,
                                     recent: &seq[..=pos],
+                                    mask: None,
                                 },
                             }
                         })
@@ -863,6 +864,7 @@ pub(crate) fn load_diag<F: Lm>(r: &Backend, f: &F, o: &Backend, m: &Model, sz: &
                         head: RowHead::Sample {
                             spec,
                             recent: &seqs[s][..=pos],
+                            mask: None,
                         },
                     }
                 })

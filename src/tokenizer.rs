@@ -601,6 +601,16 @@ impl Tokenizer {
         out
     }
 
+    /// The special tokens' ids (control, user-defined, unknown), ascending:
+    /// one symbol each to the constraint automaton, never bytes
+    /// (`crate::constrain`).
+    pub(crate) fn special_ids(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.specials.iter().map(|&(_, id)| id).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     /// The id of a special (control or user-defined) token by its text.
     pub fn special_id(&self, text: &str) -> Option<u32> {
         self.specials

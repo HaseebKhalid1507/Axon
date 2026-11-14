@@ -1827,6 +1827,7 @@ impl<'a, M: Lm> Chat<'a, M> {
                 stop: &fr.stop,
                 max_draft: *max_draft,
                 sample: sampler.as_mut(),
+                constraint: None,
             },
             &mut |h, max| match drafter {
                 Some(d) => d.draft(h, max),

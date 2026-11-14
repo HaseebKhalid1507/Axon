@@ -1115,6 +1115,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             stop: &tok.eog(),
             max_draft,
             sample: sampler.as_mut(),
+            constraint: None,
         },
         &mut |h, max| source.draft(h, max),
         &mut |id| {
@@ -2268,6 +2269,7 @@ mod tests {
                                 stop: &[eos],
                                 max_draft: k,
                                 sample: None,
+                                constraint: None,
                             },
                             &mut draft,
                             &mut |t| {

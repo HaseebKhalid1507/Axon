@@ -47,6 +47,7 @@ in [serving.md](serving.md).
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_API_KEY=KEY` | `serve`: same as `--api-key KEY`, kept out of `ps`; `--api-key` wins ([serving.md](serving.md#operations-auth-metrics-slots)) |
 | `AXON_SHARE_KV=1` | `serve`, the GPU's paged pool: requests share the KV pages of a common prompt prefix, same bits (opt-in, off by default; [serving.md](serving.md#operations-auth-metrics-slots)) |
+| `AXON_CONSTRAIN=1` | `serve`, Qwen2.5-family models: a tool call (`tool_choice` auto) is held to JSON from its `<tool_call>` token to `</tool_call>`: `{"name": STRING, "arguments": OBJECT}`, nesting at most 64 deep, no special token inside a string. Tokens outside a call are unchanged, and so are requests without tools; a constrained reply's `system_fingerprint` names the grammar ([determinism.md](determinism.md#the-identity-tuple-and-system_fingerprint)). Off by default for now (#259) |
 | `AXON_PAGED_KV=0` | `serve`: the old pool of slots each reserved at the full context, instead of 64-position pages shared by every slot |
 | `AXON_KV_PAGES=N` | `serve`: size the paged pool to N pages (at most what fits), for testing a server under memory pressure |
 | `AXON_KV_RAM_ALLOC=start` | `serve --cache-ram` on the GPU: pin the whole tier before the server answers, instead of in 64 MiB pieces while it runs |

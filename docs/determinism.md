@@ -48,6 +48,7 @@ how the request was run:
 | again after a restart, on another day, on another machine with the same identity | yes (a split that streams says so in its identity, so a restart that can't stream has another one) |
 | at temperature > 0 with the same `seed` (and params)              | yes: the sampler is seeded xoshiro256**, one draw per decided token |
 | on the CPU with any thread count, SIMD or scalar paths, AVX2 or AVX-VNNI | yes (the md5 gate runs the CPU too; an AVX2 and an AVX-VNNI host agree 20/20) |
+| with constrained decoding (`AXON_CONSTRAIN=1`: a Hermes tool call held to JSON), decoded, drafted and verified, or batched beside other requests | yes: an engaged position's candidates are the `k` best of the tokens its mask allows (`sample::cands_masked`), a function of the logits, the sampling params, the penalty window and the mask, and the mask is a function of the tokens so far. A free position (before `<tool_call>`, after `</tool_call>`) takes the unconstrained head. A request without a constraint runs none of this code, so its bits don't change |
 
 How: every matrix product is an exact integer block sum followed by one fixed float chain
 over the blocks in order, the same in every kernel (decode GEMV, batched GEMM, verify);
@@ -59,7 +60,10 @@ and the token's position, never on the batch. The tests that hold this in place:
 `turns_match_fresh_prefill{,_cuda,_hybrid}`, `drafting_matches_*`,
 `pool_steps_match_solo_in_any_order`, `serve_batched_matches_solo`, `serve_identity`,
 `serve_identity_cpu`, and `drafting_matches_plain_sampling` (sampled drafting over
-300 seeds), plus the gen md5 gate every PR runs against main.
+300 seeds), plus the gen md5 gate every PR runs against main. With a constraint:
+`constrained_drafting_matches_plain` (300 seeds on a toy model), `cpu_constrained_contract`,
+`cuda_constrained_contract` (decode == verify passes == pool steps, drafted == undrafted,
+the device's logits-row fallback == the host's reference) and `masks_match_naive`.
 
 ## What is NOT guaranteed
 
@@ -136,7 +140,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 | `kv`       | `f16`, `q8`, `q8/32`; `f32` on the CPU with `AXON_KV=f32`             |
 | `rope`     | when not plain RoPE: the effective scaling as run (YaRN's factor, original context, betas, ext factor and (sin, cos) multiplier, from the GGUF or `--rope-scaling`; gemma3's linear scale) and `freq_base`. Read from the model's metadata after the flags rewrite it: the model digest hashes the file, which the flags don't change. `--rope-scaling none` on a plain model adds nothing |
 | `weights`, `act`, `head` | FP8 checkpoints only ([fp8-weights.md](design/fp8-weights.md) §4): `fp8-native` (fp8.cu's e4m3 products: `--numerics fast` on sm_89+), `fp8-q8` (converted to Q8_0 at load: exact mode, or a GPU below sm_89) or `fp8-ref` (the CPU: exact dequant); the activations the matrices read (`e4m3-tok`, `q8`, `f32`); the head's type (`q8`, `f16`). Other models carry none of the three |
-| `serve`    | `axon serve` only, when not the defaults: `no-think`, `think-inline`, the server's sampling flags |
+| `serve`    | `axon serve` only, when not the defaults: `no-think`, `think-inline`, the server's sampling flags; per request, `constrain <grammar> <hash>` when the request is constrained (`AXON_CONSTRAIN=1`: `hermes-json` and a hash of what the grammar was built from), so a constrained reply's `system_fingerprint` isn't an unconstrained one's. Unconstrained requests keep the server's fingerprint: their bits don't change, so constrained decoding didn't bump `NUMERICS_VERSION_EXACT` |
 
 Left out because they never change bits: drafting, `--parallel`/slots, chunk sizes,
 threads, CUDA graphs, PDL, and the context size (`--ctx`, or `serve`'s default, the trained

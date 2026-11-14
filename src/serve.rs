@@ -180,6 +180,9 @@ pub struct Opts {
     /// `--numerics` (`crate::numerics`), or `--datacenter`'s fast: the
     /// whole server's (every slot's cache is one mode's), in its identity.
     pub numerics: Numerics,
+    /// Constrained tool calls (`crate::constrain`) on or off (None:
+    /// AXON_CONSTRAIN, off unless "1": opt-in until the spec's PR B).
+    pub constrain: Option<bool>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -330,6 +333,9 @@ struct Job {
     arrived: Instant,
     /// Its prompt's block keys (`block_keys`), worked out at most once.
     keys: std::cell::OnceCell<Vec<crate::kvstore::Key>>,
+    /// Constrained decoding (`crate::constrain`): the request's state, which
+    /// goes with it (alone, into the batch, preempted and fed again).
+    constraint: Option<crate::constrain::Constraint>,
 }
 
 impl Job {
@@ -900,7 +906,9 @@ impl<'a> Engine<'a> {
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
     /// hands over (returns its state, the cache holding its rows) when
     /// another request arrives that could share a step with it.
-    fn job(&mut self, owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+    fn job(&mut self, mut owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+        // Out of the job while it runs alone; back in if it hands over.
+        let mut constraint = owned.constraint.take();
         let job = &owned;
         let cancelled = || job.cancel.load(Ordering::Relaxed);
         let t0 = Instant::now();
@@ -982,6 +990,7 @@ impl<'a> Engine<'a> {
                 stop: &job.stop_ids,
                 max_draft: self.max_draft,
                 sample: sampler.as_mut(),
+                constraint: constraint.as_mut(),
             },
             &mut |h, max| source.draft(h, max),
             &mut |id| {
@@ -1018,7 +1027,10 @@ impl<'a> Engine<'a> {
             hist.extend_from_slice(&ids);
             self.hist = hist[..hist.len() - 1].to_vec();
             return Some(Seq {
-                job: owned,
+                job: Job {
+                    constraint,
+                    ..owned
+                },
                 slot: 0,
                 hist,
                 ids,
@@ -1105,6 +1117,9 @@ struct Loaded {
     /// The GGUF's architecture and parameter count (ollama.rs: /api/show).
     arch: String,
     params: u64,
+    /// Constrained tool calls (`Opts::constrain`): the Hermes grammar on
+    /// this vocabulary, for a Qwen2.5-family template (PR A of the spec).
+    constrain: Option<Arc<crate::constrain::Grammar>>,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -1559,6 +1574,14 @@ fn engine(
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
     let banner = banner + tier_note.as_deref().unwrap_or("");
+    // The vocabulary's automaton tables (~0.1 s at 152k tokens), built once.
+    let constrain = (o.constrain
+        && template.as_ref().and_then(tools::family) == Some(tools::Family::Qwen25))
+    .then(|| {
+        let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
+        crate::constrain::Grammar::hermes(v).map(Arc::new)
+    })
+    .flatten();
     if ready
         .send(Ok(Loaded {
             tok,
@@ -1579,6 +1602,7 @@ fn engine(
             identity,
             arch: model.arch.clone(),
             params: model.total_params(),
+            constrain,
         }))
         .is_err()
     {
@@ -2252,6 +2276,7 @@ struct EngineOpts {
     cache_ram: tier::CacheRam,
     cache_ram_alloc: tier::Alloc,
     numerics: Numerics,
+    constrain: bool,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2390,6 +2415,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         cache_ram: o.cache_ram,
         cache_ram_alloc: o.cache_ram_alloc,
         numerics: o.numerics,
+        constrain: o.constrain.unwrap_or_else(crate::constrain::env_on),
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -2988,6 +3014,15 @@ fn run_request(
         // As `axon gen`: BOS if the model adds one, its end-of-generation set.
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
+    // Constrained tool calls (`Opts::constrain`; the spec's PR A): Hermes
+    // with tool_choice auto, armed until the reply's `<tool_call>`.
+    let constraint = match (&g.tools, &m.constrain) {
+        (Some(tr), Some(gr)) if parser.is_some() && tr.choice == tools::Choice::Auto => {
+            Some(crate::constrain::Constraint::new(gr.clone()))
+        }
+        _ => None,
+    };
+    let constraint_field = (constraint.as_ref()).map(|c| c.grammar().field().to_string());
     if prompt.is_empty() {
         return out.err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
     }
@@ -3017,6 +3052,7 @@ fn run_request(
         id: n,
         arrived,
         keys: Default::default(),
+        constraint,
     };
     match sh.jobs.try_send(job) {
         Ok(()) => {
@@ -3044,7 +3080,16 @@ fn run_request(
         _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
-    let model = (model, m.identity.fingerprint());
+    // A constrained request's bits are its grammar's too: its fingerprint
+    // says so (the maintainer's ruling 1 on the spec's §6: the serve field,
+    // per request; unconstrained ones keep the server's).
+    let fp = match &constraint_field {
+        Some(f) => (m.identity.clone())
+            .with_serve_extra(crate::identity::constrain_field(f))
+            .fingerprint(),
+        None => m.identity.fingerprint(),
+    };
+    let model = (model, fp);
     // Out of flight just before the response's last write (`on_end`): a
     // client that has all of it never sees it counted (#112). Else (an
     // error, a client gone) as the handler returns.
@@ -3480,6 +3525,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cache_ram: tier::CacheRam::Bytes(0),
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
+        constrain: None,
     };
     let mut k = None;
     let key_from;

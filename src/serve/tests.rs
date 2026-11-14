@@ -66,6 +66,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         cache_ram: super::tier::CacheRam::Bytes(0),
         cache_ram_alloc: super::tier::Alloc::Thread,
         numerics: Numerics::Exact,
+        constrain: None,
     }
 }
 
@@ -212,6 +213,7 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
             stop: &tok.eog(),
             max_draft: 0,
             sample: None,
+            constraint: None,
         },
         &mut |_, _| Vec::new(),
         &mut |id| {
@@ -1924,6 +1926,148 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
         });
         for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
             assert_eq!(t, s1, "{what} stagger {stagger} ms: request {i}");
+        }
+    }
+}
+
+/// Constrained tool calls (`Opts::constrain`, AXON_CONSTRAIN=1) end to end,
+/// on the CPU (one request at a time: `sample::generate_constrained`) and
+/// on CUDA (the batch's masked rows, `RowHead::Sample.mask`): a request
+/// without tools gets the same reply and fingerprint from a server with
+/// constraints on or off; a tools request (tool_choice auto) gets its own
+/// `system_fingerprint` (`identity::constrain_field`), and every call it
+/// makes has arguments that parse, with no `<tool_call>` block left in the
+/// content of a reply that stopped; on CUDA, tools requests and plain ones
+/// sent together get what each gets alone (handing over to the batch
+/// partway too, with drafting).
+#[test]
+fn serve_constrained_tool_calls() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([{"type": "function", "function": {"name": "exec_command",
+        "description": "Run a shell command",
+        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}},
+                       "required": ["cmd"]}}}]);
+    let ask = "In ledger/cli.py replace raise KeyError(f'No such account: {name}') with raise \
+               ValueError(\"unknown \\\"account\\\"\"), then print \"done\".";
+    let treq = |extra: Value| {
+        let mut r = json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+                           "max_tokens": 96});
+        for (k, v) in extra.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        r
+    };
+    let tbodies = [
+        treq(json!({"temperature": 0})),
+        treq(json!({"temperature": 0.8, "seed": 1})),
+        treq(json!({"temperature": 1.2, "seed": 2, "top_k": 0})),
+    ];
+    let plain = json!({"messages": [{"role": "user", "content": "Name three colors."}],
+                       "max_tokens": 24, "temperature": 0});
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for dev in devices {
+        let off = server_with(p, dev, |o| o.constrain = Some(false));
+        let on = server_with(p, dev, |o| {
+            o.constrain = Some(true);
+            if dev == Device::Cuda {
+                o.parallel = 4;
+                o.max_draft = 3;
+            }
+        });
+        let a = post(off.addr, "/v1/chat/completions", plain.clone()).json();
+        let b = post(on.addr, "/v1/chat/completions", plain.clone()).json();
+        assert_eq!(a["choices"], b["choices"], "{dev:?}: a plain request");
+        assert_eq!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        let fp = a["system_fingerprint"].as_str().unwrap().to_string();
+        let (mut calls, mut cfps) = (0, Vec::new());
+        for body in &tbodies {
+            let v0 = post(off.addr, "/v1/chat/completions", body.clone()).json();
+            assert_eq!(
+                v0["system_fingerprint"],
+                fp.as_str(),
+                "{dev:?}: constraints off"
+            );
+            let r = post(on.addr, "/v1/chat/completions", body.clone());
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            let vfp = v["system_fingerprint"].as_str().unwrap().to_string();
+            assert_ne!(vfp, fp, "{dev:?}: a constrained reply's fingerprint");
+            cfps.push(vfp);
+            let ch = &v["choices"][0];
+            for c in ch["message"]["tool_calls"].as_array().into_iter().flatten() {
+                let args = c["function"]["arguments"].as_str().unwrap();
+                serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                calls += 1;
+            }
+            if ch["finish_reason"] != "length" {
+                let content = ch["message"]["content"].as_str().unwrap_or("");
+                assert!(
+                    !content.contains("<tool_call>"),
+                    "{dev:?}: an unparsed call: {v}"
+                );
+            }
+            eprintln!("{dev:?} constrained: {}", ch["message"]);
+        }
+        // One grammar: one fingerprint for every constrained request.
+        assert!(cfps.windows(2).all(|w| w[0] == w[1]), "{cfps:?}");
+        assert!(calls > 0, "{dev:?}: no call made");
+        if dev == Device::Cuda {
+            let mut bodies: Vec<Value> = tbodies.to_vec();
+            bodies.extend(batch_bodies(true).into_iter().take(3));
+            bodies.push(treq(json!({"temperature": 0, "repetition_penalty": 1.2})));
+            constrained_together_vs_alone(on.addr, &bodies);
+        }
+    }
+}
+
+/// `batched_vs_solo` for replies that may be tool calls: content,
+/// reasoning, the calls' names and arguments (not their ids, which are
+/// unique), the finish reason and the token count, alone and sent together
+/// (at once, and staggered: the first hands over to the batch).
+fn constrained_together_vs_alone(a: SocketAddr, bodies: &[Value]) {
+    let reply = |r: &Resp| -> Value {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        let ch = &v["choices"][0];
+        let m = &ch["message"];
+        let calls: Vec<Value> = (m["tool_calls"].as_array().into_iter().flatten())
+            .map(|c| json!([c["function"]["name"], c["function"]["arguments"]]))
+            .collect();
+        json!([
+            m["content"],
+            m["reasoning_content"],
+            calls,
+            ch["finish_reason"],
+            v["usage"]["completion_tokens"],
+            v["system_fingerprint"]
+        ])
+    };
+    let alone: Vec<Value> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/chat/completions", b.clone())))
+        .collect();
+    for stagger in [0u64, 60] {
+        let together: Vec<Value> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (bodies.iter().enumerate())
+                .map(|(i, b)| {
+                    sc.spawn(move || {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(stagger));
+                        }
+                        reply(&post(a, "/v1/chat/completions", b.clone()))
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, (t, s1)) in together.iter().zip(&alone).enumerate() {
+            assert_eq!(t, s1, "constrained, stagger {stagger} ms: request {i}");
         }
     }
 }
