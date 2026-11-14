@@ -1567,7 +1567,7 @@ fn call_scan_name_and_arguments() {
         while !args.starts_with('{') {
             args = gen_json(&mut r, 3);
         }
-        let name = format!("{}", gen_json(&mut r, 0));
+        let name = gen_json(&mut r, 0);
         let name = if name.starts_with('"') {
             name
         } else {
