@@ -1703,8 +1703,8 @@ def cmd_rescore(a):
                           os.path.join(root, "r%d-%s" % (r.get("round") or 1, r["task"])), t0) if recs else None
         mark_cold(recs, cts)
         x = summarize(recs, {}, {}, cts)
-        for k in ("dropped", "refused"):
-            x.pop(k)
+        for k in ("dropped", "refused") + (() if any("cut" in q for q in recs) else ("hup", "cut_end")):
+            x.pop(k)  # /metrics deltas stay as recorded; hang-ups weren't recorded before 11-14 ("-", not 0)
         diff = {k: (r.get(k), x[k]) for k in ("requests", "tc", "tc_text", "tc_badjson", "http_err", "ctx_overflow")
                 if r.get(k) != x[k]}
         if diff:
