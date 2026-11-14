@@ -31,8 +31,17 @@ threads until the deadline. Each client picks from a weighted mix and waits up t
 | slow-reader | 4 | a stream read 64 bytes at a time with 20–100 ms pauses through a 4 KiB `SO_RCVBUF`. Since this PR's review round: ~1500 tokens (~300 KB of SSE, well past the kernel socket buffers, so the server's writer really blocks), and with several slots a concurrent probe (greedy, 4 tokens) must get its first bytes within `--probe-ttft-s` (30 s), else `slow-blocks-others` (failing). **Harness changed, not yet exercised on a GPU soak** (the runs below used `max_tokens` 96, ~30 KB, which the socket buffers absorb: they tested a slow *client*, not server write back-pressure) |
 | oversize | 3 | a prompt of 1.3× the context: must be a 4xx |
 | burst | every 2 min | client 0 fires 3× the slot count of streams at once (503 back-pressure allowed) |
+| hog (`--hogs K`, default 0) | K more clients | each a count that doesn't stop (`Count: 1, 2, 3, 4, 5,`, greedy, 2000–3000 tokens) after a prefix the hogs share, back to back |
 
 A client that gets a 503 backs off 1–3 s, as a real one would.
+
+**Preemption needs hogs.** Admission reserves pages for at most 1024 of a running request's tokens to come
+(`GROW_TOKENS`, engine.rs `admit_check`), so a paged pool preempts only when several replies grow past that at once
+on a pool smaller than their sum. The mix above never does: #228's two soaks (4.6 h each, 128 pages, 12 clients)
+evicted thousands of warm pages and preempted nothing. `--hogs K` (K ≥ 3, with `AXON_KV_PAGES` under K × 45) adds
+those replies, and the verdict then also requires the pressure to have happened: at the end, `/slots`' `preempted`
+and `prefills_unfed` and `/metrics`' `axon_refeed_shared_tokens_total` (sharing on) above 0. Otherwise the check
+`pressure` is INCONCLUSIVE, "not evidence": the run says nothing about preemption, whatever else passed.
 
 **Priming** (default; `--no-prime` skips it). Before the reference identity run, the harness sends every batch mix
 the slots can form: for nb = 1..S concurrent streams, with ng = 0..nb of them greedy, twice each. On CUDA the

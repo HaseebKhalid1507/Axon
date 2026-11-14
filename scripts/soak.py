@@ -2,7 +2,7 @@
 """Multi-hour soak of `axon serve` (stdlib only).
 
     scripts/soak.py <axon binary> <model.gguf> --hours H [--clients N] [--out DIR]
-                    [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [-- serve flags]
+                    [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [--hogs K] [-- serve flags]
     scripts/soak.py report DIR            (re-read DIR/summary.json, print the verdict)
     scripts/soak.py summarise FILE [MIN]  (a markdown table of samples.csv or a job log, MIN-minute buckets)
 
@@ -19,6 +19,8 @@ realistic mix until the deadline:
   oversize                   a prompt past the context: must be a 4xx, never a 5xx
   invalid                    malformed JSON / bad params / wrong method: must be a 4xx
   burst                      every ~2 min one client fires 3x the slot count at once (503 allowed)
+  hog (--hogs K)             K more clients, each a count that doesn't stop (2000-3000 tokens, greedy)
+                             after a prefix they share, back to back: the pool preempts (see Client.hog)
 
 Every --sample-s seconds one CSV row (DIR/samples.csv, also printed as `CSV,...`
 on stdout so a remote log keeps it) records: server RSS, VRAM (nvidia-smi
@@ -42,6 +44,11 @@ Verdict (summary.json, exit 0 = PASS):
     up for a day, well above allocator noise (see docs/hardening.md).
   - after the load stops and the server idles, fds and threads are back at
     the pre-load baseline (+2 fds of slack for a lingering keep-alive).
+  - with --hogs: the pool really was under pressure. At the end /slots'
+    preempted and prefills_unfed and /metrics' axon_refeed_shared_tokens_total
+    (sharing on) are all above 0, else the run is INCONCLUSIVE ("not
+    evidence"): a soak meant to exercise preemption that never preempted
+    passed nothing about it (#228's review).
 """
 
 import argparse
@@ -231,8 +238,8 @@ TOOLS = [{"type": "function", "function": {
 
 
 class Client:
-    def __init__(self, i, cfg, stats, stop_at):
-        self.i, self.cfg, self.stats, self.stop_at = i, cfg, stats, stop_at
+    def __init__(self, i, cfg, stats, stop_at, only=None):
+        self.i, self.cfg, self.stats, self.stop_at, self.only = i, cfg, stats, stop_at, only
         self.rng = random.Random(cfg.seed * 1000 + i)
         self.port = cfg.port
         # ~1.3 tokens per WORDS word (measured on qwen tokenizers: mostly 1).
@@ -351,6 +358,17 @@ class Client:
             j = self.whole("/v1/chat/completions", self.chat_body(turns, max_tokens=32), "agent")
             turns.append({"role": "assistant", "content": j["choices"][0]["message"].get("content") or ""})
 
+    def hog(self):
+        """--hogs: a reply that doesn't stop (a count, greedy, 2000-3000 tokens) after a prefix every hog
+        shares. Admission reserves pages for at most GROW_TOKENS = 1024 of a running request's tokens to come
+        (engine.rs `admit_check`), so only replies past that, several at once on a pool smaller than their sum,
+        make the engine preempt the youngest, unfeed prefills and refeed what it preempted (claiming its warm
+        pages again). The default mix's replies are too short: #228's soaks (4.6 h each on 128 pages) evicted
+        thousands of warm pages and preempted nothing. The count is serve_paged_pressure's prompt."""
+        body = {"model": MODEL[0], "prompt": self.cfg.hog_prefix + "Count: 1, 2, 3, 4, 5,",
+                "max_tokens": self.rng.randint(2000, 3000), "temperature": 0}
+        self.stream("/v1/completions", body, "hog")
+
     def disconnect(self):
         msgs = [{"role": "user", "content": "Count slowly from one to two hundred."}]
         try:
@@ -458,7 +476,9 @@ class Client:
         weights = [w for _, w in self.MIX]
         last_burst = time.time() + self.rng.uniform(30, 120)
         while time.time() < self.stop_at:
-            if self.i == 0 and time.time() - last_burst > 120:
+            if self.only:
+                kind = self.only
+            elif self.i == 0 and time.time() - last_burst > 120:
                 kind, last_burst = "burst", time.time()
             else:
                 kind = self.rng.choices(names, weights)[0]
@@ -673,6 +693,24 @@ def memory_checks(rows, cfg):
     return out
 
 
+def pressure_counts(cfg):
+    """--hogs: the pool's pressure counters at the end (/slots, /metrics), for the pressure check."""
+    out = {}
+    try:
+        _, _, rb = request(cfg.port, "GET", "/slots", None, timeout=10)
+        j = json.loads(rb)
+        out["preempted"], out["prefills_unfed"] = j.get("preempted"), j.get("prefills_unfed")
+        out["pages_total"] = j.get("pages_total")
+        _, _, rb = request(cfg.port, "GET", "/metrics", None, timeout=10)
+        for ln in rb.decode("utf-8", "replace").splitlines():
+            k, _, v = ln.partition(" ")
+            if k in ("axon_refeed_shared_tokens_total", "axon_prompt_shared_tokens_total", "axon_pages_evicted_total"):
+                out[k[5:-6] if k.endswith("_total") else k] = int(float(v))
+    except Exception as e:  # noqa: BLE001
+        out["error"] = repr(e)
+    return out
+
+
 def verdict(rows, summary, cfg):
     """Fill summary['checks'] and summary['verdict'] (PASS / FAIL / INCONCLUSIVE) from the samples."""
     checks = {k: dict(v, pass_=v["status"]) for k, v in memory_checks(rows, cfg).items()}
@@ -697,6 +735,12 @@ def verdict(rows, summary, cfg):
     sl = summary.get("slots_after")
     if sl is not None:
         checks["slots_idle"] = dict(sl, pass_=st(sl.get("busy", 1) == 0 and sl.get("queue_depth", 1) == 0))
+    p = summary.get("pressure")
+    if p is not None:
+        need = ("preempted", "prefills_unfed", "refeed_shared_tokens")
+        short = [k for k in need if not (p.get(k) or 0) > 0]
+        checks["pressure"] = dict(p, pass_="INCONCLUSIVE" if short else "PASS",
+                                  why=f"not evidence: {', '.join(short)} not above 0" if short else "")
     c = summary.get("cancels")
     if c is not None:
         checks["cancels"] = dict(c, pass_="REPORTED")
@@ -794,6 +838,9 @@ def main():
     ap.add_argument("--vram-floor-mib", type=float, default=16)
     ap.add_argument("--no-prime", dest="prime", action="store_false",
                     help="skip priming every batch mix before the load (see prime())")
+    ap.add_argument("--hogs", type=int, default=0,
+                    help="this many more clients, each a reply that doesn't stop (2000-3000 tokens) back to back, "
+                         "so the pool preempts; the run must then show preemption, unfeeds and refeed claims")
     ap.add_argument("--vram-card", action="store_true",
                     help="judge VRAM on the card's total when nvidia-smi doesn't list the server pid "
                          "(only on a GPU nothing else uses)")
@@ -802,11 +849,13 @@ def main():
     os.makedirs(cfg.out, exist_ok=True)
     rng = random.Random(cfg.seed)
     cfg.agent_prefix = ("You are an agent with these rules. " + words(rng, cfg.ctx // 4))
+    # Its own generator: the default mix's draws stay what they were without --hogs.
+    cfg.hog_prefix = "Notes before counting. " + words(random.Random(cfg.seed + 7), 300) + "\n"
     sargs = ["--ctx", str(cfg.ctx)] + (["--parallel", str(cfg.slots)] if cfg.slots > 1 else [])
     srv = Server(cfg.axon, cfg.model, cfg.port, sargs + extra, cfg.out)
     print(f"loaded in {srv.load_s:.1f}s, pid {srv.pid}", flush=True)
     MODEL[0] = json.loads(request(cfg.port, "GET", "/v1/models", None)[2])["data"][0]["id"]
-    summary = {"args": {k: v for k, v in vars(cfg).items() if k != "agent_prefix"}, "extra": extra,
+    summary = {"args": {k: v for k, v in vars(cfg).items() if k not in ("agent_prefix", "hog_prefix")}, "extra": extra,
                "load_s": round(srv.load_s, 1), "identity_runs": 0, "identity_mismatches": []}
     t_start = time.time()
     rows = []
@@ -825,6 +874,7 @@ def main():
         stats = Stats()
         stop_at = t_start + cfg.hours * 3600
         clients = [Client(i, cfg, stats, stop_at) for i in range(cfg.clients)]
+        clients += [Client(cfg.clients + k, cfg, stats, stop_at, only="hog") for k in range(cfg.hogs)]
         ths = [threading.Thread(target=c.run, daemon=True) for c in clients]
         for t in ths:
             t.start()
@@ -885,6 +935,8 @@ def main():
                                  "threads": d1.get("Threads", -1), "fds": d1.get("fds", -1),
                                  "hwm_mib": mib(d1, "VmHWM")}
         summary["slots_after"] = slots_idle(cfg)
+        if cfg.hogs:
+            summary["pressure"] = pressure_counts(cfg)
         summary["totals"] = dict(sorted(stats.total.items()))
         summary["requests"] = stats.requests
         summary["lat_max_s"] = stats.lat_max
