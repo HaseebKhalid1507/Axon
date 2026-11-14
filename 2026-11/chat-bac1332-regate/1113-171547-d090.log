@@ -1,0 +1,23 @@
+[axon-run 17:15:47] submitted 1113-171547-d090 by /home/haseeb/.cache/axon-wt-chat: /home/haseeb/.cache/axon-chat/bin/axon-test-dbg-bac1332 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact
+[axon-run 17:27:55] job 1113-171547-d090 -> pod1 [RTX 4090 sm_89 secure] (pod grsxq0x6m4wjk5): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-chat /home/haseeb/.cache/axon-chat/bin/axon-test-dbg-bac1332 cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref --exact
+axon-remote: uploading axon-test-dbg-bac1332 (c191b2dbcedb5b04cad0e959) + source of /home/haseeb/.cache/axon-wt-chat
+
+sent 2,682,942 bytes  received 6,805 bytes  1,075,898.80 bytes/sec
+total size is 9,473,234  speedup is 3.52
+
+sent 8,390,845 bytes  received 35 bytes  5,593,920.00 bytes/sec
+total size is 26,890,776  speedup is 3.20
+axon-remote: job 20261113-222800-axon-test-dbg-bac1332-1336 on pod1 (GPU, 5000 MB)
+[axon-node 22:28:00] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 22:28:00] run axon-test-dbg-bac1332 (c191b2dbcedb5b04cad0e959) as /home/haseeb/.cache/axon-wt-chat on 186ff7c3a6be, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref has been running for over 60 seconds
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 911 filtered out; finished in 910.52s
+
+[axon-node 22:43:11] exit 0 after 910.7s
+[axon-node 22:43:11] peak RSS 3270 MB (job process tree PSS, 2 s samples x449)
+[axon-run 17:43:12] exit 0 after 917.0s (host pod1)

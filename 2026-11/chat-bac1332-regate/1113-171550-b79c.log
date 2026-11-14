@@ -1,0 +1,28 @@
+[axon-run 17:15:50] submitted 1113-171550-b79c by /home/haseeb/.cache/axon-wt-chat: /home/haseeb/.cache/axon-chat/bin/axon-test-bac1332 serve::template_tests
+[axon-run 17:15:50] job 1113-171550-b79c -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-wt-chat --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /home/haseeb/.cache/axon-chat/bin/axon-test-bac1332 serve::template_tests --test-threads 1
+axon-remote: uploading axon-test-bac1332 (89308877803f77f4f78b4486) + source of /home/haseeb/.cache/axon-wt-chat
+
+sent 2,682,898 bytes  received 6,797 bytes  1,793,130.00 bytes/sec
+total size is 9,473,234  speedup is 3.52
+
+sent 7,859,881 bytes  received 35 bytes  5,239,944.00 bytes/sec
+total size is 25,741,544  speedup is 3.28
+axon-remote: job 20261113-171555-axon-test-bac1332-3025301 on jade (CPU-only)
+[axon-node 17:15:55] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 17:15:55] run axon-test-bac1332 (89308877803f77f4f78b4486) as /home/haseeb/.cache/axon-wt-chat on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 17:15:55] memory cap (scope MemoryMax) 2799 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 17:15:55] MemAvailable 4336 MB, load ['0.58', '0.80', '0.74']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 5 tests
+test serve::template_tests::broken_special_ids_never_reach_a_prompt ... ok
+test serve::template_tests::chat_templates_match_hf ... ok
+test serve::template_tests::default_system_from_the_template ... ok
+test serve::template_tests::message_text_never_forges_turns ... ok
+test serve::template_tests::tools_need_the_template ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 907 filtered out; finished in 3.79s
+
+[axon-node 17:16:01] exit 0 after 6.1s; lowest MemAvailable seen 4211 MB
+[axon-node 17:16:01] peak RSS 89 MB (job process tree PSS, 2 s samples x2)
+[axon-run 17:16:02] exit 0 after 12.5s (host jade)
+[axon-run 17:16:07] EXPECT ok: output matches /^test result: ok\. 5 passed; 0 failed/
