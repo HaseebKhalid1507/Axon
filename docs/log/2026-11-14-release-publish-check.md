@@ -1,4 +1,4 @@
-# Release workflow: the tag check right before Publish; publish.sh; a draft title that fails closed (#265)
+# Release workflow: the tag check right before Publish; publish.sh, tied to the checked tarball; a draft title that fails closed (#265)
 
 - Date: 2026-11-14. Branch: fix/release-publish-check. Base: main be37005. Status: open
 - Pick: shady's review of #261 (9/10 SHIP, comment 6877091068): its SHOULD (docs, before v0.1.0) and its nits.
@@ -96,4 +96,53 @@ and rhysd/actionlint's published v1.7.12. Both refuse before the tag check and t
 Not tested: `gh release edit --draft=false` on a real draft (publish.sh's edit never runs live), the
 concurrency group on GitHub, a cancelled job leaving its "unchecked" draft (only the title it is created with
 is tested).
+
+## Round 3: shady's round-2 review (comment 6880776856, 9/10 SHIP)
+
+Stop rule: PR comment 6880937124 (11:47 EST), written before any edit.
+
+- **SHOULD 1: publish.sh proved the draft was current, not that it was the one checked.** The hole: checks
+  start on A's tarball, the tag moves to B, the old draft is deleted as told, B's run makes a new draft, and
+  publish.sh, run when A's checks finish, passes everything and publishes B's tarball. Now it is `publish.sh
+  vX.Y.Z SHA256` (required to publish; an empty or malformed one is refused before any gh call). It refuses
+  unless SHA256 equals the notes' "SHA-256 of the tarball" (exactly one, 64 hex) and the tarball asset's
+  `digest`, which GitHub computes at upload ("sha256:…"; null or malformed refused; checked on real listings:
+  the listing endpoint carries it). The notes already had the line; the harness now pins it and "Built from
+  commit" exactly once each in every create. `--check vX.Y.Z [SHA256]` prints the SHA-256 to write down.
+- **SHOULD 2: the 1–2 s between the last tag check and the publish.** gh's own lookups and `remoteTagExists` sit
+  between them, and GitHub has no "publish only if the tag names X". Now, after the edit, publish.sh asks for
+  the tag's commit again and re-reads the release by its id (published, its tag, its title). On a miss, or an
+  answer it can't read, it PATCHes the release back to a draft titled "DO NOT PUBLISH: Axon vX.Y.Z
+  (unpublished by publish.sh)" and fails, saying what to do; if that PATCH fails, it says to run it by hand,
+  with the command. A failed edit that left a draft is "nothing published", with no revert. releasing.md
+  documents the residual window and that a tag ruleset on `refs/tags/v*` (blocking updates and deletions)
+  closes it and the hours-long one; the maintainer's call, not set up.
+- **Nit 1: the final title in the publish itself.** The job now titles the checked draft "Axon vX.Y.Z (checked;
+  publish with scripts/release/publish.sh)"; publish.sh refuses any other title, including `Axon vX.Y.Z`, and
+  sends `--title "Axon vX.Y.Z"` with `--draft=false` in one edit. The web page's Publish button would publish a
+  visibly mis-titled release.
+- **Nit 2:** releasing.md: keep the "SHA-256 of the tarball" and "Built from commit" lines, each exactly once,
+  and the title, when putting the release notes into the draft; publish.sh's refusals say so too.
+- **Nit 3:** 0 releases: publish.sh asks for `.permissions.push` and says when the account lacks push access
+  (drafts hidden), or names both causes when it can't tell. jq is checked up front ("needs jq").
+
+### Tests, round 3
+`test_draft_guards.sh`: 18 step cases, the wiring check and 48 publish.sh cases (67). The stub answers the
+re-read as the recorded edit left the release, the way GitHub would, and records the revert's PATCH. `--live`
+adds the 5 endpoint cases and 3 read-only `--check` runs: no release for `v9.9.9` here (push access: "none
+made"), none on rhysd/actionlint (no push access: says so), and its published v1.7.12. 62 mutants, all red, the
+runner checking it ran every one it generated:
+- 29 for round 3: 21 in publish.sh (no SHA256 compare, no digest compare, a null digest accepted, SHA256
+  optional, an empty one accepted, the first of two notes SHAs taken, no tag check after the publish, a miss
+  that doesn't revert, the revert's failure ignored, the re-read's draft field ignored, the publish without
+  `--title`, `Axon vX.Y.Z` accepted, the push-access hint dropped, the jq check dropped, a still-draft release
+  reported published, no lowercasing, the re-read's title or tag unchecked, the revert keeping the title, and
+  ports of round 2's p2 and p9); 8 in release.yml (the final title back to `Axon vX.Y.Z`, the notes without or
+  with two tarball SHAs, and ports of round 2's s3, n2, n3, n5, n6);
+- round 2's 40 where their anchor still exists: 18; the 7 whose anchor this round rewrote are ported above;
+- the original 18 where their code still exists: 15 (07–09 aimed at code gone since round 2).
+
+Not tested: a live publish or revert (publish.sh's edit and PATCH never run against GitHub); that a draft's
+tarball carries a `digest` (GitHub's changelog says digests are computed at upload for all assets; checked
+only on published releases); the concurrency group on GitHub; a cancelled job leaving its "unchecked" draft.
 

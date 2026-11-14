@@ -85,22 +85,32 @@ measurements behind them.
   peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
   draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
   every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
-- **Publishing is one checked command, and the draft's title fails closed** (#265, shady's reviews of #261 and
-  #265). releasing.md ran the tag check only first, hours before publishing. Now `scripts/release/publish.sh
-  vX.Y.Z` is the publish step. Right before `gh release edit --tag --verify-tag --draft=false`, it checks:
-  one draft for the tag, titled `Axon vX.Y.Z`, with its three assets uploaded, and the tag naming the commit
-  in its notes. `--check` runs the same checks first, before the hand checks. When the tag is gone (a 422) it
-  refuses: the draft's target is main, so publishing would create the tag at main's tip, with the old commit's
-  tarball. The release job:
+- **Publishing is one checked command, tied to the tarball that was checked; the draft's title fails closed**
+  (#265, shady's reviews of #261 and #265). releasing.md ran the tag check only first, hours before publishing,
+  and nothing tied the publish to the tarball the GPU checks ran on. Now `scripts/release/publish.sh vX.Y.Z
+  SHA256` is the publish step, with the SHA-256 written next to the hand checks' results. It publishes only if:
+  - there is one draft for the tag, titled "Axon vX.Y.Z (checked; publish with scripts/release/publish.sh)", with
+    its three assets uploaded;
+  - SHA256 equals both the notes' "SHA-256 of the tarball" and the digest GitHub computed for the uploaded
+    tarball, so a draft made again after the checks (the tag moved, the tarball re-uploaded) is refused;
+  - the tag names the commit in the notes, checked last.
+
+  Then one `gh release edit --title "Axon vX.Y.Z" --tag --verify-tag --draft=false` sets the final title and
+  publishes. Right after, it asks for the tag's commit again and re-reads the release; on a miss, or an answer
+  it can't read, it turns the release back into a DO NOT PUBLISH draft and fails. The 1–2 s between the last
+  check and the publish can't be closed from the client; a tag ruleset on `refs/tags/v*` would close it
+  (releasing.md; the maintainer's call, not set up). `--check` runs the same checks first, publishes nothing,
+  and prints the tarball's SHA-256. When the tag is gone (a 422) it refuses: the draft's target is main, so
+  publishing would create the tag at main's tip, with the old commit's tarball. The release job:
   - says "re-run this job" when GitHub gave no commit for the tag (a transient error, or the tag deleted),
     not "the other run makes the draft";
-  - creates the draft titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)", and retitles it `Axon vX.Y.Z` only
-    after the tag check after the upload passes. A failed, cancelled or lost job leaves a draft that says not
-    to publish it;
+  - creates the draft titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)", and retitles it "Axon vX.Y.Z (checked;
+    …)" only after the tag check after the upload passes. A failed, cancelled or lost job leaves a draft that
+    says not to publish it, and the web page's Publish button would publish a visibly mis-titled release;
   - runs one at a time per tag (a `concurrency` group, never cancelling the running one).
 
-  `scripts/release/test_draft_guards.sh` now pins the create's and the edit's exact arguments (`--draft`,
-  `--verify-tag`, both titles, `--repo`) and tests publish.sh.
+  `scripts/release/test_draft_guards.sh` pins the create's, the edits' and publish.sh's exact arguments
+  (`--draft`, `--verify-tag`, the titles, `--repo`, the revert) and the notes' two lines, and tests publish.sh.
   No `--target` on the create: GITHUB_TOKEN can't create a release whose target's workflows differ from main's.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)

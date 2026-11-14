@@ -279,9 +279,13 @@ jobs:
           # published (publishing would create the tag at main's tip; scripts/release/publish.sh checks the tag first).
           # --target "$BUILT" would make this call 404 whenever the tagged commit's .github/workflows differ from
           # main's: GITHUB_TOKEN can't be authorized for that (REST docs, "Create a release").
-          # The title fails closed: the draft is created "DO NOT PUBLISH: ... (unchecked)" and titled "Axon <tag>"
+          # The title fails closed: the draft is created "DO NOT PUBLISH: ... (unchecked)" and titled "$checked"
           # only after the check below passes. A job that fails, is cancelled or dies after this call leaves a draft
-          # whose title says not to publish it, and publish.sh refuses any other title.
+          # whose title says not to publish it, and publish.sh refuses any other title. Not "Axon <tag>" either:
+          # publish.sh sets that in the same request that publishes, so the web page's Publish button, which checks
+          # nothing, would publish a visibly mis-titled release. publish.sh reads the notes' "SHA-256 of the
+          # tarball" and "Built from commit" lines.
+          checked="Axon $tag (checked; publish with scripts/release/publish.sh)"
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "DO NOT PUBLISH: Axon $GITHUB_REF_NAME (unchecked)" \
             --notes "Linux x86-64. Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh\` (this version: \`curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/install.sh | AXON_VERSION=$GITHUB_REF_NAME sh\`). SHA-256 of the tarball: $(cut -d' ' -f1 dist/axon-x86_64-linux.tar.gz.sha256). Built from commit $BUILT." \
@@ -294,10 +298,10 @@ jobs:
             echo "the draft for $tag holds $BUILT's tarball and stays titled DO NOT PUBLISH: delete it (gh release delete $tag --yes; the tag stays). The run that built the commit $tag names makes the draft; if its release job already refused, because this draft existed, re-run it" >&2
             exit 1
           elif [ "$check" != 0 ]; then
-            echo "the draft for $tag stays titled DO NOT PUBLISH. If gh api repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag --jq .sha prints $BUILT (a transient error), the draft is right: gh release edit $tag --repo $GITHUB_REPOSITORY --title 'Axon $tag'. If the tag is gone, delete the draft (gh release delete $tag --yes): publishing it would create $tag at main's tip" >&2
+            echo "the draft for $tag stays titled DO NOT PUBLISH. If gh api repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag --jq .sha prints $BUILT (a transient error), the draft is right: gh release edit $tag --repo $GITHUB_REPOSITORY --title '$checked'. If the tag is gone, delete the draft (gh release delete $tag --yes): publishing it would create $tag at main's tip" >&2
             exit 1
           fi
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "Axon $tag" > /dev/null || {
-            echo "the draft for $tag is right ($tag names $BUILT) but couldn't be retitled, so it is still titled DO NOT PUBLISH: gh release edit $tag --repo $GITHUB_REPOSITORY --title 'Axon $tag'" >&2
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$checked" > /dev/null || {
+            echo "the draft for $tag is right ($tag names $BUILT) but couldn't be retitled, so it is still titled DO NOT PUBLISH: gh release edit $tag --repo $GITHUB_REPOSITORY --title '$checked'" >&2
             exit 1
           }
