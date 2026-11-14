@@ -6,6 +6,17 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Constrained tool calls, opt-in (`AXON_CONSTRAIN=1`; PR A of #259)
+- **A Hermes tool call can't be malformed JSON.** With `AXON_CONSTRAIN=1`, `axon serve` on a Qwen2.5-family model
+  holds a tool call (`tool_choice` auto) to `{"name": STRING, "arguments": OBJECT}` from its `<tool_call>` token to
+  `</tool_call>`: each token is picked from those a JSON automaton allows. The 8 malformed calls of #259
+  (unescaped quotes, invalid escapes, a raw newline, a second `<tool_call>` inside a call) can't be generated, and
+  no special token (EOS, `<|im_end|>`) can be picked inside a string. Text before and after a call, requests
+  without tools, and every request with the variable unset are unchanged, bit for bit.
+- **Same bits however it runs.** A constrained reply is the same decoded, drafted, verified or batched beside other
+  requests. Its `system_fingerprint` names the grammar (`constrain hermes-json <hash>` in the `serve` field), so it
+  isn't an unconstrained reply's; unconstrained fingerprints don't move.
+- Off by default until the follow-ups (#259's PR B: on by default, `required`/named calls, the tool-name enum).
 ### Tool calls stream as they are generated (#260)
 - **Streamed, a call's head goes out as soon as its name is read and its arguments open with `{`**, then its
   arguments a piece at a time: `delta.tool_calls` chunks on `/v1/chat/completions`, a `function_call` item with
