@@ -1,0 +1,29 @@
+{
+ "label": "dec-adabb40-soakpreempt",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1114-140058-9cb6",
+   "name": "dec-adabb40-soakpreempt",
+   "rc": 143,
+   "verdict": "FAIL (rc 143)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "adabb40",
+   "binary": "bash",
+   "started": 1794684901.6814303,
+   "ended": 1794690347.5680413,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "9b1a6954d66adeeba118575fca859a838dc6008d443974ff00fca2913706d44e",
+   "log_bytes": 19656
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 16:05:48 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
