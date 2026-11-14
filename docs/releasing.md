@@ -24,8 +24,16 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`:
    refused with exit code 2.
 6. **Draft release.** The workflow uploads the tarball, its `.sha256` and `install.sh` to a **draft** release
    for the tag. Nothing is public until a maintainer publishes the draft. Only the tag's push uploads: a
-   `workflow_dispatch` run, on the tag or not, only builds. The job refuses if a release for the tag (draft or
-   published) exists already, so "Re-run all jobs" on the tag's run can't add a second draft.
+   `workflow_dispatch` run, on the tag or not, only builds. The job uploads nothing if:
+   - the tag no longer names the commit the run built: it was moved while the run was building, and the run
+     for the commit it names makes the draft;
+   - a release for the tag (draft or published) exists already, so "Re-run all jobs" on the tag's run can't
+     add a second draft.
+
+   After the upload it checks the tag again, and fails if the tag moved meanwhile (delete that draft). The
+   draft's notes name the commit it was built from. If the upload step fails partway, the half-made draft stays
+   (`gh release create --draft` doesn't remove it): delete it (`gh release delete vX.Y.Z --yes`; the tag stays),
+   then "Re-run failed jobs".
 
 The workflow never checks the GPU side. No runner has a GPU, so the draft's kernels have run nowhere yet.
 
@@ -38,7 +46,10 @@ The workflow never checks the GPU side. No runner has a GPU, so the draft's kern
 ## Before publishing the draft
 
 Run every check on **the draft's own tarball**: `gh release download vX.Y.Z -p 'axon-x86_64-linux.tar.gz*'`,
-then `sha256sum -c axon-x86_64-linux.tar.gz.sha256`. Write its SHA-256 next to each result.
+then `sha256sum -c axon-x86_64-linux.tar.gz.sha256`. Write its SHA-256 next to each result. First, the tag must
+still name the commit in the draft's notes ("Built from commit …"): `gh api
+repos/HaseebKhalid1507/Axon/commits/refs/tags/vX.Y.Z --jq .sha` prints it. A tag moved after the draft was made
+leaves the draft holding the old commit's tarball.
 
 1. **The pack is NVRTC's output, byte for byte.** Download the tag run's `kernels-pack` artifact (kept 30
    days): the draft's binary embeds exactly this pack, because the build job takes it from the same run. On

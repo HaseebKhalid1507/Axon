@@ -2,7 +2,8 @@ name: Release
 
 # Builds the Linux x86-64 release tarball: `axon` with its GPU kernels precompiled (the kernel pack,
 # docs/models.md "NVIDIA GPUs") and the license notices. A pushed tag `vX.Y.Z` uploads it to a draft GitHub
-# release for that tag; a maintainer publishes it after the hand checks in docs/releasing.md. Any other run
+# release for that tag, if the tag still names the commit it built; a maintainer publishes it after the hand
+# checks in docs/releasing.md. Any other run
 # (workflow_dispatch, on a tag too, or a pull request that touches the release files) only builds it, tests
 # install.sh against it, and keeps it as a workflow artifact.
 #
@@ -45,6 +46,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       epoch: ${{ steps.key.outputs.epoch }}
+      commit: ${{ steps.key.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: install.sh is POSIX sh
@@ -53,13 +55,18 @@ jobs:
           dash -n install.sh
       - name: rust_licenses.py self-test
         run: python3 scripts/release/rust_licenses.py --self-test
+      - name: the draft step's checks, against a stub gh
+        run: bash scripts/release/test_draft_guards.sh
       # The pack depends only on the kernel sources, the module list, the targets and NVRTC. A stale pack can't ship
       # anyway: the build job checks it holds every module this build loads. (Cache keys can't hold commas.)
-      # epoch: the commit's time, the tarball's file times (a reproducible tarball).
+      # epoch: the commit's time, the tarball's file times (a reproducible tarball). commit: the commit this run
+      # builds (an annotated tag's, peeled); the build job checks it builds the same one, and the release job
+      # uploads only while the tag still names it.
       - id: key
         run: |
           echo "key=kernels-$CUDA_VER-$(echo "$PACK_TARGETS" | tr , _)" >> "$GITHUB_OUTPUT"
           echo "epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" | tee -a "$GITHUB_OUTPUT"
       # Not on a tag: the pack a release ships is compiled from the tagged source.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: cache
@@ -106,6 +113,15 @@ jobs:
       SOURCE_DATE_EPOCH: ${{ needs.pack.outputs.epoch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The binary and the pack come from one commit, the one the release job checks the tag still names.
+      # (-c safe.directory: in a container the checkout can belong to another user, and git then refuses it.)
+      - name: the pack job's commit
+        env:
+          PACK_COMMIT: ${{ needs.pack.outputs.commit }}
+        run: |
+          head=$(git -c safe.directory="$PWD" rev-parse HEAD)
+          echo "commit=$head"
+          [ "$head" = "$PACK_COMMIT" ] || { echo "this job checked out $head, the pack job '$PACK_COMMIT'"; exit 1; }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: kernels-pack
@@ -199,7 +215,7 @@ jobs:
     # Only the tag's own push uploads. A workflow_dispatch on the tag (docs/releasing.md step 4, the
     # reproducibility check) has the same github.ref, so the ref alone would let it add a second draft.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [pack, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -212,7 +228,24 @@ jobs:
       - name: upload to a draft release for the tag
         env:
           GH_TOKEN: ${{ github.token }}
+          # The commit this run built: the pack job's checkout, which the build job checked is its own.
+          BUILT: ${{ needs.pack.outputs.commit }}
         run: |
+          tag=$GITHUB_REF_NAME
+          [[ "$BUILT" =~ ^[0-9a-f]{40}$ ]] || { echo "the pack job's commit '$BUILT' isn't a SHA: nothing uploaded" >&2; exit 1; }
+          # The build job already checked the binary says this version, so this only keeps the URL below plain.
+          [[ "$tag" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]] || { echo "tag '$tag' isn't a version: nothing uploaded" >&2; exit 1; }
+          # The tag must still name the commit this run built. A tag moved (deleted, pushed again elsewhere) while
+          # this run was building would otherwise get this run's draft with the old commit's tarball, and the new
+          # commit's run would then hit the one-release check below. commits/refs/tags/<tag> peels an annotated
+          # tag to its commit. Not GITHUB_SHA: what it holds for an annotated tag isn't documented.
+          tag_names_built() {
+            local now
+            now=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" --jq .sha) ||
+              { echo "can't ask GitHub which commit $tag names (deleted?)" >&2; return 1; }
+            [ "$now" = "$BUILT" ] || { echo "$tag names '$now' now, but this run built $BUILT" >&2; return 1; }
+          }
+          tag_names_built || { echo "nothing uploaded; the run for the commit the tag names makes the draft" >&2; exit 1; }
           # One release per tag. GitHub allows several drafts for one tag, and "Re-run all jobs" on the tag's push
           # run is still a push: refuse if a release for the tag, draft or published, exists already (this token
           # can push, so the listing includes drafts).
@@ -225,5 +258,7 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "Axon $GITHUB_REF_NAME" \
-            --notes "Linux x86-64. Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh\` (this version: \`curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/install.sh | AXON_VERSION=$GITHUB_REF_NAME sh\`). SHA-256 of the tarball: $(cut -d' ' -f1 dist/axon-x86_64-linux.tar.gz.sha256)." \
+            --notes "Linux x86-64. Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh\` (this version: \`curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/install.sh | AXON_VERSION=$GITHUB_REF_NAME sh\`). SHA-256 of the tarball: $(cut -d' ' -f1 dist/axon-x86_64-linux.tar.gz.sha256). Built from commit $BUILT." \
             dist/axon-x86_64-linux.tar.gz dist/axon-x86_64-linux.tar.gz.sha256 dist/install.sh
+          # Again: the tag can move while the files upload.
+          tag_names_built || { echo "the draft for $tag holds $BUILT's tarball: delete it (gh release delete $tag --yes; the tag stays), then re-run the release job of the run that built the commit the tag names" >&2; exit 1; }
