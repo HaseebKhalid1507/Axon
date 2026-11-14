@@ -236,9 +236,15 @@ pub struct Metrics {
     pub idle_evictions: AtomicU64,
     /// Prompts refused by `--max-prompt-tokens`.
     pub refused_prompts: AtomicU64,
-    /// gpt-oss tool calls begun but not finished as a JSON object
-    /// (returned as reasoning).
+    /// Tool calls the model began that came back as no call: Hermes
+    /// (`<tool_call>`) and Llama (JSON reply) blocks that aren't a JSON
+    /// object with a string "name" (returned as content), and gpt-oss calls
+    /// whose arguments never opened as an object (returned as reasoning).
     pub tool_calls_dropped: AtomicU64,
+    /// Calls returned whose `arguments` aren't a JSON object: streamed calls
+    /// cut off by the token limit or whose JSON went bad (#260), and calls
+    /// given a non-object value.
+    pub tool_calls_invalid: AtomicU64,
     pub ttft: Histogram,
     pub itl: Histogram,
     /// Batched steps that fed prompt beside running rows, and those with
@@ -320,6 +326,7 @@ impl Default for Metrics {
             idle_evictions: AtomicU64::new(0),
             refused_prompts: AtomicU64::new(0),
             tool_calls_dropped: AtomicU64::new(0),
+            tool_calls_invalid: AtomicU64::new(0),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             step: Histogram::new(STEP_BOUNDS),
@@ -501,8 +508,17 @@ impl Metrics {
         counter(
             &mut o,
             "axon_tool_calls_dropped_total",
-            "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
+            "Tool calls begun but returned as no call: a <tool_call> block or JSON reply that \
+             isn't a JSON object with a string name (as content), a gpt-oss call whose arguments \
+             never opened as an object (as reasoning).",
             self.tool_calls_dropped.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_tool_calls_invalid_total",
+            "Tool calls returned whose arguments are not a JSON object (a streamed call cut off \
+             or whose JSON went bad, or a non-object value).",
+            self.tool_calls_invalid.load(Ordering::Relaxed),
         );
         // The tier's lines: while it's on, and after it turned off (its
         // gauges 0, its counters kept).

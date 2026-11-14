@@ -54,6 +54,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         slot_ctx: None,
         kv_pages: None,
         share: None,
+        tool_stream: Some(true),
         paged: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
@@ -1130,6 +1131,7 @@ fn text_out_reasoning_and_stops() {
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
             metrics: None,
+            stream_calls: false,
         };
         let (mut c, mut r) = (String::new(), String::new());
         for id in tok.encode_special(text) {
@@ -1706,21 +1708,29 @@ fn serve_tool_calls() {
         let v = post(a, "/v1/chat/completions", req.clone()).json();
         let ch = &v["choices"][0];
         let m = &ch["message"];
-        if ch["finish_reason"] != "tool_calls" {
-            // Not a call (cut off, or not JSON): the block is content, verbatim.
+        let Some(calls) = m["tool_calls"].as_array() else {
+            // Not a call (not JSON before its arguments): the block is
+            // content, verbatim.
             assert!(
                 m["content"].as_str().unwrap().contains("<tool_call>"),
                 "{v}"
             );
             continue;
-        }
-        let calls = m["tool_calls"].as_array().unwrap();
+        };
         assert!(!calls.is_empty(), "{v}");
-        for c in calls {
+        // A call whose arguments began is a call (#260): cut off by
+        // max_tokens, it ends the reply ("length") with what was written.
+        let cut = ch["finish_reason"] == "length";
+        if !cut {
+            assert_eq!(ch["finish_reason"], "tool_calls", "{v}");
+        }
+        for (i, c) in calls.iter().enumerate() {
             assert!(c["id"].as_str().unwrap().starts_with("call_"), "{v}");
             assert_eq!(c["type"], "function");
             let args = c["function"]["arguments"].as_str().unwrap();
-            serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+            if !(cut && i + 1 == calls.len()) {
+                serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+            }
         }
 
         let mut sreq = req.clone();
@@ -1759,7 +1769,7 @@ fn serve_tool_calls() {
                 scalls[i]["arguments"] = json!(args);
             }
         }
-        assert_eq!(finish.as_deref(), Some("tool_calls"));
+        assert_eq!(finish.as_deref(), ch["finish_reason"].as_str());
         assert_eq!(content, m["content"].as_str().unwrap_or(""));
         let whole: Vec<Value> = calls
             .iter()
@@ -1768,6 +1778,9 @@ fn serve_tool_calls() {
             )
             .collect();
         assert_eq!(scalls, whole);
+        if cut {
+            continue;
+        }
 
         // The next turn: the call and its result appended; the cache is reused.
         let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
@@ -1787,6 +1800,214 @@ fn serve_tool_calls() {
         assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {v2}");
         assert!(v2["usage"]["prompt_tokens"].as_u64().unwrap() > p1);
     }
+}
+
+/// #260, over HTTP on the test model (CPU): on chat completions and
+/// Responses a call streams as it is generated (its id and name, then its
+/// arguments a piece at a time); with `tool_stream` off (AXON_TOOL_STREAM=0)
+/// it goes out whole once decided, as before. The tokens are the same either
+/// way, so the same call. A call cut off by max_tokens is a call with what
+/// was written (finish "length", `axon_tool_calls_invalid_total`) where
+/// decide-whole mode returns the block as content
+/// (`axon_tool_calls_dropped_total`); on /v1/responses its item is
+/// `incomplete`. Streamed and whole replies agree in both modes.
+#[test]
+fn serve_tool_calls_streamed() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let tools = json!([{"type": "function", "function": {"name": "get_weather",
+        "description": "Get the weather in a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]}}}]);
+    let rtools = json!([{"type": "function", "name": "get_weather",
+        "description": "Get the weather in a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]}}]);
+    let ask = "What's the weather in Paris?";
+    let named = json!({"type": "function", "function": {"name": "get_weather"}});
+    let chat = |n: u64, stream: bool| {
+        json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+               "tool_choice": named, "temperature": 0, "max_tokens": n, "stream": stream})
+    };
+    // A chat stream: (content, [(name, arguments, tool_call chunks)], finish).
+    let chat_stream = |a: SocketAddr, body: Value| {
+        let ev = post(a, "/v1/chat/completions", body).events();
+        assert_eq!(ev.last().map(String::as_str), Some("[DONE]"));
+        let (mut content, mut calls, mut finish) = (String::new(), Vec::new(), String::new());
+        for e in ev.iter().filter(|e| *e != "[DONE]") {
+            let v: Value = serde_json::from_str(e).unwrap();
+            let c = &v["choices"][0];
+            content.push_str(c["delta"]["content"].as_str().unwrap_or(""));
+            if let Some(f) = c["finish_reason"].as_str() {
+                finish = f.to_string();
+            }
+            for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                let i = tc["index"].as_u64().unwrap() as usize;
+                if i == calls.len() {
+                    assert!(
+                        tc["id"].is_string() && tc["function"]["name"].is_string(),
+                        "{e}"
+                    );
+                    calls.push((
+                        tc["function"]["name"].as_str().unwrap().to_string(),
+                        String::new(),
+                        0,
+                    ));
+                }
+                calls[i]
+                    .1
+                    .push_str(tc["function"]["arguments"].as_str().unwrap_or(""));
+                calls[i].2 += 1;
+            }
+        }
+        (content, calls, finish)
+    };
+    let mut seen = Vec::new();
+    for streaming in [true, false] {
+        let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+            o.tool_stream = Some(streaming)
+        });
+        let a = s.addr;
+        // A whole call.
+        let v = post(a, "/v1/chat/completions", chat(48, false)).json();
+        let ch = &v["choices"][0];
+        assert_eq!(ch["finish_reason"], "tool_calls", "{v}");
+        let c = &ch["message"]["tool_calls"][0]["function"];
+        let (name, args) = (
+            c["name"].as_str().unwrap(),
+            c["arguments"].as_str().unwrap(),
+        );
+        assert_eq!(name, "get_weather");
+        assert!(
+            serde_json::from_str::<Value>(args).unwrap().is_object(),
+            "{v}"
+        );
+        let (content, calls, finish) = chat_stream(a, chat(48, true));
+        assert_eq!((content.as_str(), finish.as_str()), ("", "tool_calls"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].0.as_str(), calls[0].1.as_str()), (name, args));
+        if streaming {
+            assert!(
+                calls[0].2 >= 3,
+                "a head, then the arguments in pieces: {calls:?}"
+            );
+        } else {
+            assert_eq!(calls[0].2, 2, "a head and the arguments at once: {calls:?}");
+        }
+        // The same through /v1/responses, streamed: a function_call item
+        // with an arguments delta per piece (decide-whole: one).
+        let rbody = json!({"input": ask, "tools": rtools,
+                           "tool_choice": {"type": "function", "name": "get_weather"},
+                           "temperature": 0, "max_output_tokens": 48, "stream": true});
+        let mut rbody_whole = rbody.clone();
+        rbody_whole["stream"] = json!(false);
+        let r = post(a, "/v1/responses", rbody);
+        let ev = responses_events(&r);
+        let added = ev
+            .iter()
+            .position(|(n, v)| {
+                n == "response.output_item.added" && v["item"]["type"] == "function_call"
+            })
+            .expect("a function_call item");
+        let deltas: Vec<usize> = (0..ev.len())
+            .filter(|&i| ev[i].0 == "response.function_call_arguments.delta")
+            .collect();
+        assert!(deltas.iter().all(|&i| i > added));
+        assert!(
+            if streaming {
+                deltas.len() >= 2
+            } else {
+                deltas.len() == 1
+            },
+            "{deltas:?}"
+        );
+        let (_, _, rcalls, _) = responses_stream(&r);
+        assert_eq!(rcalls, [(name.to_string(), args.to_string())]);
+        // Cut off by max_tokens inside the arguments.
+        let v = post(a, "/v1/chat/completions", chat(4, false)).json();
+        let ch = &v["choices"][0];
+        assert_eq!(ch["finish_reason"], "length", "{v}");
+        let m = &ch["message"];
+        let (content, calls, finish) = chat_stream(a, chat(4, true));
+        assert_eq!(finish, "length");
+        let g = prom_parse(&call(a, "GET", "/metrics", "").body);
+        let counts = (
+            g["axon_tool_calls_invalid_total"],
+            g["axon_tool_calls_dropped_total"],
+        );
+        if streaming {
+            let cut = m["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            assert!(
+                args.starts_with(cut) && cut.len() < args.len(),
+                "{cut:?} of {args:?}"
+            );
+            assert!(serde_json::from_str::<Value>(cut).is_err(), "{cut}");
+            assert_eq!(m["tool_calls"][0]["function"]["name"], "get_weather");
+            assert_eq!(content, "");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                (calls[0].0.as_str(), calls[0].1.as_str()),
+                ("get_weather", cut)
+            );
+            assert_eq!(counts, (2.0, 0.0));
+        } else {
+            let text = m["content"].as_str().unwrap();
+            assert!(text.starts_with("<tool_call>"), "{v}");
+            assert!(m["tool_calls"].is_null(), "{v}");
+            assert_eq!((content.as_str(), calls.len()), (text, 0));
+            assert_eq!(counts, (0.0, 2.0));
+        }
+        // The same cut on /v1/responses: the call is the reply's last item,
+        // its arguments not an object, so its item is `incomplete` (as
+        // OpenAI marks it), whole and streamed alike. Decide-whole: the
+        // block is the incomplete message.
+        let rcut = |stream: bool| {
+            json!({"input": ask, "tools": rtools,
+                   "tool_choice": {"type": "function", "name": "get_weather"},
+                   "temperature": 0, "max_output_tokens": 4, "stream": stream})
+        };
+        let r = post(a, "/v1/responses", rcut(false)).json();
+        assert_eq!(r["status"], "incomplete", "{r}");
+        let (_, _, rcalls, sr) = responses_stream(&post(a, "/v1/responses", rcut(true)));
+        let shape = |r: &Value| -> Vec<(Value, Value, Value)> {
+            let items = r["output"].as_array().unwrap();
+            items
+                .iter()
+                .map(|i| {
+                    (
+                        i["type"].clone(),
+                        i["status"].clone(),
+                        i["arguments"].clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(shape(&sr), shape(&r), "streamed {sr} whole {r}");
+        let last = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["status"], "incomplete", "{r}");
+        if streaming {
+            assert_eq!(last["type"], "function_call", "{r}");
+            let cut = last["arguments"].as_str().unwrap();
+            assert!(args.starts_with(cut) && cut.len() < args.len(), "{r}");
+            assert_eq!(rcalls, [("get_weather".to_string(), cut.to_string())]);
+        } else {
+            assert_eq!(last["type"], "message", "{r}");
+            assert!(rcalls.is_empty(), "{sr}");
+        }
+        // A whole call (not cut) stays `completed`.
+        let r = post(a, "/v1/responses", rbody_whole.clone()).json();
+        let it = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            (&it["type"], &it["status"]),
+            (&json!("function_call"), &json!("completed")),
+            "{r}"
+        );
+        seen.push((name.to_string(), args.to_string()));
+    }
+    assert_eq!(seen[0], seen[1], "the same tokens, the same call");
 }
 
 /// Continuous batching (stage S2, GPU), `parallel` 8: requests sent
@@ -4879,6 +5100,7 @@ fn harmony_calls_from_channels() {
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
             metrics: None,
+            stream_calls: false,
         };
         let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
         for (i, &id) in ids.iter().enumerate() {
@@ -4906,6 +5128,7 @@ fn harmony_calls_from_channels() {
                     (Piece::Text(t), Some(l)) if l.starts_with("text ") => l.push_str(&t),
                     (Piece::Text(t), _) => v.push(format!("text {t}")),
                     (Piece::Call(c), _) => v.push(format!("call {} {}", c.name, c.args)),
+                    (Piece::Head(_) | Piece::Args(_), _) => {}
                 }
             }
             v
@@ -5046,6 +5269,7 @@ fn harmony_calls_from_channels() {
         stop: super::StopMatcher::new(Vec::new()),
         call: super::CallState::None,
         metrics: Some(m.clone()),
+        stream_calls: false,
     };
     for id in tok.encode_special(&format!("{head}[1]<|end|>")) {
         out.push(id);
@@ -5262,6 +5486,170 @@ fn harmony_calls_from_channels() {
     assert!(render(r#", "tool_choice": "none""#).is_none());
 }
 
+/// #260: stream mode through `TextOut` (gpt-oss): a call is framed once its
+/// arguments open with `{`, they go out as their tokens come, and the reply
+/// still ends at the token that closes the object (the same tokens as in
+/// decide-whole mode, so the same call). From then on it is a call: cut off
+/// (the token limit, a header, its `<|call|>`) it is a call with what was
+/// written, never reasoning, and not counted as dropped. Arguments that
+/// never open with `{` are never framed: reasoning, as before. Tokenizer
+/// only.
+#[test]
+fn harmony_calls_streamed() {
+    use super::tools::{self, Piece};
+    let Some(m) = crate::testutil::gptoss_model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m).unwrap();
+    let render = || {
+        let body = r#"{"messages": [{"role": "user", "content": "Weather in Paris?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]}"#;
+        let r = tools::parse(body.as_bytes()).unwrap().unwrap();
+        tools::render(&t, &tok, &r, false).ok().unwrap().channels
+    };
+    let mx = std::sync::Arc::new(super::ops::Metrics::default());
+    // (content pieces, reasoning, the token that ended the reply).
+    let run = |ids: &[u32], stream: bool| {
+        let mut out = super::TextOut {
+            tok: &tok,
+            utf8: Utf8Stream::default(),
+            think: None,
+            channels: render(),
+            reasoning: false,
+            first: true,
+            strip_nl: false,
+            stop: super::StopMatcher::new(Vec::new()),
+            call: super::CallState::None,
+            metrics: Some(mx.clone()),
+            stream_calls: stream,
+        };
+        let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
+        for (i, &id) in ids.iter().enumerate() {
+            let (a, b, hit) = out.push(id);
+            c.push(a);
+            r.push_str(&b);
+            if hit {
+                stopped = Some(i);
+                break;
+            }
+        }
+        if stopped.is_none() {
+            let (a, b) = out.finish();
+            c.push(a);
+            r.push_str(&b);
+        }
+        (c, r, stopped)
+    };
+    // The parser (stream mode) over the content pieces: (calls as
+    // "name args", the arguments' pieces, the content piece of the head).
+    let parse = |pieces: &[String]| {
+        let mut p = tools::Parser::new_harmony();
+        p.configure(true, None);
+        let (mut calls, mut args, mut head_at) = (Vec::new(), 0, None);
+        for (i, s) in pieces.iter().enumerate() {
+            for x in p.push(s) {
+                match x {
+                    Piece::Head(_) => head_at = head_at.or(Some(i)),
+                    Piece::Args(_) => args += 1,
+                    Piece::Call(c) => calls.push(format!("{} {}", c.name, c.args)),
+                    Piece::Text(_) => {}
+                }
+            }
+        }
+        for x in p.finish() {
+            if let Piece::Call(c) = x {
+                calls.push(format!("{} {}", c.name, c.args));
+            }
+        }
+        (calls, args, head_at)
+    };
+    let head = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
+    let v = json!({"cmd": "echo }\"} \\\" \\\\ ]", "o": {"a": {}, "b": [1, {"c": "]}\"{"}, []]},
+                   "u": "é😀}\\\\"});
+    let args = v.to_string();
+    let per_char: Vec<u32> = args
+        .chars()
+        .flat_map(|ch| tok.encode(&ch.to_string()))
+        .collect();
+    for body in [tok.encode(&args), per_char] {
+        let mut ids = tok.encode_special(head);
+        ids.extend(&body);
+        ids.extend(tok.encode_special("<|call|>"));
+        let (c0, r0, s0) = run(&ids, false);
+        let (c1, r1, s1) = run(&ids, true);
+        assert_eq!(
+            (s1, r1.as_str()),
+            (s0, r0.as_str()),
+            "the reply ends where it did"
+        );
+        let (calls, n_args, head_at) = parse(&c1);
+        assert_eq!(calls, [format!("get_weather {args}")]);
+        assert_eq!(calls, parse(&c0).0, "the same call");
+        // Streamed: the head at the arguments' first token, a piece per
+        // token after it.
+        assert_eq!(head_at, Some(tok.encode_special(head).len()), "{c1:?}");
+        // (A token that ends inside a character sends nothing yet.)
+        assert!(
+            n_args > 10 && n_args + 8 >= body.len(),
+            "{n_args} pieces for {} tokens",
+            body.len()
+        );
+        // One token short (the token limit): a call with what was written.
+        let short = &ids[..ids.len() - 2];
+        let (c, r, _) = run(short, true);
+        let (calls, _, _) = parse(&c);
+        assert_eq!(r, "");
+        assert_eq!(calls.len(), 1);
+        let cut = calls[0].strip_prefix("get_weather ").unwrap();
+        assert!(args.starts_with(cut) && cut.len() < args.len(), "{cut}");
+    }
+    let before = mx.tool_calls_dropped.load(Ordering::Relaxed);
+    // Cut off otherwise: a header, its `<|call|>`; reasoning after a header
+    // still goes where its channel says.
+    for end in [
+        "",
+        "<|call|>",
+        "<|end|>",
+        "<|channel|>analysis<|message|>We need a joke.",
+    ] {
+        let (c, r, _) = run(
+            &tok.encode_special(&format!("{head}{{\"city\": {end}")),
+            true,
+        );
+        assert_eq!(parse(&c).0, ["get_weather {\"city\":"], "{end}");
+        let more = if end.contains("analysis") {
+            "We need a joke."
+        } else {
+            ""
+        };
+        assert_eq!(r, more, "{end}");
+    }
+    assert_eq!(mx.tool_calls_dropped.load(Ordering::Relaxed), before);
+    // Never an object: never framed; reasoning, as before, and dropped.
+    for v in ["42", "[1]", "\"x\"", "null", ""] {
+        let (c, r, _) = run(&tok.encode_special(&format!("{head}{v}<|end|>")), true);
+        assert!(parse(&c).0.is_empty(), "{v}: {c:?}");
+        assert_eq!(r, v);
+    }
+    assert_eq!(mx.tool_calls_dropped.load(Ordering::Relaxed), before + 5);
+    // Text before the `{`: framed only if it is blanks `trim` drops, where
+    // `call_made` parses from, so streamed and decided whole agree: U+3000
+    // is (a call), `é` isn't (never framed, never made: reasoning).
+    for (pre, made) in [("\u{3000}", true), ("é", false), (" é ", false)] {
+        let ids = tok.encode_special(&format!("{head}{pre}{{\"city\": \"Paris\"}}<|call|>"));
+        let (c0, r0, s0) = run(&ids, false);
+        let (c1, r1, s1) = run(&ids, true);
+        assert_eq!((s1, r1.as_str()), (s0, r0.as_str()), "{pre:?}");
+        let (calls, _, head_at) = parse(&c1);
+        assert_eq!(calls, parse(&c0).0, "{pre:?}");
+        assert_eq!(
+            (calls.len(), head_at.is_some()),
+            (usize::from(made), made),
+            "{pre:?}: {c1:?}"
+        );
+    }
+}
+
 fn rtools_of(params: &Value) -> Value {
     json!([{"type": "function", "name": "get_weather",
         "description": "Get the current weather in a city", "parameters": params}])
@@ -5270,8 +5658,9 @@ fn rtools_of(params: &Value) -> Value {
 /// gpt-oss-20b calls a tool for real (CUDA, greedy): asked for the weather
 /// with a get_weather tool it calls it (OpenAI shape, streamed and whole the
 /// same: reasoning in `reasoning_content`, the call's id and name in its
-/// first delta, then its arguments, no call in the finish chunk); given the
-/// result, it answers with it (also with `tools: []`); named tool_choice
+/// first delta, then its arguments a piece at a time as they are generated
+/// (#260; the tests' `tool_stream` is on), no call in the finish chunk);
+/// given the result, it answers with it (also with `tools: []`); named tool_choice
 /// calls at once; required calls one of the offered tools; Responses and
 /// ollama /api/chat call too; asked to repeat the call syntax, no endpoint
 /// (streamed or whole) returns a call made of that text.
@@ -5340,11 +5729,23 @@ fn serve_gptoss_tool_calls() {
         (sr.as_str(), sc.as_str(), sargs.as_str()),
         (reasoning, "", args)
     );
-    assert_eq!(deltas.len(), 2, "{deltas:?}");
+    // The head (id, name, no arguments yet), then the arguments in pieces
+    // (#260): each only `index` and `function.arguments`, never empty, and
+    // more than one (the object is several tokens). Their concatenation is
+    // the whole reply's arguments (above).
+    assert!(deltas.len() > 2, "{deltas:?}");
     assert!(deltas[0]["id"].as_str().unwrap().starts_with("call_"));
     assert_eq!(deltas[0]["type"], "function");
     assert_eq!(deltas[0]["function"]["name"], "get_weather");
     assert_eq!(deltas[0]["function"]["arguments"], "");
+    for d in &deltas[1..] {
+        assert_eq!(d.as_object().unwrap().len(), 2, "{d}");
+        assert_eq!(d["function"].as_object().unwrap().len(), 1, "{d}");
+        assert!(
+            !d["function"]["arguments"].as_str().unwrap().is_empty(),
+            "{d}"
+        );
+    }
 
     // The result goes back: the answer uses it, and the prompt reuses the cache.
     let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
