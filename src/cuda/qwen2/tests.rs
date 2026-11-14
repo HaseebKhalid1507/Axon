@@ -499,7 +499,7 @@ pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     }
 }
 
-/// The sanity backstops a debug build's FP8 gate keeps
+/// The sanity backstops of the FP8 checkpoint's always-on test
 /// (`numerics::assert_sane_vs_exact`), with no statistics: something was
 /// graded, every logit finite, and the whole-vocabulary max |dlogit| below
 /// 12 (`assert_graded_with`'s `Top1::Binomial` backstop).
