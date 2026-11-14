@@ -4,6 +4,7 @@
     scripts/soak.py <axon binary> <model.gguf> --hours H [--clients N] [--out DIR]
                     [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [--hogs K] [-- serve flags]
     scripts/soak.py report DIR            (re-read DIR/summary.json, print the verdict)
+    scripts/soak.py selftest              (the hog-reply check's rule, no server)
     scripts/soak.py summarise FILE [MIN]  (a markdown table of samples.csv or a job log, MIN-minute buckets)
 
 Starts `axon serve` itself (so it knows the pid), then N client threads run a
@@ -20,7 +21,8 @@ realistic mix until the deadline:
   invalid                    malformed JSON / bad params / wrong method: must be a 4xx
   burst                      every ~2 min one client fires 3x the slot count at once (503 allowed)
   hog (--hogs K)             K more clients, each a count that doesn't stop (2000-3000 tokens, greedy)
-                             after a prefix they share, back to back: the pool preempts (see Client.hog)
+                             after a prefix they share, back to back: the pool preempts (see Client.hog);
+                             every hog reply must be a prefix of the longest (HogRef)
 
 Every --sample-s seconds one CSV row (DIR/samples.csv, also printed as `CSV,...`
 on stdout so a remote log keeps it) records: server RSS, VRAM (nvidia-smi
@@ -44,7 +46,10 @@ Verdict (summary.json, exit 0 = PASS):
     up for a day, well above allocator noise (see docs/hardening.md).
   - after the load stops and the server idles, fds and threads are back at
     the pre-load baseline (+2 fds of slack for a lingering keep-alive).
-  - with --hogs: the pool really was under pressure. At the end /slots'
+  - with --hogs: every hog reply is a prefix of the longest one (the same
+    prompt, greedy: the requests that get preempted, unfed and refed have
+    checked output; a mismatch is class hog-mismatch, failing), and at
+    least 2 were compared. And the pool really was under pressure. At the end /slots'
     preempted and prefills_unfed and /metrics' axon_refeed_shared_tokens_total
     (sharing on) are all above 0, else the run is INCONCLUSIVE ("not
     evidence"): a soak meant to exercise preemption that never preempted
@@ -196,10 +201,41 @@ class Stats:
 
 # Classes that fail the soak.
 BAD = {"5xx", "unexpected-4xx", "unexpected-200", "dropped", "bad-body", "timeout", "other-status",
-       "503-undocumented", "slow-blocks-others"}
+       "503-undocumented", "slow-blocks-others", "hog-mismatch"}
 # accepted-unsupported: a request for a feature serve refuses today (n > 1, logit_bias) got a 200:
 # the feature shipped and the harness should move the case; reported, not failing.
 CLASSES = ["ok", "4xx-expected", "503", "cancelled", "accepted-unsupported"] + sorted(BAD)
+
+
+class HogRef:
+    """--hogs: the hogs' replies against each other (shady's review of #228). Every hog sends the same prompt,
+    greedy, with max_tokens 2000-3000, so in exact mode each reply is a prefix of the longest one so far, or that
+    one is a prefix of it (it becomes the longest). Anything else is a mismatch: Outcome hog-mismatch, failing.
+    The hogs are the requests that get preempted, unfed and refed, so this checks their output, not just that the
+    pressure happened."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.longest, self.n, self.mismatches = "", 0, 0
+
+    def check(self, text):
+        with self.lock:
+            self.n += 1
+            a, b = (text, self.longest) if len(text) <= len(self.longest) else (self.longest, text)
+            if b.startswith(a):
+                self.longest = b
+                return
+            self.mismatches += 1
+            i = next(k for k in range(len(a)) if a[k] != b[k])
+            detail = (f"hog reply of {len(text)} chars differs from the longest ({len(self.longest)}) at char {i}: "
+                      f"{text[max(0, i - 40):i + 40]!r} vs {self.longest[max(0, i - 40):i + 40]!r}")
+        raise Outcome("hog-mismatch", detail)
+
+    def summary(self):
+        with self.lock:
+            return {"compared": self.n, "longest_chars": len(self.longest), "mismatches": self.mismatches}
+
+
 # The documented back-pressure 503s (serve.rs): anything else is 503-undocumented.
 BACKPRESSURE = (b"too many queued requests", b"too many connections")
 
@@ -254,7 +290,7 @@ class Client:
         b.update(kw)
         return b
 
-    def stream(self, path, body, kind, close_after=None, slow=False):
+    def stream(self, path, body, kind, close_after=None, slow=False, check=None):
         t0 = time.perf_counter()
         s = None
         if slow:
@@ -272,7 +308,7 @@ class Client:
             r = c.getresponse()
             if r.status != 200:
                 classify_status(r.status, r.read(), True)
-            n, done, finish, usage = 0, False, None, None
+            n, done, finish, usage, text = 0, False, None, None, []
             rd = (lambda: (time.sleep(self.rng.uniform(0.02, 0.1)), r.read1(64))[1]) if slow else None
             for ev in sse_events(r, rd):
                 if ev == "[DONE]":
@@ -288,11 +324,15 @@ class Client:
                                          or ch.get("text")):
                         ttft = time.perf_counter() - t0
                     n += 1
+                    if check is not None:
+                        text.append(ch.get("text") or dl.get("content") or "")
                     finish = ch.get("finish_reason") or finish
                 if close_after is not None and n >= close_after:
                     raise Outcome("cancelled")
             if not done or finish is None or usage is None:
                 raise Outcome("bad-body", f"stream ended early: done={done} finish={finish} usage={usage}")
+            if check is not None:
+                check("".join(text))
             self.stats.add(kind, "ok", time.perf_counter() - t0, ttft)
         finally:
             c.close()
@@ -364,10 +404,11 @@ class Client:
         (engine.rs `admit_check`), so only replies past that, several at once on a pool smaller than their sum,
         make the engine preempt the youngest, unfeed prefills and refeed what it preempted (claiming its warm
         pages again). The default mix's replies are too short: #228's soaks (4.6 h each on 128 pages) evicted
-        thousands of warm pages and preempted nothing. The count is serve_paged_pressure's prompt."""
+        thousands of warm pages and preempted nothing. The count is serve_paged_pressure's prompt. Every reply
+        goes to HogRef: a prefix of the longest one, or a mismatch (failing)."""
         body = {"model": MODEL[0], "prompt": self.cfg.hog_prefix + "Count: 1, 2, 3, 4, 5,",
                 "max_tokens": self.rng.randint(2000, 3000), "temperature": 0}
-        self.stream("/v1/completions", body, "hog")
+        self.stream("/v1/completions", body, "hog", check=self.cfg.hog_ref.check)
 
     def disconnect(self):
         msgs = [{"role": "user", "content": "Count slowly from one to two hundred."}]
@@ -735,6 +776,10 @@ def verdict(rows, summary, cfg):
     sl = summary.get("slots_after")
     if sl is not None:
         checks["slots_idle"] = dict(sl, pass_=st(sl.get("busy", 1) == 0 and sl.get("queue_depth", 1) == 0))
+    h = summary.get("hog_replies")
+    if h is not None:
+        checks["hog_replies"] = dict(h, pass_="FAIL" if h["mismatches"] else "PASS" if h["compared"] >= 2
+                                     else "INCONCLUSIVE")
     p = summary.get("pressure")
     if p is not None:
         need = ("preempted", "prefills_unfed", "refeed_shared_tokens")
@@ -792,6 +837,23 @@ def summarise(path, bucket_min=30):
               f"{med('ttft_p50_ms'):.0f} |")
 
 
+def selftest():
+    """`soak.py selftest`: HogRef's rule without a server (prefixes and extensions pass, a difference fails)."""
+    r = HogRef()
+    for t in ("1, 2, 3", "1, 2, 3, 4, 5", "1, 2", "1, 2, 3, 4, 5", ""):
+        r.check(t)
+    assert r.summary() == {"compared": 5, "longest_chars": 13, "mismatches": 0}, r.summary()
+    for bad in ("1, 2, 4", "1, 2, 3, 4, 5, 6, 7".replace("4", "9")):
+        try:
+            r.check(bad)
+            raise AssertionError(f"no mismatch for {bad!r}")
+        except Outcome as o:
+            assert o.cls == "hog-mismatch" and "at char" in o.detail, o
+    assert r.summary() == {"compared": 7, "longest_chars": 13, "mismatches": 2}, r.summary()
+    print("selftest ok")
+    return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "summarise":
         summarise(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 30)
@@ -803,6 +865,8 @@ def main():
         v = s.get("verdict", "PASS" if s["pass"] else "FAIL")
         print(v, s.get("verdict_note", ""))
         return {"PASS": 0, "FAIL": 1}.get(v, 2)
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        return selftest()
     if len(sys.argv) > 1 and sys.argv[1] == "rejudge":
         a = sys.argv[2:]
         w = float(a[1]) if len(a) > 1 else 20
@@ -851,11 +915,12 @@ def main():
     cfg.agent_prefix = ("You are an agent with these rules. " + words(rng, cfg.ctx // 4))
     # Its own generator: the default mix's draws stay what they were without --hogs.
     cfg.hog_prefix = "Notes before counting. " + words(random.Random(cfg.seed + 7), 300) + "\n"
+    cfg.hog_ref = HogRef()
     sargs = ["--ctx", str(cfg.ctx)] + (["--parallel", str(cfg.slots)] if cfg.slots > 1 else [])
     srv = Server(cfg.axon, cfg.model, cfg.port, sargs + extra, cfg.out)
     print(f"loaded in {srv.load_s:.1f}s, pid {srv.pid}", flush=True)
     MODEL[0] = json.loads(request(cfg.port, "GET", "/v1/models", None)[2])["data"][0]["id"]
-    summary = {"args": {k: v for k, v in vars(cfg).items() if k not in ("agent_prefix", "hog_prefix")}, "extra": extra,
+    summary = {"args": {k: v for k, v in vars(cfg).items() if k not in ("agent_prefix", "hog_prefix", "hog_ref")}, "extra": extra,
                "load_s": round(srv.load_s, 1), "identity_runs": 0, "identity_mismatches": []}
     t_start = time.time()
     rows = []
@@ -937,6 +1002,7 @@ def main():
         summary["slots_after"] = slots_idle(cfg)
         if cfg.hogs:
             summary["pressure"] = pressure_counts(cfg)
+            summary["hog_replies"] = cfg.hog_ref.summary()
         summary["totals"] = dict(sorted(stats.total.items()))
         summary["requests"] = stats.requests
         summary["lat_max_s"] = stats.lat_max

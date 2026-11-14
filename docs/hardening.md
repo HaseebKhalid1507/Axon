@@ -41,7 +41,11 @@ on a pool smaller than their sum. The mix above never does: #228's two soaks (4.
 evicted thousands of warm pages and preempted nothing. `--hogs K` (K ≥ 3, with `AXON_KV_PAGES` under K × 45) adds
 those replies, and the verdict then also requires the pressure to have happened: at the end, `/slots`' `preempted`
 and `prefills_unfed` and `/metrics`' `axon_refeed_shared_tokens_total` (sharing on) above 0. Otherwise the check
-`pressure` is INCONCLUSIVE, "not evidence": the run says nothing about preemption, whatever else passed.
+`pressure` is INCONCLUSIVE, "not evidence": the run says nothing about preemption, whatever else passed. The hogs'
+replies are checked too (shady's review of #228): the same prompt, greedy, so each must be a prefix of the longest
+(`HogRef`; else class `hog-mismatch`, failing), and check `hog_replies` needs at least 2 compared. Those are the
+requests that get preempted, unfed and refed, so their output is checked, not only that the pressure happened.
+`scripts/soak.py selftest` checks the rule without a server.
 
 **Priming** (default; `--no-prime` skips it). Before the reference identity run, the harness sends every batch mix
 the slots can form: for nb = 1..S concurrent streams, with ng = 0..nb of them greedy, twice each. On CUDA the
