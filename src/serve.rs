@@ -714,8 +714,16 @@ impl TextOut<'_> {
         if !scan.began() || name.is_empty() {
             return String::new();
         }
+        // Framed only where `call_made` parses from: what comes before the
+        // `{` must be blanks its `trim` drops. (`ArgScan` skips any non-ASCII
+        // byte there; with other text first the call is never made, so it
+        // isn't framed: reasoning, as in decide-whole mode.)
+        let at = args.find('{').unwrap_or(0);
+        if !args[..at].trim().is_empty() {
+            return String::new();
+        }
         *framed = true;
-        let a = &args[args.find('{').unwrap_or(0)..];
+        let a = &args[at..];
         tools::harmony_call_open(to) + &tools::harmony_text(a)
     }
 

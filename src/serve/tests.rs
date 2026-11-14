@@ -1809,8 +1809,8 @@ fn serve_tool_calls() {
 /// way, so the same call. A call cut off by max_tokens is a call with what
 /// was written (finish "length", `axon_tool_calls_invalid_total`) where
 /// decide-whole mode returns the block as content
-/// (`axon_tool_calls_dropped_total`). Streamed and whole replies agree in
-/// both modes.
+/// (`axon_tool_calls_dropped_total`); on /v1/responses its item is
+/// `incomplete`. Streamed and whole replies agree in both modes.
 #[test]
 fn serve_tool_calls_streamed() {
     let Some(p) = crate::testutil::model_path() else {
@@ -1900,6 +1900,8 @@ fn serve_tool_calls_streamed() {
         let rbody = json!({"input": ask, "tools": rtools,
                            "tool_choice": {"type": "function", "name": "get_weather"},
                            "temperature": 0, "max_output_tokens": 48, "stream": true});
+        let mut rbody_whole = rbody.clone();
+        rbody_whole["stream"] = json!(false);
         let r = post(a, "/v1/responses", rbody);
         let ev = responses_events(&r);
         let added = ev
@@ -1958,6 +1960,51 @@ fn serve_tool_calls_streamed() {
             assert_eq!((content.as_str(), calls.len()), (text, 0));
             assert_eq!(counts, (0.0, 2.0));
         }
+        // The same cut on /v1/responses: the call is the reply's last item,
+        // its arguments not an object, so its item is `incomplete` (as
+        // OpenAI marks it), whole and streamed alike. Decide-whole: the
+        // block is the incomplete message.
+        let rcut = |stream: bool| {
+            json!({"input": ask, "tools": rtools,
+                   "tool_choice": {"type": "function", "name": "get_weather"},
+                   "temperature": 0, "max_output_tokens": 4, "stream": stream})
+        };
+        let r = post(a, "/v1/responses", rcut(false)).json();
+        assert_eq!(r["status"], "incomplete", "{r}");
+        let (_, _, rcalls, sr) = responses_stream(&post(a, "/v1/responses", rcut(true)));
+        let shape = |r: &Value| -> Vec<(Value, Value, Value)> {
+            let items = r["output"].as_array().unwrap();
+            items
+                .iter()
+                .map(|i| {
+                    (
+                        i["type"].clone(),
+                        i["status"].clone(),
+                        i["arguments"].clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(shape(&sr), shape(&r), "streamed {sr} whole {r}");
+        let last = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["status"], "incomplete", "{r}");
+        if streaming {
+            assert_eq!(last["type"], "function_call", "{r}");
+            let cut = last["arguments"].as_str().unwrap();
+            assert!(args.starts_with(cut) && cut.len() < args.len(), "{r}");
+            assert_eq!(rcalls, [("get_weather".to_string(), cut.to_string())]);
+        } else {
+            assert_eq!(last["type"], "message", "{r}");
+            assert!(rcalls.is_empty(), "{sr}");
+        }
+        // A whole call (not cut) stays `completed`.
+        let r = post(a, "/v1/responses", rbody_whole.clone()).json();
+        let it = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            (&it["type"], &it["status"]),
+            (&json!("function_call"), &json!("completed")),
+            "{r}"
+        );
         seen.push((name.to_string(), args.to_string()));
     }
     assert_eq!(seen[0], seen[1], "the same tokens, the same call");
@@ -5585,6 +5632,22 @@ fn harmony_calls_streamed() {
         assert_eq!(r, v);
     }
     assert_eq!(mx.tool_calls_dropped.load(Ordering::Relaxed), before + 5);
+    // Text before the `{`: framed only if it is blanks `trim` drops, where
+    // `call_made` parses from, so streamed and decided whole agree: U+3000
+    // is (a call), `é` isn't (never framed, never made: reasoning).
+    for (pre, made) in [("\u{3000}", true), ("é", false), (" é ", false)] {
+        let ids = tok.encode_special(&format!("{head}{pre}{{\"city\": \"Paris\"}}<|call|>"));
+        let (c0, r0, s0) = run(&ids, false);
+        let (c1, r1, s1) = run(&ids, true);
+        assert_eq!((s1, r1.as_str()), (s0, r0.as_str()), "{pre:?}");
+        let (calls, _, head_at) = parse(&c1);
+        assert_eq!(calls, parse(&c0).0, "{pre:?}");
+        assert_eq!(
+            (calls.len(), head_at.is_some()),
+            (usize::from(made), made),
+            "{pre:?}: {c1:?}"
+        );
+    }
 }
 
 fn rtools_of(params: &Value) -> Value {

@@ -671,6 +671,15 @@ fn status_of(finish: &str) -> &'static str {
     }
 }
 
+/// A streamed call whose arguments aren't a JSON object (cut off, or gone
+/// bad: counted in `axon_tool_calls_invalid_total`). If it is the reply's
+/// last item and the reply was cut off (`status_of`), it is what the token
+/// limit cut, and its item is `incomplete`, as OpenAI marks it; else
+/// `completed`.
+fn not_object(c: &Call) -> bool {
+    !matches!(tools::parse_json(&c.args), Some(J::Obj(_)))
+}
+
 fn item_id(kind: &str, id: &str, n: usize) -> String {
     format!("{kind}_{}{n}", id.trim_start_matches("resp-"))
 }
@@ -789,6 +798,8 @@ pub(super) fn whole(
                     let mut run = String::new();
                     let mut msgs = 0;
                     let n = ps.iter().filter(|p| matches!(p, Piece::Call(_))).count();
+                    // The last item, if a call: (its index, not an object).
+                    let mut last_call = None;
                     for p in ps {
                         match p {
                             Piece::Text(t) => {
@@ -805,11 +816,19 @@ pub(super) fn whole(
                                     ));
                                     msgs += 1;
                                 }
+                                last_call = Some((out.len(), not_object(&c)));
                                 out.push(call_item(&c, "completed", &c.args));
                                 calls.push(c);
                             }
                             Piece::Head(_) | Piece::Args(_) => {}
                         }
+                    }
+                    if let Some((i, true)) = last_call
+                        && run.is_empty()
+                        && status_of(finish) == "incomplete"
+                    {
+                        // Cut off by the token limit (`not_object`).
+                        out[i]["status"] = json!("incomplete");
                     }
                     if !run.is_empty() || n == 0 {
                         let st = status_of(finish);
@@ -882,10 +901,14 @@ enum Open {
         text: String,
     },
     /// A function call streamed as it is generated (#260): its item id, and
-    /// the call so far.
+    /// the call so far. `ended`: its `Piece::Call` came, but its arguments
+    /// aren't a JSON object, so it stays open until another item opens
+    /// (`completed`) or the reply ends (`incomplete` if cut off:
+    /// `not_object`).
     Call {
         fid: String,
         call: Call,
+        ended: bool,
     },
 }
 
@@ -936,7 +959,7 @@ pub(super) fn stream(
         let n = out.len();
         match std::mem::replace(open, Open::None) {
             Open::None => {}
-            Open::Call { fid, call } => {
+            Open::Call { fid, call, .. } => {
                 // Only an error ends a call before its `Piece::Call`.
                 let st = if status == "completed" {
                     "completed"
@@ -1054,10 +1077,14 @@ pub(super) fn stream(
                     "response.output_item.added",
                     json!({"output_index": out.len(), "item": call_item(&h, "in_progress", "")}),
                 );
-                *open = Open::Call { fid, call: h };
+                *open = Open::Call {
+                    fid,
+                    call: h,
+                    ended: false,
+                };
             }
             Piece::Args(a) => {
-                if let Open::Call { fid, call } = open {
+                if let Open::Call { fid, call, .. } = open {
                     call.args.push_str(&a);
                     sse.ev(
                         "response.function_call_arguments.delta",
@@ -1068,9 +1095,15 @@ pub(super) fn stream(
             Piece::Call(c) => {
                 acc.calls.push(c.clone());
                 match open {
-                    Open::Call { call, .. } if call.id == c.id => {
+                    Open::Call { call, ended, .. } if call.id == c.id => {
+                        let held = not_object(&c);
                         *call = c;
-                        close(sse, open, out, "completed");
+                        *ended = true;
+                        if !held {
+                            close(sse, open, out, "completed");
+                        }
+                        // Reasoning that came during the call follows it
+                        // (and closes it, if held).
                         if !acc.wait.is_empty() {
                             let r = std::mem::take(&mut acc.wait);
                             reasoning_delta(sse, open, out, &r);
@@ -1089,7 +1122,7 @@ pub(super) fn stream(
                 Event::Text { content, reasoning } => {
                     if !reasoning.is_empty() {
                         acc.reasoning.push_str(&reasoning);
-                        if matches!(open, Open::Call { .. }) {
+                        if matches!(open, Open::Call { ended: false, .. }) {
                             acc.wait.push_str(&reasoning);
                         } else {
                             reasoning_delta(&mut sse, &mut open, &mut out, &reasoning);

@@ -331,24 +331,35 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   the object's closing `}`. A reply cut off mid-call is a call with what was written. Either
   way `arguments` isn't a valid JSON object, and the call is counted in
   `axon_tool_calls_invalid_total`. A harness then reports the call as failed to the model,
-  which can try again; before, the block came back as text, which ended codex's turn. Other
-  text after the call's object ends the block there: `<tool_call>` opens the next call
-  (#259's "a valid object followed by a second `<tool_call>`"), anything else is content.
-- **`AXON_TOOL_STREAM=0`** turns this off: every call goes out once its block is decided, as
+  which can try again; before, the block came back as text, which ended codex's turn. This
+  holds **streamed or not**: a whole (`"stream": false`) reply decides its calls the same way,
+  so the two always agree (`AXON_TOOL_STREAM=0` restores the old rule for both). On
+  `/v1/responses` a call the token limit cut (the reply's last item, its arguments not a JSON
+  object, in an `incomplete` response) has `status: "incomplete"`, as OpenAI marks it; any
+  other call is `completed`. A stop string that hits inside a call's arguments ends it the same
+  way, with `finish_reason: "tool_calls"`. Other text after the call's object ends the block
+  there: `<tool_call>` opens the next call (#259's "a valid object followed by a second
+  `<tool_call>`"), anything else is content, less the block's own `</tool_call>` if it comes
+  later (the first one before the next `<tool_call>`), so axon's framing never shows in
+  `content`.
+- **`AXON_TOOL_STREAM=0`** (exactly `0`) turns this off: every call goes out once its block is decided, as
   two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
   text when the reply ends), and a block that isn't a JSON object with a string `"name"`
   (invalid JSON, or cut off mid-call) is returned as `content`, so `arguments` is always
   valid JSON. The ollama routes always work this way (an ollama call is a whole object).
 - Qwen3's reasoning still comes as `reasoning_content`. gpt-oss: its calls stream the same
-  way once their arguments open with `{`. A call whose arguments never do (a number, an
-  array, nothing) is not a call: its text comes back as `reasoning_content` (it was on the
+  way once their arguments open with `{` (after nothing but blanks). A call whose arguments
+  never do (a number, an array, nothing, other text first) is not a call: its text comes back as `reasoning_content` (it was on the
   commentary channel), never as `content`, and is counted in `axon_tool_calls_dropped_total`.
   With `AXON_TOOL_STREAM=0` that also holds for a call that ends without a whole JSON
   object (a header, its `<|call|>`, the token limit).
 - The parser reads tags and JSON, not prose. `<tool_call>` written in ordinary text opens a
-  block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
-  JSON string value ends the block early (streamed, the call is cut there; with
-  `AXON_TOOL_STREAM=0` it fails to parse and is returned as content).
+  block (which comes back as content if it isn't a call). In a call's arguments, a
+  `</tool_call>` inside a JSON string is the string's text, so a call writing a file that
+  mentions the tag stays whole; anywhere else it ends the block (a string the model leaves
+  open goes bad at the newline Hermes writes before the tag, so the tag still ends the
+  block). With `AXON_TOOL_STREAM=0` the tag ends the block wherever it is, as before: inside a
+  string, the block fails to parse and is returned as content.
 - The format is chosen per model family from the vocabulary (ChatML with or without
   `<think>`, or Llama 3's headers), not read from the GGUF's template. Models of a known
   family with a different tool format, such as Qwen3-Coder's XML `<function=...>` calls,

@@ -1687,6 +1687,10 @@ pub struct Parser {
     metrics: Option<std::sync::Arc<super::ops::Metrics>>,
     /// Hermes: inside a block. Json: holding the reply.
     inside: bool,
+    /// Stream mode, Hermes: the last block ended without its tag (other
+    /// text after its object), so its `</tool_call>` may still come: the
+    /// first one before the next `<tool_call>` is dropped.
+    stray: bool,
     /// Json: the reply's first non-blank character is still to come.
     undecided: bool,
     /// Text not yet decided (a block's body; a possible `<tool_call>` start).
@@ -1717,6 +1721,7 @@ impl Parser {
             n_invalid: 0,
             metrics: None,
             inside: false,
+            stray: false,
             undecided: kind == Kind::Json,
             buf: String::new(),
             scan: 0,

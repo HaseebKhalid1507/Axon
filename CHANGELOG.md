@@ -17,8 +17,14 @@ measurements behind them.
 - **Changed: once its head is out, a call is a call.** Arguments that go bad after that point (#259's unescaped
   quotes, raw newlines, bad escapes) come back as written, and a reply cut off mid-call comes back as a call with what
   was written. Either way `arguments` isn't valid JSON, as OpenAI's API allows, and the call is counted in the new
-  `axon_tool_calls_invalid_total`. Before, such a block came back as content, which ended codex's turn. Other text
-  after a call's object ends its block: a `<tool_call>` there opens the next call.
+  `axon_tool_calls_invalid_total`. Before, such a block came back as content, which ended codex's turn. This applies
+  streamed or not: a `"stream": false` reply decides calls the same way. Other text after a call's object ends its
+  block: a `<tool_call>` there opens the next call, and the block's own `</tool_call>`, if it comes later, is dropped
+  rather than shown as content.
+- On `/v1/responses` a call cut off by the token limit has item `status: "incomplete"` (it was `completed`).
+- In a call's arguments a `</tool_call>` inside a JSON string is the string's text (it used to cut the call there).
+- gpt-oss: a call is framed only when nothing but blanks comes before its arguments' `{`, where the call is parsed
+  from (other text first: reasoning, as before).
 - Llama 3.1/3.2's JSON calls and gpt-oss's calls stream the same way (gpt-oss once its arguments open with `{`).
 - `axon_tool_calls_dropped_total` now also counts `<tool_call>` blocks and Llama JSON replies returned as content.
   It used to count gpt-oss calls only.

@@ -1154,23 +1154,90 @@ fn stream_hermes_bad_arguments() {
         "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n<tool_call>\n{\"name\": \"b\", \"arguments\": {\"x\": 1}}\n</tool_call>",
         &[call("a", "{}"), call("b", "{\"x\": 1}")],
     );
-    // Other text after the object ends the block there (content); text in
-    // the object after the arguments is content too.
+    // Other text after the object ends the block there (content), less the
+    // block's `</tool_call>` (the first before the next `<tool_call>`); text
+    // in the object after the arguments is content too.
     every_split_stream(
         h,
         "<tool_call>{\"name\": \"a\", \"arguments\": {}}} x</tool_call> y",
-        &[call("a", "{}"), text("} x</tool_call> y")],
+        &[call("a", "{}"), text("} x y")],
+    );
+    // Only the first: a second is content.
+    every_split_stream(
+        h,
+        "<tool_call>{\"name\": \"a\", \"arguments\": {}}} x</tool_call> y</tool_call>z",
+        &[call("a", "{}"), text("} x y</tool_call>z")],
+    );
+    // A `<tool_call>` first opens the next block; its own tag closes it, and
+    // a later one is content.
+    every_split_stream(
+        h,
+        "<tool_call>{\"name\": \"a\", \"arguments\": {}}}<tool_call>{\"name\": \"b\", \"arguments\": {}}</tool_call> y</tool_call>",
+        &[
+            call("a", "{}"),
+            text("}"),
+            call("b", "{}"),
+            text("y</tool_call>"),
+        ],
+    );
+    // A block that ended with its tag: a later `</tool_call>` is content.
+    every_split_stream(
+        h,
+        "<tool_call>{\"name\": \"a\", \"arguments\": {}}</tool_call> y</tool_call>",
+        &[call("a", "{}"), text("y</tool_call>")],
+    );
+    // The tag cut short at the reply's end is content.
+    every_split_stream(
+        h,
+        "<tool_call>{\"name\": \"a\", \"arguments\": {}}} x</tool_",
+        &[call("a", "{}"), text("} x</tool_")],
     );
     every_split_stream(
         h,
         "<tool_call>{\"name\": \"a\", \"arguments\": {\"k\": 1}, oops}</tool_call>after",
         &[call("a", "{\"k\": 1}"), text("oops}after")],
     );
-    // `</tool_call>` inside a string still ends the block: the call is cut.
+    // `</tool_call>` inside a string in the arguments (still JSON) is the
+    // string's text: the call is whole.
     every_split_stream(
         h,
-        "<tool_call>{\"name\": \"a\", \"arguments\": {\"s\": \"x</tool_call>y\"}}</tool_call>",
-        &[call("a", "{\"s\": \"x"), text("y\"}}</tool_call>")],
+        r#"<tool_call>{"name": "a", "arguments": {"s": "x</tool_call>y"}}</tool_call>"#,
+        &[call("a", r#"{"s": "x</tool_call>y"}"#)],
+    );
+    every_split_stream(
+        h,
+        "<tool_call>\n{\"name\": \"a\", \"arguments\": {\"s\": \"</tool_call></tool_call>\\n\"}}\n</tool_call>",
+        &[call("a", r#"{"s": "</tool_call></tool_call>\n"}"#)],
+    );
+    // Not in a string, or after an escape began: the block ends there.
+    every_split_stream(
+        h,
+        r#"<tool_call>{"name": "a", "arguments": {"s": 1</tool_call>z"#,
+        &[call("a", r#"{"s": 1"#), text("z")],
+    );
+    every_split_stream(
+        h,
+        r#"<tool_call>{"name": "a", "arguments": {"s": "x\</tool_call>z"#,
+        &[call("a", r#"{"s": "x\"#), text("z")],
+    );
+    // Arguments gone bad (Raw): the tag ends the block, quotes or not.
+    every_split_stream(
+        h,
+        r#"<tool_call>{"name": "a", "arguments": {"s": "x"y"</tool_call>z"#,
+        &[call("a", r#"{"s": "x"y""#), text("z")],
+    );
+    // A string left open meets the newline before the tag (a raw control
+    // byte: bad), so the tag still ends the block.
+    every_split_stream(
+        h,
+        "<tool_call>\n{\"name\": \"a\", \"arguments\": {\"s\": \"x\\\"}}\n</tool_call>after",
+        &[call("a", r#"{"s": "x\"}}"#), text("after")],
+    );
+    // Before the commit point (the name's string): the block ends, content.
+    every_split_stream(
+        h,
+        r#"<tool_call>{"name": "a</tool_call>b"#,
+        &[text(r#"<tool_call>{"name": "a</tool_call>b"#)],
     );
 }
 

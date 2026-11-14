@@ -37,12 +37,24 @@
 //! - **After the object** whitespace and `</tool_call>` end the block. Other
 //!   text ends it without its tag: a `<tool_call>` there opens the next block
 //!   (#259's "a valid object followed by a second `<tool_call>`"), anything
-//!   else is content. Llama: `;` and another object is the next call.
+//!   else is content, less the block's own `</tool_call>` if it comes later
+//!   (the first one before the next `<tool_call>`: a framing tag in content
+//!   would go back to the model in the next turn's history, and junk inside
+//!   the object already drops it). Llama: `;` and another object is the next
+//!   call.
 //!
-//! `</tool_call>` ends a block wherever it appears, inside a JSON string too
-//! (as in decide-whole mode). The pieces don't depend on how the text is cut
-//! into pushes: every decision is made at a byte, and text is only held while
-//! it may still be `</tool_call>`, or the end of arguments that went bad.
+//! `</tool_call>` ends a block wherever it appears (as in decide-whole mode),
+//! but one: inside a JSON string in a call's arguments while they are still
+//! JSON (the scan knows), it is the string's text, so a call writing a file
+//! that mentions the tag stays whole. A string the model leaves open can't
+//! swallow the block's end: Hermes writes a newline before `</tool_call>`,
+//! and a raw newline is a byte no JSON string holds, so the arguments go bad
+//! there (Raw) and the tag ends the block. Before the commit point, in
+//! arguments gone bad, and after them, the tag ends the block. (#262's
+//! reviews; constrained decoding keeps this order.) The pieces don't depend
+//! on how the text is cut into pushes: every decision is made at a byte, and
+//! text is only held while it may still be `</tool_call>`, or the end of
+//! arguments that went bad.
 
 use super::{CLOSE, Call, J, Kind, MAX_DEPTH, OPEN, Parser, Piece, call_id, call_of, parse_json};
 
@@ -177,6 +189,19 @@ impl CallScan {
             Some(Some(n)) => Some(n),
             _ => None,
         }
+    }
+
+    /// Inside a string, with no escape begun: any byte but `"`, `\` and
+    /// controls is the string's text.
+    fn in_plain_string(&self) -> bool {
+        matches!(
+            self.st,
+            St::Str {
+                esc: false,
+                hex: 0,
+                ..
+            }
+        )
     }
 
     /// One more byte of the text.
@@ -434,6 +459,12 @@ pub(super) struct Block {
 }
 
 impl Block {
+    /// In a call's arguments, still JSON, inside a string: `</tool_call>`
+    /// here is the string's text.
+    fn in_args_string(&self) -> bool {
+        self.st == BSt::Args && self.scan.in_plain_string()
+    }
+
     pub(super) fn new(kind: Kind, pre: String) -> Block {
         Block {
             st: BSt::Head,
@@ -473,23 +504,46 @@ impl Parser {
     pub(super) fn hermes_stream(&mut self, out: &mut Vec<Piece>) {
         loop {
             if !self.inside {
-                if let Some(at) = self.buf.find(OPEN) {
+                let open = self.buf.find(OPEN);
+                // After a block that ended without its tag: its
+                // `</tool_call>`, if it comes before the next block, is
+                // dropped.
+                let stray = if self.stray {
+                    let close = self.buf.find(CLOSE);
+                    close.filter(|&at| open.is_none_or(|o| at < o))
+                } else {
+                    None
+                };
+                if let Some(at) = stray {
+                    let text = self.buf[..at].to_string();
+                    self.buf.drain(..at + CLOSE.len());
+                    self.content(&text, out);
+                    self.stray = false;
+                    continue;
+                }
+                if let Some(at) = open {
                     let text = self.buf[..at].to_string();
                     self.buf.drain(..at + OPEN.len());
                     self.content(&text, out);
                     self.inside = true;
+                    self.stray = false;
                     self.blk = None;
                     continue;
                 }
-                let cut = self.buf.len() - tag_start(&self.buf, OPEN);
+                // Text that may still be a tag waits.
+                let mut hold = tag_start(&self.buf, OPEN);
+                if self.stray {
+                    hold = hold.max(tag_start(&self.buf, CLOSE));
+                }
+                let cut = self.buf.len() - hold;
                 let text: String = self.buf.drain(..cut).collect();
                 if !text.is_empty() {
                     self.content(&text, out);
                 }
                 return;
             }
-            // The end tag ends the block wherever it is; text that may be
-            // its start waits.
+            // The end tag ends the block (but inside a string in a call's
+            // arguments: `in_args_string`); text that may be its start waits.
             let close = self.buf.find(CLOSE);
             let upto = close.unwrap_or(self.buf.len() - tag_start(&self.buf, CLOSE));
             let text: String = self.buf.drain(..upto).collect();
@@ -498,11 +552,18 @@ impl Parser {
                 // its tag), and that text is outside it.
                 self.buf.insert_str(0, &text[i..]);
                 self.inside = false;
+                self.stray = true;
                 self.blk = None;
                 continue;
             }
             if close.is_none() {
                 return;
+            }
+            if self.blk.as_ref().is_some_and(Block::in_args_string) {
+                let tag: String = self.buf.drain(..CLOSE.len()).collect();
+                let ended = self.feed_block(&tag, out);
+                debug_assert!(ended.is_none(), "a string's text");
+                continue;
             }
             self.buf.drain(..CLOSE.len());
             self.end_block(true, out);
