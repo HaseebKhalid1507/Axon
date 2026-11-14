@@ -1013,6 +1013,82 @@ fn verify_cands_masked_rows() {
     }
 }
 
+/// `lm::verify_masked_via` and `lm::cands_masked_via` (the pipeline's and
+/// the CPU/GPU split's routes) == the default per row, on a vocabulary
+/// past CAND_MAX: unmasked rows (CAND_MAX's best cut to k), broad masks
+/// (the allowed kept from the CAND_MAX best) and masks whose tokens are all
+/// below the CAND_MAX best (the position run again for its logits); and
+/// past CAND_MAX's k, row by row.
+#[test]
+fn masked_via_rows() {
+    use crate::lm::{cands_masked_via, verify_masked_via};
+    use crate::sample::{CAND_MAX, CandSpec, cands, cands_masked};
+    let (v, sp) = toy_vocab(3, 700);
+    let net = Toy::new(v.clone(), &sp);
+    let n = v.len();
+    let mut s = 0x5eed_u64;
+    let toks: Vec<u32> = (0..20).map(|_| (xs(&mut s) % 900) as u32).collect();
+    let masks: Vec<Option<TokenMask>> = (0..toks.len())
+        .map(|b| match b % 3 {
+            0 => None,
+            1 => Some(TokenMask::from_ids(
+                n,
+                &(0..n as u32)
+                    .filter(|j| j % 2 == b as u32 % 2)
+                    .collect::<Vec<_>>(),
+            )),
+            _ => Some(TokenMask::from_ids(
+                n,
+                &(0..1 + b / 3 % 2)
+                    .map(|_| (xs(&mut s) % n as u64) as u32)
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    let mrefs: Vec<Option<&TokenMask>> = masks.iter().map(Option::as_ref).collect();
+    for k in [5, CAND_MAX + 44] {
+        let spec = CandSpec {
+            k,
+            penalty: 1.2,
+            last_n: 8,
+        };
+        let mut c1 = net.new_cache(32);
+        let rows = verify_masked_via(&net, &toks, 0, &mut c1, &spec, &toks, &mrefs);
+        let mut below = 0;
+        for (b, row) in rows.iter().enumerate() {
+            let r = &toks[..=b];
+            // The row's position alone, after the tokens before it.
+            let mut c2 = net.new_cache(32);
+            net.feed_batch(&toks[..b], 0, &mut c2);
+            let mut c3 = c2.clone();
+            let mut l = net.forward(toks[b], b, &mut c2);
+            let want = match mrefs[b] {
+                Some(m) => {
+                    let mut best = l.clone();
+                    let top = cands(
+                        &mut best,
+                        &CandSpec {
+                            k: CAND_MAX,
+                            ..spec
+                        },
+                        r,
+                    );
+                    below += top.iter().all(|c| !m.allows(c.id)) as usize;
+                    assert_eq!(
+                        cands_masked_via(&net, toks[b], b, &mut c3, &spec, r, m),
+                        cands_masked(&mut l.clone(), &spec, r, m),
+                        "k {k}: cands_masked_via row {b}"
+                    );
+                    cands_masked(&mut l, &spec, r, m)
+                }
+                None => cands(&mut l, &spec, r),
+            };
+            assert_eq!(row, &want, "k {k}: verify_masked_via row {b}");
+        }
+        assert!(below > 0, "k {k}: no row needed its logits");
+    }
+}
+
 /// The call the mask-cost benches decode: a string with quotes, escapes
 /// and a backslash, numbers, nesting, a literal.
 pub(super) const COST_CALL: &str = "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i \

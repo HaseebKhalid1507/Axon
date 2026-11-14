@@ -39,9 +39,11 @@
   CAND_MAX best, and the allowed ones are kept. When too few are allowed, the step's logits row comes back from the
   device and the host selects (`MASK_FALLBACKS` counts it). The spec's open point: the solo `cands` path's row
   stays readable in the cache's `logits`, because the sampling step's head GEMV writes it there and `samp_topk`
-  reads it as `const float*` ("the logits buffer is left alone"). The batched masked verify takes the device path
-  when its rows fit one head launch (<= `HEAD_SUB` = 16 rows, all still in the scratch), else row by row.
-  `RowHead::Sample` gains `mask`. A pool step asks CAND_MAX for masked rows and falls back to `step_row_logits`.
+  reads it as `const float*` ("the logits buffer is left alone"). The batched masked verify runs in passes of at
+  most `HEAD_SUB` = 16 rows (one head launch each, so a pass's rows are all still in the scratch for a fallback;
+  the fix round's change, before it a verify past 16 rows went row by row). The pipeline and the CPU/GPU split
+  verify in their own batched passes (`lm::verify_masked_via`, fix round). `RowHead::Sample` gains `mask`. A pool
+  step asks CAND_MAX for masked rows and falls back to `step_row_logits`.
 - **Serve**: `Opts::constrain` / `AXON_CONSTRAIN=1`. The grammar is built once at load, for a Qwen2.5-family
   template. A request with tools and `tool_choice` auto gets a `Constraint` (`Job.constraint`). It goes along to
   the solo path (`generate`), into the batch on handover, through preemption and refeed. A constrained reply's
@@ -65,7 +67,7 @@ through axon-run. "pod1"/"pod2" are RTX 4090 (sm_89) pods; bella is an RTX 5070 
 | clippy -D warnings (lib, tests, bin; debug and release cfg), rustfmt | clean | axon-gate `constrain-4af6874-fast-clippy.log`; 977972c re-run clean |
 | fast tier, release suite (minus test-fast-skip.txt) | 879 passed, 0 failed, 65 ignored | 1114-074845-c0fd (pod1) |
 | fast tier, debug-assertion suite (CPU queue) | 897 passed, 0 failed, 65 ignored | 1114-074845-6d78 (pod2) |
-| full release suite, every test incl. big models, 3 shards | PASS: 962 tests, 897 passed, 0 failed, 65 ignored (shards 365 + 285 + 247 passed) | 1114-083143-9e1b: 34d4 (pod1), 8b95 (bella), 57fa (pod2) |
+| full release suite, every test incl. big models, 3 shards | PASS: 962 tests, 897 passed, 0 failed, 65 ignored (shards 365 + 285 + 247 passed) | 1114-083143-9e1b: 34d4 (pod1), 8b95 (pod1), 57fa (pod2) |
 | md5 of `gen` -n 64, base 0497708 vs candidate vs candidate with `AXON_CONSTRAIN=1`, same host | 50/50 equal (CPU 15, CUDA f16 20, CUDA q8 15: 0.5B, Qwen3-0.6B, Llama-3.2-1B on each, Qwen2.5-7B on CUDA f16; md5-gen.sh's 5 prompts, two long), 0 nonzero rc | 1114-074613-1847 (bella) |
 | model-gated contract, 0.5B (unit tests too) | 11 passed | 1114-073333-32e2 (pod1) |
 | model-gated contract, Qwen2.5-7B-Instruct Q4_K_M | 3 passed | 1114-073601-8253 (pod1) |
@@ -120,6 +122,7 @@ random tokens, and assert the counter grew.
   takes the call's end from a shadow `Constraint`. That is ruling 5's case, for PR B's Parser.
 - **Observed, not fixed here:** a 0.5B call sampled at temperature 1.2 with top_k off ran into spaces inside a
   string until `max_tokens` (finish_reason `length`). The grammar guarantees a call is valid JSON, not that it
-  ends. #260's runaway bound is the place for that.
+  ends. #262 (#260's fix) chose streaming and left a runaway bound out, so the bound is on PR B's list (whitespace
+  runs in frame positions, or a per-call token budget).
 - The step bench's first version took its reference tokens from a penalized decode, while its timed step is
   greedy. On the 7B they parted (job 1114-083127-af8e failed on that test-only mismatch); 977972c fixes the bench.
