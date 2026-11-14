@@ -7,6 +7,7 @@
 //! inside (one match per token; the CPU's results are the same bits as
 //! calling it directly).
 
+use crate::constrain::TokenMask;
 use crate::cuda::qwen2::pipeline::{PipelineCache, PipelineQwen2};
 use crate::cuda::qwen2::slots::CudaPool;
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
@@ -168,6 +169,59 @@ pub trait Lm: Sealed {
             })
             .collect()
     }
+
+    // Hidden with `forward_cands` (#118 item 8): `TokenMask` is a crate type.
+    #[doc(hidden)]
+    /// `forward_cands` restricted to the tokens `mask` allows (constrained
+    /// decoding): `sample::cands_masked` of the logits, the `spec.k` best
+    /// allowed tokens. Backends that keep logits off the host override it
+    /// to select on the device and keep the allowed ones, falling back to
+    /// the row's logits (still on the device) when the device's best hold
+    /// too few allowed tokens (`sample::masked_prefix`); an override must
+    /// give the same candidates for the same logits.
+    fn forward_cands_masked(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut Self::Cache,
+        spec: &CandSpec,
+        recent: &[u32],
+        mask: &TokenMask,
+    ) -> Vec<Cand> {
+        let mut l = self.forward(token, pos, cache);
+        sample::cands_masked(&mut l, spec, recent, mask)
+    }
+
+    // Hidden with `forward_cands` (#118 item 8).
+    #[doc(hidden)]
+    /// `verify_cands` with a mask per row (None: the row's `forward_cands`,
+    /// Some: its `forward_cands_masked`), as those on each `tokens[b]` in
+    /// order would give.
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut Self::Cache,
+        spec: &CandSpec,
+        recent: &[u32],
+        masks: &[Option<&TokenMask>],
+    ) -> Vec<Vec<Cand>> {
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        assert_eq!(masks.len(), nb, "a mask (or None) per row");
+        (0..nb)
+            .map(|b| {
+                let r = &recent[..n - nb + b + 1];
+                match masks[b] {
+                    None => self.forward_cands(tokens[b], start + b, cache, spec, r),
+                    Some(m) => self.forward_cands_masked(tokens[b], start + b, cache, spec, r, m),
+                }
+            })
+            .collect()
+    }
 }
 
 /// One token of a multi-sequence step (`BatchLm::step`): `token` at
@@ -186,7 +240,12 @@ pub enum RowHead<'a> {
     /// `forward_argmax`'s pick.
     Argmax,
     /// `forward_cands`'s candidates; `recent` ends with the row's token.
-    Sample { spec: CandSpec, recent: &'a [u32] },
+    /// With a `mask`: `forward_cands_masked`'s (constrained decoding).
+    Sample {
+        spec: CandSpec,
+        recent: &'a [u32],
+        mask: Option<&'a TokenMask>,
+    },
 }
 
 /// A row's result, per its `RowHead`.
@@ -474,6 +533,35 @@ impl Lm for Qwen2<'_> {
             .into_iter()
             .enumerate()
             .map(|(b, mut l)| sample::cands(&mut l, spec, &recent[..n - nb + b + 1]))
+            .collect()
+    }
+
+    /// One batched pass, as `verify_cands`.
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut KvCache,
+        spec: &CandSpec,
+        recent: &[u32],
+        masks: &[Option<&TokenMask>],
+    ) -> Vec<Vec<Cand>> {
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        assert_eq!(masks.len(), nb, "a mask (or None) per row");
+        self.verify_batch(tokens, start, cache)
+            .into_iter()
+            .enumerate()
+            .map(|(b, mut l)| {
+                let r = &recent[..n - nb + b + 1];
+                match masks[b] {
+                    None => sample::cands(&mut l, spec, r),
+                    Some(m) => sample::cands_masked(&mut l, spec, r, m),
+                }
+            })
             .collect()
     }
 }
@@ -1237,6 +1325,32 @@ impl Lm for Backend<'_> {
     ) -> Vec<Vec<Cand>> {
         dispatch!(self, cache, |n, c| n
             .verify_cands(tokens, start, c, spec, recent))
+    }
+
+    fn forward_cands_masked(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut BackendCache,
+        spec: &CandSpec,
+        recent: &[u32],
+        mask: &TokenMask,
+    ) -> Vec<Cand> {
+        dispatch!(self, cache, |n, c| n
+            .forward_cands_masked(token, pos, c, spec, recent, mask))
+    }
+
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut BackendCache,
+        spec: &CandSpec,
+        recent: &[u32],
+        masks: &[Option<&TokenMask>],
+    ) -> Vec<Vec<Cand>> {
+        dispatch!(self, cache, |n, c| n
+            .verify_cands_masked(tokens, start, c, spec, recent, masks))
     }
 
     fn prefill_logits(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) -> Vec<f32> {

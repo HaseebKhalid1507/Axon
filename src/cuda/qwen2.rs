@@ -35,6 +35,7 @@
 //! GPU, out of memory, unsupported model) are `Err`s from `new` / `try_cache`.
 
 use super::{Arg, DevBuf, Func, Gpu, Graph, HostBuf, Module};
+use crate::constrain::TokenMask;
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
 use crate::quant::fp8::F8_E4M3;
@@ -3528,6 +3529,127 @@ impl<'g> Lm for CudaQwen2<'g> {
         }
         self.verify_cands_tokens(cache, tokens, start, spec, recent)
             .unwrap_or_else(|e| Self::die(e))
+    }
+
+    /// The device's CAND_MAX best (sample.cu), the allowed ones kept
+    /// (`sample::masked_prefix`); too few allowed among them: the step's
+    /// logits row, still in the cache's `logits` (the sampling step's head
+    /// writes it there and sample.cu only reads it), comes back and the
+    /// host selects (`sample::cands_masked`). One step either way.
+    fn forward_cands_masked(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut CudaCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+        mask: &TokenMask,
+    ) -> Vec<Cand> {
+        assert_eq!(
+            recent.last(),
+            Some(&token),
+            "recent must end with the token"
+        );
+        if spec.k > CAND_MAX || self.f8 {
+            let mut l = Lm::forward(self, token, pos, cache);
+            return sample::cands_masked(&mut l, spec, recent, mask);
+        }
+        let dev = CandSpec {
+            k: CAND_MAX,
+            ..*spec
+        };
+        let r = (|| {
+            let c = self.cands(cache, token, pos, &dev, recent)?;
+            if let Some(c) = sample::masked_prefix(&c, spec.k, mask) {
+                return Ok(c);
+            }
+            sample::MASK_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let n = self.vocab * 4;
+            cache.host_out.copy_from(&cache.logits, 0, n)?;
+            let mut l: Vec<f32> = (cache.host_out.bytes_mut()?[..n].chunks_exact(4))
+                .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+                .collect();
+            Ok(sample::cands_masked(&mut l, spec, recent, mask))
+        })();
+        r.unwrap_or_else(|e: String| Self::die(e))
+    }
+
+    /// One batched pass with sample.cu on every row (CAND_MAX each; an
+    /// unmasked row keeps its first `spec.k`), when it fits one head launch
+    /// (at most HEAD_SUB rows: their logits rows are all still in the batch
+    /// scratch for a fallback). Longer, past CAND_MAX, or no mask at all:
+    /// `verify_cands`, or row by row (the same logits bit for bit).
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut CudaCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+        masks: &[Option<&TokenMask>],
+    ) -> Vec<Vec<Cand>> {
+        self.check_batch(tokens, start, cache);
+        assert_eq!(
+            cache.net, self.id,
+            "a CudaCache used with another CudaQwen2"
+        );
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        assert_eq!(masks.len(), nb, "a mask (or None) per row");
+        if masks.iter().all(Option::is_none) {
+            return self.verify_cands(tokens, start, cache, spec, recent);
+        }
+        let max = cache.b.as_ref().map_or(0, |b| b.max);
+        if spec.k > CAND_MAX || self.f8 || nb > batch::HEAD_SUB.min(max) {
+            return (0..nb)
+                .map(|b| {
+                    let r = &recent[..n - nb + b + 1];
+                    match masks[b] {
+                        None => self.forward_cands(tokens[b], start + b, cache, spec, r),
+                        Some(m) => {
+                            self.forward_cands_masked(tokens[b], start + b, cache, spec, r, m)
+                        }
+                    }
+                })
+                .collect();
+        }
+        let dev = CandSpec {
+            k: CAND_MAX,
+            ..*spec
+        };
+        let r = (|| {
+            let rows = self.verify_cands_tokens(cache, tokens, start, &dev, recent)?;
+            let v = self.vocab;
+            let mut out = Vec::with_capacity(nb);
+            for (b, mut c) in rows.into_iter().enumerate() {
+                let r = &recent[..n - nb + b + 1];
+                out.push(match masks[b] {
+                    None => {
+                        c.truncate(spec.k);
+                        c
+                    }
+                    Some(m) => match sample::masked_prefix(&c, spec.k, m) {
+                        Some(c) => c,
+                        None => {
+                            sample::MASK_FALLBACKS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let bb = cache.b.as_ref().expect("batch scratch");
+                            cache.host_out.copy_from(&bb.logits, b * v * 4, v * 4)?;
+                            let mut l: Vec<f32> = (cache.host_out.bytes_mut()?[..v * 4]
+                                .chunks_exact(4))
+                            .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+                            .collect();
+                            sample::cands_masked(&mut l, spec, r, m)
+                        }
+                    },
+                });
+            }
+            Ok(out)
+        })();
+        r.unwrap_or_else(|e: String| Self::die(e))
     }
 
     fn prefill_batch(&self) -> usize {

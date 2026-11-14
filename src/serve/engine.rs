@@ -487,6 +487,9 @@ enum End {
     Length,
     /// The client went away (cancelled, or a send failed).
     Gone,
+    /// The request can't go on (constrained decoding: its grammar allows
+    /// nothing): it fails with this error, the others go on.
+    Failed(String),
 }
 
 /// The pool and the requests in it.
@@ -1981,6 +1984,29 @@ impl<'a, 't> Batch<'a, 't> {
         if self.seqs.is_empty() {
             return Ok(());
         }
+        // Constrained requests' masks (None: free, the normal head). A
+        // request whose grammar allows nothing fails here, alone.
+        let mut masks = Vec::with_capacity(self.seqs.len());
+        let mut bad = Vec::new();
+        for (i, s) in self.seqs.iter_mut().enumerate() {
+            match s.job.constraint.as_mut().map(|c| c.mask()) {
+                None | Some(Ok(None)) => masks.push(None),
+                Some(Ok(Some(m))) => masks.push(Some(m)),
+                Some(Err(e)) => {
+                    bad.push((i, e.to_string()));
+                    masks.push(None);
+                }
+            }
+        }
+        // Highest index first: swap_remove keeps the lower ones in place.
+        for (i, e) in bad.into_iter().rev() {
+            masks.swap_remove(i);
+            let s = self.seqs.swap_remove(i);
+            self.fail(s, &e);
+        }
+        if self.seqs.is_empty() {
+            return Ok(());
+        }
         let specs: Vec<_> = self
             .seqs
             .iter()
@@ -1990,20 +2016,26 @@ impl<'a, 't> Batch<'a, 't> {
             .seqs
             .iter()
             .zip(&specs)
-            .map(|(s, spec)| {
+            .zip(&masks)
+            .map(|((s, spec), mask)| {
                 let h = &s.hist;
                 SeqRow {
                     token: h[h.len() - 1],
                     pos: h.len() - 1,
                     slot: s.slot,
-                    head: match spec {
-                        None => RowHead::Argmax,
+                    head: match (spec, mask) {
+                        (None, None) => RowHead::Argmax,
                         // The penalty window: the tail of the history (as
-                        // generate's forward_cands takes it).
-                        Some(spec) => RowHead::Sample {
-                            spec: *spec,
-                            recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
-                        },
+                        // generate's forward_cands takes it). Greedy and
+                        // masked: the first allowed of the best (no penalty).
+                        (spec, mask) => {
+                            let spec = spec.unwrap_or(crate::sample::GREEDY_SPEC);
+                            RowHead::Sample {
+                                spec,
+                                recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                mask: mask.as_ref(),
+                            }
+                        }
                     },
                 }
             })
@@ -2045,11 +2077,27 @@ impl<'a, 't> Batch<'a, 't> {
             }
             let next = match (o, s.sampler.as_mut()) {
                 (RowOut::Pick(t), None) => t,
+                (RowOut::Cands(c), _) if c.is_empty() => {
+                    done.push((
+                        i,
+                        End::Failed("constrained decoding: no candidate allowed".into()),
+                    ));
+                    continue;
+                }
+                // Greedy, masked (constrained): the first allowed.
+                (RowOut::Cands(c), None) => c[0].id,
                 (RowOut::Cands(c), Some(sm)) => sm.pick(&c),
                 _ => unreachable!("a row's result is its head's"),
             };
             if s.job.stop_ids.contains(&next) {
                 done.push((i, End::Stop));
+                continue;
+            }
+            if let Some(c) = s.job.constraint.as_mut()
+                && !c.accept(next)
+            {
+                let e = format!("constrained decoding: token {next} picked outside the mask");
+                done.push((i, End::Failed(e)));
                 continue;
             }
             s.ids.push(next);
@@ -2198,6 +2246,11 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
+    /// Running request `s` (out of `seqs`) fails with error `e`.
+    fn fail(&mut self, s: Seq<'t>, e: &str) {
+        self.finish(s, End::Failed(e.to_string()));
+    }
+
     fn finish(&mut self, mut s: Seq<'t>, end: End) {
         self.busy[s.slot] = false;
         let decode_ms = s.t1.elapsed().as_secs_f64() * 1e3;
@@ -2214,6 +2267,12 @@ impl<'a, 't> Batch<'a, 't> {
             }
             End::Stop => "stop",
             End::Length => "length",
+            End::Failed(e) => {
+                eprintln!("axon serve: #{} failed: {e}", s.job.id);
+                self.publish();
+                let _ = s.job.tx.send(Event::Error(e));
+                return;
+            }
         };
         let (content, reasoning) = s.out.finish();
         if !content.is_empty() || !reasoning.is_empty() {

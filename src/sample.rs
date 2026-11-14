@@ -331,6 +331,60 @@ pub fn cands(l: &mut [f32], spec: &CandSpec, recent: &[u32]) -> Vec<Cand> {
     top_k(l, spec.k)
 }
 
+/// `cands` restricted to the tokens `mask` allows (constrained decoding,
+/// `crate::constrain`): the repeat penalty as `cands` applies it, then the
+/// `spec.k` best allowed tokens, best first, in `top_k_ref`'s order (logit,
+/// then the larger id; NaN last). Fewer when fewer are allowed. The
+/// reference every backend's `forward_cands_masked` equals, and its
+/// fallback (`masked_prefix`).
+pub fn cands_masked(
+    l: &mut [f32],
+    spec: &CandSpec,
+    recent: &[u32],
+    mask: &crate::constrain::TokenMask,
+) -> Vec<Cand> {
+    if spec.penalty != 1.0 && spec.last_n > 0 {
+        penalize(l, &penalty_ids(recent, spec.last_n), spec.penalty);
+    }
+    let mut keys: Vec<u64> = (mask.ids())
+        .filter(|&id| (id as usize) < l.len())
+        .map(|id| key64(l[id as usize], id as usize))
+        .collect();
+    let k = spec.k.min(keys.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    if k < keys.len() {
+        keep_top(&mut keys, k);
+    }
+    keys.sort_unstable_by(|a, b| b.cmp(a));
+    keys.into_iter().map(cand).collect()
+}
+
+/// The `k` first of `c` (a position's best candidates over the whole
+/// vocabulary, best first, as a backend selects them: `CAND_MAX` of them,
+/// or all) that `mask` allows, if they are `cands_masked`'s: when at least
+/// min(k, allowed tokens) of `c` are allowed, every allowed token left out
+/// of `c` ranks below them. None: too few are; the position's whole row
+/// decides (`cands_masked`).
+pub fn masked_prefix(
+    c: &[Cand],
+    k: usize,
+    mask: &crate::constrain::TokenMask,
+) -> Option<Vec<Cand>> {
+    let need = k.min(mask.count());
+    let out: Vec<Cand> = (c.iter().filter(|x| mask.allows(x.id)))
+        .take(k)
+        .copied()
+        .collect();
+    (out.len() >= need).then_some(out)
+}
+
+/// Rows of a constrained verify that fell back to the whole row
+/// (`masked_prefix` None), process-wide: the spec's escalation rule reads
+/// it (PR B exports it as `axon_constraint_fallback_total`).
+pub static MASK_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The `k` best of `l` (fewer if it's shorter), best first: by logit, then
 /// by the larger id; NaN last. Exact, by sorting every key: the reference
 /// for `top_k`, and its fallback.
@@ -582,6 +636,178 @@ pub fn generate<M: Lm>(
                 .verify_cands(&toks, pos, cache, &spec, &recent)
                 .into_iter();
             cur = rows.next().expect("verify_cands: one row per token");
+            queue.extend(guesses.into_iter().zip(rows));
+            if st.verify.len() <= toks.len() {
+                st.verify.resize(toks.len() + 1, (0, 0.0));
+            }
+            let v = &mut st.verify[toks.len()];
+            v.0 += 1;
+            v.1 += t.elapsed().as_secs_f64();
+        }
+        st.passes += 1;
+    }
+    st.decided = picks.saturating_sub(1);
+    Ok(st)
+}
+
+/// How `generate_constrained` picks from a position's candidates.
+pub enum Picker<'a> {
+    /// The first (the masked argmax), no RNG draw: greedy decoding.
+    Greedy,
+    Sample(&'a mut Sampler),
+}
+
+/// A position's outcome in `generate_constrained`.
+enum Next {
+    /// Greedy and free: the backend's argmax (`forward_argmax`), as the
+    /// unconstrained greedy loop takes it.
+    Pick(u32),
+    Cands(Vec<Cand>),
+}
+
+/// The candidate spec of a greedy constrained position: the first allowed
+/// token of the best, no penalty (greedy decoding has none).
+pub const GREEDY_SPEC: CandSpec = CandSpec {
+    k: 1,
+    penalty: 1.0,
+    last_n: 0,
+};
+
+/// `crate::generate` with a `Constraint` (constrained decoding): the loop
+/// of `generate` above, greedy (`Picker::Greedy`: the first candidate, no
+/// RNG draw) or sampled. A free position takes the head the unconstrained
+/// loop takes (`forward_argmax` greedy, `forward_cands` sampled), so the
+/// tokens equal an unconstrained run's until the trigger; an engaged one
+/// takes `forward_cands_masked` (`GREEDY_SPEC` when greedy). Drafting stays
+/// lossless: the guesses go through a clone of the constraint, which gives
+/// each verify row its mask, and the draft is cut at the first guess the
+/// mask before it forbids (its row could never be accepted). Each row's
+/// pick is then the one the undrafted loop makes at that position, with
+/// the same RNG number. The real constraint advances only on emitted tokens.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_constrained<M: Lm>(
+    net: &M,
+    cache: &mut M::Cache,
+    prompt: &[u32],
+    mut logits: Vec<f32>,
+    n_gen: usize,
+    stop: &[u32],
+    max_draft: usize,
+    mut picker: Picker,
+    con: &mut crate::constrain::Constraint,
+    draft: &mut dyn FnMut(&[u32], usize) -> Vec<u32>,
+    emit: &mut dyn FnMut(u32) -> io::Result<()>,
+) -> io::Result<GenStats> {
+    let greedy = matches!(picker, Picker::Greedy);
+    let spec = match &picker {
+        Picker::Greedy => GREEDY_SPEC,
+        Picker::Sample(s) => s.cfg.spec(),
+    };
+    let mut st = GenStats::default();
+    let mut hist = prompt.to_vec();
+    let mut queue: VecDeque<(u32, Next)> = VecDeque::new();
+    let mut cur = match con.mask()? {
+        None if greedy => Next::Pick(crate::argmax(&logits)),
+        None => Next::Cands(cands(&mut logits, &spec, &hist)),
+        Some(m) => Next::Cands(cands_masked(&mut logits, &spec, &hist, &m)),
+    };
+    drop(logits);
+    let mut picks = 0usize;
+    while st.ids.len() < n_gen {
+        let next = match (&cur, &mut picker) {
+            (Next::Pick(t), _) => *t,
+            (Next::Cands(c), _) if c.is_empty() => {
+                return Err(
+                    crate::constrain::ConstraintError("no candidate allowed".into()).into(),
+                );
+            }
+            (Next::Cands(c), Picker::Greedy) => c[0].id,
+            (Next::Cands(c), Picker::Sample(s)) => s.pick(c),
+        };
+        picks += 1;
+        if stop.contains(&next) {
+            break;
+        }
+        if !con.accept(next) {
+            return Err(crate::constrain::ConstraintError(format!(
+                "token {next} picked outside the mask"
+            ))
+            .into());
+        }
+        st.ids.push(next);
+        hist.push(next);
+        emit(next)?;
+        let left = n_gen - st.ids.len();
+        if left == 0 {
+            break;
+        }
+        match queue.pop_front() {
+            Some((guess, c)) if guess == next => {
+                cur = c;
+                st.accepted += 1;
+                continue;
+            }
+            _ => queue.clear(),
+        }
+        let max = max_draft.min(left - 1);
+        let mut guesses = if max > 0 {
+            draft(&hist, max)
+        } else {
+            Vec::new()
+        };
+        guesses.truncate(max);
+        // Row b's mask: the constraint after `next` and guesses ..b.
+        let mut masks = vec![con.mask()?];
+        if !guesses.is_empty() {
+            let mut cl = con.clone();
+            let mut keep = 0;
+            for &g in &guesses {
+                if masks[keep].as_ref().is_some_and(|m| !m.allows(g)) || !cl.accept(g) {
+                    break;
+                }
+                masks.push(cl.mask()?);
+                keep += 1;
+            }
+            guesses.truncate(keep);
+        }
+        let pos = hist.len() - 1;
+        let t = Instant::now();
+        if guesses.is_empty() {
+            cur = match &masks[0] {
+                None if greedy => Next::Pick(net.forward_argmax(next, pos, cache)),
+                None => Next::Cands(net.forward_cands(next, pos, cache, &spec, &hist)),
+                Some(m) => Next::Cands(net.forward_cands_masked(next, pos, cache, &spec, &hist, m)),
+            };
+            st.forward.0 += 1;
+            st.forward.1 += t.elapsed().as_secs_f64();
+        } else {
+            st.drafted += guesses.len();
+            let mut toks = vec![next];
+            toks.extend_from_slice(&guesses);
+            let tail = spec.last_n.clamp(1, hist.len());
+            let mut recent = hist[hist.len() - tail..].to_vec();
+            recent.extend_from_slice(&guesses);
+            let rows: Vec<Next> = if masks.iter().all(Option::is_none) {
+                if greedy {
+                    (net.verify_argmax(&toks, pos, cache).into_iter())
+                        .map(Next::Pick)
+                        .collect()
+                } else {
+                    (net.verify_cands(&toks, pos, cache, &spec, &recent)
+                        .into_iter())
+                    .map(Next::Cands)
+                    .collect()
+                }
+            } else {
+                let m: Vec<Option<&crate::constrain::TokenMask>> =
+                    masks.iter().map(Option::as_ref).collect();
+                (net.verify_cands_masked(&toks, pos, cache, &spec, &recent, &m)
+                    .into_iter())
+                .map(Next::Cands)
+                .collect()
+            };
+            let mut rows = rows.into_iter();
+            cur = rows.next().expect("verify: one row per token");
             queue.extend(guesses.into_iter().zip(rows));
             if st.verify.len() <= toks.len() {
                 st.verify.resize(toks.len() + 1, (0, 0.0));
