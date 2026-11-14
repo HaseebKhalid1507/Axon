@@ -1,0 +1,29 @@
+{
+ "label": "eval-0d0b0bb-accept-qwen2.5-7b-opencode",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-063612-b2e0",
+   "name": "eval-0d0b0bb-accept-qwen2.5-7b-opencode",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "0d0b0bb",
+   "binary": "bash",
+   "started": 1794672252.875147,
+   "ended": 1794674023.3916428,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8a1eeecbdaa4e781a4d74022dea796ab4e9a57dc6e18262607e24072af750791",
+   "log_bytes": 31602
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 11:33:44 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
