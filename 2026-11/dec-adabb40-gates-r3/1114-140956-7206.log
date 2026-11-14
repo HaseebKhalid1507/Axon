@@ -1,0 +1,22 @@
+[axon-run 14:09:56] submitted 1114-140956-7206 by /home/haseeb/.cache/axon-wt-dec-share: /home/haseeb/.cache/axon-dec/bin/axon-test-adabb40 serve_share share_kv_is_on_by_default serve_paged_pressure
+[axon-run 14:34:24] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 14:34:24] scope axon-job-1114-140956-7206-1794684864.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17160 MB): an OOM here kills only this job
+[axon-run 14:34:24] job 1114-140956-7206 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1114-140956-7206-1794684864 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dec/bin/axon-test-adabb40 serve_share share_kv_is_on_by_default serve_paged_pressure --test-threads 6
+axon-q 14:34:24 start slot 16-23: /home/haseeb/.cache/axon-dec/bin/axon-test-adabb40 serve_share share_kv_is_on_by_default serve_paged_pressure --test-threads 6
+
+running 10 tests
+testutil: GPU has 11.56 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_paged_pressure ... ok
+test serve::tests::serve_share_pressure ... ok
+test serve::tests::serve_share_solo_handover ... ok
+test serve::tests::serve_share_unindex_in_place ... ok
+test serve::tests::share_kv_is_on_by_default ... ok
+test serve::tests::serve_share_fanout_idle ... ok
+test serve::tests::serve_share_off_under_fast_kernels ... ok
+test serve::tests::serve_share_matches_off ... ok
+test serve::tests::serve_share_dup_swapped ... ok
+test serve::tests::serve_share_cancel_frees ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 966 filtered out; finished in 30.18s
+
+[axon-run 14:34:54] exit 0 after 30.4s (host bella)

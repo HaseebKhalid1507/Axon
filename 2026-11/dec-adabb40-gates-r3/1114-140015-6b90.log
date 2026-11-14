@@ -1,0 +1,40 @@
+[axon-run 14:00:15] submitted 1114-140015-6b90 by /home/haseeb/.cache/axon-dec: /usr/bin/bash sharecancel30.sh ./axon-test-adabb40 30
+[axon-run 14:33:03] scope axon-job-1114-140015-6b90-1794684783.scope in app-axonjobs.slice: MemoryMax 10312 MB, MemoryHigh 9280 MB, no swap, oomd pressure kill 80% (claim 6192 MB): an OOM here kills only this job
+[axon-run 14:33:03] job 1114-140015-6b90 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1114-140015-6b90-1794684783 --slice=app-axonjobs.slice -p MemoryMax=10312M -p MemoryHigh=9280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash sharecancel30.sh ./axon-test-adabb40 30
+axon-q 14:33:03 start slot 16-23: /usr/bin/bash sharecancel30.sh ./axon-test-adabb40 30
+-rw-r--r-- 1 haseeb haseeb 491400032 Oct 10 00:29 /home/haseeb/.cache/axon-podjob/sharecancel30-a53f30514465/models/qwen2.5-0.5b-q4_k_m.gguf
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 958 MiB, 0 %
+ 14:33:03 up 10:19,  8 users,  load average: 6.62, 5.73, 4.77
+8
+ITER 1 rc=0 ok=1 wall_s=3 load=6.62 5.73 4.77 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 2 rc=0 ok=1 wall_s=2 load=6.25 5.67 4.75 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 3 rc=0 ok=1 wall_s=3 load=6.25 5.67 4.75 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 4 rc=0 ok=1 wall_s=2 load=5.83 5.59 4.73 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 5 rc=0 ok=1 wall_s=3 load=5.83 5.59 4.73 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 6 rc=0 ok=1 wall_s=3 load=5.60 5.55 4.72 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 7 rc=0 ok=1 wall_s=2 load=5.60 5.55 4.72 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 8 rc=0 ok=1 wall_s=3 load=5.39 5.50 4.71 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 9 rc=0 ok=1 wall_s=2 load=5.39 5.50 4.71 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 10 rc=0 ok=1 wall_s=3 load=4.96 5.41 4.69 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 11 rc=0 ok=1 wall_s=3 load=4.96 5.41 4.69 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 12 rc=0 ok=1 wall_s=2 load=4.72 5.36 4.67 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 13 rc=0 ok=1 wall_s=3 load=4.72 5.36 4.67 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 14 rc=0 ok=1 wall_s=2 load=4.59 5.32 4.66 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 15 rc=0 ok=1 wall_s=3 load=4.59 5.32 4.66 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 16 rc=0 ok=1 wall_s=3 load=4.30 5.24 4.64 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 17 rc=0 ok=1 wall_s=2 load=4.30 5.24 4.64 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 18 rc=0 ok=1 wall_s=3 load=4.03 5.17 4.62 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 19 rc=0 ok=1 wall_s=2 load=4.03 5.17 4.62 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 20 rc=0 ok=1 wall_s=3 load=3.95 5.14 4.61 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 21 rc=0 ok=1 wall_s=3 load=3.95 5.14 4.61 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 22 rc=0 ok=1 wall_s=2 load=3.79 5.08 4.60 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 23 rc=0 ok=1 wall_s=3 load=3.79 5.08 4.60 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 24 rc=0 ok=1 wall_s=2 load=3.57 5.02 4.58 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 25 rc=0 ok=1 wall_s=3 load=3.44 4.97 4.56 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 26 rc=0 ok=1 wall_s=3 load=3.44 4.97 4.56 admissions: prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 27 rc=0 ok=1 wall_s=2 load=3.41 4.93 4.56 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 28 rc=0 ok=1 wall_s=3 load=3.41 4.93 4.56 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 29 rc=0 ok=1 wall_s=2 load=3.22 4.87 4.54 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+ITER 30 rc=0 ok=1 wall_s=3 load=3.22 4.87 4.54 admissions: prefill: chunked, slot 0, 341 tok (0 cached), 0 decoding;prefill: chunked, slot 1, 609 tok (320 cached), 1 decoding;
+SHARECANCEL 30/30 passed
+[axon-run 14:34:21] exit 0 after 78.0s (host bella)
