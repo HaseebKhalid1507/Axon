@@ -1,0 +1,112 @@
+[axon-run 15:45:22] submitted 1113-154522-e27e by /home/haseeb/.cache/axon-wt-dist-pull: /usr/bin/bash alias-check.sh ./axon-pull-94ea627
+[axon-run 16:16:51] job 1113-154522-e27e -> pod2 [RTX 4090 sm_89 secure] (pod ekewteh821d9xj): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 16000 --src /home/haseeb/.cache/axon-podjob/alias-check-627023f6bd79 /usr/bin/bash alias-check.sh ./axon-pull-94ea627
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (03807a33137cae76021a34b4) + source of /home/haseeb/.cache/axon-podjob/alias-check-627023f6bd79 (delta vs 7 earlier upload(s) there)
+
+sent 18,816,968 bytes  received 106 bytes  154,873.04 bytes/sec
+total size is 27,466,548  speedup is 1.46
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261113-211900-bash-98232 on pod2 (GPU, 16000 MB)
+[axon-node 21:19:00] GPU slot taken; job wants 16000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 21:19:01] run bash (03807a33137cae76021a34b4) as /home/haseeb/.cache/axon-podjob/alias-check-627023f6bd79 on dc118c3f35a6, AXON_THREADS=5 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 595.91.07, 24564 MiB
+overlay          50G   27G   24G  53% /
+axon 0.1.0
+== qwen2.5-coder-1.5b
+/root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf: pulled, SHA-256 cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046 checked
+run it: axon chat qwen2.5-coder-1.5b   (or axon serve qwen2.5-coder-1.5b)
+(pull 45 s)
+339 tensors | 1.78B params | 1.04 GB
+gen: def fibonacci(n):
+    if n <= 0:
+prompt eval: 4 tok in 0.00s (1556.51 tok/s)
+decode:      8 tok, 7 passes in 0.01s (504.68 tok/s)
+device:      cuda, 1.03 GB of weights in VRAM (934.1 MB read per token), KV cache f16 372736 B, CUDA graphs on
+chat: ```python
+def add_numbers(a, b):
+    """
+    This function takes two numbers as input and returns their sum.
+    
+    Parameters:
+    a (int or float): The first number.
+    b (int or float): The second number.
+    
+    Returns:
+    int or float: The sum of the
+ALIAS qwen2.5-coder-1.5b PASS pull=0 info=0 gen=0 chat=0
+== qwen2.5-coder-7b
+/root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/qwen2.5-coder-7b-instruct-q4_k_m.gguf: pulled, SHA-256 509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c checked
+run it: axon chat qwen2.5-coder-7b   (or axon serve qwen2.5-coder-7b)
+(pull 72 s)
+339 tensors | 7.62B params | 4.36 GB
+gen: def fibonacci(n): # Recursive function to calculate Fibonacci sequence
+prompt eval: 4 tok in 0.01s (610.71 tok/s)
+decode:      8 tok, 7 passes in 0.04s (180.99 tok/s)
+device:      cuda, 4.35 GB of weights in VRAM (4.07 GB read per token), KV cache f16 745472 B, CUDA graphs on
+chat: ```python
+def sum_two_numbers(a, b):
+    # This function takes two parameters, a and b
+    # It returns the sum of a and b
+    return a + b
+```
+ALIAS qwen2.5-coder-7b PASS pull=0 info=0 gen=0 chat=0
+== qwen2.5-coder-14b
+/root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/qwen2.5-coder-14b-instruct-q4_k_m.gguf: pulled, SHA-256 c1e659736d89ac1065fb495330fb824d94001974a4bfa78e7270e43476a8d940 checked
+run it: axon chat qwen2.5-coder-14b   (or axon serve qwen2.5-coder-14b)
+(pull 1024 s)
+579 tensors | 14.77B params | 8.37 GB
+gen: def fibonacci(n):
+    if n <= 0:
+prompt eval: 4 tok in 0.01s (317.37 tok/s)
+decode:      8 tok, 7 passes in 0.07s (93.82 tok/s)
+device:      cuda, 8.36 GB of weights in VRAM (7.95 GB read per token), KV cache f16 2.4 MB, CUDA graphs on
+chat: Certainly! Below is a simple Python function that takes two numbers as arguments and returns their sum:
+
+```python
+def add_numbers(a, b):
+    """
+    Returns the sum of two numbers.
+
+    Parameters:
+    a (int or float): The first number.
+    b (int or float): The second number.
+ALIAS qwen2.5-coder-14b PASS pull=0 info=0 gen=0 chat=0
+== qwen3-14b
+axon pull: Qwen3-14B-Q4_K_M.gguf (9.00 GB) from Qwen/Qwen3-14B-GGUF
+(pull 1800 s)
+gen: 
+axon: no file 'qwen3-14b', and as a name axon pull knows it isn't pulled yet (no /root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/Qwen/Qwen3-14B-GGUF/Qwen3-14B-Q4_K_M.gguf): axon pull qwen3-14b
+chat: 
+axon: no file 'qwen3-14b', and as a name axon pull knows it isn't pulled yet (no /root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/Qwen/Qwen3-14B-GGUF/Qwen3-14B-Q4_K_M.gguf): axon pull qwen3-14b
+ALIAS qwen3-14b FAIL pull=124 info=2 gen=2 chat=2
+== qwen3-coder-30b-a3b
+/root/axon-node/store/03807a33137cae76021a34b4/tree/aliases-out/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf: pulled, SHA-256 fadc3e5f8d42bf7e894a785b05082e47daee4df26680389817e2093056f088ad checked
+run it: axon chat qwen3-coder-30b-a3b   (or axon serve qwen3-coder-30b-a3b)
+(pull 1110 s)
+579 tensors | 30.53B params | 17.28 GB
+gen: def fibonacci(n):
+    if n <= 1:
+prompt eval: 4 tok in 0.11s (35.05 tok/s)
+decode:      8 tok, 7 passes in 0.16s (43.14 tok/s)
+chat: Here's a simple Python function that returns the sum of two numbers:
+
+```python
+def add_numbers(a, b):
+    """
+    Returns the sum of two numbers.
+    
+    Args:
+        a: First number
+        b: Second number
+    
+    Returns:
+        The sum of a and b
+    """
+   
+ALIAS qwen3-coder-30b-a3b PASS pull=0 info=0 gen=0 chat=0
+ALIASES: 1 failed
+[axon-node 22:27:04] exit 1 after 4083.4s
+[axon-node 22:27:04] peak RSS 18275 MB (job process tree PSS, 2 s samples x2037)
+[axon-run 17:27:05] exit 1 after 4213.5s (host pod2)
