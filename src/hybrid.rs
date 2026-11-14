@@ -897,6 +897,30 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
         }
     }
 
+    /// Each half alone: its own batched override; split: the batched
+    /// `verify_cands` above at CAND_MAX, the allowed kept
+    /// (`lm::verify_masked_via`), so a constrained draft is one pass too.
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        c: &mut HybridCache<'g>,
+        spec: &crate::sample::CandSpec,
+        recent: &[u32],
+        masks: &[Option<&crate::constrain::TokenMask>],
+    ) -> Vec<Vec<crate::sample::Cand>> {
+        if self.cpu.is_some() && self.gpu.is_some() {
+            return crate::lm::verify_masked_via(self, tokens, start, c, spec, recent, masks);
+        }
+        match self.split(c) {
+            (Some((n, c)), None) => n.verify_cands_masked(tokens, start, c, spec, recent, masks),
+            (None, Some((n, c))) => {
+                Lm::verify_cands_masked(n, tokens, start, c, spec, recent, masks)
+            }
+            _ => unreachable!("split: above"),
+        }
+    }
+
     /// The CPU half's batch whenever it has layers: its batched pass sets
     /// the pace, and the GPU half chunks any size into its own passes
     /// (its scratch is sized for this: `cuda::qwen2::SPLIT_BATCH`).

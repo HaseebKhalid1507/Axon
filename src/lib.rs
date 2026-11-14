@@ -58,6 +58,7 @@ mod mv;
 mod chat;
 #[doc(hidden)]
 pub mod cli;
+mod constrain;
 mod cuda;
 mod draft;
 mod generate;

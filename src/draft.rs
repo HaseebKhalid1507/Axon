@@ -584,6 +584,7 @@ mod tests {
                 stop,
                 max_draft: k,
                 sample: sampler.as_mut(),
+                constraint: None,
             },
             &mut |h, max| src.draft(h, max),
             &mut |_| Ok(()),

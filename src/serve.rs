@@ -138,6 +138,9 @@ pub struct Opts {
     /// "0", the kill switch, and off while fast kernels run unless "1":
     /// `share_on`; a paged pool only).
     pub share: Option<bool>,
+    /// Tool calls streamed as they are generated on OpenAI's APIs (None:
+    /// AXON_TOOL_STREAM, on unless "0"; #260).
+    pub tool_stream: Option<bool>,
     /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
     /// with Some(false)).
     pub paged: Option<bool>,
@@ -181,6 +184,9 @@ pub struct Opts {
     /// `--numerics` (`crate::numerics`), or `--datacenter`'s fast: the
     /// whole server's (every slot's cache is one mode's), in its identity.
     pub numerics: Numerics,
+    /// Constrained tool calls (`crate::constrain`) on or off (None:
+    /// AXON_CONSTRAIN, off unless "1": opt-in until the spec's PR B).
+    pub constrain: Option<bool>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -324,6 +330,8 @@ struct Job {
     /// gpt-oss (harmony): the analysis channel to reasoning, the final
     /// channel to content, the markers nowhere.
     channels: Option<chat::Channels>,
+    /// Harmony with tools: stream calls (`TextOut::stream_calls`).
+    stream_calls: bool,
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
@@ -331,6 +339,9 @@ struct Job {
     arrived: Instant,
     /// Its prompt's block keys (`block_keys`), worked out at most once.
     keys: std::cell::OnceCell<Vec<crate::kvstore::Key>>,
+    /// Constrained decoding (`crate::constrain`): the request's state, which
+    /// goes with it (alone, into the batch, preempted and fed again).
+    constraint: Option<crate::constrain::Constraint>,
 }
 
 impl Job {
@@ -363,6 +374,8 @@ struct Shared {
     path: String,
     no_think: bool,
     think_inline: bool,
+    /// Tool calls streamed on OpenAI's APIs (`Opts::tool_stream`).
+    tool_stream: bool,
     sample: SampleArgs,
     max_tokens: Option<usize>,
     /// The `extra` header lines of every response (CORS).
@@ -514,6 +527,9 @@ struct TextOut<'t> {
     call: CallState,
     /// Counts dropped calls (`axon_tool_calls_dropped_total`).
     metrics: Option<Arc<ops::Metrics>>,
+    /// Harmony with tools: stream a call's arguments as they come (#260;
+    /// the job's `stream_calls`), framed once they open with `{`.
+    stream_calls: bool,
 }
 
 /// A harmony reply's call, as `TextOut` reads it.
@@ -521,8 +537,10 @@ struct TextOut<'t> {
 enum CallState {
     #[default]
     None,
-    /// Open: its recipient, its arguments' text so far and their scan.
-    Open(String, String, tools::ArgScan),
+    /// Open: its recipient, its arguments' text so far, their scan, and
+    /// whether its frame went out (stream mode: its arguments opened with
+    /// `{`, and it is a call whatever follows).
+    Open(String, String, tools::ArgScan, bool),
     /// Made: the reply is over.
     Done,
 }
@@ -582,9 +600,9 @@ impl TextOut<'_> {
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, String::new(), true);
             }
@@ -593,13 +611,16 @@ impl TextOut<'_> {
         let mut r = String::new();
         if !now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.finish();
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, r, true);
             }
-            r = self.call_dropped();
+            match self.call_cut() {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
         }
         if ch.ended() {
             // `<|call|>`: the reply is over.
@@ -642,7 +663,8 @@ impl TextOut<'_> {
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
             Some(to) if matches!(self.call, CallState::None) => {
-                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
+                self.call =
+                    CallState::Open(to.to_string(), String::new(), Default::default(), false);
                 tools::harmony_text(&self.stop.finish())
             }
             _ => String::new(),
@@ -653,7 +675,7 @@ impl TextOut<'_> {
     /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
     fn call_push(&mut self, t: &str) -> bool {
         match &mut self.call {
-            CallState::Open(_, args, scan) => {
+            CallState::Open(_, args, scan, _) => {
                 args.push_str(t);
                 scan.feed(t)
             }
@@ -664,7 +686,7 @@ impl TextOut<'_> {
     /// The open call's frame, if its arguments are a whole JSON object:
     /// parsed once, when the scan closes the top-level object.
     fn call_made(&mut self) -> Option<String> {
-        let CallState::Open(to, args, scan) = &mut self.call else {
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
             return None;
         };
         let a = args.trim();
@@ -672,9 +694,58 @@ impl TextOut<'_> {
             scan.kill();
             return None;
         }
-        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        let f = if *framed {
+            // Stream mode: its frame and arguments went out as they came.
+            tools::HARMONY_CALL_END.to_string()
+        } else {
+            tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END
+        };
         self.call = CallState::Done;
         Some(f)
+    }
+
+    /// Stream mode: what of the open call goes out with `t` (just added to
+    /// its arguments): nothing until they open with `{`, then its frame
+    /// and the arguments from that `{`, then each piece as it comes.
+    fn call_stream(&mut self, t: &str) -> String {
+        if !self.stream_calls {
+            return String::new();
+        }
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
+            return String::new();
+        };
+        if *framed {
+            return tools::harmony_text(t);
+        }
+        let name = to.strip_prefix("functions.").unwrap_or(to);
+        if !scan.began() || name.is_empty() {
+            return String::new();
+        }
+        // Framed only where `call_made` parses from: what comes before the
+        // `{` must be blanks its `trim` drops. (`ArgScan` skips any non-ASCII
+        // byte there; with other text first the call is never made, so it
+        // isn't framed: reasoning, as in decide-whole mode.)
+        let at = args.find('{').unwrap_or(0);
+        if !args[..at].trim().is_empty() {
+            return String::new();
+        }
+        *framed = true;
+        let a = &args[at..];
+        tools::harmony_call_open(to) + &tools::harmony_text(a)
+    }
+
+    /// Stream mode: an open call whose frame went out ends without its
+    /// arguments being a whole object (a header, its `<|call|>`, the token
+    /// limit): still a call, so its end frame (the parser counts it in
+    /// `axon_tool_calls_invalid_total`). None if its frame didn't go out.
+    fn call_cut(&mut self) -> Option<String> {
+        match self.call {
+            CallState::Open(_, _, _, true) => {
+                self.call = CallState::None;
+                Some(tools::HARMONY_CALL_END.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// The open call isn't one: its text (reasoning). Counted, and logged
@@ -682,7 +753,7 @@ impl TextOut<'_> {
     /// "the model didn't call".
     fn call_dropped(&mut self) -> String {
         match std::mem::take(&mut self.call) {
-            CallState::Open(to, args, _) => {
+            CallState::Open(to, args, _, _) => {
                 if let Some(m) = &self.metrics {
                     m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -719,14 +790,15 @@ impl TextOut<'_> {
         if matches!(self.call, CallState::Open(..)) {
             // The reply ended inside the call (the token limit).
             let t = self.utf8.finish();
-            let made = if self.call_push(&t) {
-                self.call_made()
-            } else {
-                None
-            };
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            let made = if closed { self.call_made() } else { None };
             match made {
                 Some(f) => c.push_str(&f),
-                None => r = self.call_dropped(),
+                None => match self.call_cut() {
+                    Some(f) => c.push_str(&f),
+                    None => r = self.call_dropped(),
+                },
             }
         }
         let unheaded = ch.take_unheaded();
@@ -804,6 +876,13 @@ fn debug() -> bool {
     *D.get_or_init(|| std::env::var_os("AXON_SERVE_DEBUG").is_some_and(|v| v == "1"))
 }
 
+/// AXON_TOOL_STREAM: tool calls streamed as they are generated on OpenAI's
+/// APIs (#260), on unless "0", the kill switch: then every call goes out
+/// whole once decided, as before #260.
+fn tool_stream_env() -> bool {
+    std::env::var_os("AXON_TOOL_STREAM").is_none_or(|v| v != "0")
+}
+
 /// The detokenizer and stop matcher of `job`'s reply.
 fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
@@ -817,6 +896,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> T
         stop: StopMatcher::new(job.stops.clone()),
         call: CallState::None,
         metrics: Some(metrics.clone()),
+        stream_calls: job.stream_calls,
     }
 }
 
@@ -904,7 +984,9 @@ impl<'a> Engine<'a> {
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
     /// hands over (returns its state, the cache holding its rows) when
     /// another request arrives that could share a step with it.
-    fn job(&mut self, owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+    fn job(&mut self, mut owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+        // Out of the job while it runs alone; back in if it hands over.
+        let mut constraint = owned.constraint.take();
         let job = &owned;
         let cancelled = || job.cancel.load(Ordering::Relaxed);
         let t0 = Instant::now();
@@ -986,6 +1068,7 @@ impl<'a> Engine<'a> {
                 stop: &job.stop_ids,
                 max_draft: self.max_draft,
                 sample: sampler.as_mut(),
+                constraint: constraint.as_mut(),
             },
             &mut |h, max| source.draft(h, max),
             &mut |id| {
@@ -1022,7 +1105,10 @@ impl<'a> Engine<'a> {
             hist.extend_from_slice(&ids);
             self.hist = hist[..hist.len() - 1].to_vec();
             return Some(Seq {
-                job: owned,
+                job: Job {
+                    constraint,
+                    ..owned
+                },
                 slot: 0,
                 hist,
                 ids,
@@ -1109,6 +1195,9 @@ struct Loaded {
     /// The GGUF's architecture and parameter count (ollama.rs: /api/show).
     arch: String,
     params: u64,
+    /// Constrained tool calls (`Opts::constrain`): the Hermes grammar on
+    /// this vocabulary, for a Qwen2.5-family template (PR A of the spec).
+    constrain: Option<Arc<crate::constrain::Grammar>>,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -1568,7 +1657,41 @@ fn engine(
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
-    let banner = banner + tier_note.as_deref().unwrap_or("");
+    // Constrained tool calls (`Opts::constrain`): the Hermes grammar on this
+    // vocabulary (its automaton tables: ~0.1 s at 152k tokens), built once.
+    // On, the banner names it; asked for but refused, one line says why,
+    // even under --quiet (an operator who set AXON_CONSTRAIN=1 must be able
+    // to tell it's off).
+    let constrain = o.constrain.then(|| {
+        let g = match template.as_ref().map(tools::family) {
+            Some(Some(tools::Family::Qwen25)) => {
+                let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
+                crate::constrain::Grammar::hermes(v).map(Arc::new)
+            }
+            Some(Some(f)) => Err(format!(
+                "the chat template's tool calls are {}; this release holds Qwen2.5's \
+                 Hermes calls only",
+                match f {
+                    tools::Family::Qwen3 => "Qwen3's (Hermes after <think>)",
+                    tools::Family::Llama31 => "Llama 3.1's",
+                    tools::Family::Harmony => "gpt-oss's (Harmony)",
+                    tools::Family::Qwen25 => unreachable!(),
+                }
+            )),
+            Some(None) => Err("the chat template has no tool-call format".into()),
+            None => Err("the model has no chat template".into()),
+        };
+        g.map_err(|why| {
+            eprintln!("axon serve: constrained tool calls (AXON_CONSTRAIN=1) off: {why}")
+        })
+        .ok()
+    });
+    let constrain = constrain.flatten();
+    let banner = banner
+        + tier_note.as_deref().unwrap_or("")
+        + &(constrain.as_ref())
+            .map(|g| format!(", constrained tool calls ({})", g.field()))
+            .unwrap_or_default();
     if ready
         .send(Ok(Loaded {
             tok,
@@ -1589,6 +1712,7 @@ fn engine(
             identity,
             arch: model.arch.clone(),
             params: model.total_params(),
+            constrain,
         }))
         .is_err()
     {
@@ -2314,6 +2438,7 @@ struct EngineOpts {
     cache_ram: tier::CacheRam,
     cache_ram_alloc: tier::Alloc,
     numerics: Numerics,
+    constrain: bool,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2452,6 +2577,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         cache_ram: o.cache_ram,
         cache_ram_alloc: o.cache_ram_alloc,
         numerics: o.numerics,
+        constrain: o.constrain.unwrap_or_else(crate::constrain::env_on),
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -2482,6 +2608,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         alias: o.alias,
         no_think: o.no_think,
         think_inline: o.think_inline,
+        tool_stream: o.tool_stream.unwrap_or_else(tool_stream_env),
         sample,
         max_tokens: o.max_tokens,
         extra,
@@ -3050,6 +3177,15 @@ fn run_request(
         // As `axon gen`: BOS if the model adds one, its end-of-generation set.
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
+    // Constrained tool calls (`Opts::constrain`; the spec's PR A): Hermes
+    // with tool_choice auto, armed until the reply's `<tool_call>`.
+    let constraint = match (&g.tools, &m.constrain) {
+        (Some(tr), Some(gr)) if parser.is_some() && tr.choice == tools::Choice::Auto => {
+            Some(crate::constrain::Constraint::new(gr.clone()))
+        }
+        _ => None,
+    };
+    let constraint_field = (constraint.as_ref()).map(|c| c.grammar().field().to_string());
     if prompt.is_empty() {
         return out.err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
     }
@@ -3058,6 +3194,12 @@ fn run_request(
     }
     if sh.max_prompt_tokens.is_some_and(|max| prompt.len() > max) {
         return out.err(c, over_max(format!("{} tokens", prompt.len())), keep);
+    }
+    // OpenAI's APIs stream a call as it is generated (#260); ollama's calls
+    // are whole objects, so its replies decide each call whole.
+    let stream_calls = parser.is_some() && sh.tool_stream && !matches!(out, Out::Ollama(_));
+    if let Some(p) = parser.as_mut() {
+        p.configure(stream_calls, Some(sh.metrics.clone()));
     }
     let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
@@ -3074,11 +3216,13 @@ fn run_request(
         stops: g.stop.clone(),
         think,
         channels,
+        stream_calls,
         cancel: cancel.clone(),
         tx,
         id: n,
         arrived,
         keys: Default::default(),
+        constraint,
     };
     match sh.jobs.try_send(job) {
         Ok(()) => {
@@ -3106,7 +3250,16 @@ fn run_request(
         _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
-    let model = (model, m.identity.fingerprint());
+    // A constrained request's bits are its grammar's too: its fingerprint
+    // says so (the maintainer's ruling 1 on the spec's §6: the serve field,
+    // per request; unconstrained ones keep the server's).
+    let fp = match &constraint_field {
+        Some(f) => (m.identity.clone())
+            .with_serve_extra(crate::identity::constrain_field(f))
+            .fingerprint(),
+        None => m.identity.fingerprint(),
+    };
+    let model = (model, fp);
     // Out of flight just before the response's last write (`on_end`): a
     // client that has all of it never sees it counted (#112). Else (an
     // error, a client gone) as the handler returns.
@@ -3313,6 +3466,8 @@ fn whole(
                         match piece {
                             tools::Piece::Text(t) => text.push_str(&t),
                             tools::Piece::Call(c) => calls.push(c),
+                            // A streamed call's pieces: its `Call` is whole.
+                            tools::Piece::Head(_) | tools::Piece::Args(_) => {}
                         }
                     }
                     let h = api::head(id, "chat.completion", created, model.0, &model.1);
@@ -3379,17 +3534,30 @@ fn stream(
         c.send(api::sse(&u(api::chat_chunk(&h, true, "", "", None))).as_bytes())?;
     }
     let mut buf = String::new();
-    // Tools: the content and calls the parser has decided, as chunks.
+    // Tools: the content and calls the parser has decided, as chunks. A
+    // streamed call: a chunk with its id and name, then one per piece of its
+    // arguments (OpenAI's shape); a call decided whole: the same two chunks
+    // at once.
     let mut ncalls = 0;
+    let mut streaming = false;
     let mut pieces = |buf: &mut String, ps: Vec<tools::Piece>| {
         for p in ps {
             match p {
                 tools::Piece::Text(t) => {
                     buf.push_str(&api::sse(&u(api::chat_chunk(&h, false, &t, "", None))));
                 }
+                tools::Piece::Head(call) => {
+                    buf.push_str(&api::sse(&u(tools::call_head_chunk(&h, ncalls, &call))));
+                    streaming = true;
+                }
+                tools::Piece::Args(a) => {
+                    buf.push_str(&api::sse(&u(tools::call_args_chunk(&h, ncalls, &a))));
+                }
                 tools::Piece::Call(call) => {
-                    for j in tools::call_chunks(&h, ncalls, &call) {
-                        buf.push_str(&api::sse(&u(j)));
+                    if !std::mem::replace(&mut streaming, false) {
+                        for j in tools::call_chunks(&h, ncalls, &call) {
+                            buf.push_str(&api::sse(&u(j)));
+                        }
                     }
                     ncalls += 1;
                 }
@@ -3530,6 +3698,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         slot_ctx: None,
         kv_pages: None,
         share: None,
+        tool_stream: None,
         paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
@@ -3542,6 +3711,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cache_ram: tier::CacheRam::Bytes(0),
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
+        constrain: None,
     };
     let mut k = None;
     let key_from;

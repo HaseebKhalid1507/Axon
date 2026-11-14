@@ -6,6 +6,60 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Constrained tool calls, opt-in (`AXON_CONSTRAIN=1`; PR A of #259)
+- **A Hermes tool call is valid JSON.** With `AXON_CONSTRAIN=1`, `axon serve` on a Qwen2.5-family model holds a
+  tool call (`tool_choice` auto) to `{"name": STRING, "arguments": OBJECT}` from its `<tool_call>` token to
+  `</tool_call>`: each token is picked from those a JSON automaton allows, and no special token (EOS,
+  `<|im_end|>`, a second `<tool_call>`) can be picked inside a string. None of the 8 malformed calls in #259 can be
+  generated. Valid doesn't mean right: where the model would have written an unescaped quote, the string ends
+  there (`"cmd": "echo '{"` and then a forced `,` or `}`), so the call parses but may not be what was meant.
+- **What it doesn't fix yet.**
+  - `max_tokens` can still cut a call short. Inside a call EOS is banned, so `max_tokens` is the only stop, and
+    there is no bound on a runaway call yet (PR B). Cut once its arguments have opened, a call comes back as a call
+    (#260's rules, below) whose `arguments` aren't valid JSON, counted in `axon_tool_calls_invalid_total`. Cut
+    earlier, or with `AXON_TOOL_STREAM=0`, it comes back as content.
+  - The grammar allows `</tool_call>` spelled out inside any string (it is string text there). Since #260 the
+    Parser agrees inside a string in the call's arguments. It still ends the block at the tag inside the name
+    string, and anywhere with `AXON_TOOL_STREAM=0` or on the ollama routes (decided whole). There the block is cut
+    at the tag, isn't a call, and comes back as content (PR B, ruling 5).
+- **Unchanged.** Requests without tools and every request with the variable unset are unchanged, bit for bit.
+  Text before a call too. After a call the position takes the unconstrained head again (the text differs only
+  because the call did).
+- **Same bits however it runs.** A constrained reply is the same decoded, drafted, verified or batched beside other
+  requests. Its `system_fingerprint` names the grammar (`constrain hermes-json <hash>` in the `serve` field), so it
+  isn't an unconstrained reply's: every tools request gets it, even one whose reply makes no call. Unconstrained
+  fingerprints don't move.
+- **It says whether it's on.** The startup banner ends with `constrained tool calls (hermes-json <hash>)`. A model
+  it can't hold (not the Qwen2.5 template family, no `<tool_call>` token, a vocabulary without every byte as a
+  token) gets one line saying why, even under `--quiet`.
+- Off by default until the follow-ups (#259's PR B: on by default, `required`/named calls, the tool-name enum).
+### Tool calls stream as they are generated (#260)
+- **Streamed, a call's head goes out as soon as its name is read and its arguments open with `{`**, then its
+  arguments a piece at a time: `delta.tool_calls` chunks on `/v1/chat/completions`, a `function_call` item with
+  `response.function_call_arguments.delta` events on `/v1/responses`. Before, nothing of a call went out until its
+  block closed. In #260 a looping call (codex, Qwen2.5-7B, job 1113-010041-0dce) sent nothing for 340 s, so codex's
+  300 s idle timeout fired, and its retry decoded at half speed beside the runaway.
+- **A block is decided as soon as it can't be a call** (its text stops being a prefix of a JSON object), and streams
+  as content from there, where it used to be held to its end.
+- **Changed: once its head is out, a call is a call.** Arguments that go bad after that point (#259's unescaped
+  quotes, raw newlines, bad escapes) come back as written, and a reply cut off mid-call comes back as a call with what
+  was written. Either way `arguments` isn't valid JSON, as OpenAI's API allows, and the call is counted in the new
+  `axon_tool_calls_invalid_total`. Before, such a block came back as content, which ended codex's turn. This applies
+  streamed or not: a `"stream": false` reply decides calls the same way. Other text after a call's object ends its
+  block: a `<tool_call>` there opens the next call, and the block's own `</tool_call>`, if it comes later, is dropped
+  rather than shown as content.
+- On `/v1/responses` a call cut off by the token limit has item `status: "incomplete"` (it was `completed`).
+- In a call's arguments a `</tool_call>` inside a JSON string is the string's text (it used to cut the call there).
+- gpt-oss: a call is framed only when nothing but blanks comes before its arguments' `{`, where the call is parsed
+  from (other text first: reasoning, as before).
+- Llama 3.1/3.2's JSON calls and gpt-oss's calls stream the same way (gpt-oss once its arguments open with `{`).
+- `axon_tool_calls_dropped_total` now also counts `<tool_call>` blocks and Llama JSON replies returned as content.
+  It used to count gpt-oss calls only.
+- **Kill switch `AXON_TOOL_STREAM=0`:** calls decided whole and sent once decided, as before, on every route. The
+  ollama routes always work this way (an ollama call is a whole object).
+- The output tokens are unchanged. What changes is how the text is split into content and calls, and when it is
+  sent.
+
 ### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
 - **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
   `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
@@ -85,6 +139,33 @@ measurements behind them.
   peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
   draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
   every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
+- **Publishing is one checked command, tied to the tarball that was checked; the draft's title fails closed**
+  (#265, shady's reviews of #261 and #265). releasing.md ran the tag check only first, hours before publishing,
+  and nothing tied the publish to the tarball the GPU checks ran on. Now `scripts/release/publish.sh vX.Y.Z
+  SHA256` is the publish step, with the SHA-256 written next to the hand checks' results. It publishes only if:
+  - there is one draft for the tag, titled "Axon vX.Y.Z (checked; publish with scripts/release/publish.sh)", with
+    its three assets uploaded;
+  - SHA256 equals both the notes' "SHA-256 of the tarball" and the digest GitHub computed for the uploaded
+    tarball, so a draft made again after the checks (the tag moved, the tarball re-uploaded) is refused;
+  - the tag names the commit in the notes, checked last.
+
+  Then one `gh release edit --title "Axon vX.Y.Z" --tag --verify-tag --draft=false` sets the final title and
+  publishes. Right after, it asks for the tag's commit again and re-reads the release; on a miss, or an answer
+  it can't read, it turns the release back into a DO NOT PUBLISH draft and fails. The 1–2 s between the last
+  check and the publish can't be closed from the client; a tag ruleset on `refs/tags/v*` would close it
+  (releasing.md; the maintainer's call, not set up). `--check` runs the same checks first, publishes nothing,
+  and prints the tarball's SHA-256. When the tag is gone (a 422) it refuses: the draft's target is main, so
+  publishing would create the tag at main's tip, with the old commit's tarball. The release job:
+  - says "re-run this job" when GitHub gave no commit for the tag (a transient error, or the tag deleted),
+    not "the other run makes the draft";
+  - creates the draft titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)", and retitles it "Axon vX.Y.Z (checked;
+    …)" only after the tag check after the upload passes. A failed, cancelled or lost job leaves a draft that
+    says not to publish it, and the web page's Publish button would publish a visibly mis-titled release;
+  - runs one at a time per tag (a `concurrency` group, never cancelling the running one).
+
+  `scripts/release/test_draft_guards.sh` pins the create's, the edits' and publish.sh's exact arguments
+  (`--draft`, `--verify-tag`, the titles, `--repo`, the revert) and the notes' two lines, and tests publish.sh.
+  No `--target` on the create: GITHUB_TOKEN can't create a release whose target's workflows differ from main's.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
 - **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
