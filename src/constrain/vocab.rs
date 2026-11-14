@@ -113,7 +113,14 @@ impl Vocab {
     /// (Qwen, Llama 3) and SentencePiece with byte fallback: then every
     /// prefix the automaton takes can be finished, and a mask is never
     /// empty (a grammar refuses a vocabulary without it: `Grammar::hermes`).
+    #[cfg_attr(not(test), allow(dead_code))] // `Grammar::hermes` says which byte
     pub fn byte_complete(&self) -> bool {
+        self.missing_byte().is_none()
+    }
+
+    /// The first byte a JSON text can hold that isn't a token by itself
+    /// (`byte_complete` is its absence).
+    pub fn missing_byte(&self) -> Option<u8> {
         let mut have = [false; 256];
         for id in 0..self.n as u32 {
             if let [b] = self.bytes(id)
@@ -122,7 +129,7 @@ impl Vocab {
                 have[*b as usize] = true;
             }
         }
-        (have.iter().enumerate()).all(|(b, &h)| h || (b < 0x20 && !matches!(b, 0x09 | 0x0a | 0x0d)))
+        (0..=255u8).find(|&b| !have[b as usize] && (b >= 0x20 || matches!(b, 0x09 | 0x0a | 0x0d)))
     }
 
     /// The special token whose text is `text`, if there is one.

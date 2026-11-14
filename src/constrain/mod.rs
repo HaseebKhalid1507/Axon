@@ -15,10 +15,11 @@
 //! Bits: a free position takes the request's normal head (`RowHead::Argmax`
 //! or `Sample` without a mask), so a constrained request's tokens equal an
 //! unconstrained one's until the trigger, and a request without a
-//! constraint runs no new code at all. An engaged position's candidates are
-//! a pure function of (logits, sampling spec, penalty window, mask), and
-//! the mask is a function of the tokens so far, so decode, batched steps
-//! and speculative verify agree bit for bit (docs/determinism.md).
+//! constraint takes none of the constrained paths. An engaged position's
+//! candidates are a pure function of (logits, sampling spec, penalty
+//! window, mask), and the mask is a function of the tokens so far, so
+//! decode, batched steps and speculative verify agree bit for bit
+//! (docs/determinism.md).
 //!
 //! Special tokens (control and user-defined) are symbols to the automaton,
 //! never bytes: inside a JSON string none of them (EOS, `<|im_end|>`,
@@ -62,14 +63,18 @@ impl Grammar {
     /// `<tool_call>` is picked, `ws* {ws* "name" ws* : ws* STRING ws* ,
     /// ws* "arguments" ws* : ws* OBJECT ws* } ws* </tool_call>` (the close
     /// as its token or spelled), where STRING is any JSON string and
-    /// OBJECT any JSON object (nesting capped at `pda::MAX_DEPTH`). None if
-    /// the vocabulary has no `<tool_call>` token, or isn't
-    /// `Vocab::byte_complete` (a mask could come up empty).
-    pub fn hermes(vocab: Arc<Vocab>) -> Option<Grammar> {
-        if !vocab.byte_complete() {
-            return None;
+    /// OBJECT any JSON object (nesting capped at `pda::MAX_DEPTH`). Err
+    /// (why, for the server's startup line) if the vocabulary isn't
+    /// `Vocab::byte_complete` (a mask could come up empty) or has no
+    /// `<tool_call>` special token.
+    pub fn hermes(vocab: Arc<Vocab>) -> Result<Grammar, String> {
+        if let Some(b) = vocab.missing_byte() {
+            return Err(format!(
+                "the vocabulary isn't byte-complete: byte {b:#04x} is no token by itself"
+            ));
         }
-        let open = vocab.special_of(b"<tool_call>")?;
+        let open = (vocab.special_of(b"<tool_call>"))
+            .ok_or("the vocabulary has no <tool_call> special token")?;
         let close = vocab.special_of(b"</tool_call>");
         let mut b = Builder::default();
         let json = pda::json(&mut b);
@@ -117,7 +122,7 @@ impl Grammar {
         let mut h = Sha256::new();
         h.update(desc.as_bytes());
         let hex = h.finish_hex()[..16].to_string();
-        Some(Grammar {
+        Ok(Grammar {
             masks: Masks::new(graph, vocab),
             start: h0,
             triggers: vec![open],

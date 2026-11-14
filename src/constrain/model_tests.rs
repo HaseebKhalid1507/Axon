@@ -6,8 +6,10 @@
 //! generation drafted or not gives the same tokens; the logits-row
 //! fallback (too few allowed among the device's best) is `cands_masked` of
 //! the row; and a constrained request's tokens are the unconstrained ones
-//! until its trigger. The masks themselves on the real vocabulary, and the
-//! per-token cost (`mask_cost_real`, ignored: `--ignored --nocapture`).
+//! until its trigger. Verify passes past 16 rows (CUDA's HEAD_SUB), and
+//! the batched routes of the pipeline and the CPU/GPU split. The masks
+//! themselves on the real vocabulary, and the per-token cost
+//! (`mask_cost_real`, ignored: `--ignored --nocapture`).
 //!
 //! The model: `testutil::MODEL` (Qwen2.5-0.5B), or
 //! `AXON_CONSTRAIN_TEST_MODEL` (a Qwen2.5 GGUF: the 7B gate job).
@@ -242,9 +244,10 @@ fn generate_with<M: Lm>(
 }
 
 /// The contract on one backend: decode == verify passes (chunks 1, 3, 8,
-/// 16), generation drafted == undrafted (greedy and two seeds), and the
-/// constrained request's tokens == the unconstrained ones until its
-/// trigger. Returns `decode`'s results per prompt for the pool test.
+/// 16, 17 and all the rows at once), generation drafted == undrafted
+/// (greedy and two seeds), and the constrained request's tokens == the
+/// unconstrained ones until its trigger. Returns `decode`'s results per
+/// prompt for the pool test.
 #[allow(clippy::type_complexity)]
 fn contract<M: Lm>(
     net: &M,
@@ -266,7 +269,13 @@ fn contract<M: Lm>(
         if after != usize::MAX {
             assert!(engaged > 0, "{what}: never engaged");
         }
-        for chunk in [1, 3, 8, 16] {
+        // Past 16 rows (CUDA's HEAD_SUB): passes of 16 and the rest.
+        assert!(
+            rows.len() > 16,
+            "{what}: {} rows: too few for 17",
+            rows.len()
+        );
+        for chunk in [1, 3, 8, 16, 17, rows.len()] {
             verify_matches(net, g, &prompt, after, &ids, &rows, chunk, &what);
         }
         let cfgs = [
@@ -373,32 +382,35 @@ fn restrictive<M: Lm>(net: &M, prompt: &[u32], n: usize, label: &str) -> usize {
         t = crate::argmax(&l);
         hist.push(t);
     }
-    // The same rows in verify passes of up to 8 (each row restricted).
+    // The same rows in verify passes of up to 8, then of all n at once
+    // (past 16: CUDA's later passes' fallbacks), each row restricted.
     let toks: Vec<u32> = std::iter::once(last)
         .chain(hist[prompt.len()..].iter().copied())
         .take(n)
         .collect();
-    let mut b = 0;
-    while b < n {
-        let e = (b + 8).min(n);
-        let m: Vec<Option<&TokenMask>> = masks[b..e].iter().map(Some).collect();
-        let rows = net.verify_cands_masked(
-            &toks[b..e],
-            rest.len() + b,
-            &mut c3,
-            &SPEC,
-            &hist[..prompt.len() + e - 1],
-            &m,
-        );
-        for (j, r) in rows.iter().enumerate() {
-            assert_eq!(
-                bits(r),
-                bits(&want[b + j]),
-                "{label}: restrictive verify row {}",
-                b + j
+    for chunk in [8, n] {
+        let mut b = 0;
+        while b < n {
+            let e = (b + chunk).min(n);
+            let m: Vec<Option<&TokenMask>> = masks[b..e].iter().map(Some).collect();
+            let rows = net.verify_cands_masked(
+                &toks[b..e],
+                rest.len() + b,
+                &mut c3,
+                &SPEC,
+                &hist[..prompt.len() + e - 1],
+                &m,
             );
+            for (j, r) in rows.iter().enumerate() {
+                assert_eq!(
+                    bits(r),
+                    bits(&want[b + j]),
+                    "{label}: restrictive verify row {} (passes of {chunk})",
+                    b + j
+                );
+            }
+            b = e;
         }
-        b = e;
     }
     n
 }
@@ -433,7 +445,7 @@ fn cpu_constrained_contract() {
     let n = n_for(&m);
     contract(&net, tok, &g, n, "cpu");
     let p = &prompts(tok)[1].0;
-    restrictive(&net, p, 12, "cpu");
+    restrictive(&net, p, 20, "cpu");
 }
 
 #[test]
@@ -454,7 +466,7 @@ fn cuda_constrained_contract() {
     let f0 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     let runs = contract(&net, tok, &g, n, "cuda");
     let p1 = &prompts(tok)[1].0;
-    restrictive(&net, p1, 12, "cuda");
+    restrictive(&net, p1, 20, "cuda");
     let f1 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     assert!(f1 > f0, "the logits-row fallback never ran");
     // Pool steps: each constrained run beside the others and an
@@ -579,6 +591,72 @@ fn cuda_constrained_contract() {
     }
     let f3 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     assert!(f3 > f2, "the pool's fallback never ran");
+}
+
+/// The other backends' batched routes (`lm::cands_masked_via`,
+/// `lm::verify_masked_via`): a two-stage pipeline on one device (device 0
+/// opened twice, as pipeline/tests.rs does) and a CPU/GPU split, each held
+/// to the contract on itself, restrictive masks (the fallback that runs a
+/// position again) included; the pipeline's candidates are the one-GPU
+/// model's, bit for bit.
+#[test]
+fn split_backends_constrained_contract() {
+    let Some(gpu) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = test_model() else {
+        return;
+    };
+    use crate::cuda::qwen2::pipeline::PipelineQwen2;
+    use crate::cuda::qwen2::{CacheKv, CudaQwen2};
+    use crate::cuda::{Gpu, Kernels, Module};
+    use crate::hybrid::HybridQwen2;
+    use std::sync::atomic::Ordering::Relaxed;
+    let ctx = 1024;
+    let nl = crate::hybrid::block_count(&m).unwrap();
+    let km = Kernels::module_for(&gpu, &m).unwrap();
+    let (tok, g, one) = {
+        let net = CudaQwen2::new(&gpu, &km, &m, ctx).unwrap();
+        let (tok, g) = grammar(&m, net.vocab());
+        let (p, after) = &prompts(tok)[1];
+        let one = decode(&net, &g, p, *after, n_for(&m), &tok.eog());
+        (tok, g, one)
+    };
+    let n = n_for(&m);
+    let p1 = &prompts(tok)[1].0;
+    {
+        let gs: Vec<Gpu> = (0..2).map(|_| Gpu::open_device(0).unwrap()).collect();
+        let kms: Vec<Module> = gs
+            .iter()
+            .map(|g| Kernels::module_for(g, &m).unwrap())
+            .collect();
+        let devs = [(&gs[0], &kms[0]), (&gs[1], &kms[1])];
+        let pipe =
+            PipelineQwen2::new(&devs, &m, ctx, CacheKv::F16, Some(vec![0, nl / 2, nl])).unwrap();
+        let runs = contract(&pipe, tok, &g, n, "pipeline");
+        assert_eq!(runs[1].1, one.0, "pipeline: the one-GPU model's tokens");
+        for (i, (a, b)) in runs[1].3.iter().zip(&one.1).enumerate() {
+            assert_eq!(
+                bits(a),
+                bits(b),
+                "pipeline: the one-GPU model's candidates at {i}"
+            );
+        }
+        let f0 = sample::MASK_FALLBACKS.load(Relaxed);
+        restrictive(&pipe, p1, 20, "pipeline");
+        assert!(
+            sample::MASK_FALLBACKS.load(Relaxed) > f0,
+            "pipeline: no fallback ran"
+        );
+    }
+    let hy = HybridQwen2::new(Some((&gpu, &km)), &m, ctx, nl / 2, CacheKv::F16).unwrap();
+    contract(&hy, tok, &g, n, "hybrid");
+    let f0 = sample::MASK_FALLBACKS.load(Relaxed);
+    restrictive(&hy, p1, 20, "hybrid");
+    assert!(
+        sample::MASK_FALLBACKS.load(Relaxed) > f0,
+        "hybrid: no verify fallback ran"
+    );
 }
 
 /// The masks on the real vocabulary (151k tokens, byte-level BPE) equal

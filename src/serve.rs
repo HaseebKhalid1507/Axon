@@ -1647,15 +1647,41 @@ fn engine(
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
-    let banner = banner + tier_note.as_deref().unwrap_or("");
-    // The vocabulary's automaton tables (~0.1 s at 152k tokens), built once.
-    let constrain = (o.constrain
-        && template.as_ref().and_then(tools::family) == Some(tools::Family::Qwen25))
-    .then(|| {
-        let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
-        crate::constrain::Grammar::hermes(v).map(Arc::new)
-    })
-    .flatten();
+    // Constrained tool calls (`Opts::constrain`): the Hermes grammar on this
+    // vocabulary (its automaton tables: ~0.1 s at 152k tokens), built once.
+    // On, the banner names it; asked for but refused, one line says why,
+    // even under --quiet (an operator who set AXON_CONSTRAIN=1 must be able
+    // to tell it's off).
+    let constrain = o.constrain.then(|| {
+        let g = match template.as_ref().map(tools::family) {
+            Some(Some(tools::Family::Qwen25)) => {
+                let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
+                crate::constrain::Grammar::hermes(v).map(Arc::new)
+            }
+            Some(Some(f)) => Err(format!(
+                "the chat template's tool calls are {}; this release holds Qwen2.5's \
+                 Hermes calls only",
+                match f {
+                    tools::Family::Qwen3 => "Qwen3's (Hermes after <think>)",
+                    tools::Family::Llama31 => "Llama 3.1's",
+                    tools::Family::Harmony => "gpt-oss's (Harmony)",
+                    tools::Family::Qwen25 => unreachable!(),
+                }
+            )),
+            Some(None) => Err("the chat template has no tool-call format".into()),
+            None => Err("the model has no chat template".into()),
+        };
+        g.map_err(|why| {
+            eprintln!("axon serve: constrained tool calls (AXON_CONSTRAIN=1) off: {why}")
+        })
+        .ok()
+    });
+    let constrain = constrain.flatten();
+    let banner = banner
+        + tier_note.as_deref().unwrap_or("")
+        + &(constrain.as_ref())
+            .map(|g| format!(", constrained tool calls ({})", g.field()))
+            .unwrap_or_default();
     if ready
         .send(Ok(Loaded {
             tok,

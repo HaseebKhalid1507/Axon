@@ -765,7 +765,12 @@ pub fn generate_constrained<M: Lm>(
                 if masks[keep].as_ref().is_some_and(|m| !m.allows(g)) || !cl.accept(g) {
                     break;
                 }
-                masks.push(cl.mask()?);
+                // Nothing allowed after a guess: the draft stops before it
+                // (only a decided token's empty mask fails the request).
+                let Ok(m) = cl.mask() else {
+                    break;
+                };
+                masks.push(m);
                 keep += 1;
             }
             guesses.truncate(keep);

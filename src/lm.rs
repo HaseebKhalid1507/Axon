@@ -196,7 +196,11 @@ pub trait Lm: Sealed {
     #[doc(hidden)]
     /// `verify_cands` with a mask per row (None: the row's `forward_cands`,
     /// Some: its `forward_cands_masked`), as those on each `tokens[b]` in
-    /// order would give.
+    /// order would give. The default runs them in order, one step per row:
+    /// a constrained draft is then no faster than none. The CPU and CUDA
+    /// models override it with their batched pass, the pipeline and the
+    /// CPU/GPU split with `verify_masked_via`. TODO (#259's PR B): MoE
+    /// keeps the default, correct but one step per row.
     fn verify_cands_masked(
         &self,
         tokens: &[u32],
@@ -564,6 +568,99 @@ impl Lm for Qwen2<'_> {
             })
             .collect()
     }
+}
+
+/// `Lm::forward_cands_masked` from the backend's own `forward_cands` (its
+/// candidates selected on the device): the CAND_MAX best, the allowed ones
+/// kept (`sample::masked_prefix`); too few allowed among them, the step
+/// runs again at the same position (`forward`: the same KV bits written
+/// again, and the logits) and the host selects (`sample::cands_masked`), as
+/// the trait's default does. For backends whose cache is KV by position (a
+/// step at a position already run is a rewind) and whose `forward_cands`
+/// meets its contract (`sample::cands` of the same logits): the default's
+/// candidates bit for bit, without copying a logits row to the host for
+/// every constrained token.
+pub(crate) fn cands_masked_via<M: Lm + ?Sized>(
+    net: &M,
+    token: u32,
+    pos: usize,
+    cache: &mut M::Cache,
+    spec: &CandSpec,
+    recent: &[u32],
+    mask: &TokenMask,
+) -> Vec<Cand> {
+    if spec.k <= sample::CAND_MAX {
+        let dev = CandSpec {
+            k: sample::CAND_MAX,
+            ..*spec
+        };
+        let c = net.forward_cands(token, pos, cache, &dev, recent);
+        if let Some(c) = sample::masked_prefix(&c, spec.k, mask) {
+            return c;
+        }
+        sample::MASK_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let mut l = net.forward(token, pos, cache);
+    sample::cands_masked(&mut l, spec, recent, mask)
+}
+
+/// `Lm::verify_cands_masked` from the backend's own batched `verify_cands`
+/// (`cands_masked_via`'s terms): one verify at CAND_MAX, an unmasked row
+/// keeping its first `spec.k` (sample.cu's and `sample::cands`' best are a
+/// prefix of the CAND_MAX best), a masked row the allowed ones; a masked
+/// row with too few allowed among them runs its position again (`forward`)
+/// for the logits. So a constrained draft keeps the backend's batched
+/// verify instead of the default's one step per row.
+pub(crate) fn verify_masked_via<M: Lm + ?Sized>(
+    net: &M,
+    tokens: &[u32],
+    start: usize,
+    cache: &mut M::Cache,
+    spec: &CandSpec,
+    recent: &[u32],
+    masks: &[Option<&TokenMask>],
+) -> Vec<Vec<Cand>> {
+    let (nb, n) = (tokens.len(), recent.len());
+    assert!(
+        n >= nb && recent[n - nb..] == *tokens,
+        "recent must end with tokens"
+    );
+    assert_eq!(masks.len(), nb, "a mask (or None) per row");
+    if masks.iter().all(Option::is_none) {
+        return net.verify_cands(tokens, start, cache, spec, recent);
+    }
+    if spec.k > sample::CAND_MAX {
+        return (0..nb)
+            .map(|b| {
+                let r = &recent[..n - nb + b + 1];
+                match masks[b] {
+                    None => net.forward_cands(tokens[b], start + b, cache, spec, r),
+                    Some(m) => cands_masked_via(net, tokens[b], start + b, cache, spec, r, m),
+                }
+            })
+            .collect();
+    }
+    let dev = CandSpec {
+        k: sample::CAND_MAX,
+        ..*spec
+    };
+    let rows = net.verify_cands(tokens, start, cache, &dev, recent);
+    assert_eq!(rows.len(), nb, "a row per token");
+    rows.into_iter()
+        .enumerate()
+        .map(|(b, mut c)| {
+            let r = &recent[..n - nb + b + 1];
+            let Some(m) = masks[b] else {
+                c.truncate(spec.k);
+                return c;
+            };
+            sample::masked_prefix(&c, spec.k, m).unwrap_or_else(|| {
+                sample::MASK_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut l = net.forward(tokens[b], start + b, cache);
+                sample::cands_masked(&mut l, spec, r, m)
+            })
+        })
+        .collect()
 }
 
 /// Where `axon gen` / `axon chat` run the model. Non-exhaustive: more

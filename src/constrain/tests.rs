@@ -588,13 +588,17 @@ fn hermes_field() {
     assert!(a.field().starts_with("hermes-json ") && a.field().len() == 12 + 16);
     // No `<tool_call>` token; not byte-complete (no 'q'): refused.
     let bytes: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
-    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(256, &bytes, &[]))).is_none());
+    // Each refusal says why (the server's startup line).
+    let why = |v: Vocab| Grammar::hermes(Arc::new(v)).err();
+    let w = why(Vocab::from_pieces(256, &bytes, &[])).unwrap();
+    assert!(w.contains("no <tool_call>"), "{w}");
     let mut p = bytes.clone();
     p[b'q' as usize] = b"qq".to_vec();
     p.push(b"<tool_call>".to_vec());
-    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(257, &p, &[256]))).is_none());
+    let w = why(Vocab::from_pieces(257, &p, &[256])).unwrap();
+    assert!(w.contains("byte-complete: byte 0x71 "), "{w}");
     p[b'q' as usize] = b"q".to_vec();
-    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(257, &p, &[256]))).is_some());
+    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(257, &p, &[256]))).is_ok());
 }
 
 /// `cands_masked` is the reference: the `k` best allowed (penalty first),

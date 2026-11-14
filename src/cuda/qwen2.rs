@@ -3574,11 +3574,13 @@ impl<'g> Lm for CudaQwen2<'g> {
         r.unwrap_or_else(|e: String| Self::die(e))
     }
 
-    /// One batched pass with sample.cu on every row (CAND_MAX each; an
-    /// unmasked row keeps its first `spec.k`), when it fits one head launch
-    /// (at most HEAD_SUB rows: their logits rows are all still in the batch
-    /// scratch for a fallback). Longer, past CAND_MAX, or no mask at all:
-    /// `verify_cands`, or row by row (the same logits bit for bit).
+    /// Batched passes with sample.cu on every row (CAND_MAX each; an
+    /// unmasked row keeps its first `spec.k`), of at most HEAD_SUB rows
+    /// each: one head launch per pass, so all of a pass's logits rows are
+    /// still in the batch scratch for a fallback, taken before the next
+    /// pass (passes of any size give the same bits). Past CAND_MAX or f8:
+    /// row by row (sequential steps, the same logits bit for bit); no mask
+    /// at all: `verify_cands`.
     fn verify_cands_masked(
         &self,
         tokens: &[u32],
@@ -3602,8 +3604,8 @@ impl<'g> Lm for CudaQwen2<'g> {
         if masks.iter().all(Option::is_none) {
             return self.verify_cands(tokens, start, cache, spec, recent);
         }
-        let max = cache.b.as_ref().map_or(0, |b| b.max);
-        if spec.k > CAND_MAX || self.f8 || nb > batch::HEAD_SUB.min(max) {
+        let sub = batch::HEAD_SUB.min(cache.b.as_ref().map_or(0, |b| b.max));
+        if spec.k > CAND_MAX || self.f8 || sub == 0 {
             return (0..nb)
                 .map(|b| {
                     let r = &recent[..n - nb + b + 1];
@@ -3621,31 +3623,38 @@ impl<'g> Lm for CudaQwen2<'g> {
             ..*spec
         };
         let r = (|| {
-            let rows = self.verify_cands_tokens(cache, tokens, start, &dev, recent)?;
             let v = self.vocab;
             let mut out = Vec::with_capacity(nb);
-            for (b, mut c) in rows.into_iter().enumerate() {
-                let r = &recent[..n - nb + b + 1];
-                out.push(match masks[b] {
-                    None => {
-                        c.truncate(spec.k);
-                        c
-                    }
-                    Some(m) => match sample::masked_prefix(&c, spec.k, m) {
-                        Some(c) => c,
+            for p0 in (0..nb).step_by(sub) {
+                let p1 = (p0 + sub).min(nb);
+                // The pass's rows: recent ends with its last token.
+                let pr = &recent[..n - nb + p1];
+                let rows =
+                    self.verify_cands_tokens(cache, &tokens[p0..p1], start + p0, &dev, pr)?;
+                for (j, mut c) in rows.into_iter().enumerate() {
+                    let b = p0 + j;
+                    let r = &recent[..n - nb + b + 1];
+                    out.push(match masks[b] {
                         None => {
-                            sample::MASK_FALLBACKS
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let bb = cache.b.as_ref().expect("batch scratch");
-                            cache.host_out.copy_from(&bb.logits, b * v * 4, v * 4)?;
-                            let mut l: Vec<f32> = (cache.host_out.bytes_mut()?[..v * 4]
-                                .chunks_exact(4))
-                            .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
-                            .collect();
-                            sample::cands_masked(&mut l, spec, r, m)
+                            c.truncate(spec.k);
+                            c
                         }
-                    },
-                });
+                        Some(m) => match sample::masked_prefix(&c, spec.k, m) {
+                            Some(c) => c,
+                            None => {
+                                sample::MASK_FALLBACKS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let bb = cache.b.as_ref().expect("batch scratch");
+                                cache.host_out.copy_from(&bb.logits, j * v * 4, v * 4)?;
+                                let mut l: Vec<f32> = (cache.host_out.bytes_mut()?[..v * 4]
+                                    .chunks_exact(4))
+                                .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+                                .collect();
+                                sample::cands_masked(&mut l, spec, r, m)
+                            }
+                        },
+                    });
+                }
             }
             Ok(out)
         })();

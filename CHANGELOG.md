@@ -7,15 +7,27 @@ measurements behind them.
 ## Unreleased (after 0.1.0's draft)
 
 ### Constrained tool calls, opt-in (`AXON_CONSTRAIN=1`; PR A of #259)
-- **A Hermes tool call can't be malformed JSON.** With `AXON_CONSTRAIN=1`, `axon serve` on a Qwen2.5-family model
-  holds a tool call (`tool_choice` auto) to `{"name": STRING, "arguments": OBJECT}` from its `<tool_call>` token to
-  `</tool_call>`: each token is picked from those a JSON automaton allows. The 8 malformed calls of #259
-  (unescaped quotes, invalid escapes, a raw newline, a second `<tool_call>` inside a call) can't be generated, and
-  no special token (EOS, `<|im_end|>`) can be picked inside a string. Text before and after a call, requests
-  without tools, and every request with the variable unset are unchanged, bit for bit.
+- **A Hermes tool call is valid JSON.** With `AXON_CONSTRAIN=1`, `axon serve` on a Qwen2.5-family model holds a
+  tool call (`tool_choice` auto) to `{"name": STRING, "arguments": OBJECT}` from its `<tool_call>` token to
+  `</tool_call>`: each token is picked from those a JSON automaton allows, and no special token (EOS,
+  `<|im_end|>`, a second `<tool_call>`) can be picked inside a string. None of the 8 malformed calls in #259 can be
+  generated. Valid doesn't mean right: where the model would have written an unescaped quote, the string ends
+  there (`"cmd": "echo '{"` and then a forced `,` or `}`), so the call parses but may not be what was meant.
+- **What it doesn't fix yet.**
+  - `max_tokens` can still cut a call short. Inside a call EOS is banned, so `max_tokens` is the only stop, and
+    there is no bound on a runaway call yet (PR B).
+  - The grammar allows `</tool_call>` spelled out inside a string (it is string text there), but main's tool-call
+    Parser still splits the reply at it, and the call arrives as text, until #262 lands.
+- **Unchanged.** Requests without tools and every request with the variable unset are unchanged, bit for bit.
+  Text before a call too. After a call the position takes the unconstrained head again (the text differs only
+  because the call did).
 - **Same bits however it runs.** A constrained reply is the same decoded, drafted, verified or batched beside other
   requests. Its `system_fingerprint` names the grammar (`constrain hermes-json <hash>` in the `serve` field), so it
-  isn't an unconstrained reply's; unconstrained fingerprints don't move.
+  isn't an unconstrained reply's: every tools request gets it, even one whose reply makes no call. Unconstrained
+  fingerprints don't move.
+- **It says whether it's on.** The startup banner ends with `constrained tool calls (hermes-json <hash>)`. A model
+  it can't hold (not the Qwen2.5 template family, no `<tool_call>` token, a vocabulary without every byte as a
+  token) gets one line saying why, even under `--quiet`.
 - Off by default until the follow-ups (#259's PR B: on by default, `required`/named calls, the tool-name enum).
 ### Tool calls stream as they are generated (#260)
 - **Streamed, a call's head goes out as soon as its name is read and its arguments open with `{`**, then its

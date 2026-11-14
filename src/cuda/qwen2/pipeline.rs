@@ -21,6 +21,7 @@
 
 use super::batch::{BatchIn, passes};
 use super::{CacheKv, CudaCache, CudaQwen2, Head, Input, PLAN_BATCH};
+use crate::constrain::TokenMask;
 use crate::cuda::{Gpu, Module, SyncEvent};
 use crate::gguf::Model;
 use crate::lm::Lm;
@@ -708,6 +709,33 @@ impl<'g> Lm for PipelineQwen2<'g> {
         }
         self.verify_cands_tokens(c, tokens, start, spec, recent)
             .unwrap_or_else(|e| Self::die(e))
+    }
+
+    /// On the device (`lm::cands_masked_via`): the logits row comes to the
+    /// host only when too few allowed tokens are among the CAND_MAX best.
+    fn forward_cands_masked(
+        &self,
+        token: u32,
+        pos: usize,
+        c: &mut PipelineCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+        mask: &TokenMask,
+    ) -> Vec<Cand> {
+        crate::lm::cands_masked_via(self, token, pos, c, spec, recent, mask)
+    }
+
+    /// The pipelined batched verify (`lm::verify_masked_via`).
+    fn verify_cands_masked(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        c: &mut PipelineCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+        masks: &[Option<&TokenMask>],
+    ) -> Vec<Vec<Cand>> {
+        crate::lm::verify_masked_via(self, tokens, start, c, spec, recent, masks)
     }
 
     /// The smallest stage's batch (the first stage may have the bigger
