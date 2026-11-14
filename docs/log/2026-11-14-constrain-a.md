@@ -87,6 +87,7 @@ Commits 7294a18 (fixes) and 67cb85e (a unit test). What changed:
 |---|---|---|
 | clippy -D warnings (both cfgs), rustfmt | clean | axon-gate `constrain-67cb85e-fast-clippy.log` |
 | fast tier, release suite | 881 passed, 0 failed, 65 ignored | 1114-095719-fc83 (pod1) |
+| fast tier, debug-assertion suite (CPU) | 899 passed, 0 failed, 65 ignored | 1114-095719-8fbf (pod1) |
 | model-gated, 0.5B (`constrain::`, `serve_constrained_tool_calls`) | 14 passed, 0 failed, incl. `split_backends_constrained_contract`, `masked_via_rows`, verify chunks of 17 and all rows | 1114-095441-3f2f (pod1) |
 | model-gated, Qwen2.5-7B-Instruct Q4_K_M (`constrain::model_tests`) | 4 passed, 0 failed (CPU, CUDA, split backends, real vocab) | 1114-095442-d621 (pod1) |
 | serve A/B, base 0497708 vs 67cb85e, `AXON_CONSTRAIN` unset; chat, multi-turn, sampled, 4 tool requests, completions; whole and streamed; one at a time and 16 at once on CUDA | 288 of 288 identical (fingerprints included); with the variable set, the 144 requests without tools == base | 1114-102136-6c91 (0.5B, Qwen3-0.6B, Llama-3.2-1B; CPU, CUDA, CUDA `--draft 4`), 1114-102136-d95a (7B; CUDA, CUDA draft) |
@@ -97,6 +98,26 @@ The serve A/B's constrained arm on the 7B (dumped in 1114-103013-31f9):
 - **The same prompt sampled at T 0.7, seed 7.** Constrained, an unescaped quote ended the string early, and the model
   wrote whitespace in the frame position until `max_tokens`, so no call came back. Main's call was malformed too.
   That is the runaway case deferred to PR B.
+- (Both against main 0497708's Parser. On #262's, a call that goes bad after its arguments open comes back as a call
+  with invalid `arguments` instead of text; not re-dumped.)
+
+### Rebase onto #262 (head 1acf2ed), for one merge train
+#262 (#260's streamed tool calls) and this PR land together. The rebase conflicted only in `CHANGELOG.md` (both new
+sections kept) and `docs/environment.md` (adjacent rows). 7b73521 updates the docs and one test for #262's Parser:
+- A `</tool_call>` inside a string in a call's arguments is now string text to the Parser, as it is to the grammar.
+  In the name string, and when calls are decided whole (`AXON_TOOL_STREAM=0`, ollama), it still ends the block.
+- A call cut by `max_tokens` after its arguments open comes back as a call with invalid `arguments`.
+  `serve_constrained_tool_calls` now parses a reply's last call only if the reply wasn't cut (`finish_reason`
+  `length`).
+
+`axon-train plan 262 264`: both orders merge clean, with the same final tree.
+
+| gate | result | job ID / log |
+|---|---|---|
+| clippy -D warnings (both cfgs), rustfmt | clean | axon-gate `constrain-7b73521-fast-clippy.log` |
+| fast tier, release suite | queued | 1114-114610-5186 (bella) |
+| fast tier, debug-assertion suite (CPU) | running | 1114-114610-619b (bella) |
+| serve A/B, base = #262's 1acf2ed `axon` vs 7b73521, `AXON_CONSTRAIN` unset; the same requests and configs as above | 288 of 288 identical (fingerprints included); with the variable set, the 144 requests without tools == base | 1114-114236-af84 (0.5B, Qwen3-0.6B, Llama-3.2-1B), 1114-114305-44d3 (7B), both bella |
 
 ## Results
 MEASURED. Host and job named per line.
