@@ -1,0 +1,29 @@
+{
+ "label": "flake-sjf-45b1f24",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1114-132500-6592",
+   "name": "flake-sjf-45b1f24-dbg",
+   "rc": 127,
+   "verdict": "FAIL (rc 127)",
+   "host": "pod1",
+   "hw": "hw-pod1-11-14_13:40.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "45b1f24",
+   "binary": "bash",
+   "started": 1794681629.0089214,
+   "ended": 1794681651.2918122,
+   "attempts": 1,
+   "remote_job": "20261114-184046-bash-162441",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c7f66fbc65d7362e0e82d133c9bbda00905602b0792cbdd4326d21c4a9866b1e",
+   "log_bytes": 1476
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 13:40:53 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

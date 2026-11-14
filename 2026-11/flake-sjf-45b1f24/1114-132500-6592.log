@@ -1,0 +1,17 @@
+[axon-run 13:25:00] submitted 1114-132500-6592 by /home/haseeb/.cache/axon-train: /usr/bin/bash loop.sh ./axon-test-dbg-45b1f24 10
+[axon-run 13:40:31] job 1114-132500-6592 -> pod1 [RTX 4090 sm_89 secure] (pod ct0a0ov1orv0bm): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 3000 --src /home/haseeb/.cache/axon-train/wt /usr/bin/bash loop.sh ./axon-test-dbg-45b1f24 10
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (e9f3b1c1041e2e6f374a625b) + source of /home/haseeb/.cache/axon-train/wt (delta vs 6 earlier upload(s) there)
+
+sent 16,796 bytes  received 60 bytes  4,816.00 bytes/sec
+total size is 10,197,391  speedup is 604.97
+
+sent 186 bytes  received 32,532 bytes  7,270.67 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261114-184046-bash-162441 on pod1 (GPU, 3000 MB)
+[axon-node 18:40:46] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 970/24564 MB; sharing with 20261114-182320-axon-test-dbg-45b1f24-142891 (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 18:40:46] run bash (e9f3b1c1041e2e6f374a625b) as /home/haseeb/.cache/axon-train/wt on b60a65b6b4d5, AXON_THREADS=5 RUST_TEST_THREADS=4; free 23114 MB of 24564 (used 970); GPU processes pid:MB 142906:960
+bash: loop.sh: No such file or directory
+[axon-node 18:40:46] exit 127 after 0.0s
+[axon-node 18:40:46] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 13:40:50] exit 127 after 19.2s (host pod1)
