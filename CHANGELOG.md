@@ -6,9 +6,27 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `AXON_SHARE_KV` read strictly; /slots `waiting` after a request alone; share and sjf tests (#267, #268)
+- **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages
+  off, `1` on (under fast kernels too), unset or empty is the default (on; off under fast kernels). Any other
+  value refuses to start with a message naming the valid ones; before, `off` and `false` read as on, and under fast
+  kernels `on` and `true` read as off. The start line says on or off and what decided it, and prints under
+  `--quiet` too when the variable is set or fast kernels turned sharing off.
+- **/slots `waiting` is empty on an idle server** (#268). A request that ran alone (nothing else running or
+  waiting) stayed in the published waiting list until the next request came; the list is now published again
+  when that path takes it.
+- **Tests.** `serve_share_on_under_fast_kernels`: sharing on under FP8 fast kernels (`AXON_SHARE_KV=1`), the path
+  where a debug build's duplicate-page byte check is skipped, with duplicates swapped (skipped without e4m3
+  tensor cores). `serve_share_cancel_frees` now proves its third request is dropped while being fed: a test-only
+  cap holds it two pages into its private part, and the engine records it reaped from its prompts being fed.
+  `serve_solo_leaves_no_waiting` covers #268. `serve_sjf_long_prompt_admitted_within_age_bound` waits until both
+  slots are busy and a short request waits before it sends the long prompt (it failed once in a debug suite on a
+  shared GPU, 1114-125202-b1eb: the long one found a slot free).
+
 ### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
 - **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Any value but `0` is now on,
-  `false` and `off` included; the start line says on or off and echoes a value that reads as on. Same bits on or off.
+  `false` and `off` included; the start line says on or off and echoes a value that reads as on (strict since #267,
+  above). Same bits on or off.
   **Off under fast kernels** (an FP8 checkpoint under `--numerics fast`, which `--datacenter` implies) unless
   `AXON_SHARE_KV=1`: their rows change with a prompt's chunking, so two copies of a block can differ. An engine
   failure's exit line names `AXON_SHARE_KV=0` while sharing is on. `cached_tokens` now counts pages another client

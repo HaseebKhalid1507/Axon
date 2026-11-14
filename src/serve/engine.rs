@@ -542,9 +542,9 @@ pub(super) struct Batch<'a, 't> {
     /// take, a key collision): it waits, as with no backlog, until the
     /// batch steps, admits or the tier grows.
     stalled: bool,
-    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV=0,
-    /// or a plain pool, and every path below is main's, decision for
-    /// decision).
+    /// Shared prefixes (`set_share`; None: off, by AXON_SHARE_KV=0 or
+    /// fast kernels' default, or a plain pool, and every path below is
+    /// main's, decision for decision).
     share: Option<Share>,
     /// Prompt tokens admissions mapped from the prefix index so far.
     pub shared_tokens: u64,
@@ -1674,6 +1674,18 @@ impl<'a, 't> Batch<'a, 't> {
         for (f, s) in self.pre.iter_mut().zip(starve(&plan, &rem, &starved, idle)) {
             f.starved = s;
         }
+        // Tests: no prompt fed past `Metrics::feed_cap` tokens (a request
+        // held mid-feed: `serve_share_cancel_frees`).
+        #[cfg(test)]
+        let plan: Vec<usize> = match self.metrics.as_ref() {
+            Some(m) => {
+                let cap = m.feed_cap.load(Ordering::Relaxed);
+                (plan.iter().zip(&fed))
+                    .map(|(&n, &f)| n.min(cap.saturating_sub(f)))
+                    .collect()
+            }
+            None => plan,
+        };
         let mut moved = false;
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
@@ -1959,6 +1971,11 @@ impl<'a, 't> Batch<'a, 't> {
         while i < self.pre.len() {
             if self.pre[i].seq.job.cancel.load(Ordering::Relaxed) {
                 let f = self.pre.remove(i);
+                #[cfg(test)]
+                if let Some(m) = &self.metrics {
+                    let n = f.seq.hist.len() - 1;
+                    m.reaped_fed.lock().unwrap().push((f.fed, n));
+                }
                 self.finish(f.seq, End::Gone);
             } else {
                 i += 1;

@@ -23,7 +23,8 @@ size, not its size minus the pool's. An evicted 25k-token session resumes in 0.1
 ([design](design/kv-ram-tier-exclusive.md) §6, §14). It stays opt-in until #233 (the first request waits
 3.2–4.0 s for the pinning) and #234 (the write-behind costs 2.3 % tok/s at C=16 on a 4090) are fixed.
 Requests share the KV pages of a common prompt prefix, same bits (on by default; `AXON_SHARE_KV=0` turns it
-off; off under `--numerics fast`'s FP8 kernels; #207, #216; [below](#operations-auth-metrics-slots)).
+off; off by default under `--numerics fast`'s FP8 kernels, where `AXON_SHARE_KV=1` turns it on; #207, #216;
+[below](#operations-auth-metrics-slots)).
 
 ## Starting a server, and its flags
 
@@ -213,6 +214,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   "steps_eager_oom"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
   alone is in the slot it runs in (on the CPU, a split or a pipeline, the one cache is slot 0).
+  `waiting`: the requests the engine holds for a slot (with a pool), not the ones running; empty on an idle
+  server (#268: a request that had run alone stayed listed until the next one came).
   With the paged pool, each slot adds `pages_used`, and the object `pages_free`, `pages_total`, `page_tokens`,
   `preempted` and `prefills_unfed`. The two OOM counters: CUDA graphs given up, and steps run kernel by kernel, for
   lack of VRAM (never fatal, the same bits).
@@ -232,15 +235,18 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; on by default, `AXON_SHARE_KV=0` turns them off; any other
-  value, `false` and `off` included, leaves them on, and the start line says which). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; on by default, `AXON_SHARE_KV=0` turns them off and
+  `AXON_SHARE_KV=1` turns them on; unset or empty is the default; any other value, `false` or `off` say, refuses
+  to start, naming the valid ones, #267). The start line says on or off and what decided it: the default, the
+  variable, or fast kernels' default (below); it prints under `--quiet` too when the variable is set or fast kernels
+  turned sharing off. A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
   bits: a page is reused only under the same tokens and the same parent page, so its rows are the
   ones the request would compute (exact kernels: under `--numerics fast` on an FP8 checkpoint the
-  rows change with how a prompt is chunked, so sharing is off there unless `AXON_SHARE_KV=1`, and
-  then within fast mode's tolerance, as a cached prefix is; [determinism](determinism.md)).
+  rows change with how a prompt is chunked, so sharing is off there by default; `AXON_SHARE_KV=1` turns it on,
+  within fast mode's tolerance, as a cached prefix is; [determinism](determinism.md)).
   **What a client can learn:** `usage.prompt_tokens_details.cached_tokens` counts the pages a
   request mapped, so it now includes pages another client computed. A request learns how many
   64-token blocks at the start of its prompt someone else sent recently, as with any shared
