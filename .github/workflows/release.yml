@@ -3,8 +3,8 @@ name: Release
 # Builds the Linux x86-64 release tarball: `axon` with its GPU kernels precompiled (the kernel pack,
 # docs/models.md "NVIDIA GPUs") and the license notices. A pushed tag `vX.Y.Z` uploads it to a draft GitHub
 # release for that tag; a maintainer publishes it after the hand checks in docs/releasing.md. Any other run
-# (workflow_dispatch, or a pull request that touches the release files) only builds it, tests install.sh against
-# it, and keeps it as a workflow artifact.
+# (workflow_dispatch, on a tag too, or a pull request that touches the release files) only builds it, tests
+# install.sh against it, and keeps it as a workflow artifact.
 #
 # Supply chain: third-party actions are pinned to commit SHAs and the build image by digest (bump them on purpose,
 # with a run that passes); a tag build compiles its kernel pack from the tagged source (no cache).
@@ -91,7 +91,8 @@ jobs:
         with:
           name: kernels-pack
           path: kernels.pack
-          retention-days: 7
+          # docs/releasing.md step 1 compares it with bella's NVRTC build before the draft is published.
+          retention-days: 30
 
   build:
     name: axon x86_64-linux
@@ -195,7 +196,9 @@ jobs:
 
   release:
     name: draft release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Only the tag's own push uploads. A workflow_dispatch on the tag (docs/releasing.md step 4, the
+    # reproducibility check) has the same github.ref, so the ref alone would let it add a second draft.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -210,6 +213,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # One release per tag. GitHub allows several drafts for one tag, and "Re-run all jobs" on the tag's push
+          # run is still a push: refuse if a release for the tag, draft or published, exists already (this token
+          # can push, so the listing includes drafts).
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" |
+            jq -r --arg tag "$GITHUB_REF_NAME" '.[] | select(.tag_name == $tag) | .html_url')
+          if [ -n "$existing" ]; then
+            echo "a release for $GITHUB_REF_NAME exists already: $existing" >&2
+            echo "nothing uploaded; to upload this run's tarball instead, delete that release and re-run this job" >&2
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "Axon $GITHUB_REF_NAME" \
             --notes "Linux x86-64. Install: \`curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh\` (this version: \`curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/install.sh | AXON_VERSION=$GITHUB_REF_NAME sh\`). SHA-256 of the tarball: $(cut -d' ' -f1 dist/axon-x86_64-linux.tar.gz.sha256)." \
