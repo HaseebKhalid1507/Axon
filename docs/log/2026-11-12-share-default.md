@@ -43,12 +43,43 @@ soak under pool pressure. The board's Synaps-shaped trace shares only 4–7 % of
 subagent fan-out, not every agent workload.
 
 ## How it was verified
-PR body (job IDs): the full tier on bella (the serve tests that don't set `share` now run with it on, the
+PR body (job IDs): the full tier on RTX 4090 pods (the serve tests that don't set `share` now run with it on, the
 default), a `serve::` run with `AXON_SHARE_KV=0`, `md5share-v4.sh` against main (gen; serve on, off, tier on and
 off, shuffled, undersized pools; pressure), the A/B of rule 4 (four arms: main, both flips, sharing alone, the tier
 alone; stop rule in the PR body before the run; result above). Then **the soak, the shipped config**: 4.5 h on a
 debug-assertions build (page invariants checked after every step), sharing on, the tier off, a 128-page pool. A
-second soak with sharing on and `--cache-ram 2G` (the opt-in combination) runs at `--low` as extra evidence.
+second soak with sharing on and `--cache-ram 2G` (the opt-in combination) ran at `--low` as extra evidence.
 
 ## Results
-Pending at the time of writing; the PR body has them as they land.
+Gated code fc845c8.
+- **Bits.** `md5share-v4.sh` against main (1113-004233-e238): gen, 0 of 30 differ. Serve: every arm's replies were
+  equal to main's in every cell. That held under a 128-page pool too (`on128`: 3,840 shared tokens, 743 evictions,
+  3 preemptions, 45 unfeeds).
+- **Suites.**
+  - Full tier, release: 223, 379 and 243 passed. Shard 2 is 5bb0: the first shard 2, 88ee, was killed while stuck
+    behind #232's test, and that test passed alone (48ac).
+  - Full tier, debug: 223, 380 and 243 passed.
+  - `serve::` with `AXON_SHARE_KV=0`: 184 passed.
+  - `serve_share_cancel_frees`, 30 fresh processes in a row, the lead's requirement: 30 of 30 on bella (7c83). It
+    was also 30 of 30 on a packed pod (c7ee), but that job ended rc 1 on the script's own output check, which broke
+    under `--nocapture`. The check was fixed before 7c83.
+- **The A/B** (d38d): sharing alone passed all six cells (above).
+- **The soak, the gate** (1113-171545-892b, bella). The run: 4.58 h, 12,173 requests, debug-assertions build,
+  sharing on, the tier off, 128 pages.
+  - RSS 198.6–200.6 MiB, a slope of 0.03 MiB/h (0.7 MiB over 24 h against a 64 MiB bound). VRAM flat at 1,856 MiB.
+  - No panic, so the page invariants held after every step.
+  - 19 identity runs under load, each equal to main's solo run.
+  - No 503, and every slot idle at the end.
+  - 112,320 prompt tokens were mapped from the index, and 5,101 warm pages were evicted for room.
+  - **No preemption and no unfeed in 4.5 h.** The small pool's pressure fell on the index (evictions), never on a
+    running request: the mix's requests are short and its long ones fit. Preemption with sharing on rests on
+    `serve_share_pressure`, in every suite, and md5's pressure arm (above), not on the soak.
+- **The soak with the tier** (1113-222946-bd87, `--cache-ram 2G`, `--low`; extra evidence). The run: 4.60 h, 12,889
+  requests.
+  - RSS 202.9–205.5 MiB, a slope of 0.31 MiB/h (7.3 MiB over 24 h, within the 64 MiB bound). VRAM flat.
+  - 19 identity runs, each equal to main's solo run.
+  - 127,040 shared prompt tokens.
+  - The tier: 776 hits, 193,997 restored tokens, 25,334 pages written, none spilled. No preemption here either.
+- **The soak harness failed first** (11-13). The first smoke and soak died at load: `soakshare.sh` passed no
+  `--device`, and serve's default device is the CPU, which refuses `--parallel 8`. Fixed with `--device cuda` and
+  rerun (smoke 1dd6, then the two soaks).
