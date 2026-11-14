@@ -175,10 +175,23 @@ prefilled again; forgetting only what makes room would pay that near-full prefil
 context is full, while half leaves room for the next several turns to append to the cache. The cache after
 forgetting is the same, byte for byte, as a fresh prefill of what's kept.
 
-Llama 3 uses the official 3.1/3.2 template (no tools): a system block that always
-opens with the template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul
-2024" lines (its default date, so a conversation doesn't depend on the day) and then
-`--system`'s text if any, headers around each message, `<|eot_id|>` ending each turn.
+Each model is framed as its GGUF's own chat template frames it (`tokenizer.chat_template`, read for a few fixed
+facts; no Jinja runs), token for token as Hugging Face renders that template (`src/serve/template_tests.rs`). The
+format comes from the vocabulary's special tokens; the template picks the variant and the default system message.
+Without `--system`, chat uses the template's own default if it has a fixed one: Qwen2.5's "You are Qwen, created by
+Alibaba Cloud. You are a helpful assistant.", Qwen2's "You are a helpful assistant.", Kimi's; Qwen1.5, Qwen3, Llama
+3, Gemma 3 and DeepSeek have none (a file without a template: Qwen2.5's for `qwen2`, as before).
+
+Llama 3.1 and 3.2 (their template has "Cutting Knowledge Date"): a system block that always opens with the
+template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul 2024" lines (its default date, so a
+conversation doesn't depend on the day) and then `--system`'s text if any. Llama 3.0 (no date lines in its
+template): BOS, then a system block only if `--system` gives one. Both: headers around each message, `<|eot_id|>`
+ending each turn.
+
+DeepSeek R1 (R1-0528 and the Qwen and Llama distills) and V3: each reply opens after `<｜Assistant｜>`, so R1 reasons
+first (`<think>...</think>`); BOS whenever the template writes it. Earlier replies stay in the conversation as
+their text after the last `</think>`, as R1's templates render them: the reasoning isn't fed back. DeepSeek V3.1:
+its template's non-thinking mode (`<｜Assistant｜></think>`).
 
 Qwen3 follows its own template: no system message unless `--system` gives one, and
 the model reasons first (`<think>...</think>`, shown as it streams; Ollama's default

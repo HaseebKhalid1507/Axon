@@ -41,7 +41,7 @@ mod responses;
 mod tier;
 pub mod tools;
 
-use crate::chat::{self, Framing, special};
+use crate::chat::{self, Format, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
@@ -197,15 +197,26 @@ pub struct Template {
     /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
     /// `enable_thinking: false` opens a reply with.
     think: Option<(u32, u32, Vec<u32>)>,
-    /// Used when the messages don't start with a system message (Qwen2.5's
-    /// template brings one, Qwen3's and Llama 3's none).
-    default_system: Option<&'static str>,
+    /// Used when the messages don't start with a system message: the
+    /// template's (`chat::default_system`: Qwen2.5's, Qwen2's; Qwen1.5's,
+    /// Qwen3's and Llama 3's have none).
+    default_system: Option<String>,
+    /// Whether the template renders tools (`<tool_call>` in ChatML, Llama
+    /// 3.1's `ipython`; harmony always), or the file has no template.
+    pub(crate) tools: bool,
 }
 
 impl Template {
-    /// None if the vocabulary has no chat markers (no chat endpoint).
-    pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
-        let fr = Framing::new(tok)?;
+    /// None if the vocabulary has no chat markers (no chat endpoint). The
+    /// details come from the model file's own template
+    /// (`Framing::from_model`, `chat::default_system`).
+    pub fn new(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Template> {
+        let fr = Framing::from_model(tok, m)?;
+        let tools = chat::chat_template(m).is_none_or(|t| match fr.format {
+            Format::ChatMl => t.contains("<tool_call>"),
+            Format::Llama3 { .. } => t.contains("ipython"),
+            _ => true,
+        });
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -215,8 +226,8 @@ impl Template {
         Some(Template {
             fr,
             think,
-            // As `axon chat`: Qwen2.5's default system message for qwen2.
-            default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
+            default_system: chat::default_system(m),
+            tools,
         })
     }
 
@@ -229,21 +240,19 @@ impl Template {
     /// else the default one; Llama 3 always has one), each message framed,
     /// then the assistant's opening (with the empty reasoning block if
     /// `no_think` and the model thinks), as `axon chat` frames a
-    /// conversation. An earlier reply of a thinking model is kept as its
-    /// text after `</think>`, leading newlines dropped, as the Qwen3
-    /// template (and `axon chat`) render it.
+    /// conversation. An earlier reply of a thinking model is kept as the
+    /// framing's `think_strip` says (its text after `</think>`, as the
+    /// template and `axon chat` render it).
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
         let (system, rest) = match msgs.split_first() {
             Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
-            _ => (self.default_system, msgs),
+            _ => (self.default_system.as_deref(), msgs),
         };
         let mut t = self.fr.system(tok, system);
         for (i, m) in rest.iter().enumerate() {
-            let text = match (m.role, &self.think) {
-                (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
-                    Some((_, c)) => c.trim_start_matches('\n'),
-                    None => &m.content,
-                },
+            let strip = self.think.as_ref().and(self.fr.think_strip);
+            let text = match (m.role, strip) {
+                (Role::Assistant, Some(how)) => how.apply(&m.content),
                 _ => &m.content,
             };
             // Mistral's first user message carries the system message
@@ -1221,7 +1230,7 @@ fn engine(
     if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
-    let template = Template::new(tok, &model.arch);
+    let template = Template::new(tok, &model);
     let kvs = match &net.0 {
         Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
@@ -2455,10 +2464,12 @@ pub fn start(o: Opts) -> io::Result<Server> {
         eprintln!(
             "axon serve: {model_id} ({}) on http://{addr}/v1{}",
             l.banner,
-            if l.template.is_none() {
-                " (no chat tokens: /v1/completions only)"
-            } else {
-                ""
+            match &l.template {
+                Some(_) => String::new(),
+                None => match Framing::bad_end(l.tok) {
+                    Some(why) => format!(" (no chat framing: {why}: /v1/completions only)"),
+                    None => " (no chat tokens: /v1/completions only)".into(),
+                },
             }
         );
         eprintln!("axon serve: identity {}", l.identity.line());
@@ -2905,16 +2916,17 @@ fn run_request(
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return out.err(
-                    c,
-                    ApiError::new(
-                        400,
-                        "invalid_request_error",
+                let msg = match Framing::bad_end(m.tok) {
+                    Some(why) => {
+                        format!("this model has no chat framing: {why}; use /v1/completions")
+                    }
+                    None => {
                         "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma); use \
-                         /v1/completions",
-                    ),
-                    keep,
-                );
+                             /v1/completions"
+                            .into()
+                    }
+                };
+                return out.err(c, ApiError::new(400, "invalid_request_error", msg), keep);
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
             channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);
@@ -3632,5 +3644,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod template_tests;
 #[cfg(test)]
 mod tests;

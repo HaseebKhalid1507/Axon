@@ -139,9 +139,14 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   that starts with tokens a cache (or a slot) already holds (a chat follow-up resending the
   conversation, a shared system prompt) only runs the model over the rest
   (`usage.prompt_tokens_details.cached_tokens`).
-- Chat prompts are framed as `axon chat` frames them (ChatML, or Llama 3's template with its
-  BOS and system block; Qwen2.5's default system message when none is given; Qwen3 earlier
-  replies without their reasoning), and end on the same tokens (Llama 3: `<|eot_id|>` too).
+- Chat prompts are framed as `axon chat` frames them: as the GGUF's own chat template does,
+  token for token (ChatML, Llama 3's headers with BOS, Gemma, DeepSeek, harmony, Kimi, Mistral;
+  the template's default system message when none is given, e.g. Qwen2.5's or Qwen2's; earlier
+  replies of a thinking model without their reasoning, as Qwen3's and R1's templates drop it;
+  see [usage.md](usage.md#chat)), and end on the same tokens (Llama 3: `<|eot_id|>` too).
+  Tools need a template that renders them (Qwen2.5, Qwen3, Llama 3.1/3.2, gpt-oss): a request
+  with tools, or a tool turn, for a model whose template has none (Qwen2, Qwen1.5, Llama 3.0) is
+  a 400, as ollama refuses it.
   `/v1/completions` tokenizes and stops as `gen` does (BOS for Llama 3). Qwen3 thinks
   unless `chat_template_kwargs: {"enable_thinking": false}` (or `--no-think` as the server
   default); the reasoning comes as `reasoning_content`, apart from `content`

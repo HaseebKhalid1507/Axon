@@ -869,6 +869,14 @@ pub fn render(
             "tool calling is not supported for this model's chat format",
         ));
     };
+    // A template without tools (Qwen2's, Qwen1.5's, Llama 3.0's): no format
+    // to render them in, as ollama refuses them.
+    if !t.tools {
+        return Err(bad(
+            "tools",
+            "tool calling is not supported: this model's chat template has no tools",
+        ));
+    }
     if fam == Family::Harmony {
         return harmony(t, tok, r);
     }
@@ -882,7 +890,7 @@ pub fn render(
     };
     let mut k = Toks::new(tok, &MARKERS);
     match fam {
-        Family::Qwen3 | Family::Qwen25 => hermes(&mut k, fam, r)?,
+        Family::Qwen3 | Family::Qwen25 => hermes(&mut k, fam, r, t.default_system.as_deref())?,
         Family::Llama31 => llama(&mut k, t, r)?,
         Family::Harmony => unreachable!(),
     }
@@ -916,10 +924,18 @@ pub fn render(
 }
 
 /// Qwen3's and Qwen2.5's templates.
-fn hermes(k: &mut Toks, fam: Family, r: &ToolReq) -> Result<(), ApiError> {
+/// `default_sys`: the template's default system message (`Template`'s),
+/// Qwen2.5's (the same in its tools block); with tools, Qwen2.5's when the
+/// template has none of its own.
+fn hermes(
+    k: &mut Toks,
+    fam: Family,
+    r: &ToolReq,
+    default_sys: Option<&str>,
+) -> Result<(), ApiError> {
     let m = &r.msgs;
     let first_sys = m.first().filter(|x| x.role == TRole::System);
-    let default_sys = (fam == Family::Qwen25).then_some(chat::DEFAULT_SYSTEM);
+    let default_sys = default_sys.filter(|_| fam == Family::Qwen25);
     if !r.tools.is_empty() {
         k.lit("<|im_start|>system\n");
         match (fam, first_sys) {
@@ -929,7 +945,8 @@ fn hermes(k: &mut Toks, fam: Family, r: &ToolReq) -> Result<(), ApiError> {
             }
             (Family::Qwen3, None) => {}
             (_, s) => {
-                k.text(s.map_or(chat::DEFAULT_SYSTEM, |s| &s.content));
+                let default = default_sys.unwrap_or(chat::DEFAULT_SYSTEM);
+                k.text(s.map_or(default, |s| &s.content));
                 k.lit("\n\n");
             }
         }

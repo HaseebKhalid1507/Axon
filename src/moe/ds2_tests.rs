@@ -292,7 +292,7 @@ fn ds2_gpu_moonlight_bits() {
 
     use crate::chat::Chat;
     let sys = crate::chat::template_default_system(&m);
-    let mut chat = Chat::new(&net, &tok, sys.as_deref(), 512).unwrap();
+    let mut chat = Chat::new(&net, &tok, &m, sys.as_deref(), 512).unwrap();
     chat.max_reply = 16;
     let never = || false;
     let r1 = chat

@@ -1454,11 +1454,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             }
         );
     }
-    // Qwen2.5's template brings a default system message, Qwen3's none.
-    let system = system
-        .or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()))
-        .or_else(|| chat::template_default_system(&model));
-    let mut conv = chat::Chat::new(&net, &tok, system.as_deref(), ctx)
+    // The template's default system message (Qwen2.5's, Qwen2's, Kimi's),
+    // if it has one; the framing's details from the template too.
+    let system = system.or_else(|| chat::default_system(&model));
+    let fr = chat::Framing::from_model(&tok, &model);
+    let mut conv = chat::Chat::with_framing(&net, &tok, fr, system.as_deref(), ctx)
         .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     if no_think && !conv.thinks() {
         fail(&format!(
