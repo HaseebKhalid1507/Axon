@@ -51,12 +51,19 @@ and token ids recorded by `scripts/oracle/make_fixtures.py`.
 
 ## Rust dependencies
 
-Crates in `Cargo.lock` are under MIT, Apache-2.0, Zlib, Unlicense, BSL-1.0 or
-Unicode-3.0 (`unicode-ident`) licenses; none is copyleft. Their notices ship
-with their sources on crates.io. A release tarball includes the license files
-of every crate linked into its binary in `THIRD_PARTY_LICENSES.txt`
-(`scripts/release/rust_licenses.py`, which also fails the release if a crate's
-license leaves that list).
+Their notices ship with their sources on crates.io. A release tarball includes the license files of every crate
+linked into its binary in `THIRD_PARTY_LICENSES.txt` (`scripts/release/rust_licenses.py`). That script runs on
+every pull request (CI) and fails if a linked crate's license expression isn't satisfied by this list: for
+`A OR B` one of them must be on it, for `A AND B` both. None is copyleft; keep it that way.
+
+Allowed licenses (`scripts/release/rust_licenses.py`): MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, Unlicense, Zlib, BSL-1.0, Unicode-3.0.
+
+## Rust standard library (MIT OR Apache-2.0)
+
+Every Rust binary links the Rust standard library (std, core, alloc and the crates it builds in, such as
+compiler_builtins, hashbrown, addr2line, gimli, miniz_oxide and rustc-demangle) statically. Its copyright notices:
+https://github.com/rust-lang/rust/blob/master/COPYRIGHT. A release tarball ships the building toolchain's
+`COPYRIGHT-library.html` as `RUST_STD_COPYRIGHT.html`.
 
 ## GPU kernels in release binaries (NVIDIA CUDA Toolkit)
 

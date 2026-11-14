@@ -29,10 +29,14 @@ Linux x86-64, one command; it puts `axon` in `~/.local/bin` after checking the r
 curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/Axon/main/install.sh | sh
 ```
 
+**Until v0.1.0 is published, build from source (below):** there is no release for the script to install yet, and it
+says so.
+
 It runs on any x86-64 CPU, and on an NVIDIA GPU with nothing but the driver, **R580 or newer** (CUDA 13): the GPU
-kernels are built in for RTX 20 through RTX 50, A100 and H100. On an older driver, `--device cuda` stops with one
-line naming the driver it found and that it needs R580+: update the driver, or run on the CPU (`--device cpu`, the
-default). Details: [docs/usage.md](docs/usage.md#install-a-release-linux-x86-64).
+kernels are built in for RTX 20 through RTX 50, A100 and H100. On an older driver, `--device cuda` uses a CUDA 12
+toolkit's NVRTC if one is installed, and otherwise stops with one line naming the driver it found and that it needs
+R580+: update the driver, or run on the CPU (`--device cpu`, the default). Details:
+[docs/usage.md](docs/usage.md#install-a-release-linux-x86-64).
 
 From source (any x86-64 CPU, other targets scalar only; NVIDIA GPUs on Linux), with Rust 1.89 or newer:
 

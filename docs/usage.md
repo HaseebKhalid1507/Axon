@@ -12,13 +12,17 @@ axon pull qwen2.5-coder-7b        # or axon pull --list
 axon chat qwen2.5-coder-7b --device cuda
 ```
 
+Until v0.1.0 is published there is no release to install (the script says so): build from source, as in the
+[README](../README.md#install).
+
 `install.sh` puts `axon` in `~/.local/bin` (`AXON_INSTALL_DIR`) from the latest GitHub release
 (`AXON_VERSION=vX.Y.Z` for another), after checking the tarball's SHA-256 against the release's `.sha256`, and
 the license notices in `~/.local/share/doc/axon`; run again, it replaces the binary only if the release's differs.
 The release binary needs glibc 2.28+ (RHEL 8, Debian 10, Ubuntu 20.04 and newer) and, for `--device cuda`, only the
 NVIDIA driver, R580 or newer (CUDA 13): its GPU kernels are built in for Turing (RTX 20), Ampere, Ada, Hopper and
 Blackwell RTX (sm_120) GPUs, with PTX for newer ones (models.md, NVIDIA GPUs); other GPUs (B200-class sm_100,
-Pascal) need the CUDA toolkit's NVRTC, as a source build does. On a driver older than R580, `--device cuda` uses a
+Volta, Pascal) need the CUDA toolkit's NVRTC, as a source build does (Volta and Pascal a CUDA 12 one: NVRTC 13
+dropped them). On a driver older than R580, `--device cuda` uses a
 CUDA 12 toolkit's NVRTC if there is one, and otherwise stops with one line (and axon's usual hint), for example
 
 ```
@@ -28,8 +32,9 @@ try 'axon --help'
 
 (exit code 2, as for every refusal).
 
-Without a GPU it runs on the CPU (the default). To uninstall: `rm ~/.local/bin/axon`, and
-`~/.local/share/axon/models` for the pulled models.
+Without a GPU it runs on the CPU (the default). To uninstall: `rm ~/.local/bin/axon` and
+`rm -r ~/.local/share/doc/axon`, and `~/.local/share/axon/models` for the pulled models. Publishing a release:
+[releasing.md](releasing.md).
 
 ## Quick start
 

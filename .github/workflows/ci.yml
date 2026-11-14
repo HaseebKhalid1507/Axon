@@ -40,6 +40,12 @@ jobs:
         run: python3 scripts/agent_replay_selftest.py
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
+      # Every crate linked into the release binary under a license on THIRD_PARTY_NOTICES.md's list (and that list
+      # equal to the script's): a new dependency off it fails here, not at tag time (.github/workflows/release.yml).
+      - name: release licenses
+        run: |
+          python3 scripts/release/rust_licenses.py --self-test
+          python3 scripts/release/rust_licenses.py > /dev/null
       # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
       - run: cargo test
       # rustdoc passes a compile_fail block on any error; this checks each
