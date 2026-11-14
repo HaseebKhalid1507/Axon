@@ -1,0 +1,103 @@
+[axon-run 14:23:11] submitted 1114-142311-a8b5 by /home/haseeb/.cache/axon-dec: /usr/bin/bash soakpreempt.sh ./axon-base-soak-adabb40 ./axon-dbg-adabb40 ./soak-adabb40-r2.py 0.6 128 4 gate40
+[axon-run 14:36:34] scope axon-job-1114-142311-a8b5-1794684994.scope in app-axonjobs.slice: MemoryMax 10312 MB, MemoryHigh 9280 MB, no swap, oomd pressure kill 80% (claim 6192 MB): an OOM here kills only this job
+[axon-run 14:36:34] job 1114-142311-a8b5 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1114-142311-a8b5-1794684994 --slice=app-axonjobs.slice -p MemoryMax=10312M -p MemoryHigh=9280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash soakpreempt.sh ./axon-base-soak-adabb40 ./axon-dbg-adabb40 ./soak-adabb40-r2.py 0.6 128 4 gate40
+axon-q 14:36:34 start slot 8-15: /usr/bin/bash soakpreempt.sh ./axon-base-soak-adabb40 ./axon-dbg-adabb40 ./soak-adabb40-r2.py 0.6 128 4 gate40
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 620.70.06
+main solo run rc 0
+serve: ./axon-dbg-adabb40 serve models/qwen2.5-1.5b-instruct-q4_k_m.gguf --port 18778 --ctx 4096 --parallel 8 --device cuda
+loaded in 0.5s, pid 3531417
+primed 480 requests in 19s
+CSV,t_s,rss_mib,anon_mib,file_mib,hwm_mib,vram_mib,vram_src,fds,threads,requests,lat_p50_ms,lat_p99_ms,ttft_p50_ms,ttft_p99_ms,ok,4xx-expected,503,cancelled,accepted-unsupported,503-undocumented,5xx,bad-body,dropped,hog-mismatch,other-status,slow-blocks-others,timeout,unexpected-200,unexpected-4xx,alive
+CSV,51.8,387.0,200.5,119.4,387.0,1856.0,pid,71,21,108,481.8,23809.9,162.9,12267.6,85,13,0,10,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,81.8,387.2,200.7,119.4,387.2,1856.0,pid,65,18,73,334.2,30892.4,169.9,12342.6,63,6,0,4,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,111.8,387.4,200.9,119.4,387.4,1856.0,pid,55,13,58,341.2,31305.6,26.1,5698.8,51,3,0,4,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,141.8,387.4,200.9,119.4,387.4,1856.0,pid,51,11,28,349.2,24805.1,22.9,1306.4,23,3,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,171.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,6,23647.6,24531.2,23.2,30.1,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,201.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,5,18534.0,22702.4,22.6,24.8,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,231.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,6,23169.1,24156.6,19.8,20.5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,261.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,4,23064.2,25392.7,24.7,27.9,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,291.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,5,25755.7,27147.2,23.6,27.5,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,321.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,5,24924.7,28210.2,23.6,28.2,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,351.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,4,29355.7,31180.5,25.4,29.7,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,381.8,387.4,200.9,119.4,387.4,1856.0,pid,47,9,6,25341.4,28231.1,25.5,28.8,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,411.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,4,25404.5,25718.9,26.2,31.0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,441.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,6,22168.8,27162.8,21.8,26.8,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,471.8,387.4,200.9,119.4,387.4,1856.0,pid,49,10,5,25587.1,27119.6,22.6,23.8,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,501.8,387.9,201.4,119.4,387.9,1856.0,pid,55,13,77,1491.5,464186.1,1085.5,11367.1,72,4,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,531.8,388.0,201.5,119.4,388.0,1856.0,pid,61,16,67,443.2,464675.7,37.4,14959.2,56,3,0,8,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,561.8,388.3,201.8,119.4,388.3,1856.0,pid,63,17,48,700.5,457056.1,313.3,9899.1,42,5,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,591.8,388.3,201.8,119.4,388.3,1856.0,pid,59,15,73,343.5,452079.3,32.3,10563.2,63,5,0,5,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,621.8,388.5,202.0,119.4,388.5,1856.0,pid,55,13,63,342.8,26614.3,31.6,179.5,50,7,0,6,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,651.8,388.6,202.1,119.4,388.6,1856.0,pid,53,12,48,331.0,29453.7,28.9,325.5,41,5,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,681.8,388.6,202.1,119.4,388.6,1856.0,pid,51,11,4,24586.3,26078.6,22.5,27.2,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,711.8,388.6,202.1,119.4,388.6,1856.0,pid,49,10,5,26422.7,26612.0,22.7,26.4,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,741.8,388.6,202.1,119.4,388.6,1856.0,pid,49,10,4,20870.2,22811.4,23.9,25.5,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,771.8,388.7,202.2,119.4,388.7,1856.0,pid,49,10,7,23673.3,26190.8,22.9,31.9,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,801.8,388.8,202.3,119.4,388.8,1856.0,pid,49,10,5,24332.3,26022.4,19.6,23.7,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,831.8,390.6,204.2,119.4,390.6,1856.0,pid,49,10,5,21550.3,25562.8,22.8,24.2,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,861.8,391.5,205.0,119.4,391.5,1856.0,pid,49,10,4,22074.3,23881.0,25.9,27.6,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,891.8,391.5,205.0,119.4,391.5,1856.0,pid,49,10,5,24782.8,27774.3,24.5,26.8,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,921.8,391.5,205.0,119.4,391.5,1856.0,pid,50,10,6,24612.1,27114.4,26.3,32.7,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,951.8,391.5,205.1,119.4,391.5,1856.0,pid,51,11,5,22274.4,456041.7,27.9,423.5,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,981.8,391.6,205.1,119.4,391.6,1856.0,pid,55,13,50,324.9,460423.3,25.9,10150.3,43,3,0,4,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1011.8,391.9,205.4,119.4,391.9,1856.0,pid,63,17,112,424.2,457023.3,66.9,1364.1,93,12,0,7,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1041.8,391.9,205.4,119.4,391.9,1856.0,pid,63,17,46,3334.2,452225.8,32.2,12540.9,39,3,0,4,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1071.8,391.9,205.4,119.4,391.9,1856.0,pid,63,17,19,2557.7,455469.5,2490.2,7111.0,18,0,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1101.8,391.9,205.4,119.4,391.9,1856.0,pid,55,13,50,305.7,32321.5,30.0,7648.4,43,5,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1131.8,391.9,205.4,119.4,391.9,1856.0,pid,53,12,12,7222.4,453798.1,27.5,7118.0,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1161.8,391.9,205.4,119.4,391.9,1856.0,pid,49,10,6,22162.4,26950.2,25.7,1044.8,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1191.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,6,23183.7,25538.7,21.7,28.6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1221.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,4,25292.4,25964.5,20.5,22.6,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1251.8,391.8,205.3,119.4,391.8,1856.0,pid,47,9,7,18824.5,22735.2,22.3,26.4,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1281.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,4,21592.2,23866.7,26.7,27.1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1311.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,7,21093.0,26211.5,23.2,24.9,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1341.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,4,23245.2,26562.8,19.9,28.9,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1371.8,391.8,205.3,119.4,391.8,1856.0,pid,49,10,6,22628.6,26329.1,18.4,19.0,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1401.8,391.8,205.4,119.4,391.8,1856.0,pid,51,11,7,19634.7,455764.3,21.8,702.2,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1431.8,391.9,205.4,119.4,391.9,1856.0,pid,53,12,18,603.8,451667.8,24.1,589.1,17,0,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1461.8,391.9,205.4,119.4,391.9,1856.0,pid,51,11,37,570.2,452267.7,425.9,5010.8,37,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1491.8,391.9,205.5,119.4,391.9,1856.0,pid,57,14,61,298.1,461923.7,28.0,10155.5,59,0,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1521.8,392.2,205.8,119.3,392.2,1856.0,pid,63,17,128,353.0,458519.0,33.4,8213.4,111,10,0,7,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1551.8,392.2,205.8,119.3,392.2,1856.0,pid,59,15,30,986.6,34658.8,656.5,17598.5,26,3,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1581.8,392.3,205.9,119.3,392.3,1856.0,pid,63,17,84,467.4,454106.7,39.9,17229.8,64,4,0,16,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1611.8,392.2,205.9,119.3,392.2,1856.0,pid,59,15,27,6804.8,35828.1,6043.0,15013.0,22,2,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1641.8,392.2,205.8,119.3,392.2,1856.0,pid,53,12,52,322.6,33680.1,31.5,12008.7,46,3,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1671.8,392.2,205.8,119.3,392.2,1856.0,pid,51,11,5,24704.3,27197.7,31.2,441.8,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1701.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,4,27847.1,28646.2,27.1,30.3,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1731.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,6,25131.3,30378.5,24.9,33.5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1761.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,5,24775.4,27176.0,25.8,27.9,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1791.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,5,22204.5,25948.0,20.5,22.6,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1821.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,4,24890.6,26751.5,26.1,26.4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1851.8,392.2,205.8,119.3,392.2,1856.0,pid,49,10,11,23011.5,453933.3,25.0,686.8,10,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1881.8,392.2,205.8,119.3,392.2,1856.0,pid,51,11,12,24229.4,452803.8,24.3,637.8,10,0,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1911.8,392.2,205.8,119.3,392.2,1856.0,pid,51,11,6,23947.9,24953.6,25.7,30.1,5,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1941.8,392.2,205.9,119.3,392.2,1856.0,pid,51,11,30,787.7,451224.0,427.9,856.2,30,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,1971.8,392.2,205.8,119.3,392.2,1856.0,pid,51,11,27,625.6,457038.0,26.6,2302.8,23,3,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2001.8,392.2,205.8,119.3,392.2,1856.0,pid,53,12,63,366.2,451732.4,33.9,531.2,54,6,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2031.8,392.2,205.9,119.3,392.2,1856.0,pid,57,14,43,410.9,455132.0,34.5,7809.8,40,2,0,1,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2061.8,392.2,205.9,119.3,392.2,1856.0,pid,57,14,66,329.9,460514.5,30.2,8985.7,56,1,0,9,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2091.8,392.2,205.9,119.3,392.2,1856.0,pid,57,14,95,325.2,453241.3,28.9,9161.0,83,7,0,5,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2121.8,392.3,205.9,119.3,392.3,1856.0,pid,59,15,120,327.5,27869.5,28.8,4735.9,101,13,0,6,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,2151.8,392.2,205.9,119.3,392.2,1856.0,pid,53,12,72,311.5,24601.7,29.6,7037.1,60,8,0,4,0,0,0,0,0,0,0,0,0,0,0,1
+SUMMARY {"checks": {"rss": {"slope_mib_per_h": 2.558, "se_mib_per_h": 0.291, "growth_24h_mib": 61.4, "growth_24h_2se_mib": [47.4, 75.4], "bound_24h_mib": 64, "window_h": 0.26, "n": 32, "min_mib": 205.3, "max_mib": 205.9, "median_mib": 205.8, "last_vs_first_quarter_mib": 0.6, "status": "NOT-JUDGED", "would_be": "INCONCLUSIVE", "series": "RssAnon", "vmrss_slope_mib_per_h": 1.885}, "vram": {"slope_mib_per_h": 0.0, "se_mib_per_h": 0.0, "growth_24h_mib": 0.0, "growth_24h_2se_mib": [0.0, 0.0], "bound_24h_mib": 16, "window_h": 0.26, "n": 32, "min_mib": 1856.0, "max_mib": 1856.0, "median_mib": 1856.0, "last_vs_first_quarter_mib": 0.0, "status": "NOT-JUDGED", "would_be": "PASS", "src": "pid"}, "errors": {"bad": {}, "status": "PASS"}, "503": {"count": 0, "fraction": 0.0, "ok": 1863, "requests": 2134, "note": "every 503 body is checked against the documented back-pressure messages (otherwise class 503-undocumented, failing); the fraction is reported, not capped", "status": "PASS"}, "alive": {"status": "PASS"}, "panic": {"lines": [], "status": "PASS"}, "identity": {"runs": 4, "mismatches": [], "status": "PASS"}, "fds_threads": {"before": {"rss_mib": 382.4, "anon_mib": 195.9, "threads": 6, "fds": 41}, "after": {"rss_mib": 391.9, "anon_mib": 205.8, "threads": 6, "fds": 41, "hwm_mib": 391.9}, "status": "PASS"}, "slots_idle": {"busy": 0, "slots": 8, "queue_depth": 0, "status": "PASS"}, "hog_replies": {"compared": 352, "longest_chars": 3000, "mismatches": 0, "status": "PASS"}, "pressure": {"preempted": 0, "prefills_unfed": 0, "pages_total": 128, "prompt_shared_tokens": 109632, "refeed_shared_tokens": 0, "pages_evicted": 1720, "why": "not evidence: preempted, prefills_unfed, refeed_shared_tokens not above 0", "status": "INCONCLUSIVE"}, "cancels": {"client_disconnects": 128, "server_cancelled": 173, "ratio": 1.352, "status": "REPORTED"}}, "requests": 2134, "totals": {"agent:ok": 404, "burst:ok": 96, "chat-stream:ok": 272, "chat-whole:ok": 192, "completion:ok": 108, "disconnect:cancelled": 128, "disconnect:ok": 4, "hog:ok": 352, "invalid:4xx-expected": 103, "long:ok": 89, "oversize:4xx-expected": 40, "slow-reader:ok": 59, "tool:ok": 287}, "wall_h": 0.735}
+VERDICT INCONCLUSIVE rss, vram not judged: window under 4.0 h after warm-up
+SOAK VERDICT rc 2 (cuda, sharing on by default, tier off, AXON_KV_PAGES=128, hogs 4)
+SOAK PRESSURE INCONCLUSIVE {"preempted": 0, "prefills_unfed": 0, "pages_total": 128, "prompt_shared_tokens": 109632, "refeed_shared_tokens": 0, "pages_evicted": 1720, "why": "not evidence: preempted, prefills_unfed, refeed_shared_tokens not above 0"}
+SOAK SOLO-MD5 SAME (cand identity runs 4, mismatches 0)
+{"ctx":4096,"graphs_evicted_oom":0,"page_tokens":64,"pages_free":45,"pages_shared":40,"pages_total":128,"pages_warm":0,"preempted":0,"prefills_unfed":0,"queue_depth":0,"slots":[{"age_ms":null,"busy":false,"held_tokens":1450,"id":0,"pages_used":23,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":55,"id":1,"pages_used":1,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":94,"id":2,"pages_used":2,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":2460,"id":3,"pages_used":39,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":3114,"id":4,"pages_used":49,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":2591,"id":5,"pages_used":41,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":88,"id":6,"pages_used":2,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":217,"id":7,"pages_used":4,"request_id":null}],"steps_eager_oom":0,"waiting":[{"age_ms":35173,"id":2546,"prompt_tokens":1448}]}
+# HELP axon_kv_pages_warm KV pages the prefix index keeps that no request holds (shared prefixes).
+# TYPE axon_kv_pages_warm gauge
+axon_kv_pages_warm 0
+# HELP axon_kv_pages_shared KV pages of the prefix index more than one request holds (shared prefixes).
+# TYPE axon_kv_pages_shared gauge
+axon_kv_pages_shared 40
+# HELP axon_prompt_shared_tokens_total Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.
+# TYPE axon_prompt_shared_tokens_total counter
+axon_prompt_shared_tokens_total 109632
+# HELP axon_refeed_shared_tokens_total Tokens of preempted or unfed requests (their prompt and what they generated) whose KV pages were mapped from the prefix index again when they were fed again.
+# TYPE axon_refeed_shared_tokens_total counter
+axon_refeed_shared_tokens_total 0
+# HELP axon_pages_evicted_total KV pages the prefix index gave up for room (shared prefixes).
+# TYPE axon_pages_evicted_total counter
+axon_pages_evicted_total 1720
+[axon-run 15:29:53] exit 2 after 3198.6s (host bella)
