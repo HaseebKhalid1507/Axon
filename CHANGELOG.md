@@ -56,6 +56,22 @@ measurements behind them.
 - `graded_in_two_passes_is_graded_at_once`: the two-pass grading equals the interleaved one, field for field
   (docs/log/2026-11-13-fp8-gate-lock.md).
 
+### Precompiled GPU kernels: `--device cuda` with only the NVIDIA driver (#227)
+- **A release binary carries its CUDA kernels precompiled** (the kernel pack): cubins for sm_75, sm_80, sm_86,
+  sm_89, sm_90, sm_90a and sm_120, plus compute_120 PTX for newer GPUs. So `--device cuda` needs no CUDA toolkit
+  and no NVRTC, only a driver for CUDA 13 (R580+). Each entry is NVRTC 13.4's output for the run-time compile's
+  source, options and target, so the same code: the md5 gate matches main's NVRTC output.
+- **Not covered:** data-center Blackwell (sm_100/sm_103, below sm_120), Pascal, Volta and drivers before R580 still
+  need NVRTC; with none, `--device cuda` stops with one line naming the driver and the way out.
+- **`axon kernels list [PACK]`** says what the binary (or a pack file) carries and where this GPU's kernels come
+  from; it exits non-zero when the pack lacks some of the binary's kernel modules. **`axon kernels build OUT`**
+  compiles a pack with NVRTC (no GPU needed); OUT must name a file, and the build's temp files go in a new
+  directory beside it, the only thing it deletes.
+- **New variables:** `AXON_KERNEL_PACK=0` (the kill switch: NVRTC only, as a source build) or `only` (never
+  NVRTC), and `AXON_KERNEL_PACK_FILE=PATH` (a pack file instead of the built-in one; an unreadable or invalid one
+  is a warning, then NVRTC).
+- Source builds are unchanged: no pack, NVRTC as before.
+
 ### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
 - **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
   that RAM, up to 8 GiB, page-locked from start.

@@ -59,6 +59,7 @@ usage:
                                             up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
                                             time; docs/serving.md)
+  axon kernels list | build ...             the precompiled GPU kernels (axon kernels --help)
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -325,6 +326,13 @@ fn load_failed(path: &str, e: std::io::Error) -> ! {
     }
 }
 
+/// The GPU kernels this binary was built with (`axon kernels build`; a
+/// release's src/main.rs embeds them): `--device cuda` loads them instead
+/// of compiling with NVRTC (`cuda::pack`). Call before `main`.
+pub fn set_kernel_pack(bytes: &'static [u8]) {
+    cuda::set_embedded_pack(bytes);
+}
+
 /// The `axon` binary's entry point.
 pub fn main() {
     // A panic must not exit (libcuda's exit handlers) while a `cuda::preinit`
@@ -372,6 +380,10 @@ fn run() -> std::io::Result<()> {
     if args[1] == "serve" {
         return serve::run(&args);
     }
+    if args[1] == "kernels" {
+        cuda::kernels_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
+        return Ok(());
+    }
 
     // `axon info <model>`, or just `axon <model>`.
     let path = match args[1].as_str() {
@@ -383,7 +395,7 @@ fn run() -> std::io::Result<()> {
             &args[1]
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, chat, serve, info)"
+            "unknown command '{c}' (commands: gen, logits, chat, serve, info, kernels)"
         )),
     };
 
