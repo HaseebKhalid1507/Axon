@@ -73,7 +73,8 @@ EOF
 ```
 
 Without them those tests fail on purpose, so a missing model can't pass for a
-working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this. To skip
+working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI's `check` job does this (its `model-oracles` job
+and the nightly run them with the test model). To skip
 only the FP8 checkpoint's tests, set `AXON_SKIP_FP8_MODEL_TESTS=1`.
 
 ## The GPU tests

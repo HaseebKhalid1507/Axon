@@ -275,6 +275,35 @@ impl Template {
     }
 }
 
+/// The prompt `/v1/chat/completions` runs for the request `body`, rendered as
+/// `completion` renders it with the server's defaults: thinking on unless
+/// the body's `chat_template_kwargs` turns it off, tools through
+/// `tools::render`, the framing `Template::new` reads from the model file.
+/// `axon logits` prints it for AXON_LOGITS_CHAT=FILE, so scripts/golden.py
+/// can hold the chat framing against llama.cpp's template, token by token.
+pub fn chat_prompt(
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    body: &[u8],
+) -> Result<Vec<u32>, String> {
+    let g = api::parse(body, true).map_err(|e| e.msg)?;
+    let Prompt::Chat { messages, no_think } = &g.prompt else {
+        return Err("not a chat request".into());
+    };
+    // No framing: the reason `completion` gives (without its /v1/completions hint).
+    let t = Template::new(tok, m).ok_or_else(|| match Framing::bad_end(tok) {
+        Some(why) => format!("this model has no chat framing: {why}"),
+        None => "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma)".to_string(),
+    })?;
+    let no_think = no_think.unwrap_or(false) && t.thinks();
+    match &g.tools {
+        None => Ok(t.render(tok, messages, no_think)),
+        Some(tr) => tools::render(&t, tok, tr, no_think)
+            .map(|r| r.ids)
+            .map_err(|e| e.msg),
+    }
+}
+
 /// What a connection asks the engine for.
 struct Job {
     prompt: Vec<u32>,

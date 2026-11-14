@@ -13,12 +13,13 @@ reads the code. Process v1, below, still holds wherever v2 doesn't replace it; e
    (`src/kv*.rs`, `src/serve/tier.rs`, `src/serve/prefix.rs`, `src/cuda/qwen2/{pages,slots,kvio}.rs`), or a head-size
    or GQA path (shapes only the fast tier's skipped tests see). Both tiers run the release and the debug build
    (`-C debug-assertions -C overflow-checks`).
-2. **Nightly on main** [set up in week 1 (case), not yet running]: the full suite (`axon-postmerge`) and a golden
+2. **Nightly on main** [set up 11-12 (case): axon-devstack's `axon-nightly`, 03:30 on bella; its golden half runs
+   once `scripts/golden.py` (#229) is on main]: the full suite (`axon-postmerge`) and a golden
    check against llama.cpp on the compatibility audit's top 10 models. md5 against main can't catch a model that was
    wrong from day one. `scripts/zoo.py` feeds Axon's token ids to llama.cpp, so it can't catch a tokenizer or
    chat-template bug either: the golden check also compares the tokenization and the rendered prompt with
    llama.cpp's. Red means revert; the foreman may choose to fix forward instead, within a day.
-3. **Weekly** [set up in week 1 (case), not yet running]: a single-stream and agent board on a clean RTX 4090 pod
+3. **Weekly** [set up 11-12 (case): axon-devstack's `axon-weekly`, Sundays 06:00, capped at $2.50 a run]: a single-stream and agent board on a clean RTX 4090 pod
    (about $2), so the published numbers stay current. The last single-stream board ran on `7f42c02`, 10-18
    ([results.md](results.md)).
 4. **Speed and defaults.** Only a speed claim or a default flip needs an A/B; v1's A/B against main on every change
@@ -29,17 +30,19 @@ reads the code. Process v1, below, still holds wherever v2 doesn't replace it; e
    pre-registration; the separate registration ceremony (rules filed as their own issues, re-registered cells) goes.
 5. **Review:** shady, the project's review agent, reviews every PR. A diff that touches `unsafe`, FFI, a parser of
    untrusted bytes (GGUF, safetensors, HTTP, session files, downloads) or network code also gets a reviewer from a
-   different model family, `openai-codex/gpt-5.6-sol` [set up in week 1 (case), not yet running].
+   different model family, `openai-codex/gpt-5.6-sol` [11-12: the trigger list and the prompt are in axon-devstack's
+   `docs/second-family-review.md` (`axon-review-trigger` lists a diff's triggers); the foreman dispatches].
 6. **Findings:** MUSTs are fixed in the PR. SHOULDs go into one follow-up issue per PR, not a chain of PRs.
 7. **Docs:** one short engineering-log entry per PR ([log/README.md](log/README.md)). The README, roadmap, results and
    history are refreshed only at release tags. The roadmap stays at most 150 lines.
 8. **Safeguards, because no human reads the code** (week 1, case; Windows and arm64 with the Distribution track).
-   Status at 11-12 in brackets:
-   - public CI, on Linux, Windows and arm64, runs real small-model tests against an independent reference [not yet:
-     CI sets `AXON_SKIP_MODEL_TESTS` and `AXON_SKIP_GPU_TESTS`, and has no Windows or arm64 job];
-   - nightly fuzzing, with sanitizer builds, of every parser of untrusted bytes [not yet: `scripts/fuzz_gguf.py` and
-     `scripts/fuzz_serve.py` cover GGUF and HTTP only, and CI runs neither; safetensors, session files and pull get
-     fuzzers];
+   Status at 11-13 in brackets:
+   - public CI, on Linux, Windows and arm64, runs real small-model tests against an independent reference [Linux
+     since #229: per PR, `model-oracles` runs the HF-tokenizer, ollama-greedy and gguf-py-dequant tests on the test
+     model; nightly, the whole suite on the CPU with the test models. Not yet: the GPU tests, Windows, arm64];
+   - nightly fuzzing, with sanitizer builds, of every parser of untrusted bytes [since #229 the nightly CI runs
+     `scripts/fuzz_gguf.py` on GGUF and, with `--safetensors`, on safetensors, and `scripts/fuzz_serve.py` on HTTP.
+     Not yet: sanitizer builds, session files, pull];
    - a kill switch for every default-on feature [`AXON_SHARE_KV=0` and `--cache-ram 0` exist for the two pending
      flips];
    - a clean-machine install test for every release [not yet: no release exists].
@@ -58,7 +61,7 @@ What v2 supersedes in v1:
 | 5 | one critic agent (Fable) reviews every change | [The loop](#the-loop), step 5 and "Who decides" |
 | 6 | review follow-ups as chains of PRs (#197, #199, #200: each from the previous PR's review) | [The loop](#the-loop), step 5 |
 | 7 | README, roadmap, results and history refreshed alongside the PRs | [Writing it down](#writing-it-down) |
-| 8 | public CI with model and GPU tests skipped | [Gates](#gates), the CI row |
+| 8 | public CI with model and GPU tests skipped (until #229: model tests per PR, fuzzers nightly) | [Gates](#gates), the CI row |
 | 9 | no cap on this page (the 10-19 review proposed three, quoted in the roadmap at `213465a`) | [roadmap.md at `213465a`](https://github.com/HaseebKhalid1507/Axon/blob/213465a12e8402041e39b2d0a565de192f6c38c1/docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides) |
 
 ## Process v1 (from 2026-10-13; in force where v2 doesn't replace it)
@@ -206,7 +209,7 @@ checks it):
 | md5 of `gen` outputs | main vs candidate, greedy, on the **same host** (and driver) | night 1 with 4 prompts. Grew to 11/17/42-gen sets across models, CPU+CUDA, short and ~610-token prompts, pool settings (#22, #24, #26, #30). Same-host rule written into BUILDER-RULES (`axon-run --same-host`) on 2026-10-16 |
 | clippy | `-D warnings`, bin and tests | night 1 |
 | rustfmt | `--check` | night 1 |
-| CI | fmt, clippy, build, tests (model and GPU tests skipped), the scalar path, and the test binary under a qemu Nehalem CPU (no AVX may leak into the baseline build) | qemu step from the portability change (2bd8606, in #1) |
+| CI | fmt, clippy, build, tests (model and GPU tests skipped), the scalar path, and the test binary under a qemu Nehalem CPU (no AVX may leak into the baseline build); `model-oracles`: the test model's oracle tests (HF tokenizer, ollama greedy, gguf-py dequant); nightly: the whole suite with the test models on the CPU, and the GGUF / safetensors / HTTP fuzzers | qemu step from the portability change (2bd8606, in #1); model tests and fuzzers in CI from #229 |
 
 Extra gates by kind of change:
 

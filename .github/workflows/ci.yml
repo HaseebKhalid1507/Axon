@@ -38,6 +38,10 @@ jobs:
       # The agent replay harness's offline self-test (stdlib only, no engine or model, ~0.1 s).
       - name: agent replay self-test
         run: python3 scripts/agent_replay_selftest.py
+      # golden.py's parsers, verdict logic and one() on a fake llama-server and a stub axon, and golden-top10.sh's
+      # exit code on a fake golden.py (stdlib only, no model, no network, ~1.5 s).
+      - name: golden self-test
+        run: python3 scripts/golden_selftest.py
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
@@ -81,3 +85,42 @@ jobs:
           qemu-x86_64 -cpu Nehalem "$bin" --skip model::tests::attend_matches_per_head
           qemu-x86_64 -cpu Nehalem target/release/axon --help
           qemu-x86_64 -cpu Nehalem target/release/axon --version
+
+  # Process v2 rule 8: real small-model tests against independent references, on every PR. Next to `check`, so
+  # the per-PR wall time stays that job's (~12 min). The test model (CONTRIBUTING.md) is cached across runs and its
+  # sha256 checked before use; the other test models stay absent, and AXON_SKIP_MODEL_TESTS skips their tests.
+  # The heavy parts (the whole suite with the model, the fuzzers) run nightly: .github/workflows/nightly.yml.
+  model-oracles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: test model (cached)
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: models/qwen2.5-0.5b-q4_k_m.gguf
+          key: model-qwen2.5-0.5b-q4_k_m-74a4da8c
+      - name: download the test model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          curl -fsSL --retry 5 -o models/qwen2.5-0.5b-q4_k_m.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - name: the test model is the one the fixtures were made from
+        run: echo "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  models/qwen2.5-0.5b-q4_k_m.gguf" | sha256sum -c
+      # tokenizer::tests::oracle      token ids = Hugging Face's tokenizer (tests/fixtures/tokens.json)
+      # model::tests::matches_ollama  ollama's recorded greedy path, logprob by logprob (tests/fixtures/gen/)
+      # golden                        dequantized rows = gguf-py's dequantizer (tests/fixtures/golden/)
+      # A test whose model is missing returns early and libtest says `ok`: the log must show both model tests
+      # passing and no skip of the test model.
+      - name: model tests against independent oracles
+        run: |
+          set -o pipefail
+          cargo test --lib -- --nocapture tokenizer::tests::oracle model::tests::matches_ollama golden 2>&1 | tee oracles.log
+          if grep -n "skipping: models/qwen2.5-0.5b-q4_k_m.gguf" oracles.log; then exit 1; fi
+          grep -q "^test tokenizer::tests::oracle ... ok$" oracles.log
+          grep -q "^test model::tests::matches_ollama ... ok$" oracles.log
+          grep -q "^test quant::tests::golden_rows ... ok$" oracles.log
