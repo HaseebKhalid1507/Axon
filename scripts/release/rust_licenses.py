@@ -33,8 +33,8 @@ miniz_oxide, rustc-demangle, ...)  (MIT OR Apache-2.0)
 ==============================================================================
 Linked statically into every Rust binary. Its copyright notices, including those of the crates it builds in:
 https://github.com/rust-lang/rust/blob/master/COPYRIGHT, and the Rust toolchain's
-share/doc/rust/COPYRIGHT-library.html (a release tarball ships it as RUST_STD_COPYRIGHT.html when the toolchain
-that built it has it). The MIT and Apache-2.0 texts are in this file above (for example under serde_json).
+share/doc/rust/COPYRIGHT-library.html (every release tarball ships it as RUST_STD_COPYRIGHT.html; the release
+build fails without it). The MIT and Apache-2.0 texts are in this file above (for example under serde_json).
 """
 
 

@@ -17,13 +17,15 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`:
    - the binary needs a glibc newer than 2.28;
    - a linked crate's license is off the allowed list (THIRD_PARTY_NOTICES.md).
 3. **Tarball.** `axon`, `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES.txt` and
-   `RUST_STD_COPYRIGHT.html` are packed reproducibly: fixed order, owners, modes and the commit's time.
+   `RUST_STD_COPYRIGHT.html` are packed to be reproducible: fixed order, owners, modes and the commit's time.
 4. **install.sh.** It installs the tarball twice; the second run must change nothing. A tampered tarball must
    be refused.
 5. **No-GPU smoke test.** `axon pull qwen2.5-0.5b`, then `axon gen` on the CPU. `--device cuda` must be
    refused with exit code 2.
 6. **Draft release.** The workflow uploads the tarball, its `.sha256` and `install.sh` to a **draft** release
-   for the tag. Nothing is public until a maintainer publishes the draft.
+   for the tag. Nothing is public until a maintainer publishes the draft. Only the tag's push uploads: a
+   `workflow_dispatch` run, on the tag or not, only builds. The job refuses if a release for the tag (draft or
+   published) exists already, so "Re-run all jobs" on the tag's run can't add a second draft.
 
 The workflow never checks the GPU side. No runner has a GPU, so the draft's kernels have run nowhere yet.
 
@@ -38,10 +40,10 @@ The workflow never checks the GPU side. No runner has a GPU, so the draft's kern
 Run every check on **the draft's own tarball**: `gh release download vX.Y.Z -p 'axon-x86_64-linux.tar.gz*'`,
 then `sha256sum -c axon-x86_64-linux.tar.gz.sha256`. Write its SHA-256 next to each result.
 
-1. **The pack is NVRTC's output, byte for byte.** Download the tag run's `kernels-pack` artifact: the draft's
-   binary embeds exactly this pack, because the build job takes it from the same run. On bella, build the
-   reference with the same NVRTC (13.4.92): `axon kernels build ref.pack --targets <the workflow's
-   PACK_TARGETS> -j N`. That takes about an hour for all eight targets. Then run
+1. **The pack is NVRTC's output, byte for byte.** Download the tag run's `kernels-pack` artifact (kept 30
+   days): the draft's binary embeds exactly this pack, because the build job takes it from the same run. On
+   bella, build the reference with the same NVRTC (13.4.92): `axon kernels build ref.pack --targets <the
+   workflow's PACK_TARGETS> -j N`. That takes about an hour for all eight targets. Then run
    `scripts/release/packcmp.py kernels.pack ref.pack`. It must say PASS, every entry the same raw bytes.
 2. **md5 gate.** On bella (sm_120) and on an RTX 4090 (sm_89), run the md5 gate (docs/testing.md) with the
    draft's `axon` as the candidate under `AXON_KERNEL_PACK=only`, against main's NVRTC-compiled run of the same
@@ -54,10 +56,15 @@ then `sha256sum -c axon-x86_64-linux.tar.gz.sha256`. Write its SHA-256 next to e
    - the md5 gens with `--device cuda` match the base's on the same GPU.
 
    The procedure as run for #227 is in that PR's "Clean-machine proof".
-4. **Optional, reproducibility.** Re-run the workflow on the tag (`workflow_dispatch` with the tag as the ref).
-   The tarball's SHA-256 should come out the same.
+4. **Optional, reproducibility.** Run the workflow by hand on the tag: `gh workflow run release.yml --ref vX.Y.Z`
+   (or Actions → Release → Run workflow, from the tag). It only builds; it can't touch the draft. Its tarball
+   (`gh run download RUN -n axon-x86_64-linux`) should have the draft's SHA-256. Not "Re-run all jobs" on the
+   tag's own run: its release job would refuse, because the draft exists.
 
 If any check fails, delete the draft and the tag, fix the problem on main, and tag again.
+
+Publish it as a full release, not a pre-release: install.sh installs GitHub's `latest`, which never points at a
+pre-release.
 
 ## After publishing
 

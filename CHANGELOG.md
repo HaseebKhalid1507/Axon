@@ -62,8 +62,9 @@ measurements behind them.
   a runner with no GPU, built in `manylinux_2_28` (glibc 2.28+), plus the license notices: `THIRD_PARTY_LICENSES.txt`
   for every linked crate, and the Rust standard library's. The build fails if the tag isn't the binary's version,
   the pack lacks a module, the binary needs a newer glibc, or a crate's license is off the allowed list (also
-  checked in CI on every PR). Actions are pinned by commit and the image by digest; the tarball is reproducible.
-  A pull request that touches the release files builds and tests it without a release.
+  checked in CI on every PR). Actions are pinned by commit and the image by digest; the tarball is built to be
+  reproducible (docs/releasing.md step 4 checks it; no two builds of one commit have been compared yet). A pull
+  request that touches the release files builds and tests it without a release.
 - **`install.sh`** (`curl -fsSL …/install.sh | sh`, POSIX sh) puts `axon` in `~/.local/bin` after checking the
   tarball's SHA-256. Running it again changes nothing. It first runs the binary where it will live, so a noexec
   `/tmp` doesn't matter, and it names a noexec install dir. It warns when another `axon` comes first on PATH, and
@@ -71,6 +72,11 @@ measurements behind them.
 - Publishing a draft takes the hand checks in docs/releasing.md: the pack byte-checked against bella's NVRTC, the
   md5 gate, a driver-only machine. Nothing is published yet: until v0.1.0 is, the README says to build from
   source.
+- **Only the tag's push makes a draft** (#257, shady's SHOULD on #230). A `workflow_dispatch` on the tag
+  (releasing.md step 4, the reproducibility check) has the same `github.ref`, so it used to add a second draft
+  with its own tarball; it now only builds. The release job also refuses when a release for the tag, draft or
+  published, exists already, so "Re-run all jobs" on the tag's run can't add one either. The `kernels-pack`
+  artifact is kept 30 days (was 7), for releasing.md step 1.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
 - **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
