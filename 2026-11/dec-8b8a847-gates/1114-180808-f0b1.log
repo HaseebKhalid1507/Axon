@@ -1,0 +1,46 @@
+[axon-run 18:08:08] submitted 1114-180808-f0b1 by /home/haseeb/.cache/axon-dec: /usr/bin/bash fixproof268.sh ./axon-test-8b8a847 ./axon-test-v268-8b8a847
+[axon-run 18:23:10] job 1114-180808-f0b1 -> pod2 [RTX 4090 sm_89 secure] (pod 8xnlsb94z83xmu): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 3000 --src /home/haseeb/.cache/axon-podjob/fixproof268-344eb6e88709 /usr/bin/bash fixproof268.sh ./axon-test-8b8a847 ./axon-test-v268-8b8a847
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (b09cfd7720416fadbf13b24d) + source of /home/haseeb/.cache/axon-podjob/fixproof268-344eb6e88709 (delta vs 3 earlier upload(s) there)
+
+sent 16,783,138 bytes  received 113 bytes  3,729,611.33 bytes/sec
+total size is 56,080,679  speedup is 3.34
+
+sent 57 bytes  received 19 bytes  50.67 bytes/sec
+total size is 89  speedup is 1.17
+axon-remote: job 20261114-232318-bash-5933 on pod2 (GPU, 3000 MB)
+[axon-node 23:23:18] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 1134/24564 MB; sharing with 20261114-232033-axon-test-dbg-8b8a847-1158 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 23:23:18] run bash (b09cfd7720416fadbf13b24d) as /home/haseeb/.cache/axon-podjob/fixproof268-344eb6e88709 on 3df631cb85a9, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23598 MB of 24564 (used 486); GPU processes pid:MB 1174:476
+-rw-r--r-- 1 root root 491400032 Nov 14 23:16 /root/axon-node/store/b09cfd7720416fadbf13b24d/tree/models/qwen2.5-0.5b-q4_k_m.gguf
+NVIDIA GeForce RTX 4090, 486 MiB
+
+running 1 test
+test serve::tests::serve_solo_leaves_no_waiting ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 978 filtered out; finished in 0.75s
+
+
+running 1 test
+test serve::tests::serve_solo_leaves_no_waiting ... testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'serve::tests::serve_solo_leaves_no_waiting' (6052) panicked at src/serve/tests.rs:3163:9:
+assertion `left == right` failed: request 0: {"ctx":2048,"graphs_evicted_oom":0,"page_tokens":64,"pages_free":63,"pages_shared":0,"pages_total":64,"pages_warm":0,"preempted":0,"prefills_unfed":0,"queue_depth":0,"slots":[{"age_ms":null,"busy":false,"held_tokens":9,"id":0,"pages_used":1,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":0,"id":1,"pages_used":0,"request_id":null}],"steps_eager_oom":0,"waiting":[{"age_ms":10,"id":1,"prompt_tokens":6}]}
+  left: Array [Object {"age_ms": Number(10), "id": Number(1), "prompt_tokens": Number(6)}]
+ right: Array []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    serve::tests::serve_solo_leaves_no_waiting
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 978 filtered out; finished in 0.76s
+
+FIXPROOF cand rc=0 pass=1; variant (fix removed) rc=101 failed-on-waiting=1
+FIXPROOF PASS
+[axon-node 23:23:20] exit 0 after 1.8s
+[axon-node 23:23:20] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 18:23:21] exit 0 after 11.3s (host pod2)
+[axon-run 18:23:25] EXPECT ok: output matches /^FIXPROOF PASS/

@@ -1,0 +1,42 @@
+[axon-run 18:05:51] submitted 1114-180551-fe25 by /home/haseeb/.cache/axon-dec: /usr/bin/bash repeat.sh ./axon-test-dbg-8b8a847 serve::tests::serve_sjf_long_prompt_admitted_within_age_bound 20
+[axon-run 18:20:02] job 1114-180551-fe25 -> pod1 [RTX 4090 sm_89 secure] (pod t03s4c5oze7f5p): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 3000 --src /home/haseeb/.cache/axon-podjob/repeat-34b489b90c84 /usr/bin/bash repeat.sh ./axon-test-dbg-8b8a847 serve::tests::serve_sjf_long_prompt_admitted_within_age_bound 20
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (a9b70be9c9209fac38fa3731) + source of /home/haseeb/.cache/axon-podjob/repeat-34b489b90c84 (delta vs 2 earlier upload(s) there)
+
+sent 9,017,696 bytes  received 87 bytes  2,576,509.43 bytes/sec
+total size is 29,233,757  speedup is 3.24
+
+sent 186 bytes  received 31,854 bytes  12,816.00 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261114-232017-bash-6275 on pod1 (GPU, 3000 MB)
+[axon-node 23:20:17] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 6170/24564 MB; sharing with 20261114-231409-axon-test-8b8a847-1270 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 23:20:17] run bash (a9b70be9c9209fac38fa3731) as /home/haseeb/.cache/axon-podjob/repeat-34b489b90c84 on 69a4eeea31b8, AXON_THREADS=4 RUST_TEST_THREADS=4; free 17914 MB of 24564 (used 6170); GPU processes pid:MB 1283:6160
+-rw-r--r-- 1 root root 491400032 Nov 14 23:12 /root/axon-node/store/a9b70be9c9209fac38fa3731/tree/models/qwen2.5-0.5b-q4_k_m.gguf
+NVIDIA GeForce RTX 4090, 6170 MiB, 13 %, 41
+ 23:20:18 up 27 days, 23:59,  0 user,  load average: 7.90, 7.74, 4.50
+32
+ITER 1 rc=0 ok=1 wall_s=2 load=7.90 7.74 4.50 long prompt admitted after waiting ~991 ms
+ITER 2 rc=0 ok=1 wall_s=2 load=7.43 7.64 4.49 long prompt admitted after waiting ~990 ms
+ITER 3 rc=0 ok=1 wall_s=1 load=7.43 7.64 4.49 long prompt admitted after waiting ~990 ms
+ITER 4 rc=0 ok=1 wall_s=2 load=6.91 7.53 4.47 long prompt admitted after waiting ~990 ms
+ITER 5 rc=0 ok=1 wall_s=2 load=6.91 7.53 4.47 long prompt admitted after waiting ~991 ms
+ITER 6 rc=0 ok=1 wall_s=2 load=6.91 7.53 4.47 long prompt admitted after waiting ~991 ms
+ITER 7 rc=0 ok=1 wall_s=2 load=6.52 7.44 4.46 long prompt admitted after waiting ~990 ms
+ITER 8 rc=0 ok=1 wall_s=2 load=6.52 7.44 4.46 long prompt admitted after waiting ~1012 ms
+ITER 9 rc=0 ok=1 wall_s=3 load=6.24 7.37 4.45 long prompt admitted after waiting ~992 ms
+ITER 10 rc=0 ok=1 wall_s=2 load=6.24 7.37 4.45 long prompt admitted after waiting ~1032 ms
+ITER 11 rc=0 ok=1 wall_s=2 load=6.24 7.37 4.45 long prompt admitted after waiting ~992 ms
+ITER 12 rc=0 ok=1 wall_s=2 load=5.98 7.29 4.44 long prompt admitted after waiting ~991 ms
+ITER 13 rc=0 ok=1 wall_s=2 load=5.98 7.29 4.44 long prompt admitted after waiting ~995 ms
+ITER 14 rc=0 ok=1 wall_s=3 load=5.82 7.24 4.44 long prompt admitted after waiting ~1032 ms
+ITER 15 rc=0 ok=1 wall_s=2 load=5.82 7.24 4.44 long prompt admitted after waiting ~991 ms
+ITER 16 rc=0 ok=1 wall_s=2 load=5.59 7.17 4.43 long prompt admitted after waiting ~1032 ms
+ITER 17 rc=0 ok=1 wall_s=2 load=5.59 7.17 4.43 long prompt admitted after waiting ~1012 ms
+ITER 18 rc=0 ok=1 wall_s=2 load=5.39 7.10 4.42 long prompt admitted after waiting ~1012 ms
+ITER 19 rc=0 ok=1 wall_s=2 load=5.39 7.10 4.42 long prompt admitted after waiting ~1011 ms
+ITER 20 rc=0 ok=1 wall_s=3 load=5.39 7.10 4.42 long prompt admitted after waiting ~1012 ms
+REPEAT serve::tests::serve_sjf_long_prompt_admitted_within_age_bound 20/20 passed
+[axon-node 23:21:00] exit 0 after 42.2s
+[axon-node 23:21:00] peak RSS 249 MB (job process tree PSS, 2 s samples x21)
+[axon-run 18:21:02] exit 0 after 59.4s (host pod1)
+[axon-run 18:21:03] EXPECT ok: output matches /^REPEAT serve::tests::serve_sjf_long_prompt_admitted_within_age_bound 20/20 passed/
