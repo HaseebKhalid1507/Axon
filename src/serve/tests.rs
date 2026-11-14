@@ -223,11 +223,17 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
     out
 }
 
-/// `axon chat --temp 0`'s first reply to `msg` on `net`, at most `n`
-/// tokens, with run_chat's default system message for `arch`.
-fn chat_text<M: Lm>(net: &M, tok: &Tokenizer, arch: &str, msg: &str, n: usize) -> String {
-    let system = (arch == "qwen2").then_some(crate::chat::DEFAULT_SYSTEM);
-    let mut c = crate::chat::Chat::new(net, tok, system, 256).unwrap();
+/// `axon chat --temp 0`'s first reply to `msg` on `net` (model `m`), at
+/// most `n` tokens, with run_chat's default system message (the template's).
+fn chat_text<M: Lm>(
+    net: &M,
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    msg: &str,
+    n: usize,
+) -> String {
+    let system = crate::chat::default_system(m);
+    let mut c = crate::chat::Chat::new(net, tok, m, system.as_deref(), 256).unwrap();
     c.max_reply = n;
     let mut text = Utf8Stream::default();
     let mut out = String::new();
@@ -279,7 +285,7 @@ fn serve_matches_gen_and_chat(path: &str, device: Device) {
         .unwrap();
         (
             gen_text(&net, &tok, PROMPT, 32),
-            chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
+            chat_text(&net, &tok, &m, CHAT_MSG, 24),
         )
     };
     serve_checks(path, device, &gen_ref, &chat_ref);
@@ -893,7 +899,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let msg = |role, c: &str| Message {
         role,
         content: c.into(),
@@ -936,7 +942,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok3 = Tokenizer::from_gguf(&m3);
-    let t3 = Template::new(&tok3, &m3.arch).unwrap();
+    let t3 = Template::new(&tok3, &m3).unwrap();
     let msgs = [
         msg(Role::User, "a"),
         msg(Role::Assistant, "<think>\nhmm\n</think>\n\nb"),
@@ -958,7 +964,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tokl = Tokenizer::from_gguf(&ml);
-    let tl = Template::new(&tokl, &ml.arch).unwrap();
+    let tl = Template::new(&tokl, &ml).unwrap();
     assert!(!tl.thinks());
     let head = |sys: &str| {
         format!(
@@ -1018,7 +1024,7 @@ fn gemma3_template_matches_llama_cpp() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert!(!t.thinks());
     let (bos, eot) = (2u32, 106u32);
     assert!(t.stop().contains(&eot) && t.stop().contains(&tok.eos()));
@@ -1068,7 +1074,7 @@ fn text_out_reasoning_and_stops() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m3);
-    let t = Template::new(&tok, &m3.arch).unwrap();
+    let t = Template::new(&tok, &m3).unwrap();
     let think = t.think.as_ref().map(|&(o, c, _)| (o, c));
     let run = |text: &str, think, stops: &[&str]| {
         let mut out = super::TextOut {
@@ -4765,7 +4771,7 @@ fn harmony_calls_from_channels() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let render = |extra: &str| {
         let body = format!(
             r#"{{"messages": [{{"role": "user", "content": "Weather in Paris?"}}], "tools": [{{"type": "function", "function": {{"name": "get_weather", "parameters": {{"type": "object", "properties": {{"city": {{"type": "string"}}}}}}}}}}]{extra}}}"#

@@ -83,7 +83,9 @@ GPU natively with `--numerics fast` (sm_89+; the prefill GEMM's tensor cores mul
 Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
 without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other
 architectures are refused with a message (roadmap). The pre-tokenizer must be one
-Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+Axon knows (Qwen2's or Llama 3's regex: recognized, never executed; `deepseek-r1-qwen`, the
+DeepSeek-R1 Qwen2.5 distills' name for Qwen2's, as llama.cpp maps it: those distills, ollama's
+`deepseek-r1:1.5b` to `:32b`, load since #249); SentencePiece-style
 `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 
 ## Hardware

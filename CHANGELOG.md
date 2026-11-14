@@ -6,6 +6,39 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
+- **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
+  `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
+  - **Llama 3.0** (#241): no "Cutting Knowledge Date" lines, and a system block only when a system message is given.
+    Llama 3.1, 3.2 and 3.3 are unchanged.
+  - **DeepSeek R1** (R1-0528, the distills) and **V3** (#238): a reply opens with `<｜Assistant｜>` alone, so R1
+    reasons. Before, they got V3.1's `</think>` and reasoning was switched off. BOS is written whenever the template
+    writes it.
+  - **Earlier DeepSeek replies** drop their reasoning as the template does, in serve and in `axon chat` alike
+    (`axon chat` used to keep all of it). R1's (R1-0528, the distills): the text after the last `</think>`, newlines
+    kept. V3.1's: what follows the first `</think>`. Qwen3's rule is unchanged: after the last, newlines dropped.
+  - **DeepSeek multi-turn** (#240): an earlier reply is `<｜Assistant｜>{text}<｜end▁of▁sentence｜>`. Before, the
+    marker was missing and the reply was glued onto the user turn.
+- **The default system message is the template's** (#239): Qwen2's is "You are a helpful assistant.", and Qwen1.5, the
+  R1 distills and Qwen3 have none. Qwen2.5's "You are Qwen, ..." now comes only from its template, or for a `qwen2`
+  file without one. Any ChatML template with a fixed default gets that default whatever its architecture
+  (Qwen2.5-Math's, for example). A fine-tune whose template has no default loses Qwen2.5's, except on a tool
+  request, which still gets it (#256).
+- **Tools need a template that renders them.** A request with tools, or a tool turn, for Qwen2, Qwen1.5 or Llama 3.0
+  is now a 400, as ollama refuses it. These used to render in Qwen2.5's or Llama 3.1's format.
+- **DeepSeek-R1's Qwen2.5 distills load** (#249): pre-tokenizer `deepseek-r1-qwen` is Qwen2's, as llama.cpp maps it.
+- **A broken `bos_token_id` or `eos_token_id`** (past the vocabulary) never reaches a prompt. A bad BOS is dropped,
+  as the tokenizer drops it. A bad EOS on a format that ends turns with EOS (DeepSeek, Mistral) leaves no chat
+  framing, instead of a panic in the model: the chat endpoint gives a 400, `axon chat` an error and serve's banner a
+  note, each naming the id ("eos_token_id N is past the vocabulary").
+- **Pinned by a fixture**, `tests/fixtures/chat_templates.json`, built by `scripts/chat_template_fixtures.py` from
+  pinned Hugging Face revisions: 16 families and 148 conversations, Axon's ids equal to `apply_chat_template`'s.
+  The conversations also run through `axon chat` turn by turn. Message text that spells special tokens stays text
+  in every family.
+- **Saved sessions:** a resumed `axon chat` session keeps its old tokens, and the new turns use the new framing. A
+  conversation that changed framing (Llama 3.0, R1, Qwen2 or Qwen1.5 without a system message) mixes the two.
+  Serve's prompt cache is keyed by tokens, so changed prompts only miss it.
+
 ### Tests: the FP8 gate off the GPU test lock; GPU fast vs GPU exact in the suites (#232)
 - **`gpu_fp8_fast_vs_exact_sanity` replaces `gpu_fp8_graded_vs_fp8_ref` in every suite.** It runs the FP8 0.5B
   checkpoint's fast mode against its exact mode on the same GPU, every arm at >= 1000 positions, with no

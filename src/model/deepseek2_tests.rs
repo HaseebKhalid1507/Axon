@@ -1075,7 +1075,7 @@ fn deepseek2_moonlight_bits() {
     use crate::chat::Chat;
     let sys = crate::chat::template_default_system(&m);
     assert_eq!(sys.as_deref(), Some("You are a helpful assistant"));
-    let mut chat = Chat::new(&net, &tok, sys.as_deref(), 512).unwrap();
+    let mut chat = Chat::new(&net, &tok, &m, sys.as_deref(), 512).unwrap();
     chat.max_reply = 12;
     let never = || false;
     let r1 = chat
@@ -1084,7 +1084,7 @@ fn deepseek2_moonlight_bits() {
     let r2 = chat
         .reply("And another one?", &never, &mut |_| Ok(()))
         .unwrap();
-    let mut fresh = Chat::new(&net, &tok, sys.as_deref(), 512).unwrap();
+    let mut fresh = Chat::new(&net, &tok, &m, sys.as_deref(), 512).unwrap();
     fresh.max_reply = 12;
     let f1 = fresh
         .reply("Name a color.", &never, &mut |_| Ok(()))
@@ -1234,11 +1234,21 @@ fn deepseek3_tokenizer_matches_hf() {
     let c = &d["chat_sys"];
     let msgs = c["messages"].as_array().unwrap();
     let mut out = fr.system(&t, c["system"].as_str());
-    // A user message opens the reply after it (as `Chat` frames turns).
+    // Each message framed on its own (an earlier reply after its
+    // `<｜Assistant｜></think>`), then the reply's opening, as serve renders
+    // a message list.
     for msg in msgs {
         let role = msg["role"].as_str().unwrap();
-        let next = (role == "user").then_some("assistant");
-        out.extend(fr.frame(&t, role, msg["content"].as_str().unwrap(), next));
+        out.extend(fr.frame(&t, role, msg["content"].as_str().unwrap(), None));
     }
+    out.extend(fr.opening(&t, "assistant"));
     assert_eq!(out, ids(&c["ids"]), "chat");
+    // As `axon chat` feeds a turn: the user message opens the reply, the
+    // reply's tokens follow, `closing` ends it.
+    let mut live = fr.system(&t, c["system"].as_str());
+    live.extend(fr.frame(&t, "user", "What is 2+2?", Some("assistant")));
+    live.extend(t.encode("4."));
+    live.extend(fr.closing(&t));
+    live.extend(fr.frame(&t, "user", "And 3+3?", Some("assistant")));
+    assert_eq!(live, ids(&c["ids"]), "chat, turn by turn");
 }

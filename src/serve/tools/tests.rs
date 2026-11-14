@@ -261,7 +261,7 @@ fn render_qwen3() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert_eq!(family(&t), Some(Family::Qwen3));
     // The markers are single special tokens in Qwen's vocabulary.
     for s in [
@@ -371,7 +371,7 @@ fn render_qwen25() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert_eq!(family(&t), Some(Family::Qwen25));
     let tools = format!(r#""tools": {TOOLS}, "#);
     check(
@@ -403,7 +403,7 @@ fn render_llama31() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert_eq!(family(&t), Some(Family::Llama31));
     let r = check(
         &tok,
@@ -750,7 +750,7 @@ fn render_harmony() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert_eq!(family(&t), Some(Family::Harmony));
     for (name, body, prompt) in harmony_cases() {
         let r = check(&tok, &t, &req(&body), false, &prompt);

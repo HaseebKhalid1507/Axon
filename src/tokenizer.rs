@@ -81,7 +81,8 @@ pub enum Pre {
 
 /// The vocabulary's tokenizer model and pre-tokenizer, if supported: a
 /// `gpt2` (byte-level BPE) vocabulary, pre-tokenizer `qwen2` (or none: the
-/// Qwen2 files before llama.cpp wrote the key) or Llama 3's.
+/// Qwen2 files before llama.cpp wrote the key; or `deepseek-r1-qwen`, the
+/// same) or Llama 3's.
 pub fn pre_of(m: &Model) -> Result<Pre, String> {
     match meta(m, "tokenizer.ggml.model") {
         None => {}
@@ -96,7 +97,9 @@ pub fn pre_of(m: &Model) -> Result<Pre, String> {
     }
     match meta(m, "tokenizer.ggml.pre") {
         None => Ok(Pre::Qwen2),
-        Some(Val::Str(s)) if s == "qwen2" => Ok(Pre::Qwen2),
+        // DeepSeek-R1's Qwen2.5 distills: Qwen2's regex (llama.cpp maps it
+        // to its QWEN2 pre-tokenizer).
+        Some(Val::Str(s)) if ["qwen2", "deepseek-r1-qwen"].contains(&s.as_str()) => Ok(Pre::Qwen2),
         Some(Val::Str(s)) if ["llama-bpe", "llama3", "llama-v3"].contains(&s.as_str()) => {
             Ok(Pre::Llama3)
         }
@@ -104,7 +107,8 @@ pub fn pre_of(m: &Model) -> Result<Pre, String> {
         Some(Val::Str(s)) if s == "kimi-k2" => Ok(Pre::KimiK2),
         Some(Val::Str(s)) if s == "deepseek-v3" => Ok(Pre::DeepSeek3),
         Some(v) => Err(format!(
-            "pre-tokenizer {v} is not supported (qwen2, llama-bpe, gpt-4o, kimi-k2, deepseek-v3)"
+            "pre-tokenizer {v} is not supported (qwen2, deepseek-r1-qwen, llama-bpe, gpt-4o, \
+             kimi-k2, deepseek-v3)"
         )),
     }
 }
