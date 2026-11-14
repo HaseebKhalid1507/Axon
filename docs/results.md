@@ -385,8 +385,10 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   resume likely misses the clause's 0.3 s: two TAINTED reads, medians 0.513 s (1105-211421-8e35) and 0.358 s
   (1106-051210-8062), 6 of 6 rounds over 0.3 s, against main's 8.83 and 8.58 s; the lead waived bella's resume cell
   as a gate of #201. Still opt-in: `auto` waits for the RAM-pinning question and a clean bella s4 replay at its head.
-- Shared prefix KV pages (`AXON_SHARE_KV=1`, #207) are opt-in: two of #187's clauses failed on a 4090 (s4 TTFT-new
-  1.003× vs ≤ 0.6×, fan-out siblings 0.261× vs ≤ 0.25×). The re-registered cells (#210, #211) ran at #216's code;
-  their results and the default: [roadmap](roadmap.md#state-at-the-11-06-pause).
+- Shared prefix KV pages (#207) were opt-in after two of #187's clauses failed on a 4090 (s4 TTFT-new 1.003× vs
+  ≤ 0.6×, fan-out siblings 0.261× vs ≤ 0.25×). The re-registered cells (#210, #211) ran at #216's code. They are on by
+  default since #228 (the 11-12 decision; `AXON_SHARE_KV=0` turns them off): its A/B's sharing arm was within 2 % on
+  every cell, and a 4.6 h soak under a 128-page pool passed; it evicted warm pages but never preempted, so preemption
+  with sharing on rests on `serve_share_pressure` and md5's pressure arm (docs/log/2026-11-12-share-default.md).
 - Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
   depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

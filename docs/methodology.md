@@ -43,8 +43,8 @@ reads the code. Process v1, below, still holds wherever v2 doesn't replace it; e
    - nightly fuzzing, with sanitizer builds, of every parser of untrusted bytes [since #229 the nightly CI runs
      `scripts/fuzz_gguf.py` on GGUF and, with `--safetensors`, on safetensors, and `scripts/fuzz_serve.py` on HTTP.
      Not yet: sanitizer builds, session files, pull];
-   - a kill switch for every default-on feature [`AXON_SHARE_KV=0` and `--cache-ram 0` exist for the two pending
-     flips];
+   - a kill switch for every default-on feature [`AXON_SHARE_KV=0` for shared prefix pages, on by default since
+     #228; `--cache-ram 0` for the tier, whose flip is pending (#233, #234)];
    - a clean-machine install test for every release [not yet: no release exists].
 9. **Tracks:** at most three at once, each tied to a named metric ([roadmap](roadmap.md#tracks)).
 

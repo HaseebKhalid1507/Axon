@@ -116,7 +116,12 @@ measurements behind them.
 - Source builds are unchanged: no pack, NVRTC as before.
 
 ### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
-- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Same bits on or off. On its
+- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Any value but `0` is now on,
+  `false` and `off` included; the start line says on or off and echoes a value that reads as on. Same bits on or off.
+  **Off under fast kernels** (an FP8 checkpoint under `--numerics fast`, which `--datacenter` implies) unless
+  `AXON_SHARE_KV=1`: their rows change with a prompt's chunking, so two copies of a block can differ. An engine
+  failure's exit line names `AXON_SHARE_KV=0` while sharing is on. `cached_tokens` now counts pages another client
+  computed (serving.md says what that exposes). On its
   own: the KV RAM tier stays off by default (#226). In the A/B on an RTX 4090 (#228, job 1112-233524-d38d) sharing
   alone passed every cell (C=8 ITL p99 0.980×, C=16 tok/s 1.001×), but the tier failed, so the planned pairing was
   dropped (the lead's ruling, 11-13). The win is subagent fan-out (#211: eight subagents' TTFT 0.591× on a shared
