@@ -85,6 +85,16 @@ measurements behind them.
   peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
   draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
   every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
+- **The tag check runs again right before Publish** (#265, shady's review of #261). releasing.md ran it only
+  first, hours before publishing; it now runs first and last. A 422 (the tag is gone) means don't publish: the
+  draft's target is main, so publishing would create the tag at main's tip with the old commit's tarball.
+  The release job:
+  - says "re-run this job" when GitHub gave no commit for the tag (a transient error, or the tag deleted),
+    not "the other run makes the draft";
+  - retitles the draft "DO NOT PUBLISH: …" before failing when the tag moved or went during the upload;
+  - runs one at a time per tag (a `concurrency` group, never cancelling the running one).
+
+  No `--target` on the create: GITHUB_TOKEN can't create a release whose target's workflows differ from main's.
 
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
 - **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
