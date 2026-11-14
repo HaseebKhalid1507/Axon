@@ -56,6 +56,22 @@ measurements behind them.
 - `graded_in_two_passes_is_graded_at_once`: the two-pass grading equals the interleaved one, field for field
   (docs/log/2026-11-13-fp8-gate-lock.md).
 
+### Release tarball and `install.sh`: Linux x86-64, one command (#230)
+- **A tag `vX.Y.Z` builds the Linux x86-64 tarball** (`.github/workflows/release.yml`) into a *draft* GitHub release.
+  The tarball holds `axon` with its kernel pack built in (#227), compiled from the tagged source by NVRTC 13.4.92 on
+  a runner with no GPU, built in `manylinux_2_28` (glibc 2.28+), plus the license notices: `THIRD_PARTY_LICENSES.txt`
+  for every linked crate, and the Rust standard library's. The build fails if the tag isn't the binary's version,
+  the pack lacks a module, the binary needs a newer glibc, or a crate's license is off the allowed list (also
+  checked in CI on every PR). Actions are pinned by commit and the image by digest; the tarball is reproducible.
+  A pull request that touches the release files builds and tests it without a release.
+- **`install.sh`** (`curl -fsSL …/install.sh | sh`, POSIX sh) puts `axon` in `~/.local/bin` after checking the
+  tarball's SHA-256. Running it again changes nothing. It first runs the binary where it will live, so a noexec
+  `/tmp` doesn't matter, and it names a noexec install dir. It warns when another `axon` comes first on PATH, and
+  says "no published release yet" (build from source) while there is none. `AXON_VERSION`, `AXON_INSTALL_DIR`.
+- Publishing a draft takes the hand checks in docs/releasing.md: the pack byte-checked against bella's NVRTC, the
+  md5 gate, a driver-only machine. Nothing is published yet: until v0.1.0 is, the README says to build from
+  source.
+
 ### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
 - **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
   else `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) through `curl`, HTTPS only, resumable,
