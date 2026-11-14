@@ -1,0 +1,29 @@
+{
+ "label": "dec-adabb40-soakgate-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-163333-16e2",
+   "name": "dec-adabb40-soakgate-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "adabb40",
+   "binary": "bash",
+   "started": 1794692013.2283213,
+   "ended": 1794695094.520276,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "49fac927587b282f4294288b3de14eccb1aa2ee86ea4098231e46c531fb7fb63",
+   "log_bytes": 14656
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 17:24:56 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
