@@ -75,7 +75,9 @@ use super::{
 use crate::cuda::Gpu;
 use crate::gguf::Model;
 use crate::kv::KvType;
-use crate::lm::{Backend, BackendOptions, BatchLm, Device, Lm, RowHead, RowOut, SeqRow};
+use crate::lm::{
+    Backend, BackendCache, BackendOptions, BatchLm, Device, Lm, RowHead, RowOut, SeqRow,
+};
 use crate::numerics::Numerics;
 use crate::sample::CandSpec;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -142,29 +144,6 @@ impl Sizes {
         load: LOAD,
         load_steps: 25,
     };
-    /// `FP8` in a debug-assertions build: every arm, prefix length and
-    /// route of the release gate (the load arm's 32 rows reach the pool's
-    /// tensor-core attention, `ATT_NB_MIN`), on about a quarter of the CPU
-    /// reference's tokens: decode 6 x 17 + 48 = 150, batched 3 x 49 = 147,
-    /// cached 2 x 49 = 98, load 32 x 4 = 128 positions. The two CPU nets
-    /// are the test's cost: at `FP8`'s size it held the GPU test lock for
-    /// over 2700 s in a debug shard with 4 test threads (1031-080835-d64f).
-    /// This size keeps what only a debug build checks on those paths:
-    /// every launch's argument count (`cuda::Kernel`'s cuFuncGetParamInfo
-    /// check), the pool's page table, the fast counter's assertion and
-    /// overflow checks. The statistical verdict at >= 1000 positions per
-    /// arm is the release build's (`Sizes::FP8`): the debug build adds
-    /// checks, not other arithmetic, so its larger run would grade the
-    /// same numbers again.
-    pub(crate) const FP8_DEBUG: Sizes = Sizes {
-        decode_windows: 1,
-        batch_windows: 1,
-        verify_windows: 1,
-        cached_windows: Some(2),
-        after: 48,
-        load: 32,
-        load_steps: 4,
-    };
 }
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU
@@ -206,6 +185,7 @@ impl Arm {
 /// One arm's grading: the net under test and the floor, each against the
 /// exact reference over the same positions, index for index
 /// (`assert_graded` looks the floor's flips up by index).
+#[derive(Debug)]
 pub(crate) struct ArmGrade {
     pub(crate) arm: Arm,
     pub(crate) mode: Agree,
@@ -230,20 +210,28 @@ impl ArmGrade {
         }
     }
 
-    /// A new sequence (`Agree`'s previous-position KL starts again).
-    fn start(&mut self) {
-        (self.mode.last_kl, self.floor.last_kl) = (0.0, 0.0);
-    }
-
-    /// One position: the reference's logits, the floor's and the net's;
+    /// One position: the reference's logits, the floor's and the net's
+    /// (each None in the pass that doesn't run it: `Reference`);
     /// `next`: (window, the teacher-forced token after it).
-    fn tally(&mut self, lr: &[f32], lf: &[f32], lo: &[f32], next: Option<(usize, u32)>) {
-        self.floor.tally(lr, lf);
-        self.mode.tally(lr, lo);
-        if let Some((w, t)) = next {
-            let n = nll(lr, t);
-            self.df.push((w, nll(lf, t) - n));
-            self.dm.push((w, nll(lo, t) - n));
+    fn tally(
+        &mut self,
+        lr: &[f32],
+        lf: Option<&[f32]>,
+        lo: Option<&[f32]>,
+        next: Option<(usize, u32)>,
+    ) {
+        let n = next.map(|(w, t)| (w, t, nll(lr, t)));
+        if let Some(lf) = lf {
+            self.floor.tally(lr, lf);
+            if let Some((w, t, n)) = n {
+                self.df.push((w, nll(lf, t) - n));
+            }
+        }
+        if let Some(lo) = lo {
+            self.mode.tally(lr, lo);
+            if let Some((w, t, n)) = n {
+                self.dm.push((w, nll(lo, t) - n));
+            }
         }
     }
 
@@ -254,6 +242,7 @@ impl ArmGrade {
 }
 
 /// A grading (`grade`): every arm, and the batched passes' rows.
+#[derive(Debug)]
 pub(crate) struct Graded {
     pub(crate) arms: Vec<ArmGrade>,
     /// `verify_argmax` over the batched arm's prefixes, row by row: (rows,
@@ -333,28 +322,6 @@ fn nll(l: &[f32], next: u32) -> f64 {
     -log_softmax(l)[next as usize]
 }
 
-/// `after` positions from `p` on, teacher-forced, a token per step, on
-/// caches that hold positions 0..p: graded into `a` (window `w`).
-#[allow(clippy::too_many_arguments)]
-fn decode_after<R: Lm, F: Lm, O: Lm>(
-    a: &mut ArmGrade,
-    (r, rc): (&R, &mut R::Cache),
-    (f, fc): (&F, &mut F::Cache),
-    (o, oc): (&O, &mut O::Cache),
-    seq: &[u32],
-    p: usize,
-    w: usize,
-    after: usize,
-) {
-    for pos in p..p + after {
-        let t = seq[pos];
-        let lr = r.forward(t, pos, rc);
-        let lf = f.forward(t, pos, fc);
-        let lo = o.forward(t, pos, oc);
-        a.tally(&lr, &lf, &lo, Some((w, seq[pos + 1])));
-    }
-}
-
 /// Grade `o` against the exact reference `r`, with the floor `f` (exact
 /// too: another accepted placement), on `m`'s tokenizer, every arm that
 /// runs on `device` (module doc).
@@ -369,7 +336,9 @@ pub(crate) fn grade<F: Lm>(
     grade_sized(r, f, o, m, floor, device, &Sizes::BASE)
 }
 
-/// `grade` with the arms' sizes `s`.
+/// `grade` with the arms' sizes `s`: the three nets stepped together,
+/// position by position (`reference` + `Reference::grade` run the same
+/// calls in two passes).
 pub(crate) fn grade_sized<F: Lm>(
     r: &Backend,
     f: &F,
@@ -379,178 +348,471 @@ pub(crate) fn grade_sized<F: Lm>(
     device: Device,
     sz: &Sizes,
 ) -> Graded {
-    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
-    let pre = prefixes(device);
-    let (c0, c1) = CACHED;
-    let longest = *pre.iter().max().unwrap();
-    let (span, cspan) = match sz.cached_windows {
-        None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
-        Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+    let inp = Inputs::new(m, device, sz);
+    let nets = Nets {
+        r: Some(r),
+        f: Some(f),
+        o: Some(o),
     };
+    walk(&nets, &inp, floor, &mut Kept::default(), None)
+}
+
+/// The reference's half of a grading, run before the net under test's
+/// (#232): every arm's floor graded against the reference, and what the
+/// net under test will be graded against (the reference's logits at every
+/// graded position, its decode traces and verify picks, the inputs).
+/// `Reference::grade` runs the net under test on the same inputs and
+/// finishes the grading: the same `Graded` as `grade_sized` with these
+/// nets, which makes the same calls on each net in the same order, only
+/// not interleaved. For a GPU net graded against CPU references: the CPU
+/// work is done before the test takes the GPU test lock (the FP8 gate's
+/// CPU nets held it for over 2700 s on a packed pod). The cost is memory:
+/// a vocabulary of logits per graded position (0.6 MB at Qwen2.5's
+/// 151,936).
+pub(crate) struct Reference {
+    inp: Inputs,
+    floor: Floor,
+    kept: Kept,
+    graded: Graded,
+}
+
+/// `Reference`: run the reference `r` and the floor `f` over `m`'s inputs
+/// for `device` at sizes `sz`.
+pub(crate) fn reference<F: Lm>(
+    r: &Backend,
+    f: &F,
+    m: &Model,
+    floor: Floor,
+    device: Device,
+    sz: &Sizes,
+) -> Reference {
+    let inp = Inputs::new(m, device, sz);
+    let nets: Nets<'_, '_, F> = Nets {
+        r: Some(r),
+        f: Some(f),
+        o: None,
+    };
+    let mut kept = Kept::default();
+    let graded = walk(&nets, &inp, floor, &mut kept, None);
+    Reference {
+        inp,
+        floor,
+        kept,
+        graded,
+    }
+}
+
+impl Reference {
+    /// The net under test's half: `o` on the same inputs, graded against
+    /// the kept reference (consumed as it goes).
+    pub(crate) fn grade(mut self, o: &Backend) -> Graded {
+        let nets: Nets<'_, '_, Backend<'_>> = Nets {
+            r: None,
+            f: None,
+            o: Some(o),
+        };
+        let g = walk(
+            &nets,
+            &self.inp,
+            self.floor,
+            &mut self.kept,
+            Some(self.graded),
+        );
+        assert!(
+            self.kept.next == self.kept.logits.len()
+                && self.kept.traces.is_empty()
+                && self.kept.picks.is_empty(),
+            "the net under test's pass read {} of {} kept positions; {} traces, {} verify picks left",
+            self.kept.next,
+            self.kept.logits.len(),
+            self.kept.traces.len(),
+            self.kept.picks.len()
+        );
+        g
+    }
+}
+
+/// A grading's inputs (module doc): the prompts' tokens and the natural
+/// text's, split between the arms.
+struct Inputs {
+    device: Device,
+    sz: Sizes,
+    prompts: Vec<Vec<u32>>,
+    ids: Vec<u32>,
+    /// A batched window's tokens, and a cached one's (`Sizes::cached_windows`).
+    span: usize,
+    cspan: usize,
+    load_len: usize,
+}
+
+impl Inputs {
+    fn new(m: &Model, device: Device, sz: &Sizes) -> Inputs {
+        let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+        let (c0, c1) = CACHED;
+        let longest = *prefixes(device).iter().max().unwrap();
+        let (span, cspan) = match sz.cached_windows {
+            None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
+            Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+        };
+        let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
+        let n = sz.decode_windows * WINDOW
+            + sz.batch_windows * span
+            + sz.cached_windows.unwrap_or(0) * cspan
+            + sz.load * load_len;
+        Inputs {
+            device,
+            sz: *sz,
+            prompts: PROMPTS.iter().map(|p| tok.encode(p)).collect(),
+            ids: natural_ids(m, n),
+            span,
+            cspan,
+            load_len,
+        }
+    }
+
+    /// The natural text's split: (decode, batched, cached, load) tokens.
+    fn split(&self) -> (&[u32], &[u32], &[u32], &[u32]) {
+        let sz = &self.sz;
+        let (dec, rest) = self.ids.split_at(sz.decode_windows * WINDOW);
+        let (bat, rest) = rest.split_at(sz.batch_windows * self.span);
+        let (cac, load) = rest.split_at(sz.cached_windows.unwrap_or(0) * self.cspan);
+        (dec, bat, cac, load)
+    }
+}
+
+/// The nets a pass of `walk` runs. All three: `grade_sized`. The reference
+/// and the floor, `o` None: `reference` (the reference's results kept).
+/// `o` alone: `Reference::grade` (the kept results read back, in order).
+struct Nets<'a, 'm, F: Lm> {
+    r: Option<&'a Backend<'m>>,
+    f: Option<&'a F>,
+    o: Option<&'a Backend<'m>>,
+}
+
+/// The reference's results a `reference` pass keeps for the pass of the
+/// net under test, in the order `walk` makes them.
+#[derive(Default)]
+struct Kept {
+    /// Its logits at every graded position (read back from `next` on;
+    /// each is taken out as it is read).
+    logits: Vec<Vec<f32>>,
+    next: usize,
+    /// The decode arm's traces of the prompts (taken from the front).
+    traces: std::collections::VecDeque<super::Trace>,
+    /// Its `verify_argmax` picks per batched prefix.
+    picks: std::collections::VecDeque<Vec<u32>>,
+}
+
+impl Kept {
+    /// The next kept logits, taken out.
+    fn read(&mut self) -> Vec<f32> {
+        let l = std::mem::take(&mut self.logits[self.next]);
+        self.next += 1;
+        l
+    }
+}
+
+/// One position's logits from each net the pass runs: (the reference's,
+/// the floor's, the net under test's).
+type At = (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>);
+
+/// A cache per net the pass runs (`Nets::caches`).
+struct Caches<RC, FC, OC> {
+    r: Option<RC>,
+    f: Option<FC>,
+    o: Option<OC>,
+}
+
+type NetCaches<F> = Caches<BackendCache, <F as Lm>::Cache, BackendCache>;
+
+impl<F: Lm> Nets<'_, '_, F> {
+    /// A new sequence in `a`: the previous-position KL (`Agree::last_kl`)
+    /// starts again for each net this pass tallies, and only those. A
+    /// `reference` pass's floor tallies are final when `Reference::grade`
+    /// runs, the floor's last `last_kl` included, as in `grade_sized`'s one
+    /// pass; resetting both here zeroed it (#247's first gate run,
+    /// `graded_in_two_passes_is_graded_at_once`, 1113-031552-6419).
+    fn start(&self, a: &mut ArmGrade) {
+        if self.f.is_some() {
+            a.floor.last_kl = 0.0;
+        }
+        if self.o.is_some() {
+            a.mode.last_kl = 0.0;
+        }
+    }
+
+    /// The reference's logits: `r`'s by `run` (kept when the pass has no
+    /// net under test), or a `reference` pass's, read back.
+    fn reference(&self, kept: &mut Kept, run: impl FnOnce(&Backend) -> Vec<f32>) -> Vec<f32> {
+        match self.r {
+            Some(r) => {
+                let l = run(r);
+                if self.o.is_none() {
+                    kept.logits.push(l.clone());
+                }
+                l
+            }
+            None => kept.read(),
+        }
+    }
+
+    /// Fresh caches of `CTX` positions (`o`'s too with `with_o`).
+    fn caches(&self, with_o: bool) -> NetCaches<F> {
+        Caches {
+            r: self.r.map(|r| r.new_cache(CTX)),
+            f: self.f.map(|f| f.new_cache(CTX)),
+            o: self.o.filter(|_| with_o).map(|o| o.new_cache(CTX)),
+        }
+    }
+
+    fn forward(&self, kept: &mut Kept, c: &mut NetCaches<F>, t: u32, pos: usize) -> At {
+        let lr = self.reference(kept, |r| r.forward(t, pos, c.r.as_mut().unwrap()));
+        let lf = self.f.map(|f| f.forward(t, pos, c.f.as_mut().unwrap()));
+        let lo = self.o.map(|o| o.forward(t, pos, c.o.as_mut().unwrap()));
+        (lr, lf, lo)
+    }
+
+    fn prefill(&self, kept: &mut Kept, c: &mut NetCaches<F>, ids: &[u32], pos: usize) -> At {
+        let lr = self.reference(kept, |r| r.prefill_logits(ids, pos, c.r.as_mut().unwrap()));
+        let lf = self
+            .f
+            .map(|f| f.prefill_logits(ids, pos, c.f.as_mut().unwrap()));
+        let lo = self
+            .o
+            .map(|o| o.prefill_logits(ids, pos, c.o.as_mut().unwrap()));
+        (lr, lf, lo)
+    }
+
+    fn feed(&self, c: &mut NetCaches<F>, ids: &[u32], pos: usize) {
+        if let (Some(r), Some(rc)) = (self.r, c.r.as_mut()) {
+            r.feed_batch(ids, pos, rc);
+        }
+        if let (Some(f), Some(fc)) = (self.f, c.f.as_mut()) {
+            f.feed_batch(ids, pos, fc);
+        }
+        if let (Some(o), Some(oc)) = (self.o, c.o.as_mut()) {
+            o.feed_batch(ids, pos, oc);
+        }
+    }
+}
+
+/// `after` positions from `p` on, teacher-forced, a token per step, on
+/// caches that hold positions 0..p: graded into `a` (window `w`).
+#[allow(clippy::too_many_arguments)]
+fn decode_after<F: Lm>(
+    a: &mut ArmGrade,
+    n: &Nets<'_, '_, F>,
+    kept: &mut Kept,
+    c: &mut NetCaches<F>,
+    seq: &[u32],
+    p: usize,
+    w: usize,
+    after: usize,
+) {
+    for pos in p..p + after {
+        let (lr, lf, lo) = n.forward(kept, c, seq[pos], pos);
+        a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((w, seq[pos + 1])));
+    }
+}
+
+/// Every arm over `inp`, for the nets in `n` (`Nets`): graded into
+/// `prev`'s arms when a `reference` pass made them (the net under test's
+/// half), else new ones.
+fn walk<F: Lm>(
+    n: &Nets<'_, '_, F>,
+    inp: &Inputs,
+    floor: Floor,
+    kept: &mut Kept,
+    prev: Option<Graded>,
+) -> Graded {
+    let (sz, pre, (c0, c1)) = (&inp.sz, prefixes(inp.device), CACHED);
+    let (dec, bat, cac, load) = inp.split();
     let cwins = sz.cached_windows.unwrap_or(0);
-    let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
-    let ids = natural_ids(
-        m,
-        sz.decode_windows * WINDOW + sz.batch_windows * span + cwins * cspan + sz.load * load_len,
-    );
-    let (dec, rest) = ids.split_at(sz.decode_windows * WINDOW);
-    let (bat, rest) = rest.split_at(sz.batch_windows * span);
-    let (cac, load) = rest.split_at(cwins * cspan);
-    let caches = || (r.new_cache(CTX), f.new_cache(CTX), o.new_cache(CTX));
+    let (mut rows, mut prev_arms) = match prev {
+        Some(g) => (g.rows, Some(g.arms.into_iter())),
+        None => ((0, 0, 0), None),
+    };
+    let mut arm = |which: Arm| match prev_arms.as_mut() {
+        Some(it) => {
+            let a = it.next().unwrap();
+            assert_eq!(a.arm, which, "the reference pass's arms");
+            a
+        }
+        None => ArmGrade::new(which),
+    };
+    let launches = || n.o.map_or(0, |o| o.fast_launches());
     let mut arms = Vec::new();
 
     // Decode: the prompts' greedy traces, then text from position 0.
-    let mut a = ArmGrade::new(Arm::Decode);
-    let l0 = o.fast_launches();
-    for p in PROMPTS {
-        let t = trace(r, &tok.encode(p), STEPS);
-        compare_trace(&t, f, &mut a.floor);
-        compare_trace(&t, o, &mut a.mode);
-    }
-    for (w, seq) in dec.chunks(WINDOW).enumerate() {
-        let (mut rc, mut fc, mut oc) = caches();
-        a.start();
-        for (pos, &t) in seq.iter().enumerate() {
-            let lr = r.forward(t, pos, &mut rc);
-            let lf = f.forward(t, pos, &mut fc);
-            let lo = o.forward(t, pos, &mut oc);
-            a.tally(&lr, &lf, &lo, seq.get(pos + 1).map(|&n| (w, n)));
+    let mut a = arm(Arm::Decode);
+    let l0 = launches();
+    for ids in &inp.prompts {
+        let t = match n.r {
+            Some(r) => trace(r, ids, STEPS),
+            None => kept.traces.pop_front().unwrap(),
+        };
+        if let Some(f) = n.f {
+            compare_trace(&t, f, &mut a.floor);
+        }
+        if let Some(o) = n.o {
+            compare_trace(&t, o, &mut a.mode);
+        }
+        if n.o.is_none() {
+            kept.traces.push_back(t);
         }
     }
-    a.launches = o.fast_launches() - l0;
+    for (w, seq) in dec.chunks(WINDOW).enumerate() {
+        let mut c = n.caches(true);
+        n.start(&mut a);
+        for (pos, &t) in seq.iter().enumerate() {
+            let (lr, lf, lo) = n.forward(kept, &mut c, t, pos);
+            let next = seq.get(pos + 1).map(|&t| (w, t));
+            a.tally(&lr, lf.as_deref(), lo.as_deref(), next);
+        }
+    }
+    a.launches += launches() - l0;
     arms.push(a);
 
     // Batched: each prefix in one prefill_logits call, the decode after
     // it; verify_argmax's rows over the same prefix.
-    let mut a = ArmGrade::new(Arm::Batched);
-    let mut rows = (0, 0, 0);
-    let l0 = o.fast_launches();
-    for (i, seq) in bat.chunks(span).enumerate() {
+    let mut a = arm(Arm::Batched);
+    let l0 = launches();
+    for (i, seq) in bat.chunks(inp.span).enumerate() {
         let w = sz.decode_windows + i;
         for &p in pre {
-            let (mut rc, mut fc, mut oc) = caches();
-            a.start();
-            let lr = r.prefill_logits(&seq[..p], 0, &mut rc);
-            let lf = f.prefill_logits(&seq[..p], 0, &mut fc);
-            let lo = o.prefill_logits(&seq[..p], 0, &mut oc);
-            a.tally(&lr, &lf, &lo, Some((w, seq[p])));
-            let (rr, ff, oo) = ((r, &mut rc), (f, &mut fc), (o, &mut oc));
-            decode_after(&mut a, rr, ff, oo, seq, p, w, sz.after);
+            let mut c = n.caches(true);
+            n.start(&mut a);
+            let (lr, lf, lo) = n.prefill(kept, &mut c, &seq[..p], 0);
+            a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((w, seq[p])));
+            decode_after(&mut a, n, kept, &mut c, seq, p, w, sz.after);
             if i >= sz.verify_windows {
                 continue;
             }
-            let (mut rc, mut fc, mut oc) = caches();
-            let pr = r.verify_argmax(&seq[..p], 0, &mut rc);
-            let pf = f.verify_argmax(&seq[..p], 0, &mut fc);
-            let po = o.verify_argmax(&seq[..p], 0, &mut oc);
+            let ids = &seq[..p];
+            let pr = match n.r {
+                Some(r) => r.verify_argmax(ids, 0, &mut r.new_cache(CTX)),
+                None => kept.picks.pop_front().unwrap(),
+            };
             let same = |x: &[u32]| pr.iter().zip(x).filter(|(a, b)| a == b).count();
-            rows = (rows.0 + p, rows.1 + same(&po), rows.2 + same(&pf));
+            if let Some(f) = n.f {
+                rows.0 += p;
+                rows.2 += same(&f.verify_argmax(ids, 0, &mut f.new_cache(CTX)));
+            }
+            if let Some(o) = n.o {
+                rows.1 += same(&o.verify_argmax(ids, 0, &mut o.new_cache(CTX)));
+            } else {
+                kept.picks.push_back(pr);
+            }
         }
     }
-    a.launches = o.fast_launches() - l0;
+    a.launches += launches() - l0;
     arms.push(a);
 
     // Cached: a prefix in the cache, the rest in a second batched pass.
-    let mut a = ArmGrade::new(Arm::Cached);
-    let l0 = o.fast_launches();
+    let mut a = arm(Arm::Cached);
+    let l0 = launches();
     let (cwin, w0) = match sz.cached_windows {
-        None => (bat.chunks(span), sz.decode_windows),
-        Some(_) => (cac.chunks(cspan), sz.decode_windows + sz.batch_windows),
+        None => (bat.chunks(inp.span), sz.decode_windows),
+        Some(_) => (cac.chunks(inp.cspan), sz.decode_windows + sz.batch_windows),
     };
     for (w, seq) in cwin.enumerate() {
         let w = w0 + w;
-        let (mut rc, mut fc, mut oc) = caches();
-        a.start();
-        r.feed_batch(&seq[..c0], 0, &mut rc);
-        f.feed_batch(&seq[..c0], 0, &mut fc);
-        o.feed_batch(&seq[..c0], 0, &mut oc);
-        let lr = r.prefill_logits(&seq[c0..c0 + c1], c0, &mut rc);
-        let lf = f.prefill_logits(&seq[c0..c0 + c1], c0, &mut fc);
-        let lo = o.prefill_logits(&seq[c0..c0 + c1], c0, &mut oc);
-        a.tally(&lr, &lf, &lo, Some((w, seq[c0 + c1])));
-        decode_after(
-            &mut a,
-            (r, &mut rc),
-            (f, &mut fc),
-            (o, &mut oc),
-            seq,
-            c0 + c1,
-            w,
-            sz.after,
-        );
+        let mut c = n.caches(true);
+        n.start(&mut a);
+        n.feed(&mut c, &seq[..c0], 0);
+        let (lr, lf, lo) = n.prefill(kept, &mut c, &seq[c0..c0 + c1], c0);
+        a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((w, seq[c0 + c1])));
+        decode_after(&mut a, n, kept, &mut c, seq, c0 + c1, w, sz.after);
     }
-    a.launches = o.fast_launches() - l0;
+    a.launches += launches() - l0;
     arms.push(a);
 
     // Load (the GPU: a pool is the GPU model's): every row of LOAD
     // sequences' steps, taken together, against each sequence alone.
-    if device != Device::Cpu {
-        let mut a = ArmGrade::new(Arm::Load);
-        let l0 = o.fast_launches();
-        let seqs: Vec<&[u32]> = load.chunks(load_len).collect();
+    if inp.device != Device::Cpu {
+        let mut a = arm(Arm::Load);
+        let l0 = launches();
+        let seqs: Vec<&[u32]> = load.chunks(inp.load_len).collect();
         let lw = sz.decode_windows + sz.batch_windows + cwins;
-        let mut pool = o.new_pool(sz.load, CTX).unwrap();
+        let mut pool = n.o.map(|o| o.new_pool(sz.load, CTX).unwrap());
         let mut alone = Vec::with_capacity(sz.load);
         for (s, seq) in seqs.iter().enumerate() {
             let p = load_prefix(s);
-            let (mut rc, mut fc) = (r.new_cache(CTX), f.new_cache(CTX));
-            r.feed_batch(&seq[..p], 0, &mut rc);
-            f.feed_batch(&seq[..p], 0, &mut fc);
+            let mut c = n.caches(false);
+            n.feed(&mut c, &seq[..p], 0);
+            // The reference's logits are kept (or read back) at the tally
+            // below, in its order (step by step), not here.
             let at: Vec<_> = (p..p + sz.load_steps)
                 .map(|pos| {
-                    let lr = r.forward(seq[pos], pos, &mut rc);
-                    (lr, f.forward(seq[pos], pos, &mut fc))
+                    let t = seq[pos];
+                    let lr = n.r.map(|r| r.forward(t, pos, c.r.as_mut().unwrap()));
+                    let lf = n.f.map(|f| f.forward(t, pos, c.f.as_mut().unwrap()));
+                    (lr, lf)
                 })
                 .collect();
             alone.push(at.into_iter());
-            o.feed_slot(&mut pool, s, &seq[..p], 0).unwrap();
-        }
-        // Every logit back (k past CAND_MAX: the host selects from the
-        // row's logits, no penalty).
-        let spec = CandSpec {
-            k: o.vocab(),
-            penalty: 1.0,
-            last_n: 0,
-        };
-        for k in 0..sz.load_steps {
-            let step: Vec<SeqRow> = (seqs.iter().enumerate())
-                .map(|(s, seq)| {
-                    let pos = load_prefix(s) + k;
-                    SeqRow {
-                        token: seq[pos],
-                        pos,
-                        slot: s,
-                        head: RowHead::Sample {
-                            spec,
-                            recent: &seq[..=pos],
-                        },
-                    }
-                })
-                .collect();
-            let out = o.step(&mut pool, &step).unwrap();
-            for (s, row) in out.into_iter().enumerate() {
-                let RowOut::Cands(cs) = row else {
-                    panic!("a sampled row's candidates")
-                };
-                assert_eq!(cs.len(), o.vocab(), "every logit back");
-                let mut lo = vec![f32::NAN; o.vocab()];
-                for c in cs {
-                    lo[c.id as usize] = c.logit;
-                }
-                let (lr, lf) = alone[s].next().unwrap();
-                let next = seqs[s][step[s].pos + 1];
-                a.start();
-                a.tally(&lr, &lf, &lo, Some((lw + s, next)));
+            if let (Some(o), Some(pool)) = (n.o, pool.as_mut()) {
+                o.feed_slot(pool, s, &seq[..p], 0).unwrap();
             }
         }
-        a.launches = o.fast_launches() - l0;
+        for k in 0..sz.load_steps {
+            // Every logit back (k past CAND_MAX: the host selects from the
+            // row's logits, no penalty).
+            let mut out = match (n.o, pool.as_mut()) {
+                (Some(o), Some(pool)) => {
+                    let spec = CandSpec {
+                        k: o.vocab(),
+                        penalty: 1.0,
+                        last_n: 0,
+                    };
+                    let step: Vec<SeqRow> = (seqs.iter().enumerate())
+                        .map(|(s, seq)| {
+                            let pos = load_prefix(s) + k;
+                            SeqRow {
+                                token: seq[pos],
+                                pos,
+                                slot: s,
+                                head: RowHead::Sample {
+                                    spec,
+                                    recent: &seq[..=pos],
+                                },
+                            }
+                        })
+                        .collect();
+                    Some((o.vocab(), o.step(pool, &step).unwrap().into_iter()))
+                }
+                _ => None,
+            };
+            for (s, seq) in seqs.iter().enumerate() {
+                let lo = out.as_mut().map(|(vocab, rows)| {
+                    let RowOut::Cands(cs) = rows.next().unwrap() else {
+                        panic!("a sampled row's candidates")
+                    };
+                    assert_eq!(cs.len(), *vocab, "every logit back");
+                    let mut lo = vec![f32::NAN; *vocab];
+                    for c in cs {
+                        lo[c.id as usize] = c.logit;
+                    }
+                    lo
+                });
+                let (lr, lf) = alone[s].next().unwrap();
+                let lr = lr.unwrap_or_else(|| kept.read());
+                let next = seq[load_prefix(s) + k + 1];
+                n.start(&mut a);
+                a.tally(&lr, lf.as_deref(), lo.as_deref(), Some((lw + s, next)));
+                if n.o.is_none() {
+                    kept.logits.push(lr);
+                }
+            }
+        }
+        a.launches += launches() - l0;
         arms.push(a);
     }
     Graded {
         arms,
         rows,
         floor_name: floor.name(),
-        fast_kernels: o.fast_kernels(),
+        fast_kernels: n.o.is_some_and(|o| o.fast_kernels()),
     }
 }
 
@@ -797,19 +1059,64 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
     );
 }
 
-/// The FP8 gate in a debug-assertions build (lead ruling, 10-31): no
-/// statistics. The graded bars (the binomial top-1, the KL mean, the
-/// outlier count, the verify rows) are a test of >= 1000 positions per arm,
-/// whose run of record is the release build (the debug build does the same
-/// arithmetic); `Sizes::FP8_DEBUG`'s 98-150 positions can't carry them (job
-/// 1031-115732-b712: the batched arm's 137/147 against a floor of 142,
-/// 2 SE 4.4, where the release build's 1000-position arms pass). Kept:
-/// every arm graded with a fast kernel seen running (the per-arm count is
-/// the caller's), and the sanity backstops on the net under test
-/// (`assert_sane`: finite logits, max |dlogit| < 12 over the whole
-/// vocabulary). The numbers are printed, labelled info only.
+/// `assert_sane_vs_exact`'s loose bars (#247's review): every arm's top-1
+/// at least `LOOSE_TOP1` %, its KL mean at most `LOOSE_KL` x the floor's,
+/// the verify rows at least `LOOSE_ROWS` % the reference's picks. On the
+/// 4090 (1113-035842-b356) the FP8 checkpoint's fast mode had 90.5-94.8 %
+/// top-1, KL means 0.73-1.56x the floor's and 92.9 % of the rows: about 10
+/// points and 2x of headroom. Unlike the run of record's statistical bars
+/// they can't fail on noise: a build on a GPU gives the same numbers every
+/// run (no sampling; the inputs are fixed), so a failure is a change in the
+/// numbers, and only a gross one fails.
+const LOOSE_TOP1: usize = 80;
+const LOOSE_KL: f64 = 3.0;
+const LOOSE_ROWS: usize = 85;
+
+/// The loose bars' failures, one line each (none: pass).
+fn loose_bars(g: &Graded) -> Vec<String> {
+    let mut errs = Vec::new();
+    for a in &g.arms {
+        let (m, f, n) = (&a.mode, &a.floor, a.arm.name());
+        if m.top1 * 100 < LOOSE_TOP1 * m.positions {
+            errs.push(format!(
+                "[{n}]: top-1 {}/{} < {LOOSE_TOP1} %",
+                m.top1, m.positions
+            ));
+        }
+        // The means, cross-multiplied (a floor with no positions fails).
+        let (mp, fp) = (m.positions as f64, f.positions as f64);
+        if f.positions == 0 || m.sum_kl * fp > LOOSE_KL * f.sum_kl * mp {
+            errs.push(format!(
+                "[{n}]: KL mean {:.3e} > {LOOSE_KL} x the floor's {:.3e} ({} floor positions)",
+                m.sum_kl / mp,
+                f.sum_kl / fp,
+                f.positions
+            ));
+        }
+    }
+    let (n, same, _) = g.rows;
+    if n == 0 || same * 100 < LOOSE_ROWS * n {
+        errs.push(format!(
+            "verify rows {same}/{n} the reference's picks (< {LOOSE_ROWS} %, or none)"
+        ));
+    }
+    errs
+}
+
+/// The FP8 checkpoint's always-on test (`fp8::gpu_fp8_fast_vs_exact_sanity`,
+/// #232): no statistics. The graded bars (the binomial top-1, the KL mean,
+/// the outlier count, the verify rows) are the run of record's, against the
+/// CPU's fp8-ref (`gpu_fp8_graded_vs_fp8_ref_1000`): they need >= 1000
+/// positions per arm and still sit about one SD of the window spread from
+/// a correct build (#245; at 98-150 positions they failed on noise,
+/// 1031-115732-b712). Kept: every arm graded with a fast kernel seen
+/// running (the per-arm count is the caller's), the sanity backstops on
+/// the net under test (`assert_sane`: finite logits, max |dlogit| < 12 over
+/// the whole vocabulary), and the loose bars (`loose_bars`: top-1, KL mean
+/// against the floor's, verify rows; deterministic, far from a correct
+/// build's numbers).
 pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
-    report_graded(&format!("{what} (debug build: info only, not graded)"), g);
+    report_graded(&format!("{what} (sanity and loose bars)"), g);
     assert!(
         !g.fast_kernels || g.launches() > 0,
         "{what}: fast kernels, but none ran in any arm"
@@ -822,10 +1129,53 @@ pub(crate) fn assert_sane_vs_exact(what: &str, g: &Graded) {
         })
         .collect();
     assert!(errs.is_empty(), "{}", errs.join("\n"));
-    eprintln!(
-        "{what}: debug build: sanity checks only (every arm ran a fast kernel, finite logits, max \
-         |dlogit| < 12); the statistical bars are the release build's run of record"
+    let errs = loose_bars(g);
+    assert!(
+        errs.is_empty(),
+        "{what}: loose bars (top-1 >= {LOOSE_TOP1} %, KL mean <= {LOOSE_KL} x the floor's, verify \
+         rows >= {LOOSE_ROWS} %):\n{}",
+        errs.join("\n")
     );
+    eprintln!(
+        "{what}: sanity checks and loose bars passed (every arm ran a fast kernel, finite logits, \
+         max |dlogit| < 12; top-1 >= {LOOSE_TOP1} %, KL mean <= {LOOSE_KL} x the floor's, verify \
+         rows >= {LOOSE_ROWS} %); the statistical bars are the run of record's, \
+         gpu_fp8_graded_vs_fp8_ref_1000"
+    );
+}
+
+/// `loose_bars` on made-up tallies: b356's numbers pass; top-1 under
+/// 80 %, a KL mean over 3x the floor's, verify rows under 85 % or none,
+/// and a floor with no positions each fail; the bars are inclusive.
+#[test]
+fn loose_bars_rules() {
+    let agree = |positions, top1, sum_kl| Agree {
+        positions,
+        top1,
+        sum_kl,
+        ..Agree::default()
+    };
+    let graded = |top1, kl, fkl, rows| Graded {
+        arms: vec![ArmGrade {
+            mode: agree(1000, top1, kl),
+            floor: agree(1000, 900, fkl),
+            ..ArmGrade::new(Arm::Decode)
+        }],
+        rows,
+        floor_name: "test",
+        fast_kernels: true,
+    };
+    let fails = |g: Graded| loose_bars(&g).len();
+    assert_eq!(fails(graded(905, 30.4, 25.0, (2816, 2615, 2650))), 0);
+    assert_eq!(fails(graded(800, 75.0, 25.0, (100, 85, 90))), 0);
+    assert_eq!(fails(graded(799, 30.4, 25.0, (2816, 2615, 2650))), 1);
+    assert_eq!(fails(graded(905, 75.1, 25.0, (2816, 2615, 2650))), 1);
+    assert_eq!(fails(graded(905, 30.4, 25.0, (100, 84, 90))), 1);
+    assert_eq!(fails(graded(905, 30.4, 25.0, (0, 0, 0))), 1);
+    assert_eq!(fails(graded(500, 90.0, 25.0, (100, 50, 90))), 3);
+    let mut g = graded(905, 30.4, 25.0, (2816, 2615, 2650));
+    g.arms[0].floor.positions = 0;
+    assert_eq!(fails(g), 1, "no floor positions");
 }
 
 /// A GPU of another architecture than GPU 0's, as device 1 (the cross-arch
