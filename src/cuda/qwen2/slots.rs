@@ -408,7 +408,7 @@ impl<'g> CudaQwen2<'g> {
                     r.token, r.pos, r.slot, p.slots, p.ctx
                 ));
             }
-            if let RowHead::Sample { spec, recent } = r.head {
+            if let RowHead::Sample { spec, recent, .. } = r.head {
                 if recent.last() != Some(&r.token) {
                     return bad("a sampled row's recent must end with its token".into());
                 }
@@ -697,10 +697,21 @@ impl<'g> CudaQwen2<'g> {
                 base: p.base(rows[i].slot) as u32,
             })
             .collect();
+        // A masked row (constrained decoding) asks the device for CAND_MAX
+        // and keeps the allowed ones (`sample::masked_prefix`).
         let sampled: Vec<(CandSpec, &[u32])> = order[ng..ns]
             .iter()
             .map(|&i| match rows[i].head {
-                RowHead::Sample { spec, recent } => (spec, recent),
+                RowHead::Sample { spec, recent, mask } => match mask {
+                    None => (spec, recent),
+                    Some(_) => (
+                        CandSpec {
+                            k: CAND_MAX,
+                            ..spec
+                        },
+                        recent,
+                    ),
+                },
                 RowHead::Argmax => unreachable!(),
             })
             .collect();
@@ -781,26 +792,58 @@ impl<'g> CudaQwen2<'g> {
         }
         if ns > ng {
             let cs = self.samp_read(&mut p.c, kmax, self.vocab, ns - ng)?;
-            for (j, mut c) in cs.into_iter().enumerate() {
-                c.truncate(sampled[j].0.k);
-                out[order[ng + j]] = Some(RowOut::Cands(c));
+            for (j, c) in cs.into_iter().enumerate() {
+                let (z, i) = (ng + j, order[ng + j]);
+                let RowHead::Sample { spec, recent, mask } = rows[i].head else {
+                    unreachable!()
+                };
+                let c = match mask {
+                    None => {
+                        let mut c = c;
+                        c.truncate(spec.k);
+                        c
+                    }
+                    Some(m) => match sample::masked_prefix(&c, spec.k, m) {
+                        Some(c) => c,
+                        None => {
+                            // Too few allowed among the device's best: the
+                            // row's logits decide, as `cands_masked` on them.
+                            sample::MASK_FALLBACKS.fetch_add(1, Relaxed);
+                            let mut l = self.step_row_logits(p, z)?;
+                            sample::cands_masked(&mut l, &spec, recent, m)
+                        }
+                    },
+                };
+                out[i] = Some(RowOut::Cands(c));
             }
         }
-        let v = self.vocab;
         for (z, &i) in order.iter().enumerate().skip(ns) {
-            let RowHead::Sample { spec, recent } = rows[i].head else {
+            let RowHead::Sample { spec, recent, mask } = rows[i].head else {
                 unreachable!()
             };
-            let b = p.c.b.as_ref().expect("batch scratch");
-            p.c.host_out.copy_from(&b.logits, z * v * 4, v * 4)?;
-            let hb = &p.c.host_out.bytes_mut()?[..v * 4]; // waits for the step and copy
-            let mut l: Vec<f32> = hb
-                .chunks_exact(4)
-                .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
-                .collect();
-            out[i] = Some(RowOut::Cands(sample::cands(&mut l, &spec, recent)));
+            let mut l = self.step_row_logits(p, z)?;
+            out[i] = Some(RowOut::Cands(match mask {
+                None => sample::cands(&mut l, &spec, recent),
+                Some(m) => sample::cands_masked(&mut l, &spec, recent, m),
+            }));
         }
         Ok(out.into_iter().map(|o| o.expect("every row")).collect())
+    }
+
+    /// The logits of row `z` (in the step's order) of the step just run:
+    /// the pool's scratch keeps every row's (`logits_rows`).
+    fn step_row_logits(&self, p: &mut CudaPool<'g>, z: usize) -> Result<Vec<f32>, String> {
+        let v = self.vocab;
+        let b = p.c.b.as_ref().expect("batch scratch");
+        if !b.logits_rows {
+            return Err("a step row's logits: the scratch keeps one head launch's rows".into());
+        }
+        p.c.host_out.copy_from(&b.logits, z * v * 4, v * 4)?;
+        let hb = &p.c.host_out.bytes_mut()?[..v * 4]; // waits for the step and copy
+        Ok(hb
+            .chunks_exact(4)
+            .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+            .collect())
     }
 
     /// S for a step's sampled rows (in their order): the largest k,
@@ -1486,6 +1529,7 @@ mod tests {
                             head: RowHead::Sample {
                                 spec,
                                 recent: &recent[..n - nb + b + 1],
+                                mask: None,
                             },
                         })
                         .collect();
@@ -1714,6 +1758,7 @@ mod tests {
                                         Some(spec) => RowHead::Sample {
                                             spec: *spec,
                                             recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                            mask: None,
                                         },
                                     },
                                 }
@@ -2819,6 +2864,7 @@ mod tests {
                             RowHead::Sample {
                                 spec,
                                 recent: &recent[..],
+                                mask: None,
                             }
                         },
                     })
@@ -2964,6 +3010,7 @@ mod tests {
                                 Some(spec) => RowHead::Sample {
                                     spec: *spec,
                                     recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                    mask: None,
                                 },
                             },
                         }
@@ -3082,6 +3129,7 @@ mod tests {
                                         Some(spec) => RowHead::Sample {
                                             spec: *spec,
                                             recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                            mask: None,
                                         },
                                     },
                                 }

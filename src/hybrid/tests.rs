@@ -487,6 +487,7 @@ fn hybrid_bad_drafter_output_unchanged() {
             stop: &stop,
             max_draft: k,
             sample: s.as_mut(),
+            constraint: None,
         };
         generate(&h, &mut c, &ids, logits, o, bad, &mut |_| Ok(())).unwrap()
     };

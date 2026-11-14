@@ -186,6 +186,20 @@ impl Identity {
         self
     }
 
+    /// The tuple with `extra` added to the `serve` field (after the
+    /// server's settings, `, `-separated), or as the field if there is none:
+    /// a request's own part of the serve field (`constrain_field`).
+    pub fn with_serve_extra(mut self, extra: String) -> Identity {
+        match self.fields.iter_mut().find(|(k, _)| *k == "serve") {
+            Some((_, v)) => {
+                v.push_str(", ");
+                v.push_str(&extra);
+            }
+            None => self.fields.push(("serve", extra)),
+        }
+        self
+    }
+
     /// `fp_` and the first 16 hex digits of the SHA-256 of `canonical`;
     /// `fp_unknown` if a part couldn't be read (see `of`).
     pub fn fingerprint(&self) -> String {
@@ -443,6 +457,17 @@ pub fn serve_field(
     f("repeat-last-n", s.repeat_last_n.map(|x| x.to_string()));
     f("seed", s.seed.map(|x| x.to_string()));
     (!v.is_empty()).then(|| v.join(", "))
+}
+
+/// A constrained request's part of the `serve` field
+/// (`Identity::with_serve_extra`): `constrain` and its grammar
+/// (`constrain::Grammar::field`: the format and a hash of what it was
+/// built from). Its tokens follow the grammar wherever it engages, so its
+/// fingerprint isn't an unconstrained request's; unconstrained requests
+/// add nothing, and their bits never change, so no numerics bump (the
+/// maintainer's ruling on the constrained-decoding spec's §6 item 1).
+pub fn constrain_field(grammar: &str) -> String {
+    format!("constrain {grammar}")
 }
 
 /// A placement's predicted identities, `[exact, fast]`, or why there are none.
@@ -1050,6 +1075,21 @@ mod tests {
             srv.canonical()
                 .ends_with("serve=no-think, temp 0.7, seed 5\n")
         );
+        // A constrained request's part (`constrain_field`): after the
+        // server's settings, or the whole field; either way another fp.
+        let f = constrain_field("hermes-json 0123456789abcdef");
+        let c1 = srv.clone().with_serve_extra(f.clone());
+        assert!(c1.canonical().ends_with(
+            "serve=no-think, temp 0.7, seed 5, constrain hermes-json 0123456789abcdef\n"
+        ));
+        let c2 = plain.clone().with_serve_extra(f);
+        assert!(
+            c2.canonical()
+                .ends_with("serve=constrain hermes-json 0123456789abcdef\n")
+        );
+        assert_ne!(c1.fingerprint(), srv.fingerprint());
+        assert_ne!(c2.fingerprint(), plain.fingerprint());
+        assert_ne!(c1.fingerprint(), c2.fingerprint());
         let unk = Identity::new("unknown (gone)", "Q4_K:1", "cpu", None, None, "f16");
         // The text is no sentinel: only `unreadable` withholds the fp.
         assert_ne!(unk.fingerprint(), "fp_unknown");
