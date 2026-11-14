@@ -1,0 +1,46 @@
+[axon-run 17:45:19] submitted 1113-174519-9943 by /home/haseeb/.cache/axon-wt-dist-pull: /usr/bin/bash alias-check2.sh ./axon-pull-62071a6 qwen3-14b
+[axon-run 00:36:37] job 1113-174519-9943 -> pod1 [RTX 4090 sm_89 secure] (pod qxz8fcpzd3khvl): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 16000 --src /home/haseeb/.cache/axon-podjob/alias-check2-da82dfaba979 /usr/bin/bash alias-check2.sh ./axon-pull-62071a6 qwen3-14b
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (7fac29b3801a03321cd85e6a) + source of /home/haseeb/.cache/axon-podjob/alias-check2-da82dfaba979 (delta vs 3 earlier upload(s) there)
+
+sent 18,822,667 bytes  received 94 bytes  3,422,320.18 bytes/sec
+total size is 27,458,784  speedup is 1.46
+
+sent 58 bytes  received 19 bytes  30.80 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261114-053653-bash-12710 on pod1 (GPU, 16000 MB)
+[axon-node 05:36:53] GPU slot taken; job wants 16000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 05:36:53] run bash (7fac29b3801a03321cd85e6a) as /home/haseeb/.cache/axon-podjob/alias-check2-da82dfaba979 on 3aef96ddda0d, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 595.91.07, 24564 MiB
+overlay          50G   27G   24G  53% /
+axon 0.1.0
+== qwen3-14b
+  | axon pull: Qwen3-14B-Q4_K_M.gguf (9.00 GB) from Qwen/Qwen3-14B-GGUF
+  | pulling Qwen3-14B-Q4_K_M.gguf: 900.2 MB / 9.00 GB (10 %), 127.3 MB/s, 1m03s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 1.80 GB / 9.00 GB (20 %), 127.5 MB/s, 0m56s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 2.70 GB / 9.00 GB (30 %), 127.9 MB/s, 0m49s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 3.60 GB / 9.00 GB (40 %), 128.6 MB/s, 0m41s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 4.50 GB / 9.00 GB (50 %), 128.4 MB/s, 0m35s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 5.40 GB / 9.00 GB (60 %), 129.0 MB/s, 0m27s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 6.30 GB / 9.00 GB (70 %), 129.5 MB/s, 0m20s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 7.20 GB / 9.00 GB (80 %), 129.3 MB/s, 0m13s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 8.10 GB / 9.00 GB (90 %), 129.7 MB/s, 0m06s left
+  | pulling Qwen3-14B-Q4_K_M.gguf: 9.00 GB / 9.00 GB (100 %), 129.5 MB/s, 0m00s left
+  | /root/axon-node/store/7fac29b3801a03321cd85e6a/tree/aliases-out/models/Qwen/Qwen3-14B-GGUF/Qwen3-14B-Q4_K_M.gguf: pulled, SHA-256 500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0 checked
+  | run it: axon chat qwen3-14b   (or axon serve qwen3-14b)
+(pull rc=0, 70 s)
+443 tensors | 14.77B params | 8.38 GB
+gen: def fibonacci(n):
+    if n <= 1:
+prompt eval: 4 tok in 0.01s (329.55 tok/s)
+decode:      8 tok, 7 passes in 0.07s (97.58 tok/s)
+device:      cuda, 8.38 GB of weights in VRAM (7.97 GB read per token), KV cache f16 2.0 MB, CUDA graphs on
+chat: <think>
+Okay, I need to write a Python function that returns the sum of two numbers. Let me think about how to approach this.
+
+First, the function should take two parameters. Let's call them a and b. Then, it should return their sum. So the basic structure would be def add(a, b
+ALIAS qwen3-14b PASS pull=0 info=0 gen=0 chat=0
+ALIASES: 0 failed
+[axon-node 05:38:07] exit 0 after 73.9s
+[axon-node 05:38:07] peak RSS 213 MB (job process tree PSS, 2 s samples x36)
+[axon-run 00:38:09] exit 0 after 92.1s (host pod1)
