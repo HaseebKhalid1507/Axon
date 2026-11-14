@@ -953,7 +953,8 @@ mod tests {
             let dm = crate::testutil::model().unwrap();
             let mut runs = Vec::new();
             for with in [false, true] {
-                let mut chat = crate::chat::Chat::new(&net, &tok, Some("Be brief."), 160).unwrap();
+                let mut chat =
+                    crate::chat::Chat::new(&net, &tok, &m, Some("Be brief."), 160).unwrap();
                 chat.max_reply = 24;
                 chat.max_draft = if with { 5 } else { 0 };
                 chat.sampler = seed.map(|s| {

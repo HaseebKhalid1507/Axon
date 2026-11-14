@@ -52,6 +52,13 @@ the neighbours.
   reference once: `trace` + `compare_trace`, `compare_each!`, `compare_forced2` and `continuations_by` in
   `src/cuda/qwen2/tests.rs`. Each model under test still gets exactly the calls `compare` would make, and the
   reference makes the same calls once instead of once per model.
+- **CPU work before the GPU test lock, in new tests with a long CPU half.** A new GPU test graded against a CPU
+  reference that takes minutes runs the reference first and calls `testutil::gpu()` after it
+  (`numerics::reference`, then `Reference::grade` on the GPU net; `testutil::gpu_cc` tells beforehand whether the
+  GPU half will run at all). CPU work inside the lock makes every other GPU test of the suite wait: the FP8 graded
+  gate's CPU nets held it for over 2700 s on a packed pod, and 138 GPU tests of that suite failed on the lock
+  timeout behind it (#232). Many older tests take `gpu()` first and then run a short CPU half
+  (`gpu_logits_match_cpu_*` and others); they aren't converted.
 - Don't load a model just to check that its file is there (use the `*_path()` helpers).
 - Don't shorten a prompt or a position range unless you can say why the assertion doesn't depend on its
   length. The 1200-token batchings exist to cross the max batch and the attention tiles.
@@ -93,6 +100,63 @@ those shapes.
 *Superseded in part by [Process v2](methodology.md#process-v2-2026-11-12) rule 1 (2026-11-12): the fast tier and
 md5 per PR; the full tier before merge only when the diff touches `src/cuda/*.cu`, `src/model.rs`, the KV and cache
 files or a head-size or GQA path (rule 1 lists them); the full suite nightly on main.*
+
+### The FP8 gate's run of record
+
+`cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000` grades native FP8 (fast mode) against the CPU's fp8-ref
+at >= 1000 positions per arm (`Sizes::FP8`, docs/design/fp8-weights.md §6 B). It is `#[ignore]`d (#232). Its two
+CPU nets take about 20 minutes on bella and most of an hour on a packed pod (the CPU's float matmul is a serial
+scalar dot, #244), and keep about 2.5 GB of logits: too much for a suite that shares a pod. No smaller size fits
+either: one window an arm still costs 600-800 s of CPU on a packed pod, and below 1000 positions the bars fail
+with no bug far more often (#245).
+
+The suites run `gpu_fp8_fast_vs_exact_sanity` instead: fast mode against exact mode (the checkpoint's Q8_0 form),
+both on the GPU, every arm at the same >= 1000 positions, with no statistics. It checks:
+
+- that every logit is finite and the max |dlogit| over the vocabulary is below 12 (on a 4090, decode's max is 8.65
+  on a correct build: this bound only catches garbage);
+- loose bars: every arm's top-1 at least 80 %, its KL mean at most 3× the floor's (exact mode with a q8 KV cache),
+  the verify rows at least 85 % the reference's picks. On a 4090 a correct build has 90.5–94.8 % top-1, KL means
+  0.73–1.56× the floor's and 92.9 % of the rows (`1113-035842-b356`). The numbers are the same every run of a build
+  on a GPU, so these bars can't fail on noise; only a gross accuracy loss fails them;
+- that every arm launched a fast kernel, and the router's table: every batched prefix's size maps to the FP8
+  tensor-core GEMM, and the load arm's batch reaches the pool's tensor-core attention. These read the table, not
+  what ran: in the batched and cached arms the decode steps after each prefill launch fast kernels on their own,
+  so a prefill call site that stopped reaching `gemm_f8` would pass.
+
+It holds the GPU test lock for about a minute (55–174 s in release on packed 4090 pods, 60–73 s in debug). It
+can't see a bug that fast and exact mode share (the loader, the FP8 scales, the head, attention), both modes
+drifting from true FP8 math, or an accuracy loss inside the loose bars. Kernel precision is guarded on every PR by
+`gpu_fp8_gemm_bits_and_anchor` and `gpu_fp8_gemv_bits_and_anchor` (always on). The rest is the run of record's.
+
+**The run of record runs by hand only**, until devstack's axon-nightly runs it (asked 11-13; this page will say
+nightly once that job is deployed). It runs on every PR whose diff touches:
+
+- the FP8 kernels: `src/cuda/fp8.cu` or any other `src/cuda/**/fp8*`;
+- their routing: `batch::f8_route` (`src/cuda/qwen2/batch.rs`);
+- the FP8 dequantizer or activation quantizer: `src/quant/fp8.rs` (with `f8_rows_to_q8_0`, the Q8_0 conversion),
+  `model::with_fp8_cpu_qt`;
+- the FP8 load path: `safetensors::is_fp8`, `model::fp8_scales` (`src/model.rs`), the FP8 upload and the Q8_0
+  conversion at upload (`src/cuda/qwen2.rs`: the plan's `F8_E4M3` branch, `place_q8`, `Conv`).
+
+It runs on **both FP8 GEMM paths**, since they're different instructions. sm_120 (bella) runs `mma_f8` as one
+e4m3 `mma.sync`. Below sm_120 (a 4090's sm_89, an H100's sm_90) it's two f16 mmas (`src/cuda/fp8.cu`, #190,
+which was sm_89-only):
+
+```
+axon-run --on bella --max-min 90 -- <axon-test> cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored
+axon-run --on 4090 --max-min 120 -- <axon-test> cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref_1000 --exact --ignored
+```
+
+Both job IDs and verdicts go in the PR's gates table.
+
+**Until #245 lands, a failure means look, not block.** Its bars sit about one standard deviation of the
+window-to-window spread from a correct build. A bootstrap over the windows of a passing 4090 run
+(`1113-013522-ef0b`) suggests about 1 in 3 harmless numerics changes (reordered sums, a new kernel route) would
+fail it, and the 0.5B decode arm clears the 90 % top-1 floor by 1.3 points. The test's text is fixed, so the same
+code on the same GPU gives the same verdict every run. A new failure is a change in the FP8 numbers worth reading
+(which arm and bar, by how much, the floor's numbers next to it), and the lead decides whether it blocks. #245
+redesigns the bars around paired discordance; once those land, a failure of the run of record blocks again.
 
 ## Gate jobs (maintainers)
 

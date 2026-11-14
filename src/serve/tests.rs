@@ -31,6 +31,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
 fn test_opts(path: &str, device: Device) -> Opts {
     Opts {
         path: path.into(),
+        name: None,
         host: "127.0.0.1".into(),
         port: 0,
         device,
@@ -223,11 +224,17 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
     out
 }
 
-/// `axon chat --temp 0`'s first reply to `msg` on `net`, at most `n`
-/// tokens, with run_chat's default system message for `arch`.
-fn chat_text<M: Lm>(net: &M, tok: &Tokenizer, arch: &str, msg: &str, n: usize) -> String {
-    let system = (arch == "qwen2").then_some(crate::chat::DEFAULT_SYSTEM);
-    let mut c = crate::chat::Chat::new(net, tok, system, 256).unwrap();
+/// `axon chat --temp 0`'s first reply to `msg` on `net` (model `m`), at
+/// most `n` tokens, with run_chat's default system message (the template's).
+fn chat_text<M: Lm>(
+    net: &M,
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    msg: &str,
+    n: usize,
+) -> String {
+    let system = crate::chat::default_system(m);
+    let mut c = crate::chat::Chat::new(net, tok, m, system.as_deref(), 256).unwrap();
     c.max_reply = n;
     let mut text = Utf8Stream::default();
     let mut out = String::new();
@@ -279,7 +286,7 @@ fn serve_matches_gen_and_chat(path: &str, device: Device) {
         .unwrap();
         (
             gen_text(&net, &tok, PROMPT, 32),
-            chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
+            chat_text(&net, &tok, &m, CHAT_MSG, 24),
         )
     };
     serve_checks(path, device, &gen_ref, &chat_ref);
@@ -885,6 +892,47 @@ fn serve_http_behaviour() {
     );
 }
 
+/// `chat_prompt` (AXON_LOGITS_CHAT, scripts/golden.py) renders a request
+/// body as `completion` does: the template's ids for the messages,
+/// `chat_template_kwargs` honoured, request errors as their message.
+#[test]
+fn chat_prompt_renders_as_completion() {
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m).unwrap();
+    let body =
+        br#"{"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]}"#;
+    let ids = super::chat_prompt(&tok, &m, body).unwrap();
+    let msg = |role, c: &str| Message {
+        role,
+        content: c.into(),
+    };
+    let msgs = [
+        msg(Role::System, "S"),
+        msg(Role::User, "a"),
+        msg(Role::Assistant, "b"),
+        msg(Role::User, "c"),
+    ];
+    assert_eq!(ids, t.render(&tok, &msgs, false));
+    assert_eq!(
+        tok.decode(&ids),
+        "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n<|im_start|>assistant\n"
+    );
+    // qwen2 doesn't think: enable_thinking changes nothing.
+    let off = br#"{"messages": [{"role": "user", "content": "a"}], "chat_template_kwargs": {"enable_thinking": false}}"#;
+    assert_eq!(
+        super::chat_prompt(&tok, &m, off).unwrap(),
+        t.render(&tok, &[msg(Role::User, "a")], false)
+    );
+    let e = super::chat_prompt(&tok, &m, b"{").unwrap_err();
+    assert!(e.starts_with("invalid JSON"), "{e}");
+    let e = super::chat_prompt(&tok, &m, br#"{"messages": []}"#).unwrap_err();
+    assert_eq!(e, "'messages' is empty");
+}
+
 /// The chat prompt is `axon chat`'s: the same building blocks (frame), the
 /// default system message for qwen2, the empty think block for qwen3.
 #[test]
@@ -893,7 +941,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let msg = |role, c: &str| Message {
         role,
         content: c.into(),
@@ -936,7 +984,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok3 = Tokenizer::from_gguf(&m3);
-    let t3 = Template::new(&tok3, &m3.arch).unwrap();
+    let t3 = Template::new(&tok3, &m3).unwrap();
     let msgs = [
         msg(Role::User, "a"),
         msg(Role::Assistant, "<think>\nhmm\n</think>\n\nb"),
@@ -958,7 +1006,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tokl = Tokenizer::from_gguf(&ml);
-    let tl = Template::new(&tokl, &ml.arch).unwrap();
+    let tl = Template::new(&tokl, &ml).unwrap();
     assert!(!tl.thinks());
     let head = |sys: &str| {
         format!(
@@ -1018,7 +1066,7 @@ fn gemma3_template_matches_llama_cpp() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert!(!t.thinks());
     let (bos, eot) = (2u32, 106u32);
     assert!(t.stop().contains(&eot) && t.stop().contains(&tok.eos()));
@@ -1068,7 +1116,7 @@ fn text_out_reasoning_and_stops() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m3);
-    let t = Template::new(&tok, &m3.arch).unwrap();
+    let t = Template::new(&tok, &m3).unwrap();
     let think = t.think.as_ref().map(|&(o, c, _)| (o, c));
     let run = |text: &str, think, stops: &[&str]| {
         let mut out = super::TextOut {
@@ -1878,6 +1926,50 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
             assert_eq!(t, s1, "{what} stagger {stagger} ms: request {i}");
         }
     }
+}
+
+/// A model `axon serve` was given by a name `axon pull` resolved (#231
+/// review): the name is its id in /v1/models and a request naming it is
+/// served; given by path, the id is the file's stem, as before.
+#[test]
+fn serve_pulled_name_is_the_model_id() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let s = server_with(p, Device::Cpu, |o| {
+        o.name = Some("qwen2.5-0.5b".into());
+        o.alias = None;
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], "qwen2.5-0.5b", "{v}");
+    assert_eq!(v["data"].as_array().unwrap().len(), 1, "{v}");
+    let ask = |model: &str| {
+        post(
+            a,
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 2, "temperature": 0}),
+        )
+    };
+    let r = ask("qwen2.5-0.5b");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["model"], "qwen2.5-0.5b");
+    let stem = std::path::Path::new(p)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        ask(stem).status,
+        404,
+        "the file's stem is not a name it was given"
+    );
+    drop(s);
+    let s = server_with(p, Device::Cpu, |o| o.alias = None);
+    let v = call(s.addr, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], stem, "a path keeps its stem: {v}");
 }
 
 /// A pool whose slots are shorter than the context (`slot_ctx`, as when
@@ -4765,7 +4857,7 @@ fn harmony_calls_from_channels() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let render = |extra: &str| {
         let body = format!(
             r#"{{"messages": [{{"role": "user", "content": "Weather in Paris?"}}], "tools": [{{"type": "function", "function": {{"name": "get_weather", "parameters": {{"type": "object", "properties": {{"city": {{"type": "string"}}}}}}}}}}]{extra}}}"#

@@ -41,7 +41,7 @@ mod responses;
 mod tier;
 pub mod tools;
 
-use crate::chat::{self, Framing, special};
+use crate::chat::{self, Format, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
@@ -89,6 +89,12 @@ const ACCEPT_DRAIN: usize = 64 << 10;
 /// `axon serve`'s settings.
 pub struct Opts {
     pub path: String,
+    /// The model's id (/v1/models, a request's `model`) when it isn't
+    /// `path`'s file stem: the name `axon serve` was given when `axon pull`
+    /// resolved it to `path` (an alias, OWNER/REPO/FILE.gguf, a pulled
+    /// file's name), so a client asks for the model by the name it was
+    /// served as. None (a path): the stem.
+    pub name: Option<String>,
     pub host: String,
     pub port: u16,
     pub device: Device,
@@ -197,15 +203,26 @@ pub struct Template {
     /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
     /// `enable_thinking: false` opens a reply with.
     think: Option<(u32, u32, Vec<u32>)>,
-    /// Used when the messages don't start with a system message (Qwen2.5's
-    /// template brings one, Qwen3's and Llama 3's none).
-    default_system: Option<&'static str>,
+    /// Used when the messages don't start with a system message: the
+    /// template's (`chat::default_system`: Qwen2.5's, Qwen2's; Qwen1.5's,
+    /// Qwen3's and Llama 3's have none).
+    default_system: Option<String>,
+    /// Whether the template renders tools (`<tool_call>` in ChatML, Llama
+    /// 3.1's `ipython`; harmony always), or the file has no template.
+    pub(crate) tools: bool,
 }
 
 impl Template {
-    /// None if the vocabulary has no chat markers (no chat endpoint).
-    pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
-        let fr = Framing::new(tok)?;
+    /// None if the vocabulary has no chat markers (no chat endpoint). The
+    /// details come from the model file's own template
+    /// (`Framing::from_model`, `chat::default_system`).
+    pub fn new(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Template> {
+        let fr = Framing::from_model(tok, m)?;
+        let tools = chat::chat_template(m).is_none_or(|t| match fr.format {
+            Format::ChatMl => t.contains("<tool_call>"),
+            Format::Llama3 { .. } => t.contains("ipython"),
+            _ => true,
+        });
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -215,8 +232,8 @@ impl Template {
         Some(Template {
             fr,
             think,
-            // As `axon chat`: Qwen2.5's default system message for qwen2.
-            default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
+            default_system: chat::default_system(m),
+            tools,
         })
     }
 
@@ -229,21 +246,19 @@ impl Template {
     /// else the default one; Llama 3 always has one), each message framed,
     /// then the assistant's opening (with the empty reasoning block if
     /// `no_think` and the model thinks), as `axon chat` frames a
-    /// conversation. An earlier reply of a thinking model is kept as its
-    /// text after `</think>`, leading newlines dropped, as the Qwen3
-    /// template (and `axon chat`) render it.
+    /// conversation. An earlier reply of a thinking model is kept as the
+    /// framing's `think_strip` says (its text after `</think>`, as the
+    /// template and `axon chat` render it).
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
         let (system, rest) = match msgs.split_first() {
             Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
-            _ => (self.default_system, msgs),
+            _ => (self.default_system.as_deref(), msgs),
         };
         let mut t = self.fr.system(tok, system);
         for (i, m) in rest.iter().enumerate() {
-            let text = match (m.role, &self.think) {
-                (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
-                    Some((_, c)) => c.trim_start_matches('\n'),
-                    None => &m.content,
-                },
+            let strip = self.think.as_ref().and(self.fr.think_strip);
+            let text = match (m.role, strip) {
+                (Role::Assistant, Some(how)) => how.apply(&m.content),
                 _ => &m.content,
             };
             // Mistral's first user message carries the system message
@@ -263,6 +278,35 @@ impl Template {
 
     pub fn thinks(&self) -> bool {
         self.think.is_some()
+    }
+}
+
+/// The prompt `/v1/chat/completions` runs for the request `body`, rendered as
+/// `completion` renders it with the server's defaults: thinking on unless
+/// the body's `chat_template_kwargs` turns it off, tools through
+/// `tools::render`, the framing `Template::new` reads from the model file.
+/// `axon logits` prints it for AXON_LOGITS_CHAT=FILE, so scripts/golden.py
+/// can hold the chat framing against llama.cpp's template, token by token.
+pub fn chat_prompt(
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    body: &[u8],
+) -> Result<Vec<u32>, String> {
+    let g = api::parse(body, true).map_err(|e| e.msg)?;
+    let Prompt::Chat { messages, no_think } = &g.prompt else {
+        return Err("not a chat request".into());
+    };
+    // No framing: the reason `completion` gives (without its /v1/completions hint).
+    let t = Template::new(tok, m).ok_or_else(|| match Framing::bad_end(tok) {
+        Some(why) => format!("this model has no chat framing: {why}"),
+        None => "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma)".to_string(),
+    })?;
+    let no_think = no_think.unwrap_or(false) && t.thinks();
+    match &g.tools {
+        None => Ok(t.render(tok, messages, no_think)),
+        Some(tr) => tools::render(&t, tok, tr, no_think)
+            .map(|r| r.ids)
+            .map_err(|e| e.msg),
     }
 }
 
@@ -1134,7 +1178,7 @@ fn engine(
     }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
-        crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
+        crate::draft::DraftModel::open(&crate::model_arg(p), crate::copy_for(device), &model, tok)
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
@@ -1199,7 +1243,7 @@ fn engine(
     if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
-    let template = Template::new(tok, &model.arch);
+    let template = Template::new(tok, &model);
     let kvs = match &net.0 {
         Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
@@ -2353,9 +2397,11 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let engine = std::thread::Builder::new()
         .name("axon-engine".into())
         .spawn(move || engine(eo, ready_tx, jobs_rx, stop2))?;
-    let model_id = std::path::Path::new(&o.path)
-        .file_stem()
-        .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned());
+    let model_id = o.name.clone().unwrap_or_else(|| {
+        std::path::Path::new(&o.path)
+            .file_stem()
+            .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned())
+    });
     // A request's own repetition_penalty, else the server's flag, else 1
     // (off, as OpenAI and llama-server; `axon chat`'s 1.1 would quietly
     // penalize the punctuation and indentation of code and JSON).
@@ -2432,13 +2478,20 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
     l.identity = l.identity.with_serve(serve);
     if o.log {
+        // A pulled model's name, then its file.
+        let file = match o.name {
+            Some(_) => format!("{}, ", o.path),
+            None => String::new(),
+        };
         eprintln!(
-            "axon serve: {model_id} ({}) on http://{addr}/v1{}",
+            "axon serve: {model_id} ({file}{}) on http://{addr}/v1{}",
             l.banner,
-            if l.template.is_none() {
-                " (no chat tokens: /v1/completions only)"
-            } else {
-                ""
+            match &l.template {
+                Some(_) => String::new(),
+                None => match Framing::bad_end(l.tok) {
+                    Some(why) => format!(" (no chat framing: {why}: /v1/completions only)"),
+                    None => " (no chat tokens: /v1/completions only)".into(),
+                },
             }
         );
         eprintln!("axon serve: identity {}", l.identity.line());
@@ -2885,16 +2938,17 @@ fn run_request(
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return out.err(
-                    c,
-                    ApiError::new(
-                        400,
-                        "invalid_request_error",
+                let msg = match Framing::bad_end(m.tok) {
+                    Some(why) => {
+                        format!("this model has no chat framing: {why}; use /v1/completions")
+                    }
+                    None => {
                         "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma); use \
-                         /v1/completions",
-                    ),
-                    keep,
-                );
+                             /v1/completions"
+                            .into()
+                    }
+                };
+                return out.err(c, ApiError::new(400, "invalid_request_error", msg), keep);
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
             channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);
@@ -3388,8 +3442,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         crate::fail(SERVE_USAGE);
     };
+    // `model_arg` returns a path that exists as given; anything else it
+    // returns is what `axon pull` resolved the name to.
+    let resolved = crate::model_arg(path);
     let mut o = Opts {
-        path: path.clone(),
+        name: (resolved != *path).then(|| path.clone()),
+        path: resolved,
         host: "127.0.0.1".into(),
         port: 8080,
         device: crate::device_env(),
@@ -3612,5 +3670,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod template_tests;
 #[cfg(test)]
 mod tests;

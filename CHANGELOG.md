@@ -6,6 +6,115 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
+- **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
+  `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
+  - **Llama 3.0** (#241): no "Cutting Knowledge Date" lines, and a system block only when a system message is given.
+    Llama 3.1, 3.2 and 3.3 are unchanged.
+  - **DeepSeek R1** (R1-0528, the distills) and **V3** (#238): a reply opens with `<｜Assistant｜>` alone, so R1
+    reasons. Before, they got V3.1's `</think>` and reasoning was switched off. BOS is written whenever the template
+    writes it.
+  - **Earlier DeepSeek replies** drop their reasoning as the template does, in serve and in `axon chat` alike
+    (`axon chat` used to keep all of it). R1's (R1-0528, the distills): the text after the last `</think>`, newlines
+    kept. V3.1's: what follows the first `</think>`. Qwen3's rule is unchanged: after the last, newlines dropped.
+  - **DeepSeek multi-turn** (#240): an earlier reply is `<｜Assistant｜>{text}<｜end▁of▁sentence｜>`. Before, the
+    marker was missing and the reply was glued onto the user turn.
+- **The default system message is the template's** (#239): Qwen2's is "You are a helpful assistant.", and Qwen1.5, the
+  R1 distills and Qwen3 have none. Qwen2.5's "You are Qwen, ..." now comes only from its template, or for a `qwen2`
+  file without one. Any ChatML template with a fixed default gets that default whatever its architecture
+  (Qwen2.5-Math's, for example). A fine-tune whose template has no default loses Qwen2.5's, except on a tool
+  request, which still gets it (#256).
+- **Tools need a template that renders them.** A request with tools, or a tool turn, for Qwen2, Qwen1.5 or Llama 3.0
+  is now a 400, as ollama refuses it. These used to render in Qwen2.5's or Llama 3.1's format.
+- **DeepSeek-R1's Qwen2.5 distills load** (#249): pre-tokenizer `deepseek-r1-qwen` is Qwen2's, as llama.cpp maps it.
+- **A broken `bos_token_id` or `eos_token_id`** (past the vocabulary) never reaches a prompt. A bad BOS is dropped,
+  as the tokenizer drops it. A bad EOS on a format that ends turns with EOS (DeepSeek, Mistral) leaves no chat
+  framing, instead of a panic in the model: the chat endpoint gives a 400, `axon chat` an error and serve's banner a
+  note, each naming the id ("eos_token_id N is past the vocabulary").
+- **Pinned by a fixture**, `tests/fixtures/chat_templates.json`, built by `scripts/chat_template_fixtures.py` from
+  pinned Hugging Face revisions: 16 families and 148 conversations, Axon's ids equal to `apply_chat_template`'s.
+  The conversations also run through `axon chat` turn by turn. Message text that spells special tokens stays text
+  in every family.
+- **Saved sessions:** a resumed `axon chat` session keeps its old tokens, and the new turns use the new framing. A
+  conversation that changed framing (Llama 3.0, R1, Qwen2 or Qwen1.5 without a system message) mixes the two.
+  Serve's prompt cache is keyed by tokens, so changed prompts only miss it.
+
+### Tests: the FP8 gate off the GPU test lock; GPU fast vs GPU exact in the suites (#232)
+- **`gpu_fp8_fast_vs_exact_sanity` replaces `gpu_fp8_graded_vs_fp8_ref` in every suite.** It runs the FP8 0.5B
+  checkpoint's fast mode against its exact mode on the same GPU, every arm at >= 1000 positions, with no
+  statistics: finite logits, max |dlogit| < 12, loose deterministic bars (top-1 >= 80 % an arm, KL mean <= 3× the
+  floor's, verify rows >= 85 %), a fast kernel in every arm, and the router's FP8 table. It holds the GPU test
+  lock for about a minute (55–174 s on packed pods). The old test held it through its CPU reference, over 2700 s
+  on packed pods, and 138 GPU tests of one suite failed on the lock timeout behind it.
+- **The run of record, `gpu_fp8_graded_vs_fp8_ref_1000`, is `#[ignore]`d.** It grades against the CPU's fp8-ref with
+  the statistical bars, unchanged. It runs its CPU nets before it takes the lock. It runs by hand on PRs that touch
+  the FP8 kernels, their routing or the FP8 load path, on sm_120 and on sm_89 (two different FP8 GEMM paths); not
+  yet nightly (docs/testing.md, the PR template).
+  - Until #245 lands, a failure means look, not block: a bootstrap suggests its bars flag about 1 in 3 harmless
+    numerics changes.
+  - Its CPU reference is slow because the CPU's float matmul is a serial scalar dot (#244).
+- `graded_in_two_passes_is_graded_at_once`: the two-pass grading equals the interleaved one, field for field
+  (docs/log/2026-11-13-fp8-gate-lock.md).
+
+### Release tarball and `install.sh`: Linux x86-64, one command (#230)
+- **A tag `vX.Y.Z` builds the Linux x86-64 tarball** (`.github/workflows/release.yml`) into a *draft* GitHub release.
+  The tarball holds `axon` with its kernel pack built in (#227), compiled from the tagged source by NVRTC 13.4.92 on
+  a runner with no GPU, built in `manylinux_2_28` (glibc 2.28+), plus the license notices: `THIRD_PARTY_LICENSES.txt`
+  for every linked crate, and the Rust standard library's. The build fails if the tag isn't the binary's version,
+  the pack lacks a module, the binary needs a newer glibc, or a crate's license is off the allowed list (also
+  checked in CI on every PR). Actions are pinned by commit and the image by digest; the tarball is built to be
+  reproducible (docs/releasing.md step 4 checks it; no two builds of one commit have been compared yet). A pull
+  request that touches the release files builds and tests it without a release.
+- **`install.sh`** (`curl -fsSL …/install.sh | sh`, POSIX sh) puts `axon` in `~/.local/bin` after checking the
+  tarball's SHA-256. Running it again changes nothing. It first runs the binary where it will live, so a noexec
+  `/tmp` doesn't matter, and it names a noexec install dir. It warns when another `axon` comes first on PATH, and
+  says "no published release yet" (build from source) while there is none. `AXON_VERSION`, `AXON_INSTALL_DIR`.
+- Publishing a draft takes the hand checks in docs/releasing.md: the pack byte-checked against bella's NVRTC, the
+  md5 gate, a driver-only machine. Nothing is published yet: until v0.1.0 is, the README says to build from
+  source.
+- **Only the tag's push makes a draft** (#257, shady's SHOULD on #230). A `workflow_dispatch` on the tag
+  (releasing.md step 4, the reproducibility check) has the same `github.ref`, so it used to add a second draft
+  with its own tarball; it now only builds. The release job also refuses when a release for the tag, draft or
+  published, exists already, so "Re-run all jobs" on the tag's run can't add one either. The `kernels-pack`
+  artifact is kept 30 days (was 7), for releasing.md step 1.
+- **The draft is made only while the tag names the commit the run built** (#261, the must-fix in #258, from
+  shady's review of #257). A tag moved while its first run was still building used to let that stale run make
+  the draft, holding the old commit's tarball; the new commit's run then hit the one-release check. The pack
+  job now records the commit it checked out, and the build job checks it built the same one. Before
+  `gh release create`, the release job asks GitHub which commit the tag names (`commits/refs/tags/<tag>`, which
+  peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
+  draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
+  every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
+
+### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
+- **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
+  else `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) through `curl`, HTTPS only, resumable,
+  with progress. Nothing reaches its final name until its size and SHA-256 match: a name's pinned checksum, or
+  the one Hugging Face publishes for the file (the LFS oid), fetched at the commit that reported it. No registry.
+- **About ten names** (`axon pull --list`) for local coding agents, each a file at a pinned commit, each run on axon
+  (`axon info` and a greedy gen) before it was listed.
+- **`gen`, `chat`, `serve`, `info` and `--draft-model` take a name** where they took a path. `axon serve NAME`
+  serves the model as `NAME` (`/v1/models`, a request's `model`); given a path, as before, its file stem.
+- **New variables:** `AXON_MODELS_DIR` and `HF_TOKEN` (gated repos; curl 7.58+).
+- Names and paths are untrusted input: owner, repo and every path component are checked against a strict
+  allow-list before any path is built (fuzzed); curl runs with `-q` (no `~/.curlrc`).
+
+### Precompiled GPU kernels: `--device cuda` with only the NVIDIA driver (#227)
+- **A release binary carries its CUDA kernels precompiled** (the kernel pack): cubins for sm_75, sm_80, sm_86,
+  sm_89, sm_90, sm_90a and sm_120, plus compute_120 PTX for newer GPUs. So `--device cuda` needs no CUDA toolkit
+  and no NVRTC, only a driver for CUDA 13 (R580+). Each entry is NVRTC 13.4's output for the run-time compile's
+  source, options and target, so the same code: the md5 gate matches main's NVRTC output.
+- **Not covered:** data-center Blackwell (sm_100/sm_103, below sm_120), Pascal, Volta and drivers before R580 still
+  need NVRTC; with none, `--device cuda` stops with one line naming the driver and the way out.
+- **`axon kernels list [PACK]`** says what the binary (or a pack file) carries and where this GPU's kernels come
+  from; it exits non-zero when the pack lacks some of the binary's kernel modules. **`axon kernels build OUT`**
+  compiles a pack with NVRTC (no GPU needed); OUT must name a file, and the build's temp files go in a new
+  directory beside it, the only thing it deletes.
+- **New variables:** `AXON_KERNEL_PACK=0` (the kill switch: NVRTC only, as a source build) or `only` (never
+  NVRTC), and `AXON_KERNEL_PACK_FILE=PATH` (a pack file instead of the built-in one; an unreadable or invalid one
+  is a warning, then NVRTC).
+- Source builds are unchanged: no pack, NVRTC as before.
+
 ### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
 - **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). Same bits on or off. On its
   own: the KV RAM tier stays off by default (#226). In the A/B on an RTX 4090 (#228, job 1112-233524-d38d) sharing
