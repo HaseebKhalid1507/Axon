@@ -1,0 +1,29 @@
+{
+ "label": "dec-share-soakprobe-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-160314-c7b9",
+   "name": "dec-share-soakprobe-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794690362.6554167,
+   "ended": 1794692011.9611406,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "fa258b0fc4b4c34593dfe4bca62ef7a70b9e9b1336f4f8bd2ad316d49e92eb82",
+   "log_bytes": 8134
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 16:33:33 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

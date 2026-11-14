@@ -1,0 +1,54 @@
+[axon-run 16:03:14] submitted 1114-160314-c7b9 by /home/haseeb/.cache/axon-dec: /usr/bin/bash soakpreempt.sh ./axon-base-soak-main ./axon-dbg-share ./soak-probe.py 0.17 128 4 probe10
+[axon-run 16:06:04] scope axon-job-1114-160314-c7b9-1794690364.scope in app-axonjobs.slice: MemoryMax 10312 MB, MemoryHigh 9280 MB, no swap, oomd pressure kill 80% (claim 6192 MB): an OOM here kills only this job
+[axon-run 16:06:04] job 1114-160314-c7b9 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1114-160314-c7b9-1794690364 --slice=app-axonjobs.slice -p MemoryMax=10312M -p MemoryHigh=9280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash soakpreempt.sh ./axon-base-soak-main ./axon-dbg-share ./soak-probe.py 0.17 128 4 probe10
+axon-q 16:06:04 start slot 16-23: /usr/bin/bash soakpreempt.sh ./axon-base-soak-main ./axon-dbg-share ./soak-probe.py 0.17 128 4 probe10
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 620.70.06
+main solo run rc 0
+serve: ./axon-dbg-share serve models/qwen2.5-1.5b-instruct-q4_k_m.gguf --port 18630 --ctx 4096 --parallel 8 --device cuda
+loaded in 1.0s, pid 3954116
+primed 480 requests in 9s
+CSV,t_s,rss_mib,anon_mib,file_mib,hwm_mib,vram_mib,vram_src,fds,threads,requests,lat_p50_ms,lat_p99_ms,ttft_p50_ms,ttft_p99_ms,ok,4xx-expected,503,cancelled,accepted-unsupported,503-undocumented,5xx,bad-body,dropped,hog-mismatch,other-status,slow-blocks-others,timeout,unexpected-200,unexpected-4xx,alive
+CSV,41.8,401.5,196.4,119.4,401.5,1856.0,pid,73,22,97,250.4,11659.4,94.2,9629.6,74,13,0,10,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,71.8,401.6,196.6,119.4,401.6,1856.0,pid,63,17,79,460.5,19258.2,88.5,10405.5,70,6,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,101.8,401.6,196.6,119.4,401.6,1856.0,pid,59,15,57,1615.6,15848.6,104.2,5878.2,52,2,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,131.8,401.8,196.7,119.4,401.8,1856.0,pid,53,12,32,936.9,14272.4,364.2,3923.3,29,1,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,161.8,402.1,197.1,119.4,402.1,1856.0,pid,51,11,33,1149.9,13965.2,12.1,6287.2,28,3,0,2,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,191.8,402.8,197.7,119.4,402.8,1856.0,pid,51,11,12,11316.5,15136.8,16.1,3312.3,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,221.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,9,10450.0,12002.2,13.5,2341.8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,251.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,11,11137.4,16948.7,11.4,4482.7,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,281.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,11,9412.6,13486.8,11.6,4267.8,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,311.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,11,10347.7,12823.6,6.8,907.0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,341.8,402.8,197.7,119.4,402.8,1858.0,pid,49,10,8,12741.9,16631.3,11.3,3773.2,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,371.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,9,13343.0,17035.1,17.0,2927.8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,401.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,10,11946.2,13966.9,14.1,3474.3,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,431.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,11,10892.7,15626.4,12.9,3590.8,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,461.8,402.8,197.7,119.4,402.8,1856.0,pid,49,10,10,10493.0,12676.0,11.7,1423.6,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,491.8,403.1,198.1,119.4,403.1,1856.0,pid,59,15,58,330.8,461656.1,188.0,8418.3,57,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,521.8,403.3,198.2,119.4,403.3,1856.0,pid,57,14,51,371.2,458418.0,153.2,9619.9,42,3,0,6,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,551.8,403.5,198.4,119.4,403.5,1856.0,pid,61,16,62,417.7,456935.0,15.7,6910.4,52,5,0,5,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,581.8,403.5,198.4,119.4,403.5,1856.0,pid,55,13,79,268.8,453148.0,14.1,6708.2,66,4,0,9,0,0,0,0,0,0,0,0,0,0,0,1
+CSV,611.8,403.5,198.4,119.4,403.5,1856.0,pid,53,12,59,272.7,451726.5,15.6,7593.9,53,3,0,3,0,0,0,0,0,0,0,0,0,0,0,1
+SUMMARY {"checks": {"rss": {"status": "NOT-JUDGED", "why": "fewer than 3 samples after warm-up"}, "errors": {"bad": {}, "status": "PASS"}, "503": {"count": 0, "fraction": 0.0, "ok": 640, "requests": 724, "note": "every 503 body is checked against the documented back-pressure messages (otherwise class 503-undocumented, failing); the fraction is reported, not capped", "status": "PASS"}, "alive": {"status": "PASS"}, "panic": {"lines": [], "status": "PASS"}, "identity": {"runs": 2, "mismatches": [], "status": "PASS"}, "fds_threads": {"before": {"rss_mib": 396.9, "anon_mib": 191.9, "threads": 6, "fds": 41}, "after": {"rss_mib": 403.3, "anon_mib": 198.3, "threads": 6, "fds": 41, "hwm_mib": 403.3}, "status": "PASS"}, "slots_idle": {"busy": 0, "slots": 8, "queue_depth": 0, "status": "PASS"}, "hog_replies": {"replies": 206, "compared": 202, "hogs": 4, "longest_chars": {"0": 2976, "1": 2968, "2": 2997, "3": 2988}, "mismatches": 0, "status": "PASS"}, "pressure": {"preempted": 166, "prefills_unfed": 431, "pages_total": 128, "prompt_shared_tokens": 53504, "refeed_shared_tokens": 738560, "pages_evicted": 6026, "why": "", "status": "PASS"}, "cancels": {"client_disconnects": 43, "server_cancelled": 47, "ratio": 1.093, "status": "REPORTED"}}, "requests": 724, "totals": {"agent:ok": 125, "burst:ok": 24, "chat-stream:ok": 71, "chat-whole:ok": 51, "completion:ok": 36, "disconnect:cancelled": 43, "disconnect:ok": 1, "hog:ok": 206, "invalid:4xx-expected": 31, "long:ok": 26, "oversize:4xx-expected": 10, "slow-reader:ok": 21, "tool:ok": 79}, "wall_h": 0.303}
+VERDICT PASS rss not judged: window under 4.0 h after warm-up
+SOAK POLL {"samples": 1089, "peak_held": 128, "peak_at_s": 21.0, "peak_busy_pages": [39, 23, 39, 39], "most_busy_page_maps": 140, "most_busy": 8, "most_busy_over_16_pages": 5, "first_preempt_s": 19.0, "first_unfeed_s": 21.0, "end": {"t": 1090.1, "total": 128, "free": 1, "shared": 0, "warm": 30, "pre": 166, "unfed": 431, "busy": [], "waiting": 1}}
+SOAK VERDICT rc 0 (cuda, sharing on by default, tier off, AXON_KV_PAGES=128, hogs 4)
+SOAK PRESSURE PASS {"preempted": 166, "prefills_unfed": 431, "pages_total": 128, "prompt_shared_tokens": 53504, "refeed_shared_tokens": 738560, "pages_evicted": 6026, "why": ""}
+SOAK SOLO-MD5 SAME (cand identity runs 2, mismatches 0)
+{"ctx":4096,"graphs_evicted_oom":0,"page_tokens":64,"pages_free":1,"pages_shared":0,"pages_total":128,"pages_warm":30,"preempted":166,"prefills_unfed":431,"queue_depth":0,"slots":[{"age_ms":null,"busy":false,"held_tokens":2994,"id":0,"pages_used":47,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":0,"id":1,"pages_used":0,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":55,"id":2,"pages_used":1,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":0,"id":3,"pages_used":0,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":217,"id":4,"pages_used":4,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":1247,"id":5,"pages_used":20,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":88,"id":6,"pages_used":2,"request_id":null},{"age_ms":null,"busy":false,"held_tokens":1450,"id":7,"pages_used":23,"request_id":null}],"steps_eager_oom":0,"waiting":[{"age_ms":35077,"id":1192,"prompt_tokens":1448}]}
+# HELP axon_kv_pages_warm KV pages the prefix index keeps that no request holds (shared prefixes).
+# TYPE axon_kv_pages_warm gauge
+axon_kv_pages_warm 30
+# HELP axon_kv_pages_shared KV pages of the prefix index more than one request holds (shared prefixes).
+# TYPE axon_kv_pages_shared gauge
+axon_kv_pages_shared 0
+# HELP axon_prompt_shared_tokens_total Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.
+# TYPE axon_prompt_shared_tokens_total counter
+axon_prompt_shared_tokens_total 53504
+# HELP axon_refeed_shared_tokens_total Tokens of preempted or unfed requests (their prompt and what they generated) whose KV pages were mapped from the prefix index again when they were fed again.
+# TYPE axon_refeed_shared_tokens_total counter
+axon_refeed_shared_tokens_total 738560
+# HELP axon_pages_evicted_total KV pages the prefix index gave up for room (shared prefixes).
+# TYPE axon_pages_evicted_total counter
+axon_pages_evicted_total 6026
+[axon-run 16:33:27] exit 0 after 1642.6s (host bella)
+[axon-run 16:33:31] EXPECT ok: output matches /^SOAK SOLO-MD5 SAME/
