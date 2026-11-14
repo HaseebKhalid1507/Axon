@@ -315,6 +315,11 @@ pub struct Metrics {
     /// (`Batch::reap`): the prompt tokens fed, and of how many to feed.
     #[cfg(test)]
     pub reaped_fed: Mutex<Vec<(usize, usize)>>,
+    /// Tests: every claim that mapped the index's pages
+    /// (`Batch::claim_prefix`): the slot, the tokens mapped, and whether
+    /// it was a refeed's (an admission's otherwise).
+    #[cfg(test)]
+    pub claims: Mutex<Vec<(usize, u64, bool)>>,
 }
 
 impl Metrics {
@@ -376,6 +381,8 @@ impl Default for Metrics {
             feed_cap: AtomicUsize::new(usize::MAX),
             #[cfg(test)]
             reaped_fed: Mutex::default(),
+            #[cfg(test)]
+            claims: Mutex::default(),
             sched: Mutex::default(),
         }
     }

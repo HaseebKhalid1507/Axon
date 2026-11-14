@@ -24,12 +24,20 @@ measurements behind them.
   CUDA, `--no-think` on a model without `<think>`. `axon serve` still exits 2 with the same message; a process that
   starts servers itself (the test binary) keeps running. It came up when the debug test binary exited 2 in the
   middle of the share gates with its message captured and lost (1114-174039-9861).
+- **An unsupported model is refused before its weights are read**, by the CLI, `serve::start` and `axon::load`.
+  The support check's answer now stops the load: nothing copied, no rope unpermute, no read-ahead thread, and a
+  safetensors checkpoint isn't converted or FP8-scanned. `axon::load` used to load the whole model (a checkpoint
+  converted in full) before returning the refusal; the CLI exited from inside the check, which a refusal returned
+  as an error can't do.
 - **Tests.** `serve_share_on_under_fast_kernels`: sharing on under FP8 fast kernels (`AXON_SHARE_KV=1`), the path
   where a debug build's duplicate-page byte check is skipped, with duplicates swapped (skipped without e4m3
   tensor cores). `serve_share_cancel_frees` now proves its third request is dropped while being fed: a test-only
   cap holds it two pages into its private part, and the engine records it reaped from its prompts being fed. Its
   second stream waits for pages rather than decoding (the first's admission reserves pages for its reply): the
-  test said "both decoding" and now says which.
+  test said "both decoding" and now says which. The third's prefix mapping is read from a test-only log of the
+  claims, by slot: the shared-tokens counter it read moves when the second is admitted too.
+  `serve_start_refusals_dont_exit` checks six of the refusals above on the CPU (a full start refused by `--no-think`
+  among them); `stop_converts_nothing` and `load_to_run_stop_loads_nothing`, that a refused load stops.
   `serve_solo_leaves_no_waiting` covers #268. `serve_sjf_long_prompt_admitted_within_age_bound` waits until both
   slots are busy and a short request waits before it sends the long prompt (it failed once in a debug suite on a
   shared GPU, 1114-125202-b1eb: the long one found a slot free).

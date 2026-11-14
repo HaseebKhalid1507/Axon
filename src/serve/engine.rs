@@ -816,12 +816,17 @@ fn pages_for(n: usize, size: usize) -> usize {
 }
 
 impl<'a, 't> Batch<'a, 't> {
+    /// `sched`: the server's (its flags over AXON_ADMIT / AXON_STEP_COST,
+    /// checked before the start); not `Sched::default()` here, which exits
+    /// on a bad AXON_ADMIT (a server's start never exits its process, #269).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         net: &'a Backend<'a>,
         pool: <Backend<'a> as BatchLm>::Pool,
         slots: usize,
         ctx: usize,
         policy: ChunkPolicy,
+        sched: Sched,
         log: bool,
         generated: Arc<AtomicU64>,
     ) -> Batch<'a, 't> {
@@ -840,9 +845,7 @@ impl<'a, 't> Batch<'a, 't> {
             seqs: Vec::new(),
             pre: Vec::new(),
             policy,
-            // From the environment (AXON_ADMIT, AXON_STEP_COST: `Sched`'s
-            // Default); the server sets it from its flags after `new`.
-            sched: Sched::default(),
+            sched,
             cost: StepCost {
                 pass_cap_us: policy.step_ms as f64 * 0.5e3,
                 ..StepCost::default()
@@ -1026,6 +1029,8 @@ impl<'a, 't> Batch<'a, 't> {
                 true => &m.refeed_shared_tokens,
             }
             .fetch_add(n, Ordering::Relaxed);
+            #[cfg(test)]
+            m.claims.lock().unwrap().push((slot, n, refeed));
         }
         Ok(cl.reuse)
     }

@@ -115,15 +115,15 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
     let m = gguf::load_to_run(path, (device == Device::Cuda).then_some(false), |m| {
         if let Err(e) = model::check_supported(m) {
             unsupported = Some(e);
-            return gguf::CopyWish::MapOnly;
+            // Not loaded any further (`CopyWish::Stop`).
+            return gguf::CopyWish::Stop;
         }
         model::cpu_copy_wish(m)
-    })
-    .map_err(|e| format!("{path}: {e}"))?;
-    match unsupported {
-        Some(e) => Err(format!("{path}: {e}")),
-        None => Ok(m),
+    });
+    if let Some(e) = unsupported {
+        return Err(format!("{path}: {e}"));
     }
+    m.map_err(|e| format!("{path}: {e}"))
 }
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the

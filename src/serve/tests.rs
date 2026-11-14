@@ -3106,11 +3106,14 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
 
 /// Refusals on the engine thread come back from `start` as its error
 /// (#269), not as an exit: `--ctx` past the trained context, `--gpu-layers`
-/// without CUDA, a model file that isn't there. Each used to call
-/// `crate::fail` (exit 2), which ended a test binary in the middle of its
-/// run with the message captured and lost (1114-174039-9861). The test
-/// process is still here to check the messages: the ones `axon serve`
-/// exits 2 with.
+/// without CUDA, a model file that isn't there, a draft model that isn't
+/// there, `--parallel 2` on the CPU (refused after its backend is built,
+/// which is dropped), and `--no-think` on a model that doesn't think
+/// (refused by `start` once the server is fully up: its engine and accept
+/// threads stopped and joined). Each used to call `crate::fail` (exit 2),
+/// which ended a test binary in the middle of its run with the message
+/// captured and lost (1114-174039-9861). The test process is still here to
+/// check the messages: the ones `axon serve` exits 2 with.
 #[test]
 fn serve_start_refusals_dont_exit() {
     let Some(p) = crate::testutil::model_path() else {
@@ -3134,6 +3137,37 @@ fn serve_start_refusals_dont_exit() {
     assert_eq!(e, "--gpu-layers needs --device cuda");
     let e = refused("no file", &|o| o.path = "/nonexistent/axon-269.gguf".into());
     assert_eq!(e, "cannot open '/nonexistent/axon-269.gguf': no such file");
+    let e = refused("no draft file", &|o| {
+        o.draft_model = Some("/nonexistent/axon-269-draft.gguf".into());
+        o.max_draft = 4;
+    });
+    assert!(
+        e.starts_with("--draft-model /nonexistent/axon-269-draft.gguf: "),
+        "{e}"
+    );
+    let e = refused("--parallel", &|o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    assert_eq!(
+        e,
+        "--parallel 2: batching many requests needs the whole model on one GPU (--device cuda; \
+         not with --gpu-layers or several AXON_GPUS); this backend serves one request at a time \
+         (--parallel 1)"
+    );
+    // The test model doesn't think (an AXON_TEST_MODEL that does starts).
+    let mut o = test_opts(p, Device::Cpu);
+    o.no_think = true;
+    match start(o) {
+        Ok(_) => eprintln!("--no-think: {p} thinks: its refusal not checked"),
+        Err(e) => {
+            assert!(super::is_refused(&e), "--no-think: not a refusal: {e}");
+            assert_eq!(
+                e.to_string(),
+                format!("--no-think: {p} has no <think> token (not a thinking model)")
+            );
+        }
+    }
 }
 
 /// GET /slots's `waiting` is the engine's waiting list: empty once a
@@ -8691,12 +8725,14 @@ fn serve_share_dup_swapped() {
 /// prefix: the first decodes, the second waits for pages (the first's
 /// admission reserves them for its reply; it may start once there are).
 /// A third, a long private part after the prefix, is held mid-feed
-/// (`Server::feed_cap`): its admission maps the prefix's pages, it is fed
-/// two pages past them and no further, and the engine drops it from its
-/// prompts being fed (`Server::reaped_fed`; #267: until then the step
-/// budget could feed its private part before the drop was seen, so it may
-/// have been decoding). Debug builds check the pool, the index and their
-/// holds against each other after every step.
+/// (`Server::feed_cap`): its admission maps the prefix's pages (the claim
+/// logged in its slot, `Server::claims`: the shared-tokens counter can't
+/// say whose, as the second's admission moves it too), it is fed two pages
+/// past them and no further, and the engine drops it from its prompts
+/// being fed (`Server::reaped_fed`; #267: until then the step budget could
+/// feed its private part before the drop was seen, so it may have been
+/// decoding). Debug builds check the pool, the index and their holds
+/// against each other after every step.
 #[test]
 fn serve_share_cancel_frees() {
     let Some(_) = crate::testutil::gpu() else {
@@ -8792,23 +8828,29 @@ fn serve_share_cancel_frees() {
         n3 > cap + 64,
         "the third: {n3} prompt tokens, held at {cap}"
     );
-    let shared = || {
-        let m = call(a, "GET", "/metrics", "").body;
-        metric(&m, "axon_prompt_shared_tokens_total").unwrap()
-    };
-    let s0 = shared();
+    let k0 = s.claims().len();
     s.feed_cap(cap);
     let c3 = stream(&long, 50);
+    // Its slot, once it's held at the cap.
+    let slot3 = std::cell::Cell::new(None);
     wait_for("the third fed two pages past the prefix's", || {
-        (call(a, "GET", "/slots", "").json()["slots"].as_array())
-            .unwrap()
-            .iter()
-            .any(|x| {
-                x["busy"] == true
-                    && !running.contains(&x["request_id"])
-                    && x["held_tokens"].as_u64() == Some(cap as u64)
-            })
+        let sl = call(a, "GET", "/slots", "").json();
+        let third = (sl["slots"].as_array().unwrap().iter()).find(|x| {
+            x["busy"] == true
+                && !running.contains(&x["request_id"])
+                && x["held_tokens"].as_u64() == Some(cap as u64)
+        });
+        slot3.set(third.map(|x| x["id"].as_u64().unwrap() as usize));
+        third.is_some()
     });
+    let slot3 = slot3.get().unwrap();
+    // Its admission's claim: the last one since it was sent not a
+    // refeed's in its slot (it holds the slot from its admission on, still
+    // held at the cap now).
+    let claims = s.claims().split_off(k0);
+    let mapped = (claims.iter().rev())
+        .find(|c| c.0 == slot3 && !c.2)
+        .map(|c| c.1);
     drop(c3);
     wait_for("the third dropped while being fed", || {
         !s.reaped_fed().is_empty()
@@ -8818,7 +8860,11 @@ fn serve_share_cancel_frees() {
     assert_eq!(fed.len(), 1, "{fed:?}");
     // Its admission mapped the prefix's pages, and it went with two pages
     // of its private part fed (the cap), before the rest.
-    assert!(shared() >= s0 + 64 * pages, "the third mapped no prefix");
+    assert!(
+        mapped.is_some_and(|t| t >= 64 * pages),
+        "the third (slot {slot3}) mapped {mapped:?} tokens, the prefix's pages {pages}; claims \
+         {claims:?}"
+    );
     assert_eq!(fed[0].0, cap, "fed {fed:?}, the prefix's pages {pages}");
     assert!(fed[0].1 > cap, "fed {fed:?}: its whole prompt");
     drop(cs);

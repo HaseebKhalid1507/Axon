@@ -1634,8 +1634,16 @@ fn engine(
             step_tokens: o.sched.step_tokens,
             legacy: o.sched.legacy,
         };
-        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
-        b.sched = o.sched;
+        let mut b = Batch::new(
+            &net,
+            pool,
+            n,
+            slot_ctx,
+            policy,
+            o.sched,
+            o.log,
+            e.generated.clone(),
+        );
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
@@ -2625,6 +2633,12 @@ impl Server {
     /// and of how many (`Metrics::reaped_fed`).
     pub fn reaped_fed(&self) -> Vec<(usize, usize)> {
         self.sh.metrics.reaped_fed.lock().unwrap().clone()
+    }
+
+    /// The claims that mapped pages so far: slot, tokens, a refeed's
+    /// (`Metrics::claims`).
+    pub fn claims(&self) -> Vec<(usize, u64, bool)> {
+        self.sh.metrics.claims.lock().unwrap().clone()
     }
 
     /// Refed prefills that claimed a prefix again, and its tokens

@@ -309,8 +309,9 @@ pub(crate) fn try_open_model_with(
 ) -> Result<gguf::Model, String> {
     // The CPU kernels' environment, before anything is read (as `load`).
     crate::quant::env_check()?;
-    // An unsupported model: said once the load returns (the check runs
-    // before the weights are copied or read: mapped only, then dropped).
+    // An unsupported model: refused before its weights are copied, read
+    // or converted (`CopyWish::Stop`: the load ends there, the header
+    // mapped and dropped), with the check's message.
     let mut bad = None;
     let m = gguf::load_to_run(path, copy, |m| {
         // With rope flags the check waits for them (below).
@@ -318,7 +319,7 @@ pub(crate) fn try_open_model_with(
             && let Err(e) = model::check_supported(m)
         {
             bad = Some(format!("{path}: {e}"));
-            return gguf::CopyWish::MapOnly;
+            return gguf::CopyWish::Stop;
         }
         // A MoE file is always mapped (`reads_matrices_in_place`'s note).
         model::cpu_copy_wish(m)
