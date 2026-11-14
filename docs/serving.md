@@ -336,12 +336,14 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   so the two always agree (`AXON_TOOL_STREAM=0` restores the old rule for both). On
   `/v1/responses` a call the token limit cut (the reply's last item, its arguments not a JSON
   object, in an `incomplete` response) has `status: "incomplete"`, as OpenAI marks it; any
-  other call is `completed`. A stop string that hits inside a call's arguments ends it the same
-  way, with `finish_reason: "tool_calls"`. Other text after the call's object ends the block
-  there: `<tool_call>` opens the next call (#259's "a valid object followed by a second
-  `<tool_call>`"), anything else is content, less the block's own `</tool_call>` if it comes
-  later (the first one before the next `<tool_call>`), so axon's framing never shows in
-  `content`.
+  other call is `completed`. A stop string that hits inside a call's arguments also ends it
+  with what was written, with `finish_reason: "tool_calls"`; on `/v1/responses` that call is
+  `completed` (the finish is `stop`, not the token limit). Other text after the call's object
+  ends the block there: `<tool_call>` opens the next call (#259's "a valid object followed by
+  a second `<tool_call>`"), anything else is content, less the block's own `</tool_call>` if it
+  comes later (the first one before the next `<tool_call>`), so a call's own stray
+  `</tool_call>` doesn't show in `content`. A block that never becomes a call still comes back
+  as content, tags and all, and so does a second stray `</tool_call>`.
 - **`AXON_TOOL_STREAM=0`** (exactly `0`) turns this off: every call goes out once its block is decided, as
   two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
   text when the reply ends), and a block that isn't a JSON object with a string `"name"`
@@ -356,10 +358,14 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 - The parser reads tags and JSON, not prose. `<tool_call>` written in ordinary text opens a
   block (which comes back as content if it isn't a call). In a call's arguments, a
   `</tool_call>` inside a JSON string is the string's text, so a call writing a file that
-  mentions the tag stays whole; anywhere else it ends the block (a string the model leaves
-  open goes bad at the newline Hermes writes before the tag, so the tag still ends the
-  block). With `AXON_TOOL_STREAM=0` the tag ends the block wherever it is, as before: inside a
-  string, the block fails to parse and is returned as content.
+  mentions the tag stays whole; anywhere else it ends the block. A string the model leaves
+  open usually goes bad at the newline Hermes writes before the tag, so the tag still ends
+  the block. If the model also leaves out that newline, the tag stays string text and the
+  open string swallows what follows: the rest of the reply goes into the call's (invalid)
+  arguments, and a later `<tool_call>` in it is lost. That is rare. #266 tracks the fix:
+  arguments that have gone bad end at the next `<tool_call>`. With
+  `AXON_TOOL_STREAM=0` the tag ends the block wherever it is, as before: inside a string, the
+  block fails to parse and is returned as content.
 - The format is chosen per model family from the vocabulary (ChatML with or without
   `<think>`, or Llama 3's headers), not read from the GGUF's template. Models of a known
   family with a different tool format, such as Qwen3-Coder's XML `<function=...>` calls,
