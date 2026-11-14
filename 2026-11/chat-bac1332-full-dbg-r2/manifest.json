@@ -1,0 +1,29 @@
+{
+ "label": "chat-bac1332-full-dbg-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1113-202854-06c1",
+   "name": "chat-bac1332-full-dbg",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-13_20:28.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "bac1332",
+   "binary": "axon-test-dbg-bac1332",
+   "started": 1794619734.898817,
+   "ended": 1794622588.6715152,
+   "attempts": 1,
+   "remote_job": "20261114-012910-axon-test-dbg-bac1332-1149",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ae69fb582571c449606e2f96e57035d29b37745ad17dce3d5c4449587768f4af",
+   "log_bytes": 59842
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-13 21:16:30 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
