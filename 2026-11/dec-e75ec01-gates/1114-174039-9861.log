@@ -1,0 +1,27 @@
+[axon-run 17:40:39] submitted 1114-174039-9861 by /home/haseeb/.cache/axon-wt-dec-share: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-e75ec01 serve_share share_kv_is_on_by_default serve_paged_pressure serve_solo_leaves_no_waiting
+[axon-run 17:43:00] job 1114-174039-9861 -> pod1 [RTX 4090 sm_89 secure] (pod mws32568t992kw): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 1989 --src /home/haseeb/.cache/axon-wt-dec-share /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-e75ec01 serve_share share_kv_is_on_by_default serve_paged_pressure serve_solo_leaves_no_waiting
+axon-remote: uploading axon-test-dbg-e75ec01 (4305bc0ea26bd3da2d3bc224) + source of /home/haseeb/.cache/axon-wt-dec-share
+
+sent 2,955,703 bytes  received 7,490 bytes  538,762.36 bytes/sec
+total size is 10,330,982  speedup is 3.49
+
+sent 9,018,879 bytes  received 35 bytes  2,004,203.11 bytes/sec
+total size is 29,242,632  speedup is 3.24
+axon-remote: job 20261114-224317-axon-test-dbg-e75ec01-1798 on pod1 (GPU, 1989 MB)
+[axon-node 22:43:17] GPU slot taken; job wants 1989 MB; nvidia-smi used/total 396/24564 MB; sharing with 20261114-224315-axon-test-e75ec01-1073 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 22:43:17] run axon-test-dbg-e75ec01 (4305bc0ea26bd3da2d3bc224) as /home/haseeb/.cache/axon-wt-dec-share on 84e1e122deb0, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23688 MB of 24564 (used 396); GPU processes pid:MB 1087:386
+
+running 12 tests
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_share_dup_swapped ... ok
+test serve::tests::serve_paged_pressure has been running for over 60 seconds
+test serve::tests::serve_share_cancel_frees has been running for over 60 seconds
+test serve::tests::serve_share_fanout_idle has been running for over 60 seconds
+test serve::tests::serve_share_matches_off ... ok
+test serve::tests::serve_share_off_under_fast_kernels has been running for over 60 seconds
+test serve::tests::serve_share_off_under_fast_kernels ... ok
+test serve::tests::serve_share_on_under_fast_kernels ... ok
+test serve::tests::serve_share_pressure ... ok
+[axon-node 22:45:38] exit 2 after 140.3s
+[axon-node 22:45:38] peak RSS 2088 MB (job process tree PSS, 2 s samples x69)
+[axon-run 17:45:39] exit 2 after 159.7s (host pod1)
