@@ -861,9 +861,9 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Shared prefixes on or off (`AXON_SHARE_KV`), before any request: on
-    /// for a paged pool only (a plain one has no pages to share). Whether
-    /// they are on.
+    /// Shared prefixes on or off (`AXON_SHARE_KV`, `serve::share_on`),
+    /// before any request: on for a paged pool only (a plain one has no
+    /// pages to share). Whether they are on.
     pub fn set_share(&mut self, on: bool) -> bool {
         assert!(self.idle(), "set_share: the batch is running");
         self.share = (on && self.pages().is_some()).then(|| Share {
@@ -1097,17 +1097,22 @@ impl<'a, 't> Batch<'a, 't> {
                     self.net.pin_page(&mut self.pool, pages[i])?;
                     keys.push(k);
                 }
-                // The slot holds the index's page of the block elsewhere
-                // already (a chain-key collision): its own copy stays, as
-                // a block the index can't take.
+                // The index's page of the block is one the slot maps
+                // already: the call after an error offering the blocks
+                // again (#218), whose new blocks were indexed at the
+                // slot's own pages. Listed, with no second hold.
                 Ins::Have(k, other) if pages.contains(&other) => keys.push(k),
                 Ins::Have(k, other) => {
                     // Debug builds: the bytes are the same (§2's runtime
                     // proof; what sharing rests on, and what makes the
-                    // swap read what the slot wrote).
+                    // swap read what the slot wrote). Not under fast
+                    // kernels, whose rows change with the chunking: there
+                    // sharing is on only by AXON_SHARE_KV=1, within fast
+                    // mode's tolerance (`serve::share_on`).
                     #[cfg(debug_assertions)]
                     assert!(
-                        self.net.same_page_bytes(&self.pool, pages[i], other)?,
+                        self.net.fast_kernels()
+                            || self.net.same_page_bytes(&self.pool, pages[i], other)?,
                         "slot {slot} page {i} ({}): block {k:#x}'s bytes differ from page {other}'s",
                         pages[i]
                     );
