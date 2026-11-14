@@ -513,9 +513,14 @@ pub trait Source {
     /// The bytes of `url` from `offset`.
     fn open(&self, url: &str, offset: u64) -> Result<Box<dyn Stream>, Fetch>;
 
-    /// Wait before retry number `attempt` (1, 2, ...).
-    fn pause(&self, _attempt: usize) {}
+    /// Before retry number `attempt` (1 to `TRIES` - 1, counted since the
+    /// last attempt that brought bytes): `why` the last attempt failed, `at`
+    /// the byte the next one starts at. `Curl` says so and waits.
+    fn retry(&self, _attempt: usize, _why: &str, _at: u64) {}
 }
+
+/// The attempts in a row (`fetch`) before a pull gives up, keeping the `.part`.
+const TRIES: usize = 5;
 
 /// An open download.
 pub trait Stream: Read {
@@ -703,15 +708,18 @@ impl Drop for CurlStream {
     }
 }
 
-impl Source for Curl {
-    fn open(&self, url: &str, offset: u64) -> Result<Box<dyn Stream>, Fetch> {
+impl Curl {
+    /// The command that streams `url` from byte `offset` to stdout.
+    fn get(url: &str, offset: u64) -> std::process::Command {
         let off = offset.to_string();
         // No --retry: curl can't take back bytes it wrote to the pipe;
-        // `fetch` retries, resuming where the bytes stopped.
+        // `fetch` retries, resuming where the bytes stopped. No --max-time:
+        // a big file on a slow link takes as long as it takes.
         let mut extra = vec![
             "--fail",
             "--location",
-            // A transfer stalled under 1 KiB/s for a minute is dropped (and resumed).
+            // A transfer stalled under 1 KiB/s for a minute is dropped (exit
+            // 28), and `fetch` resumes it.
             "--speed-limit",
             "1024",
             "--speed-time",
@@ -720,18 +728,37 @@ impl Source for Curl {
         if offset > 0 {
             extra.extend(["--continue-at", off.as_str()]);
         }
-        let mut child = Curl::spawn(Curl::command(&extra, url)).map_err(Fetch::Failed)?;
+        Curl::command(&extra, url)
+    }
+}
+
+impl Source for Curl {
+    fn open(&self, url: &str, offset: u64) -> Result<Box<dyn Stream>, Fetch> {
+        let mut child = Curl::spawn(Curl::get(url, offset)).map_err(Fetch::Failed)?;
         let out = child.stdout.take().expect("piped");
         Ok(Box::new(CurlStream { child, out }))
     }
 
-    fn pause(&self, attempt: usize) {
-        std::thread::sleep(std::time::Duration::from_secs(1 << attempt.min(4)));
+    fn retry(&self, attempt: usize, why: &str, at: u64) {
+        use std::io::IsTerminal;
+        let wait = 1u64 << attempt.min(4);
+        // On a terminal: over the progress line, which the next update redraws.
+        let clear = match std::io::stderr().is_terminal() {
+            true => "\r\x1b[2K",
+            false => "",
+        };
+        eprintln!(
+            "{clear}axon pull: {why}; resuming at {} in {wait} s (try {} of {TRIES})",
+            gb(at),
+            attempt + 1
+        );
+        std::thread::sleep(std::time::Duration::from_secs(wait));
     }
 }
 
 /// The CLI's progress line on stderr: a carriage-return line at most 4
-/// times a second on a terminal, else a line every 10 %.
+/// times a second on a terminal, else a line every 10 % and at least once a
+/// minute (a slow or stalled download still shows in a log).
 struct Progress {
     what: String,
     total: u64,
@@ -740,6 +767,8 @@ struct Progress {
     start: u64,
     last: Option<std::time::Instant>,
     last_tenth: u64,
+    /// Off a terminal: when the last line was printed (or this phase began).
+    printed: std::time::Instant,
     verb: String,
 }
 
@@ -762,8 +791,16 @@ impl Progress {
             start: 0,
             last: None,
             last_tenth: 0,
+            printed: std::time::Instant::now(),
             verb: String::new(),
         }
+    }
+
+    /// Off a terminal: whether a line is due at `now`, `pct` % done.
+    fn line_due(&self, now: std::time::Instant, pct: u64, force: bool) -> bool {
+        force
+            || pct / 10 > self.last_tenth
+            || now.saturating_duration_since(self.printed) >= std::time::Duration::from_secs(60)
     }
 
     fn show(&mut self, done: u64, verb: &str, force: bool) {
@@ -771,6 +808,7 @@ impl Progress {
         if verb != self.verb {
             // Checking a partial download, then pulling: each its own rate.
             (self.verb, self.t0, self.start, self.last_tenth) = (verb.into(), now, done, 0);
+            self.printed = now;
             if self.tty && self.last.is_some() {
                 eprintln!();
             }
@@ -801,8 +839,8 @@ impl Progress {
                 eprint!("\r\x1b[2K{line}");
                 self.last = Some(now);
             }
-        } else if pct / 10 > self.last_tenth || force {
-            self.last_tenth = pct / 10;
+        } else if self.line_due(now, pct, force) {
+            (self.last_tenth, self.printed) = (pct / 10, now);
             eprintln!("{line}");
         }
     }
@@ -820,7 +858,10 @@ impl Progress {
 /// SHA-256 and size; else it starts over: an older version of the file),
 /// hashed as it's written; renamed to `dest` once `want.size` bytes hash
 /// to `want.sha256`. `say` hears progress (bytes so far, a verb). A
-/// mismatch deletes the `.part`: the next pull starts over.
+/// mismatch deletes the `.part`: the next pull starts over. A failed
+/// transfer (curl drops one that stalls: `Curl::open`) is retried, resuming,
+/// until `TRIES` attempts in a row have failed (one that brought bytes
+/// starts the count again); then the `.part` is kept for the next pull.
 pub fn fetch(
     want: &Want,
     dest: &Path,
@@ -892,17 +933,20 @@ pub fn fetch(
         }
     }
     f.seek(std::io::SeekFrom::Start(have)).map_err(ctx)?;
+    // The failed attempts in a row.
     let mut failures: Vec<String> = Vec::new();
     while h.len() < want.size {
-        if failures.len() >= 5 {
+        if failures.len() >= TRIES {
+            // Each reason once (a stall is the same five times; each retry said it).
+            failures.dedup();
             return Err(format!(
-                "download failed ({} kept, the next pull resumes it): {}",
+                "download failed, {TRIES} tries in a row ({} kept, the next pull resumes it): {}",
                 part.display(),
                 failures.join("; ")
             ));
         }
-        if !failures.is_empty() {
-            src.pause(failures.len());
+        if let Some(why) = failures.last() {
+            src.retry(failures.len(), why, h.len());
         }
         let at = h.len();
         let (read_err, end) = match src.open(&want.url, at) {
@@ -933,19 +977,27 @@ pub fn fetch(
                 (read_err, s.finish())
             }
         };
-        match (read_err, end) {
+        let failed = match (read_err, end) {
             (None, Ok(())) if h.len() < want.size => {
-                failures.push(format!("the transfer ended at byte {}", h.len()))
+                Some(format!("the transfer ended at byte {}", h.len()))
             }
-            (None, Ok(())) => {}
+            (None, Ok(())) => None,
             // The server can't start at `at` and sent nothing: start over.
             (_, Err(Fetch::Restart(e))) if at > 0 && h.len() == at => {
-                failures.push(format!("can't resume ({e}): starting over"));
                 f.set_len(0).map_err(ctx)?;
                 f.seek(std::io::SeekFrom::Start(0)).map_err(ctx)?;
                 h = Sha256::new();
+                Some(format!("can't resume ({e}): starting over"))
             }
-            (Some(e), _) | (None, Err(Fetch::Restart(e) | Fetch::Failed(e))) => failures.push(e),
+            (Some(e), _) | (None, Err(Fetch::Restart(e) | Fetch::Failed(e))) => Some(e),
+        };
+        if let Some(e) = failed {
+            // An attempt that brought bytes starts the count again: a long
+            // pull over a flaky link isn't given up while it moves.
+            if h.len() > at {
+                failures.clear();
+            }
+            failures.push(e);
         }
     }
     let got = h.finish_hex();
@@ -1423,6 +1475,8 @@ mod tests {
         fail: std::cell::Cell<usize>,
         no_resume: bool,
         opens: std::cell::RefCell<Vec<u64>>,
+        /// `retry`'s calls: (attempt, the byte it resumes at).
+        retries: std::cell::RefCell<Vec<(usize, u64)>>,
     }
 
     struct FakeStream {
@@ -1475,6 +1529,11 @@ mod tests {
                 err: failing,
             }))
         }
+
+        fn retry(&self, attempt: usize, why: &str, at: u64) {
+            assert!(!why.is_empty());
+            self.retries.borrow_mut().push((attempt, at));
+        }
     }
 
     fn fake(data: &[u8], cut: usize, fail: usize) -> Fake {
@@ -1484,6 +1543,7 @@ mod tests {
             fail: std::cell::Cell::new(fail),
             no_resume: false,
             opens: std::cell::RefCell::new(Vec::new()),
+            retries: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -1491,8 +1551,9 @@ mod tests {
     /// resumes where it stopped; a `.part` from an earlier run is resumed;
     /// a server that can't resume starts over; a damaged `.part` or a wrong
     /// checksum is a mismatch that deletes it; too many bytes or a `.part`
-    /// longer than the file are caught; five failures in a row keep the
-    /// `.part` for the next pull.
+    /// longer than the file are caught; `TRIES` failures in a row (a stall:
+    /// no bytes after some point) keep the `.part` for the next pull, while
+    /// any number of drops that each bring bytes don't stop it.
     #[test]
     fn pull_fetch_resumes_and_verifies() {
         let t = Scratch::new("fetch");
@@ -1530,6 +1591,16 @@ mod tests {
         fetch(&want, &dest, &src, &mut quiet).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
         assert_eq!(*src.opens.borrow(), [0, 100_000, 200_000]);
+        // Each drop brought bytes: each retry is the first of a new count.
+        assert_eq!(*src.retries.borrow(), [(1, 100_000), (1, 200_000)]);
+
+        // 99 drops in a row, each after 1000 new bytes: not given up.
+        reset();
+        let src = fake(&data, 1000, 99);
+        fetch(&want, &dest, &src, &mut quiet).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        assert_eq!(src.opens.borrow().len(), 100);
+        assert!(src.retries.borrow().iter().all(|&(n, _)| n == 1));
 
         reset();
         seed(&data[..123_457]);
@@ -1573,9 +1644,21 @@ mod tests {
         fetch(&want, &dest, &fake(&data, 0, 0), &mut quiet).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
 
+        // A stall: 5000 bytes, then every attempt fails with nothing new.
         reset();
-        let e = fetch(&want, &dest, &fake(&data, 1000, 99), &mut quiet).unwrap_err();
+        let stalled = Fake {
+            data: data[..5000].to_vec(),
+            ..fake(&data, 1 << 30, 99)
+        };
+        let e = fetch(&want, &dest, &stalled, &mut quiet).unwrap_err();
+        assert!(e.contains("5 tries in a row"), "{e}");
         assert!(e.contains("kept, the next pull resumes it"), "{e}");
+        assert_eq!(e.matches("connection reset").count(), 1, "{e}");
+        assert_eq!(*stalled.opens.borrow(), [0, 5000, 5000, 5000, 5000]);
+        assert_eq!(
+            *stalled.retries.borrow(),
+            [(1, 5000), (2, 5000), (3, 5000), (4, 5000)]
+        );
         assert_eq!(std::fs::metadata(&part).unwrap().len(), 5000);
         assert!(side.is_file());
         // ... and the next pull does.
@@ -1640,6 +1723,55 @@ mod tests {
             ["--", "https://huggingface.co/o/r/resolve/main/m.gguf"]
         );
         assert!(!args.contains(&"--location-trusted") && !args.contains(&"--insecure"));
+    }
+
+    /// A download's curl: a transfer under 1 KiB/s for 60 s is dropped
+    /// (`fetch` resumes it), resumed ones start at their byte, and nothing
+    /// caps a slow one that moves (no --max-time) or retries inside curl.
+    #[test]
+    fn pull_curl_drops_a_stall() {
+        let url = "https://huggingface.co/o/r/resolve/x/m.gguf";
+        let args = |off| -> Vec<String> {
+            Curl::get(url, off)
+                .get_args()
+                .map(|a| a.to_str().unwrap().to_string())
+                .collect()
+        };
+        let has = |a: &[String], pair: [&str; 2]| {
+            a.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+        };
+        let a = args(0);
+        assert!(has(&a, ["--speed-limit", "1024"]), "{a:?}");
+        assert!(has(&a, ["--speed-time", "60"]), "{a:?}");
+        assert!(a.iter().any(|x| x == "--fail"), "{a:?}");
+        assert!(!a.iter().any(|x| x == "--continue-at"), "{a:?}");
+        assert!(
+            !a.iter()
+                .any(|x| x == "--max-time" || x.starts_with("--retry")),
+            "{a:?}"
+        );
+        assert_eq!(a[0], "-q");
+        assert_eq!(a[a.len() - 2..], ["--", url]);
+        assert!(has(&args(123_456), ["--continue-at", "123456"]));
+    }
+
+    /// Off a terminal, a progress line every 10 % and at least once a
+    /// minute: a download crawling or stalled between two tenths still
+    /// shows (11-13: a 9 GB pull at 1 MB/s was silent for 15 minutes).
+    #[test]
+    fn pull_progress_lines_off_a_terminal() {
+        let mut p = Progress::new("m.gguf", 1000);
+        p.tty = false;
+        let t = p.printed;
+        let s = std::time::Duration::from_secs;
+        assert!(!p.line_due(t, 0, false));
+        assert!(!p.line_due(t + s(59), 9, false));
+        assert!(p.line_due(t + s(60), 9, false), "a minute");
+        assert!(p.line_due(t + s(1), 10, false), "10 %");
+        assert!(p.line_due(t, 0, true), "forced");
+        p.last_tenth = 1;
+        assert!(!p.line_due(t + s(1), 19, false));
+        assert!(p.line_due(t + s(1), 20, false));
     }
 
     /// `curl --version`'s first line, and the floor for sending HF_TOKEN.
