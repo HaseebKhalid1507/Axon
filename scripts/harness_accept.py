@@ -9,6 +9,8 @@ gpt-oss's experts on the GPU as far as they fit). Stdlib only, one file (axon-po
     harness_accept.py run --model qwen2.5-7b --engines axon,llama --harness pi --axon-bin AXON --llama-bin LLAMA \
         --out DIR [--tasks all|id,id] [--rounds N] [--turn-timeout S]
     harness_accept.py table LOG_OR_JSONL...       results table + engine-side failure counts (markdown)
+    harness_accept.py rescore DIR                 a run made before the 11-14 fixes: per-task attribution and
+                                                  compaction / cold-prompt counts redone from its files
     harness_accept.py selfcheck [--no-sandbox]    every task's check fails before and passes after its reference
                                                   solution; the proxy's parsing against a fake upstream (no model)
     harness_accept.py list                        the tasks
@@ -21,13 +23,20 @@ says unknown tool / invalid arguments), TTFT to the first token-bearing event, a
 add `axon_tool_calls_dropped_total` and `axon_prompt_refused_total`. Output: one `RESULT {json}` line per task run on
 stdout (and results.jsonl in --out), ENGINE lines per server start, a SUMMARY table at the end.
 
+Request lifecycle (11-14): when a harness hangs up, the proxy closes the engine's connection at once, so the engine
+cancels (`hup`); a reply the engine holds back used to keep generating. A task's records are its own requests only:
+at its end the proxy waits for any still in flight (20 s, then cuts them: `cut_end`), so one that outlives its task
+is counted there, not in the next task. Compactions: each run counts the harness's own context compactions (its
+session files: `compactions`) and flags cold prompts (>= COLD_MIN uncached tokens: `cold`), those in a compaction's
+window (`cold_cmp`: no engine can reuse a prefix the harness rewrote) and a task's first request (`cold_first`).
+
 Safety: every harness, and every check that runs model-written code, runs under bubblewrap (no --no-sandbox): only
 /usr, /etc, /opt, /sys read-only, an empty /home with the run directory bound in, private /tmp and pid namespace, a
 clean environment (scratch HOME / XDG dirs, dummy keys). The network namespace is shared (the harness must reach the
 proxy on 127.0.0.1), so a model could still reach the internet.
 """
-import argparse, ast, csv, hashlib, http.client, http.server, io, json, os, re, shutil, signal, socket, socketserver
-import statistics, subprocess, sys, tempfile, threading, time, urllib.request
+import argparse, ast, csv, datetime, glob, hashlib, http.client, http.server, io, json, os, re, select, shutil, signal
+import socket, socketserver, statistics, subprocess, sys, tempfile, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESSES = ("opencode", "codex", "pi")
@@ -853,6 +862,8 @@ class Rec:
 class Proxy:
     def __init__(self, up_port):
         self.up_port, self.recs, self.lock, self.label = up_port, [], threading.Lock(), {}
+        self.cv = threading.Condition(self.lock)
+        self.live = {}  # requests in flight: id -> {label, c (upstream connection), cut, done}
         px = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -884,18 +895,56 @@ class Proxy:
                         body = json.loads(raw)
                     except ValueError:
                         pass
-                rec = Rec(route, body, dict(px.label, t=round(t0, 3))) if route else None
+                label = dict(px.label)
+                rec = Rec(route, body, dict(label, t=round(t0, 3))) if route else None
                 c = http.client.HTTPConnection("127.0.0.1", px.up_port, timeout=7200)
+                # In flight until the record is added (Proxy.drain waits on it). cut: why the upstream connection was
+                # closed early: "client" (the harness hung up) or "drain" (still open after its task ended).
+                st = dict(label=label, c=c, cut=None, done=threading.Event())
+                with px.cv:
+                    px.live[id(st)] = st
+                try:
+                    self._forward(raw, route, rec, c, st, t0)
+                finally:
+                    st["done"].set()
+                    with px.cv:
+                        px.live.pop(id(st), None)
+                        px.cv.notify_all()
+
+            def _watch(self, st):
+                """Closes the upstream connection as soon as the client hangs up, so the engine sees the disconnect
+                and stops (Axon and llama-server cancel a request whose client is gone). Without it a reply the
+                engine holds back (writes nothing) kept generating until it ended, whoever was waiting."""
+                s = self.connection
+                while not st["done"].wait(0.2):
+                    try:
+                        rd, _, _ = select.select([s], [], [], 0)
+                        if rd and not s.recv(1, socket.MSG_PEEK):
+                            break  # EOF: the client is gone
+                    except (OSError, ValueError):
+                        break
+                else:
+                    return
+                st["cut"] = st["cut"] or "client"
+                px.cut(st)
+
+            def _forward(self, raw, route, rec, c, st, t0):
                 hdrs = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
                 hdrs["Content-Length"] = str(len(raw))
                 try:
                     c.request(self.command, self.path, body=raw if raw or self.command in ("POST", "PUT") else None,
                               headers=hdrs)
+                    threading.Thread(target=self._watch, args=(st,), daemon=True).start()
                     r = c.getresponse()
-                except OSError as e:
+                except (OSError, http.client.HTTPException) as e:
                     if rec:
-                        rec.d["err"] = "upstream: %s" % type(e).__name__
-                        px.add(rec.close(599, t0, time.time()))
+                        rec.d["cut"] = st["cut"]
+                        if st["cut"]:  # hung up (or cut at the task's end) before the response began
+                            rec.d["err"] = "cut before the response (%s)" % st["cut"]
+                            px.add(rec.close(499, t0, time.time()))
+                        else:
+                            rec.d["err"] = "upstream: %s" % type(e).__name__
+                            px.add(rec.close(599, t0, time.time()))
                     try:
                         self.send_error(502, "upstream: %s" % type(e).__name__)
                     except OSError:
@@ -937,11 +986,14 @@ class Proxy:
                                     pass
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
-                except OSError:
-                    pass  # the harness hung up (timeout kill)
+                except (OSError, http.client.HTTPException):
+                    # the harness hung up (a write failed), or the upstream was cut (_watch, drain: a chunked read then
+                    # ends in IncompleteRead, an HTTPException, which used to escape and lose the record)
+                    st["cut"] = st["cut"] or "client"
                 c.close()
                 if rec is None:
                     return
+                rec.d["cut"] = st["cut"]
                 t_end = time.time()
                 tail = buf.strip()
                 if tail.startswith(b"data:"):
@@ -972,10 +1024,44 @@ class Proxy:
         with self.lock:
             self.recs.append(d)
 
-    def take(self):
+    def take(self, match=None):
+        """The records so far (match: only those whose label it accepts; the rest stay)."""
         with self.lock:
-            r, self.recs = self.recs, []
+            if match is None:
+                r, self.recs = self.recs, []
+            else:
+                r = [x for x in self.recs if match(x)]
+                self.recs = [x for x in self.recs if not match(x)]
         return r
+
+    def cut(self, st):
+        """Closes a request's upstream connection: the engine sees its client gone, the handler's read ends."""
+        sock = getattr(st["c"], "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def drain(self, match, timeout=20.0):
+        """Waits until no request whose label `match` accepts is in flight, so each lands in its own task's records
+        (one that outlived its task used to be counted in the next task's). After `timeout` the rest are cut
+        (cut="drain") and recorded as they close. Returns how many were cut."""
+        def busy():
+            return [st for st in self.live.values() if match(st["label"])]
+        end = time.time() + timeout
+        with self.cv:
+            while busy() and time.time() < end:
+                self.cv.wait(0.1)
+            left = busy()
+        for st in left:
+            st["cut"] = st["cut"] or "drain"
+            self.cut(st)
+        with self.cv:
+            end = time.time() + 10
+            while busy() and time.time() < end:
+                self.cv.wait(0.1)
+        return len(left)
 
     def stop(self):
         self.srv.shutdown()
@@ -1194,7 +1280,85 @@ def pct(xs, q):
     return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))]
 
 
-def summarize(recs, m0, m1):
+# A cold prompt: a request that fed at least COLD_MIN uncached prompt tokens. The harnesses compact their own history
+# near the context's end (pi, codex and opencode alike: a summary request, then the conversation restarted as system +
+# summary + recent messages), which leaves no cached prefix past the system prompt on any engine. So each task run
+# counts its compactions, from the harness's own session files, and each cold prompt says whether it fell in a
+# compaction's window: after the last tool-bearing request before the compaction's timestamp, up to and including the
+# first one after it (the summary request itself, which carries no tools, and the restarted conversation).
+COLD_MIN = 4000
+
+
+def iso_ts(x):
+    try:
+        return datetime.datetime.fromisoformat(str(x).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def jsonl(p):
+    with open(p, errors="replace") as f:
+        for ln in f:
+            try:
+                o = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(o, dict):
+                yield o
+
+
+def compactions(h, home, ws, t0):
+    """Times (epoch s) of the harness's own context compactions in this task run, from its files: pi's session
+    entries {"type": "compaction"} (ws/.pi-sessions), codex's rollout items {"type": "compacted"} (the rollouts whose
+    session_meta cwd is ws), opencode's session_message rows of type compaction (its sessions with directory ws). None
+    if they can't be read (an unknown file layout: reported as "?", not 0)."""
+    ts = []
+    wss = {ws, os.path.realpath(ws)}
+    try:
+        if h == "pi":
+            for p in glob.glob(os.path.join(ws, ".pi-sessions", "*.jsonl")):
+                ts += [iso_ts(o.get("timestamp")) for o in jsonl(p) if o.get("type") == "compaction"]
+        elif h == "codex":
+            for p in glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True):
+                if os.path.getmtime(p) < t0 - 1:
+                    continue
+                L = list(jsonl(p))
+                meta = next((o.get("payload") or {} for o in L if o.get("type") == "session_meta"), {})
+                if meta.get("cwd") in wss:
+                    ts += [iso_ts(o.get("timestamp")) for o in L if o.get("type") == "compacted"]
+        elif h == "opencode":
+            db = os.path.join(home, ".local", "share", "opencode", "opencode.db")
+            if os.path.exists(db):
+                import sqlite3
+                c = sqlite3.connect(db, timeout=10)
+                try:
+                    q = ("select m.time_created from session_message m join session_v2 s on s.id = m.session_id "
+                         "where m.type = 'compaction' and s.directory in (%s)" % ",".join("?" * len(wss)))
+                    ts += [r[0] / 1000.0 for r in c.execute(q, sorted(wss))]
+                finally:
+                    c.close()
+    except Exception as e:  # noqa: BLE001 (a harness's file layout changed: say so, don't take the run down)
+        print("WARN compactions %s %s: %s: %s" % (h, ws, type(e).__name__, e), flush=True)
+        return None
+    return sorted(t for t in ts if t is not None and t >= t0 - 1)
+
+
+def mark_cold(recs, cts):
+    """Flags each record: cold (>= COLD_MIN uncached prompt tokens, status 200), cold_cmp (cold, in a compaction's
+    window), cold_first (cold, the task's first request)."""
+    new = lambda r: (r.get("prompt_tokens") or 0) - (r.get("cached_tokens") or 0)
+    rs = sorted(recs, key=lambda r: r.get("t") or 0)
+    tool_t = [r.get("t") or 0 for r in rs if r.get("n_tools")]
+    win = [(max([t for t in tool_t if t < c], default=float("-inf")), min([t for t in tool_t if t >= c],
+            default=float("inf"))) for c in (cts or [])]
+    for i, r in enumerate(rs):
+        t = r.get("t") or 0
+        cold = r.get("status") == 200 and new(r) >= COLD_MIN
+        r.update(cold=int(cold), cold_cmp=int(cold and any(lo < t <= hi for lo, hi in win)),
+                 cold_first=int(cold and i == 0))
+
+
+def summarize(recs, m0, m1, cts=None):
     st = [r["status"] for r in recs]
     errs = [r for r in recs if r.get("is_err")]
     okr = [r for r in recs if not r.get("is_err")]
@@ -1212,7 +1376,13 @@ def summarize(recs, m0, m1):
         prompt_max=max([r["prompt_tokens"] or 0 for r in recs] or [0]),
         errors=sorted({(r.get("err") or "")[:200] for r in errs})[:5],
         keys=sorted({k for r in recs for k in r.get("keys", [])}),
-        temps=sorted({str(r.get("temperature")) for r in recs}))
+        temps=sorted({str(r.get("temperature")) for r in recs}),
+        # the client hung up mid-response (the proxy then closed the engine's connection), or the request was still
+        # open when its task ended and was cut then (Proxy.drain)
+        hup=sum(1 for r in recs if r.get("cut") == "client"), cut_end=sum(1 for r in recs if r.get("cut") == "drain"),
+        compactions=None if cts is None else len(cts), compaction_t=cts,
+        cold=sum(r.get("cold", 0) for r in recs), cold_cmp=sum(r.get("cold_cmp", 0) for r in recs),
+        cold_first=sum(r.get("cold_first", 0) for r in recs))
 
 
 def cmd_run(a):
@@ -1303,7 +1473,14 @@ def cmd_run(a):
                     build_base(ws, t["base"])
                     git_init(ws, "ledger: %s r%d (%s %s)" % (t["id"], rnd, ek, h))
                     m0 = eng.metrics()
-                    px.take()
+                    # Records of an earlier task still here (drain gave up on them): kept, flagged, in no task's row.
+                    late = px.take()
+                    for r in late:
+                        r.update(model=a.model, late=1)
+                        reqf.write(json.dumps(r) + "\n")
+                    if late:
+                        print("WARN %d late request record(s) from earlier tasks: requests.jsonl, late=1" % len(late),
+                              flush=True)
                     t0 = time.time()
                     turns = []
                     for ti, prompt in enumerate(t["prompts"]):
@@ -1315,8 +1492,16 @@ def cmd_run(a):
                             crash = True
                             break
                     wall = round(time.time() - t0, 1)
-                    time.sleep(0.5)
-                    recs = px.take()
+                    # This task's requests only, every one of them finished: one still in flight (its harness gone,
+                    # a reply the engine holds back) is waited for, then cut, and lands here, not in the next task.
+                    key = (ek, h, t["id"], rnd)
+                    mine = lambda d, key=key: (d.get("engine"), d.get("harness"), d.get("task"), d.get("round")) == key
+                    ncut = px.drain(mine)
+                    if ncut:
+                        print("CUT %d request(s) still open 20 s after %s/%s ended" % (ncut, h, t["id"]), flush=True)
+                    recs = px.take(mine)
+                    cts = compactions(h, home, ws, t0)
+                    mark_cold(recs, cts)
                     for r in recs:
                         r["model"] = a.model
                         reqf.write(json.dumps(r) + "\n")
@@ -1326,7 +1511,7 @@ def cmd_run(a):
                     res = dict(engine=ek, harness=h, task=t["id"], model=a.model, round=rnd, ok=ok, detail=detail[:400],
                                wall_s=wall, rc=turns[-1]["rc"], timed_out=any(x["timed_out"] for x in turns),
                                turns=turns, crash=crash, engine_sha=sha[ek])
-                    res.update(summarize(recs, m0, m1))
+                    res.update(summarize(recs, m0, m1, cts))
                     if crash:
                         res["crash_log"] = tail(eng.logf, 8)
                     results.append(res)
@@ -1442,21 +1627,35 @@ def print_latency(reqs):
                                                       f(s["new_p50"]), f(s["new_p90"]), f(s["new_max"])), flush=True)
 
 
+def opt_sum(rs, k):
+    """Sum of a per-run count, "-" if no run has it (results from before it existed), "?" if any run couldn't tell."""
+    v = [r.get(k, "-") for r in rs]
+    if all(x == "-" for x in v):
+        return "-"
+    if any(x is None for x in v):
+        return "?"
+    return str(sum(x for x in v if isinstance(x, int)))
+
+
 def print_summary(results):
-    print("SUMMARY (pass / runs; malformed = tool calls as text + bad JSON args + axon dropped)")
+    print("SUMMARY (pass / runs; malf = tool calls as text + bad JSON args + axon dropped; hup = responses the client "
+          "hung up on;\n  cmp = the harness's own context compactions; cold = requests with >= %d uncached prompt "
+          "tokens, c_cmp of them in a compaction's window, c_1st a task's first request)" % COLD_MIN)
     cells = {}
     for r in results:
         cells.setdefault((r["model"], r["engine"], r["harness"]), []).append(r)
-    print("%-12s %-6s %-9s %6s %5s %5s %5s %5s %5s %8s %8s" % ("model", "engine", "harness", "pass", "malf", "ctx",
-                                                                "herr", "crash", "tmo", "ttft50", "wall50"))
+    print("%-12s %-6s %-9s %6s %5s %5s %5s %5s %5s %4s %8s %8s | %4s %5s %5s %5s" % (
+        "model", "engine", "harness", "pass", "malf", "ctx", "herr", "crash", "tmo", "hup", "ttft50", "wall50", "cmp",
+        "cold", "c_cmp", "c_1st"))
     for k in sorted(cells):
         rs = cells[k]
         malf = sum((r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0) for r in rs)
-        print("%-12s %-6s %-9s %3d/%-2d %5d %5d %5d %5d %5d %8s %8s" % (
+        print("%-12s %-6s %-9s %3d/%-2d %5d %5d %5d %5d %5d %4s %8s %8s | %4s %5s %5s %5s" % (
             k[0], k[1], k[2], sum(r["ok"] for r in rs), len(rs), malf, sum(r.get("ctx_overflow") or 0 for r in rs),
             sum(r.get("http_err") or 0 for r in rs), sum(bool(r.get("crash")) for r in rs),
-            sum(bool(r.get("timed_out")) for r in rs), pct([r.get("ttft_p50") for r in rs], 0.5),
-            pct([r.get("wall_s") for r in rs], 0.5)), flush=True)
+            sum(bool(r.get("timed_out")) for r in rs), opt_sum(rs, "hup"), pct([r.get("ttft_p50") for r in rs], 0.5),
+            pct([r.get("wall_s") for r in rs], 0.5), opt_sum(rs, "compactions"), opt_sum(rs, "cold"),
+            opt_sum(rs, "cold_cmp"), opt_sum(rs, "cold_first")), flush=True)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1486,6 +1685,42 @@ def load_results(paths):
     return out
 
 
+def cmd_rescore(a):
+    """A run dir made before the 11-14 fixes, rescored: each task row's request-derived fields again from
+    requests.jsonl, taking each record by its own task label (so a request that outlived its task moves back to it),
+    and the compaction and cold-prompt counts from the harnesses' files still in the dir. Axon's /metrics deltas stay
+    as recorded. Writes results-rescored.jsonl next to results.jsonl; prints what moved, SUMMARY and LATENCY."""
+    out = os.path.abspath(a.dir)
+    rows = load_results([os.path.join(out, "results.jsonl")])
+    reqs = load_requests([os.path.join(out, "requests.jsonl")])
+    new, moved = [], []
+    for r in rows:
+        key = (r["engine"], r["harness"], r["task"], r.get("round"))
+        recs = [q for q in reqs if (q.get("engine"), q.get("harness"), q.get("task"), q.get("round")) == key]
+        root = os.path.join(out, "%s-%s" % (r["engine"], r["harness"]))
+        t0 = min([q.get("t") or 0 for q in recs], default=0) - 30
+        cts = compactions(r["harness"], os.path.join(root, "home"),
+                          os.path.join(root, "r%d-%s" % (r.get("round") or 1, r["task"])), t0) if recs else None
+        mark_cold(recs, cts)
+        x = summarize(recs, {}, {}, cts)
+        for k in ("dropped", "refused"):
+            x.pop(k)
+        diff = {k: (r.get(k), x[k]) for k in ("requests", "tc", "tc_text", "tc_badjson", "http_err", "ctx_overflow")
+                if r.get(k) != x[k]}
+        if diff:
+            moved.append("%s/%s/%s r%s: %s" % (r["engine"], r["harness"], r["task"], r.get("round"), diff))
+        new.append(dict(r, rescored=1, **x))
+    with open(os.path.join(out, "results-rescored.jsonl"), "w") as f:
+        for r in new:
+            f.write(json.dumps(r) + "\n")
+    print("RESCORE %s: %d rows, %d changed by the per-task attribution" % (out, len(new), len(moved)))
+    for m in moved:
+        print("- " + m)
+    print_summary(new)
+    print_latency(reqs)
+    return 0
+
+
 def norm_err(e):
     e = re.sub(r"\d+", "N", e or "")
     return e[:110]
@@ -1505,17 +1740,19 @@ def cmd_table(a):
     for r in rs:
         cells.setdefault((r["model"], r["harness"], r["engine"]), []).append(r)
     print("| model | harness | engine | tasks passed | malformed / dropped calls | ctx overflows | other HTTP errors | "
-          "crashes | timeouts | TTFT p50 (ms) | wall p50 (s) |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+          "crashes | timeouts | client hang-ups | TTFT p50 (ms) | wall p50 (s) | compactions | cold prompts "
+          "(in a compaction window) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for k in sorted(cells):
         x = cells[k]
         malf = sum((r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0) for r in x)
-        print("| %s | %s | %s | %d / %d | %d (%d runs) | %d | %d | %d | %d | %s | %s |" % (
+        print("| %s | %s | %s | %d / %d | %d (%d runs) | %d | %d | %d | %d | %s | %s | %s | %s | %s (%s) |" % (
             k[0], k[1], k[2], sum(r["ok"] for r in x), len(x), malf,
             sum(1 for r in x if (r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0)),
             sum(r.get("ctx_overflow") or 0 for r in x), sum(r.get("http_err") or 0 for r in x),
-            sum(bool(r.get("crash")) for r in x), sum(bool(r.get("timed_out")) for r in x),
-            pct([r.get("ttft_p50") for r in x], 0.5), pct([r.get("wall_s") for r in x], 0.5)))
+            sum(bool(r.get("crash")) for r in x), sum(bool(r.get("timed_out")) for r in x), opt_sum(x, "hup"),
+            pct([r.get("ttft_p50") for r in x], 0.5), pct([r.get("wall_s") for r in x], 0.5),
+            opt_sum(x, "compactions"), opt_sum(x, "cold"), opt_sum(x, "cold_cmp")))
     # per model x engine totals and the majority verdict
     print("\n| model | engine | passed (all harnesses) | best harness |")
     print("|---|---|---|---|")
@@ -1552,6 +1789,8 @@ def cmd_table(a):
         "harness rejected a call (tool result error)": lambda r: (r.get("tool_res_err") or 0) > 0,
         "hit max_tokens / incomplete": lambda r: (r.get("length") or 0) > 0,
         "task timed out": lambda r: bool(r.get("timed_out")),
+        "client hung up mid-response": lambda r: (r.get("hup") or 0) > 0,
+        "harness compacted its context": lambda r: (r.get("compactions") or 0) > 0,
     }
     for name, f in kinds.items():
         n = {e: sum(1 for r in rs if r["engine"] == e and f(r)) for e in ("axon", "llama")}
@@ -1580,6 +1819,9 @@ def cmd_table(a):
 # ----------------------------------------------------------------------------------------------------------------
 # selfcheck
 # ----------------------------------------------------------------------------------------------------------------
+HOLD_SEEN = {}  # fake upstream, hold modes: tag -> when it saw the proxy close its connection (None: never)
+
+
 def fake_upstream():
     """A canned upstream for the proxy's self-test."""
     class H(http.server.BaseHTTPRequestHandler):
@@ -1592,6 +1834,42 @@ def fake_upstream():
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
             mode = body.get("mode")
+            if mode in ("hold", "hold_whole"):
+                # An engine holding its reply back: headers and a token-less event (hold), or nothing at all, as for a
+                # whole (non-streamed) response (hold_whole). Notes when the proxy closes the connection.
+                t, tag = time.time(), body.get("tag")
+                if mode == "hold":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    d = b'data: {"choices": []}\n\n'
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(d), d))
+                    self.wfile.flush()
+                HOLD_SEEN[tag] = None
+                while time.time() - t < body.get("hold_s", 10):
+                    rd, _, _ = select.select([self.connection], [], [], 0.05)
+                    try:
+                        if rd and not self.connection.recv(1, socket.MSG_PEEK):
+                            HOLD_SEEN[tag] = time.time()
+                            return
+                    except OSError:
+                        HOLD_SEEN[tag] = time.time()
+                        return
+                try:
+                    if mode == "hold":
+                        self.wfile.write(b"0\r\n\r\n")
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Length", "2")
+                        self.end_headers()
+                        self.wfile.write(b"{}")
+                    self.wfile.flush()
+                except OSError:
+                    pass
+                return
+            if mode == "slow":
+                time.sleep(body.get("slow_s", 1.5))
             if mode == "ctx":
                 b = json.dumps({"error": {"code": "context_length_exceeded", "message": "prompt is 40000 tokens"}}).encode()
                 self.send_response(400)
@@ -1639,6 +1917,141 @@ def fake_upstream():
     s = S(("127.0.0.1", 0), H)
     threading.Thread(target=s.serve_forever, daemon=True).start()
     return s
+
+
+def raw_request(port, path, body):
+    """A client socket with a POST sent and nothing read (the test closes it, or keeps it open)."""
+    s = socket.create_connection(("127.0.0.1", port))
+    b = json.dumps(body).encode()
+    s.sendall(b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+              % (path.encode(), len(b), b))
+    return s
+
+
+def wait_take(px, match, n=1, secs=5.0):
+    out, end = [], time.time() + secs
+    while len(out) < n and time.time() < end:
+        out += px.take(match)
+        time.sleep(0.05)
+    return out
+
+
+def selfcheck_lifecycle(px):
+    """The proxy's request lifecycle: a client hang-up closes the upstream at once; a request that outlives its task
+    lands in its own task's records; one still open when its task is drained is cut and recorded."""
+    bad = 0
+    # 1. hang-ups, while the upstream holds its reply back (streamed: after the headers; whole: before them)
+    for mode, want_status in (("hold", 200), ("hold_whole", 499)):
+        px.label = dict(task="hup-" + mode)
+        s = raw_request(px.port, "/v1/chat/completions", {"stream": mode == "hold", "mode": mode, "tag": mode,
+                                                           "hold_s": 10, "messages": []})
+        time.sleep(0.6)
+        s.close()
+        t_close = time.time()
+        r = wait_take(px, lambda d, m=mode: d.get("task") == "hup-" + m)
+        got = r[0] if r else {}
+        seen = HOLD_SEEN.get(mode)
+        lag = None if seen is None else round(seen - t_close, 2)
+        ok = got.get("cut") == "client" and got.get("status") == want_status and lag is not None and lag < 1.5
+        bad += not ok
+        print("proxy hang-up %-10s        %s  upstream closed %ss after the client; record cut=%s status=%s" % (
+            mode, "OK  " if ok else "FAIL", lag, got.get("cut"), got.get("status")))
+    # 2. a request of task A still running when task B starts: drain(B) doesn't wait for it, take(B) doesn't get it,
+    #    drain(A) waits for it to finish and take(A) does
+    A = dict(engine="e", harness="h", task="A", round=1)
+    mA = lambda d: (d.get("engine"), d.get("harness"), d.get("task"), d.get("round")) == ("e", "h", "A", 1)
+    mB = lambda d: (d.get("engine"), d.get("harness"), d.get("task"), d.get("round")) == ("e", "h", "B", 1)
+    px.label = dict(A, turn=0)
+    th = threading.Thread(target=http_post, args=(px.port, "/v1/chat/completions", {
+        "stream": True, "mode": "slow", "slow_s": 1.5, "messages": []}), kwargs={"timeout": 10})
+    th.start()
+    time.sleep(0.3)
+    px.label = dict(A, task="B", turn=0)
+    t1 = time.time()
+    nB, rB = px.drain(mB, 5), px.take(mB)
+    wB = time.time() - t1
+    nA, rA = px.drain(mA, 5), px.take(mA)
+    wA = time.time() - t1
+    th.join()
+    ok = nB == 0 and not rB and wB < 0.5 and nA == 0 and len(rA) == 1 and rA[0].get("status") == 200 \
+        and rA[0].get("cut") is None and rA[0].get("tc") == 1 and wA >= 0.8
+    bad += not ok
+    print("proxy outlives its task          %s  B: %d records after %.2fs; A: %d record(s) after %.2fs, status %s cut %s" % (
+        "OK  " if ok else "FAIL", len(rB), wB, len(rA), wA, rA[0].get("status") if rA else None,
+        rA[0].get("cut") if rA else None))
+    # 3. still open when its task is drained (the client never hangs up, the engine never answers): cut, recorded
+    px.label = dict(A, turn=1)
+    s = raw_request(px.port, "/v1/chat/completions", {"stream": True, "mode": "hold", "tag": "drain", "hold_s": 10,
+                                                       "messages": []})
+    time.sleep(0.4)
+    n, r = px.drain(mA, 1.0), px.take(mA)
+    s.close()
+    ok = n == 1 and len(r) == 1 and r[0].get("cut") == "drain" and HOLD_SEEN.get("drain") is not None
+    bad += not ok
+    print("proxy drain cuts what's left     %s  cut %d, records %d, cut=%s, upstream saw the close: %s" % (
+        "OK  " if ok else "FAIL", n, len(r), r[0].get("cut") if r else None, HOLD_SEEN.get("drain") is not None))
+    return bad
+
+
+def selfcheck_compactions():
+    """compactions() on each harness's file layout (and another task's sessions, which mustn't count), mark_cold on
+    pi's pattern (summary request, compaction, the restarted conversation)."""
+    bad = 0
+    d = tempfile.mkdtemp(prefix="ha-self-")
+    try:
+        home, ws, other = d + "/home", d + "/r1-x", d + "/r1-y"
+        t0 = time.time() - 60
+        iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        wr(ws, ".pi-sessions/a.jsonl", "\n".join(json.dumps(o) for o in [
+            {"type": "session", "cwd": ws}, {"type": "message"}, {"type": "compaction", "timestamp": iso(t0 + 10)},
+            {"type": "message"}, {"type": "compaction", "timestamp": iso(t0 + 20)}]) + "\n")
+        for name, cwd, n in (("rollout-a.jsonl", ws, 1), ("rollout-b.jsonl", other, 2)):
+            wr(home, ".codex/sessions/2026/11/14/" + name, "\n".join(json.dumps(o) for o in [
+                {"type": "session_meta", "payload": {"cwd": cwd}}] + [
+                {"type": "compacted", "timestamp": iso(t0 + 5 + i), "payload": {}} for i in range(n)]) + "\n")
+        import sqlite3
+        os.makedirs(home + "/.local/share/opencode", exist_ok=True)
+        c = sqlite3.connect(home + "/.local/share/opencode/opencode.db")
+        c.execute("create table session_v2 (id text, directory text)")
+        c.execute("create table session_message (id text, session_id text, type text, time_created integer)")
+        c.executemany("insert into session_v2 values (?, ?)", [("s1", ws), ("s2", ws), ("s3", other)])
+        c.executemany("insert into session_message values (?, ?, ?, ?)", [
+            ("m1", "s1", "assistant", int((t0 + 1) * 1000)), ("m2", "s1", "compaction", int((t0 + 7) * 1000)),
+            ("m3", "s2", "compaction", int((t0 + 8) * 1000)), ("m4", "s3", "compaction", int((t0 + 9) * 1000)),
+            ("m5", "s1", "compaction", int((t0 - 100) * 1000))])
+        c.commit()
+        c.close()
+        got = {h: compactions(h, home, ws, t0) for h in ("pi", "codex", "opencode")}
+        want = {"pi": 2, "codex": 1, "opencode": 2}
+        ok = all(got[h] is not None and len(got[h]) == want[h] for h in want)
+        bad += not ok
+        print("compactions per harness          %s  %s (want %s)" % ("OK  " if ok else "FAIL",
+              {h: None if v is None else len(v) for h, v in got.items()}, want))
+        os.remove(home + "/.local/share/opencode/opencode.db")
+        c = sqlite3.connect(home + "/.local/share/opencode/opencode.db")
+        c.execute("create table session (id text)")
+        c.close()
+        unk = compactions("opencode", home, ws, t0)
+        ok = unk is None
+        bad += not ok
+        print("compactions, unknown layout      %s  %s (want None: reported as ?)" % ("OK  " if ok else "FAIL", unk))
+        # pi's pattern: tool requests growing, then [summary (no tools)] [compaction] [restarted conversation, cold],
+        # and one cold request with no compaction before it; the task's first request is cold too
+        R = lambda t, pt, ct, nt: dict(Rec("chat", {}, {}).d, t=t, status=200, prompt_tokens=pt, cached_tokens=ct,
+                                       n_tools=nt, is_err=0)
+        recs = [R(100, 6600, 0, 9), R(101, 7000, 6600, 9), R(102, 24300, 24000, 9), R(103, 1500, 70, 0),
+                R(104, 24900, 1400, 9), R(105, 25100, 24800, 9), R(106, 25300, 900, 9)]
+        mark_cold(recs, [103.5])
+        flags = [(r["cold"], r["cold_cmp"], r["cold_first"]) for r in recs]
+        want = [(1, 0, 1), (0, 0, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0), (0, 0, 0), (1, 0, 0)]
+        s = summarize(recs, {}, {}, [103.5])
+        ok = flags == want and (s["compactions"], s["cold"], s["cold_cmp"], s["cold_first"]) == (1, 3, 1, 1)
+        bad += not ok
+        print("cold prompts and compactions     %s  %s; row cmp %s cold %s c_cmp %s c_1st %s" % (
+            "OK  " if ok else "FAIL", flags, s["compactions"], s["cold"], s["cold_cmp"], s["cold_first"]))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return bad
 
 
 def cmd_selfcheck(a):
@@ -1699,8 +2112,10 @@ def cmd_selfcheck(a):
         bad += not ok
         print("proxy %-22s %-8s %s  %s" % (path, body.get("mode") or "", "OK  " if ok else "FAIL",
                                            {k: got.get(k) for k in list(want) + ["ttft_ms", "err"]}))
+    bad += selfcheck_lifecycle(px)
     px.stop()
     up.shutdown()
+    bad += selfcheck_compactions()
     print("SELFCHECK %s (%d failures)" % ("PASS" if not bad else "FAIL", bad))
     return 1 if bad else 0
 
@@ -1724,6 +2139,8 @@ def main():
     r.add_argument("--no-sandbox", action="store_true")
     t = sp.add_parser("table")
     t.add_argument("paths", nargs="+")
+    rs = sp.add_parser("rescore")
+    rs.add_argument("dir")
     s = sp.add_parser("selfcheck")
     s.add_argument("--no-sandbox", action="store_true")
     sp.add_parser("list")
@@ -1734,6 +2151,8 @@ def main():
         return cmd_table(a)
     if a.cmd == "selfcheck":
         return cmd_selfcheck(a)
+    if a.cmd == "rescore":
+        return cmd_rescore(a)
     for t in TASKS:
         print("%-14s %-11s %-34s %s" % (t["id"], t["base"], t["kind"], t["prompts"][0][:90]))
     return 0

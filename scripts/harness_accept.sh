@@ -7,7 +7,13 @@
 #        AXON_BIN LLAMA_SERVER_BIN qwen2.5-7b pi [--tasks all] [--engines axon,llama]
 # Results: RESULT / ENGINE / SUMMARY lines on stdout; the harness outputs, engine logs and workspaces under
 # ${AXON_ACCEPT_OUT:-~/.cache/axon-eval/accept}/<model>-<harness>-<time>/ on the host that ran it.
+#   harness_accept.sh selfcheck PY MAKE_REPO     the script's self-test only (no model, no GPU: jade / --cpu is fine)
 set -u
+if [ "${1:-}" = selfcheck ]; then
+  D=$(cd "$(dirname "$2")" && pwd)
+  [ -e "$D/make_repo.py" ] || cp "$3" "$D/make_repo.py"
+  exec python3 "$2" selfcheck
+fi
 [ $# -ge 6 ] || { echo "usage: $0 PY MAKE_REPO AXON LLAMA MODEL HARNESS [args]"; exit 2; }
 PY=$1; MR=$2; AX=$3; LL=$4; M=$5; H=$6; shift 6
 # axon-run appends `--test-threads N` on CPU nodes (it takes the job for a Rust test binary): not ours, drop it.
