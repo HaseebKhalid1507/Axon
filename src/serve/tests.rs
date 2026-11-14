@@ -5658,8 +5658,9 @@ fn rtools_of(params: &Value) -> Value {
 /// gpt-oss-20b calls a tool for real (CUDA, greedy): asked for the weather
 /// with a get_weather tool it calls it (OpenAI shape, streamed and whole the
 /// same: reasoning in `reasoning_content`, the call's id and name in its
-/// first delta, then its arguments, no call in the finish chunk); given the
-/// result, it answers with it (also with `tools: []`); named tool_choice
+/// first delta, then its arguments a piece at a time as they are generated
+/// (#260; the tests' `tool_stream` is on), no call in the finish chunk);
+/// given the result, it answers with it (also with `tools: []`); named tool_choice
 /// calls at once; required calls one of the offered tools; Responses and
 /// ollama /api/chat call too; asked to repeat the call syntax, no endpoint
 /// (streamed or whole) returns a call made of that text.
@@ -5728,11 +5729,23 @@ fn serve_gptoss_tool_calls() {
         (sr.as_str(), sc.as_str(), sargs.as_str()),
         (reasoning, "", args)
     );
-    assert_eq!(deltas.len(), 2, "{deltas:?}");
+    // The head (id, name, no arguments yet), then the arguments in pieces
+    // (#260): each only `index` and `function.arguments`, never empty, and
+    // more than one (the object is several tokens). Their concatenation is
+    // the whole reply's arguments (above).
+    assert!(deltas.len() > 2, "{deltas:?}");
     assert!(deltas[0]["id"].as_str().unwrap().starts_with("call_"));
     assert_eq!(deltas[0]["type"], "function");
     assert_eq!(deltas[0]["function"]["name"], "get_weather");
     assert_eq!(deltas[0]["function"]["arguments"], "");
+    for d in &deltas[1..] {
+        assert_eq!(d.as_object().unwrap().len(), 2, "{d}");
+        assert_eq!(d["function"].as_object().unwrap().len(), 1, "{d}");
+        assert!(
+            !d["function"]["arguments"].as_str().unwrap().is_empty(),
+            "{d}"
+        );
+    }
 
     // The result goes back: the answer uses it, and the prompt reuses the cache.
     let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
