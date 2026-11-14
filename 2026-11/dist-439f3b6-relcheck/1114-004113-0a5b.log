@@ -1,0 +1,59 @@
+[axon-run 00:41:13] submitted 1114-004113-0a5b by /home/haseeb/.cache/axon-wt-gojo-230: /usr/bin/bash /home/haseeb/.cache/axon-dist/relcheck-439f3b6/relcheck.sh
+[axon-run 03:13:47] scope axon-job-1114-004113-0a5b-1794644027.scope in app-axonjobs.slice: MemoryMax 4024 MB, MemoryHigh 3621 MB, no swap, oomd pressure kill 80% (claim 2000 MB): an OOM here kills only this job
+[axon-run 03:13:47] job 1114-004113-0a5b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1114-004113-0a5b-1794644027 --slice=app-axonjobs.slice -p MemoryMax=4024M -p MemoryHigh=3621M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-dist/relcheck-439f3b6/relcheck.sh
+axon-q 03:13:47 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-dist/relcheck-439f3b6/relcheck.sh
+RELCHECK ok   tarball sha256 matches its .sha256
+drwxr-xr-x 0/0               0 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/
+-rw-r--r-- 0/0            1070 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/LICENSE
+-rw-r--r-- 0/0           11902 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/README.md
+-rw-r--r-- 0/0          425661 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/RUST_STD_COPYRIGHT.html
+-rw-r--r-- 0/0          323828 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/THIRD_PARTY_LICENSES.txt
+-rw-r--r-- 0/0            3893 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/THIRD_PARTY_NOTICES.md
+-rwxr-xr-x 0/0        59133192 2026-11-13 21:47 axon-dev-10e0439-x86_64-linux/axon
+RELCHECK ok   one top dir: axon-dev-10e0439-x86_64-linux
+RELCHECK ok   has axon
+RELCHECK ok   has LICENSE
+RELCHECK ok   has README.md
+RELCHECK ok   has THIRD_PARTY_NOTICES.md
+RELCHECK ok   has THIRD_PARTY_LICENSES.txt
+RELCHECK ok   has RUST_STD_COPYRIGHT.html
+RELCHECK ok   axon -rwxr-xr-x root/root (0/0: 439f3b6 packs numeric owners)
+RELCHECK ok   --version: axon 0.1.0
+RELCHECK ok   newest glibc symbol GLIBC_2.28
+precompiled kernels (built in): NVRTC 13.4, 51.9 MB (compressed fatbins), 106 entries: 14 modules (14 of this build's 14), targets sm_75 sm_80 sm_86 sm_89 sm_90 sm_120 compute_120 sm_90a
+gpu: none (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected)
+RELCHECK ok   kernels list: exit 0, 106 entries, 14 of 14 modules
+/home/haseeb/.cache/axon-dist/relcheck-439f3b6/kernels-pack/kernels.pack: NVRTC 13.4, 51.9 MB (compressed fatbins), 106 entries: 14 modules (14 of this build's 14), targets sm_75 sm_80 sm_86 sm_89 sm_90 sm_120 compute_120 sm_90a
+gpu: none (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected)
+RELCHECK ok   the kernels-pack artifact is the embedded pack's size and entry count
+CI pack: NVRTC 13.4, 106 entries; bella packs: NVRTC [(13, 4)], 106 entries
+  sm_120        14 entries: 14 same raw bytes, 0 different, 0 not built on bella
+  sm_75         12 entries: 12 same raw bytes, 0 different, 0 not built on bella
+  sm_80         12 entries: 12 same raw bytes, 0 different, 0 not built on bella
+  sm_86         12 entries: 12 same raw bytes, 0 different, 0 not built on bella
+  sm_89         14 entries: 14 same raw bytes, 0 different, 0 not built on bella
+  sm_90         14 entries: 14 same raw bytes, 0 different, 0 not built on bella
+  sm_90a        14 entries: 14 same raw bytes, 0 different, 0 not built on bella
+  compute_120   14 entries: 14 same raw bytes, 0 different, 0 not built on bella
+VERDICT: PASS: every CI entry is bella NVRTC's output, byte for byte
+RELCHECK ok   packcmp: every CI entry is bella NVRTC's output
+axon install: downloading file:///tmp/tmp.HzOljsByXr/dist/axon-x86_64-linux.tar.gz
+axon install: installed /tmp/tmp.HzOljsByXr/home/.local/bin/axon (axon 0.1.0)
+axon install: /tmp/tmp.HzOljsByXr/home/.local/bin isn't on your PATH: add  export PATH="/tmp/tmp.HzOljsByXr/home/.local/bin:$PATH"  to your shell's profile
+axon install: next: axon pull qwen2.5-0.5b, then axon chat qwen2.5-0.5b (add --device cuda for an NVIDIA GPU)
+RELCHECK ok   install.sh installs axon 0.1.0
+RELCHECK ok   installed binary == tarball's
+RELCHECK ok   rerun: already axon 0.1.0
+RELCHECK ok   tampered tarball refused (rc 1), installed binary untouched
+0
+The capital of France is Paris. It is the largest city in Europe and the second largest in the world
+
+identity:    fp_d44d20d119beefbc
+draft:       off
+RELCHECK ok   gen on the CPU: Paris
+RELCHECK ok   install.sh parses (bash --posix -n; CI runs dash -n + shellcheck --shell=sh)
+rust_licenses.py self-test: 19 expressions, 7 malformed: ok
+RELCHECK ok   rust_licenses.py --self-test
+RELCHECK SUMMARY fails=0
+[axon-run 03:13:48] exit 0 after 1.5s (host bella)
+[axon-run 03:13:52] EXPECT ok: output matches /^RELCHECK SUMMARY fails=0$/
