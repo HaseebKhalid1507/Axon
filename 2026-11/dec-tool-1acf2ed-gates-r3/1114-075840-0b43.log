@@ -1,0 +1,77 @@
+[axon-run 07:58:40] submitted 1114-075840-0b43 by /home/haseeb/.cache/axon-dec-tool: /usr/bin/bash tool260.sh ./axon-base-0497708 ./axon-f65399a ./tool260.py gpt-oss-20b-MXFP4@4096
+[axon-run 07:58:40] job 1114-075840-0b43 -> pod1 [RTX 4090 sm_89 secure] (pod lmtwcfxqs2nqde): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 8000 --src /home/haseeb/.cache/axon-podjob/tool260-bcba87bbd2a7 /usr/bin/bash tool260.sh ./axon-base-0497708 ./axon-f65399a ./tool260.py gpt-oss-20b-MXFP4@4096
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (b3e65eb8165dbca5dfc70854) + source of /home/haseeb/.cache/axon-podjob/tool260-bcba87bbd2a7 (delta vs 3 earlier upload(s) there)
+
+sent 3,934,119 bytes  received 75 bytes  1,124,055.43 bytes/sec
+total size is 25,258,577  speedup is 6.42
+
+sent 58 bytes  received 19 bytes  30.80 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261114-125855-bash-10891 on pod1 (GPU, 8000 MB)
+[axon-node 12:58:55] GPU slot taken; job wants 8000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 12:58:55] run bash (b3e65eb8165dbca5dfc70854) as /home/haseeb/.cache/axon-podjob/tool260-bcba87bbd2a7 on 24b4afa9f80a, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07, 1 MiB
+tool260: gpt-oss-20b-MXFP4.gguf cuda arms ['base', 'cand', 'off']
+  base  auto-2cities         tokens    34 finish tool_calls calls 1 chunks [2] first-call 1137 ms of 1137 ms
+  base  required-ls          tokens     7 finish tool_calls calls 1 chunks [2] first-call 234 ms of 234 ms
+  base  named-longfile       tokens   207 finish tool_calls calls 1 chunks [2] first-call 6941 ms of 6941 ms
+  base  named-cut            tokens     6 finish length     calls 0 chunks [] first-call None ms of 201 ms
+  base  auto-text            tokens    55 finish stop       calls 0 chunks [] first-call None ms of 1877 ms
+  base  auto-json-in-shell   tokens   152 finish tool_calls calls 1 chunks [2] first-call 5109 ms of 5110 ms
+  base  history              tokens    50 finish stop       calls 0 chunks [] first-call None ms of 1707 ms
+  base  r-auto-2cities       tokens    34 finish completed  calls 1 chunks [1] first-call 1145 ms of 1145 ms
+  base  r-named-longfile     tokens   207 finish completed  calls 1 chunks [1] first-call 6922 ms of 6922 ms
+  base  r-named-cut          tokens     6 finish incomplete calls 0 chunks [] first-call None ms of 202 ms
+  cand  auto-2cities         tokens    34 finish tool_calls calls 1 chunks [6] first-call 1054 ms of 1194 ms
+  cand  required-ls          tokens     7 finish tool_calls calls 1 chunks [8] first-call 34 ms of 235 ms
+  cand  named-longfile       tokens   207 finish tool_calls calls 1 chunks [194] first-call 34 ms of 6960 ms
+  cand  named-cut            tokens     6 finish length     calls 1 chunks [7] first-call 35 ms of 202 ms
+  cand  auto-text            tokens    55 finish stop       calls 0 chunks [] first-call None ms of 1877 ms
+  cand  auto-json-in-shell   tokens   152 finish tool_calls calls 1 chunks [28] first-call 4195 ms of 5102 ms
+  cand  history              tokens    50 finish stop       calls 0 chunks [] first-call None ms of 1719 ms
+  cand  r-auto-2cities       tokens    34 finish completed  calls 1 chunks [5] first-call 1006 ms of 1140 ms
+  cand  r-named-longfile     tokens   207 finish completed  calls 1 chunks [193] first-call 34 ms of 6943 ms
+  cand  r-named-cut          tokens     6 finish incomplete calls 1 chunks [6] first-call 34 ms of 201 ms
+  off   auto-2cities         tokens    34 finish tool_calls calls 1 chunks [2] first-call 1139 ms of 1139 ms
+  off   required-ls          tokens     7 finish tool_calls calls 1 chunks [2] first-call 235 ms of 235 ms
+  off   named-longfile       tokens   207 finish tool_calls calls 1 chunks [2] first-call 6951 ms of 6951 ms
+  off   named-cut            tokens     6 finish length     calls 0 chunks [] first-call None ms of 202 ms
+  off   auto-text            tokens    55 finish stop       calls 0 chunks [] first-call None ms of 1882 ms
+  off   auto-json-in-shell   tokens   152 finish tool_calls calls 1 chunks [2] first-call 5114 ms of 5114 ms
+  off   history              tokens    50 finish stop       calls 0 chunks [] first-call None ms of 1722 ms
+  off   r-auto-2cities       tokens    34 finish completed  calls 1 chunks [1] first-call 1141 ms of 1141 ms
+  off   r-named-longfile     tokens   207 finish completed  calls 1 chunks [1] first-call 6944 ms of 6944 ms
+  off   r-named-cut          tokens     6 finish incomplete calls 0 chunks [] first-call None ms of 205 ms
+{
+ "verdict": "PASS",
+ "fails": [],
+ "policy": [
+  "named-cut: reasoning = cand reasoning + the calls' arguments (harmony): base content '' -> cand calls [('exec_command', '{\"cmd\":\"ls -R')]",
+  "r-named-cut: reasoning = cand reasoning + the calls' arguments (harmony): base content '' -> cand calls [('exec_command', '{\"cmd\":\"ls -R')]"
+ ]
+}
+FRAME gpt-oss-20b-MXFP4.gguf base  auto-2cities         chunks [2] first-call 1137 ms of 1137 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  auto-2cities         chunks [6] first-call 1054 ms of 1194 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   auto-2cities         chunks [2] first-call 1139 ms of 1139 ms
+FRAME gpt-oss-20b-MXFP4.gguf base  required-ls          chunks [2] first-call 234 ms of 234 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  required-ls          chunks [8] first-call 34 ms of 235 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   required-ls          chunks [2] first-call 235 ms of 235 ms
+FRAME gpt-oss-20b-MXFP4.gguf base  named-longfile       chunks [2] first-call 6941 ms of 6941 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  named-longfile       chunks [194] first-call 34 ms of 6960 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   named-longfile       chunks [2] first-call 6951 ms of 6951 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  named-cut            chunks [7] first-call 35 ms of 202 ms
+FRAME gpt-oss-20b-MXFP4.gguf base  auto-json-in-shell   chunks [2] first-call 5109 ms of 5110 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  auto-json-in-shell   chunks [28] first-call 4195 ms of 5102 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   auto-json-in-shell   chunks [2] first-call 5114 ms of 5114 ms
+FRAME gpt-oss-20b-MXFP4.gguf base  r-auto-2cities       chunks [1] first-call 1145 ms of 1145 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  r-auto-2cities       chunks [5] first-call 1006 ms of 1140 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   r-auto-2cities       chunks [1] first-call 1141 ms of 1141 ms
+FRAME gpt-oss-20b-MXFP4.gguf base  r-named-longfile     chunks [1] first-call 6922 ms of 6922 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  r-named-longfile     chunks [193] first-call 34 ms of 6943 ms
+FRAME gpt-oss-20b-MXFP4.gguf off   r-named-longfile     chunks [1] first-call 6944 ms of 6944 ms
+FRAME gpt-oss-20b-MXFP4.gguf cand  r-named-cut          chunks [6] first-call 34 ms of 201 ms
+TOOL260 gpt-oss-20b-MXFP4.gguf PASS
+[axon-node 13:01:58] exit 0 after 183.4s
+[axon-node 13:01:58] peak RSS 10037 MB (job process tree PSS, 2 s samples x86)
+[axon-run 08:02:00] exit 0 after 199.3s (host pod1)
