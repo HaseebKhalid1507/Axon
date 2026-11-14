@@ -835,7 +835,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         }
         let body = std::fs::read(&f)
             .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT {}: {e}", f.to_string_lossy())));
-        ids = crate::serve::chat_prompt(&tok, &model.arch, &body)
+        ids = crate::serve::chat_prompt(&tok, &model, &body)
             .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT: {e}")));
         println!("chat prompt ids ({}): {:?}", ids.len(), ids);
     }
