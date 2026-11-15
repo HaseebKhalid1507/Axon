@@ -12,12 +12,10 @@
 #     A4  A1 with twice the slots on the same pool (-np 2*np -c budget, idle slots cleared: more concurrency)
 #     A5  A2 + -cram 16384             (twice the RAM prompt cache: 20 sessions don't fit in 8 GiB)
 # Then pick.py names the winner (its rule: pick.py and the log); agent_board.sh runs it against axon.
-# SMOKE=1: the 0.5B, a 60-s window, AXON_KV_PAGES=512: the mechanics only, next to other GPU jobs.
 set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
-if [ "${SMOKE:-0}" = 1 ]; then M=$MD/qwen2.5-0.5b-q4_k_m.gguf WIN=60; export AXON_KV_PAGES=512; OUT=$D/sweep-smoke
-else OUT=$D/sweep; fi
+OUT=$D/sweep
 rm -rf "$OUT"; mkdir -p "$OUT"; hw "$OUT/hw.txt"; cat "$OUT/hw.txt"
 CELL=(--kv f16 --rounds 1 --speeds 1 --model "$M" --trace "$TR" --window-s "$WIN" --scale 0.15 --clip 32768)
 python3 -u "$W/scripts/agent_replay.py" board --engines axon --axon "$AX" "${CELL[@]}" --port 18700 --out "$OUT/axon" \

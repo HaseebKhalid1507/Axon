@@ -8,12 +8,12 @@
 set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
-MODELS=${REL_SB_MODELS:-0.5B,1.5B,3B,7B,q3-8B}; ROUNDS=${REL_SB_ROUNDS:-3}
+MODELS=${AXON_REL_SB_MODELS:-0.5B,1.5B,3B,7B,q3-8B}; ROUNDS=${AXON_REL_SB_ROUNDS:-3}
 N=$D/sbnode; rm -rf "$N"; mkdir -p "$N/models" "$N/lib/nvrtc-none" "$N/cache" "$N/bin"
 for f in qwen2.5-0.5b-q4_k_m.gguf qwen2.5-1.5b-instruct-q4_k_m.gguf qwen2.5-3b-instruct-q4_k_m.gguf \
          Qwen2.5-7B-Instruct-Q4_K_M.gguf Qwen3-4B-Q4_K_M.gguf Qwen3-8B-Q4_K_M.gguf; do ln -s "$MD/$f" "$N/models/$f"; done
 echo pass > "$N/bin/axon-node"
-OUT=$D/sb${SMOKE:+-smoke}; rm -rf "$OUT"; mkdir -p "$OUT"; cd "$OUT" || exit 1
+OUT=$D/sb; rm -rf "$OUT"; mkdir -p "$OUT"; cd "$OUT" || exit 1
 cp ~/.local/share/axon-devstack/current/pod/board/sb_pod.py .
 hw hw.txt; { sha256sum sb_pod.py; (cd "$N/models" && sha256sum -- *.gguf); } >> hw.txt; cat hw.txt
 "$AX" kernels list 2>&1 | tail -4

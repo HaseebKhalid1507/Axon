@@ -15,7 +15,7 @@ bin=$NEW/llama-server env=(env LD_LIBRARY_PATH="$NEW")
 [ "$WHICH" = old ] && bin=$OLD/llama-server env=(env -u LD_LIBRARY_PATH)
 extra=(); [ "$PAR" != 0 ] && extra+=(--llama-parallel "$PAR"); [ -n "$LARGS" ] && extra+=("--llama-args=$LARGS")
 "${env[@]}" python3 -u "$W/scripts/agent_replay.py" board --engines axon,llama --axon "$AX" --llama-server "$bin" \
-  "${extra[@]}" --kv f16 --rounds "${REL_ROUNDS:-3}" --speeds "${REL_SPEEDS:-1,4}" --model "$M" --trace "$TR" \
+  "${extra[@]}" --kv f16 --rounds "${AXON_REL_ROUNDS:-3}" --speeds "${AXON_REL_SPEEDS:-1,4}" --model "$M" --trace "$TR" \
   --window-s "$WIN" --scale 0.15 --clip 32768 --port 18900 --out "$OUT" || { echo "STOP: board rc $?"; exit 1; }
 python3 "$W/scripts/agent_replay.py" table --clean-only "$OUT" > "$OUT/table-clean.md" 2>&1
 echo "BOARD END ok"
