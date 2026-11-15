@@ -370,7 +370,7 @@ fn oss_twin_dot_matches_cpu() {
     );
 }
 
-/// Layers `layers` of `m` through `upload_any` (biases too), k from the
+/// Layers `layers` of `m` through `upload` (biases too), k from the
 /// metadata.
 fn upload_oss<'g>(
     g: &'g Gpu,
@@ -382,7 +382,7 @@ fn upload_oss<'g>(
     let k = crate::model::meta_num(m, &key).expect("expert_used_count") as usize;
     layers
         .iter()
-        .map(|&l| CudaExperts::upload_any(g, km, m, l, k).unwrap())
+        .map(|&l| CudaExperts::upload(g, km, m, l, k).unwrap())
         .collect()
 }
 
@@ -578,7 +578,7 @@ fn cuda_experts_oss_bench() {
     let Some(m) = real.as_ref() else {
         return;
     };
-    let ex = CudaExperts::upload_any(&g, &km, m, 12, k).unwrap();
+    let ex = CudaExperts::upload(&g, &km, m, 12, k).unwrap();
     for nb in [128usize, 512, 1152] {
         let h: Vec<f32> = (0..nb * dim).map(|_| rng.f()).collect();
         let mut ids = Vec::with_capacity(nb * k);

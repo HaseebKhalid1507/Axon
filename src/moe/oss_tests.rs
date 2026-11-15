@@ -17,7 +17,7 @@ use crate::model::gptoss_tests::{OssDims, Ts, oss_fixture_dims};
 /// (layers, dim, q heads, kv heads, head dim, expert ffn, experts, top-k,
 /// vocab, window): head size 64 and 8 query heads per kv head (the 20B's),
 /// 3 layers (local, global, local), window 4.
-const GPU_OSS: OssDims = (3, 256, 16, 2, 64, 64, 4, 2, 64, 4);
+pub(super) const GPU_OSS: OssDims = (3, 256, 16, 2, 64, 64, 4, 2, 64, 4);
 
 fn fixture() -> Model {
     oss_fixture_dims(GPU_OSS, |_| {}, |_| {})
@@ -46,7 +46,7 @@ fn with_tensor(name: &'static str, v: f32) -> impl FnOnce(&mut Ts) {
 /// bit; prefill_logits == feed + forward; verify_argmax == forward per row
 /// with the same cache; a cache built as prefix + rest == one fresh
 /// prefill.
-fn contract(net: &MoeQwen3, ids: &[u32], next: u32) {
+pub(super) fn contract(net: &MoeQwen3, ids: &[u32], next: u32) {
     let n = ids.len();
     let mut a = net.new_cache(n + 1);
     let mut b = net.new_cache(n + 1);
@@ -135,7 +135,7 @@ fn script<'g>(
 /// `script` on a plain cache == after drop_graphs == through a shuffled
 /// page table (oss.cu's kernels with a table): the same picks, then one
 /// more `forward` with the same logits, bit for bit.
-fn paged(g: &Gpu, net: &MoeQwen3, prompt: &[u32]) {
+pub(super) fn paged(g: &Gpu, net: &MoeQwen3, prompt: &[u32]) {
     const PAGE: usize = 64;
     let ctx = 640;
     let mut c0 = net.new_cache(ctx);
@@ -164,7 +164,7 @@ fn paged(g: &Gpu, net: &MoeQwen3, prompt: &[u32]) {
     );
 }
 
-fn ids_mod(n: u64, v: u64) -> Vec<u32> {
+pub(super) fn ids_mod(n: u64, v: u64) -> Vec<u32> {
     (0..n)
         .map(|i| (i * 2_654_435_761 % 150_000 % v) as u32)
         .collect()

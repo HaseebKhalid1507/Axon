@@ -18,7 +18,9 @@
 //! gpt-oss runs the same way (stage 1): its windowed attention with sinks
 //! is cuda/oss.cu's (the model's module, `Kernels::module_for`), its biased
 //! router moe.cu's `moe_router` (`MoeKind::Oai`), and its MXFP4 experts are read in place
-//! from the mapping (`Qwen2::new_experts`: no repack, no copy).
+//! from the mapping (`Qwen2::new_experts`: no repack, no copy). With
+//! `--gpu-experts`, resident layers take oss.cu's MXFP4 twins (bias
+//! epilogues, `swiglu_oai`), the CPU's bits as for the other kinds.
 //!
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
@@ -40,7 +42,7 @@ pub(crate) struct MoeQwen3<'m, 'g> {
     /// asked).
     pub(crate) ctx: usize,
     /// The MoE layers whose experts are resident on the GPU
-    /// (`--gpu-experts`; deepseek2 and qwen3moe), and why there are none if
+    /// (`--gpu-experts`; deepseek2, qwen3moe and gpt-oss), and why there are none if
     /// some were asked for.
     res: Option<Resident<'g>>,
     res_note: Option<String>,
@@ -223,26 +225,35 @@ fn place_resident<'g>(
     env: TwinEnv,
 ) -> Result<Resident<'g>, String> {
     {
-        if matches!(kind, MoeKind::Oai(_)) {
-            return Err(format!(
-                "resident experts: deepseek2 and qwen3moe only for now ({})",
-                m.arch
-            ));
-        }
-        experts::twin_identity(env.repack, env.cpu_fused, crate::vmath::fused())?;
-        experts::twin_gemm_ok(gpu.info()?.cc)?;
         let all = expert_layers(m);
+        // Layer l's routed experts' weight types.
+        let types = |l: usize| {
+            (m.tensors.iter())
+                .filter(move |t| {
+                    t.layer == l as i32
+                        && crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                })
+                .map(|t| t.qtype.id)
+        };
         // Layers with a weight type the twins don't cover stay on the CPU
         // (rather than refusing every layer at that one's upload).
         let layers: Vec<(usize, usize)> = (all.iter().copied())
-            .filter(|&(l, _)| {
-                m.tensors.iter().all(|t| {
-                    t.layer != l as i32
-                        || !crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
-                        || crate::cuda::qwen2::twin_type(t.qtype.id).is_ok()
-                })
-            })
+            .filter(|&(l, _)| types(l).all(|q| crate::cuda::qwen2::twin_type(q).is_ok()))
             .collect();
+        // The twins' conditions, by the types they'd run: the r8 types need
+        // the CPU's repack and tensor cores; MXFP4 (gpt-oss) neither.
+        let qts: Vec<u32> = layers.iter().flat_map(|&(l, _)| types(l)).collect();
+        let repack_needed = qts.iter().any(|&q| q != crate::quant::MXFP4);
+        experts::twin_identity(
+            repack_needed,
+            env.repack,
+            env.cpu_fused,
+            crate::vmath::fused(),
+        )?;
+        let cc = gpu.info()?.cc;
+        for &q in &qts {
+            experts::twin_gemm_ok_for(cc, q)?;
+        }
         let d = net.moe.expect("a mixture-of-experts model");
         let dim = net.dim;
         // ctx first: the free memory with one cache of the planned context
@@ -285,8 +296,8 @@ fn place_resident<'g>(
         }
         let r = Resident::upload(gpu, module, m, net.n_layers, &pick, d.k)?;
         for l in r.which() {
-            let f = r.get(l).expect("resident").fused();
-            experts::twin_identity(env.repack, env.cpu_fused, f)?;
+            let ex = r.get(l).expect("resident");
+            experts::twin_identity(ex.repack_needed(), env.repack, env.cpu_fused, ex.fused())?;
         }
         Ok(r)
     }
@@ -507,6 +518,8 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 
 #[cfg(test)]
 mod ds2_tests;
+#[cfg(test)]
+mod ossres_tests;
 #[cfg(test)]
 mod q3res_tests;
 #[cfg(test)]

@@ -6,14 +6,14 @@
 //! (the router's normed states, ids and weights) into device outputs, with
 //! no host sync and no allocation (`ResBufs`, per cache): graph-capturable.
 //! nb = 1 takes the decode GEMV (`moe_gemv_tw`, any arch); more, the grouped
-//! twin GEMMs (sm_80+). `place` picks the resident layers (`--gpu-experts`).
+//! twin GEMMs (sm_80+; MXFP4's sm_61+). `place` picks the resident layers
+//! (`--gpu-experts`).
 //!
 //! gpt-oss's MXFP4 experts have twins of their own in oss.cu (`moe_gemm_mx`,
 //! `moe_gemv_mx`, `moe_gu_mx`; specs/gptoss-gpu-experts.md PR A), with the
 //! expert biases in their epilogues and `swiglu_oai_quant_tw` between, held
-//! in the twin's aligned layout (`Mats::new`). `upload` still refuses expert
-//! biases, so no gpt-oss layer is resident yet (PR B lifts that and
-//! `place_resident`'s refusal); the tests upload them with `upload_any`.
+//! in the twin's aligned layout (`Mats::new`). MXFP4 is never repacked on
+//! the CPU, so its twins hold whatever `AXON_REPACK` says (`twin_identity`).
 
 use super::batch::act_stride;
 use super::gemm2_smem;
@@ -21,22 +21,9 @@ use crate::cuda::{Arg, DevBuf, Gpu, Module};
 use crate::gguf::{Model, Tensor};
 use crate::quant::{self, F32, MXFP4, Q4_K, Q5_0, Q8_0};
 
-pub(crate) use super::{twin_gemm_ok, twin_type};
-
-/// Err if layer l of `m` has expert biases (gpt-oss): the CPU adds them
-/// (`Moe::act`, `down_bias`); the expert kernels have no bias epilogue yet.
-/// `CudaExperts::upload` checks it before uploading anything.
-fn refuse_expert_biases(m: &Model, l: usize) -> Result<(), String> {
-    for p in ["gate", "up", "down"] {
-        let name = format!("blk.{l}.ffn_{p}_exps.bias");
-        if m.tensors.iter().any(|t| t.name == name) {
-            return Err(format!(
-                "{name}: expert biases aren't supported on the GPU yet"
-            ));
-        }
-    }
-    Ok(())
-}
+#[cfg(test)]
+pub(crate) use super::twin_gemm_ok;
+pub(crate) use super::{twin_gemm_ok_for, twin_type};
 
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
@@ -290,7 +277,8 @@ pub(crate) struct CudaExperts<'g> {
     /// gpt-oss's expert biases (gate, up, down: n_e x rows f32 each), with
     /// its activation (`swiglu_oai_quant_tw`); None: no biases, SwiGLU.
     bias: Option<[DevBuf<'g>; 3]>,
-    /// The batched path's twin GEMMs: `twin_gemm_ok` of the device.
+    /// The batched path's twin GEMMs: `twin_gemm_ok_for` of the device and
+    /// the type.
     mma: Result<(), String>,
     /// F of every swiglu_twin launch of the layer, read once at upload: the
     /// host CPU's `vmath::fused()`, the F its `moe_layer_batch` runs with.
@@ -299,24 +287,12 @@ pub(crate) struct CudaExperts<'g> {
 }
 
 impl<'g> CudaExperts<'g> {
-    /// Layer l's experts of `m` (its `ffn_{gate,up,down}_exps`), k per token.
-    /// Expert biases (gpt-oss) are refused (PR B lifts it).
+    /// Layer l's experts of `m` (its `ffn_{gate,up,down}_exps`), k per token,
+    /// with gpt-oss's expert biases (`ffn_{gate,up,down}_exps.bias`, F32
+    /// [rows, n_e]) if the layer has them; MXFP4 experts take the oss.cu
+    /// twins (km: the model's module, the oss module for gpt-oss). Biases
+    /// need MXFP4 experts (only those kernels add them).
     pub(crate) fn upload(
-        g: &'g Gpu,
-        km: &'g Module<'g>,
-        m: &Model,
-        l: usize,
-        k: usize,
-    ) -> Result<CudaExperts<'g>, String> {
-        refuse_expert_biases(m, l)?;
-        Self::upload_any(g, km, m, l, k)
-    }
-
-    /// `upload` without the refusal: gpt-oss's MXFP4 experts with their
-    /// biases (`ffn_{gate,up,down}_exps.bias`, F32 [rows, n_e]) too, which
-    /// take the oss.cu twins (km: the model's module, the oss module for
-    /// gpt-oss). Biases need MXFP4 experts (only those kernels add them).
-    pub(crate) fn upload_any(
         g: &'g Gpu,
         km: &'g Module<'g>,
         m: &Model,
@@ -367,6 +343,7 @@ impl<'g> CudaExperts<'g> {
             }
             _ => return Err(format!("layer {l}: some expert biases are missing")),
         };
+        let mma = twin_gemm_ok_for(g.info()?.cc, gate.qt);
         Ok(CudaExperts {
             g,
             km,
@@ -378,7 +355,7 @@ impl<'g> CudaExperts<'g> {
             up,
             down,
             bias,
-            mma: twin_gemm_ok(g.info()?.cc),
+            mma,
             fused: crate::vmath::fused(),
         })
     }
@@ -421,6 +398,12 @@ impl<'g> CudaExperts<'g> {
     /// The F the layer's swiglu_twin launches pass.
     pub(crate) fn fused(&self) -> bool {
         self.fused
+    }
+
+    /// Whether the CPU must repack for this layer's twins to hold
+    /// (`twin_identity`): the r8 types yes, all-MXFP4 (gpt-oss) no.
+    pub(crate) fn repack_needed(&self) -> bool {
+        [self.gate.qt, self.up.qt, self.down.qt] != [MXFP4; 3]
     }
 
     /// Enqueue the layer's experts of nb tokens: h at `h` (nb x dim f32,
@@ -1095,11 +1078,18 @@ pub(crate) fn place(layers: &[(usize, usize)], want: GpuExperts, budget: usize) 
 }
 
 /// Whether resident experts give the CPU experts' bits here (#121 item 5):
-/// the twins are the r8 / r8q kernels' numerics, so the CPU must repack
-/// (`AXON_REPACK=0` reads the file's rows in place, other sums), and the
-/// twins' F must be the host's `vmath::fused()`. Err says why not.
-pub(crate) fn twin_identity(repack: bool, cpu_fused: bool, twin_fused: bool) -> Result<(), String> {
-    if !repack {
+/// the r8 types' twins are the r8 / r8q kernels' numerics, so the CPU must
+/// repack (`AXON_REPACK=0` reads the file's rows in place, other sums);
+/// MXFP4's match the CPU's one MXFP4 kernel, which never repacks
+/// (`repack_needed` false: gpt-oss). Either way the twins' F must be the
+/// host's `vmath::fused()`. Err says why not.
+pub(crate) fn twin_identity(
+    repack_needed: bool,
+    repack: bool,
+    cpu_fused: bool,
+    twin_fused: bool,
+) -> Result<(), String> {
+    if repack_needed && !repack {
         return Err(
             "AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match".into(),
         );

@@ -3721,6 +3721,16 @@ pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
     }
 }
 
+/// `twin_gemm_ok` for the twins of weight type qt: MXFP4's batched kernel
+/// (`moe_gemm_mx`, oss.cu: dp4a, cp.async only where it exists) runs on
+/// sm_61+; the r8 types' need tensor cores (sm_80+).
+pub(crate) fn twin_gemm_ok_for(cc: (u32, u32), qt: u32) -> Result<(), String> {
+    match qt == MXFP4 && cc >= (6, 1) {
+        true => Ok(()),
+        false => twin_gemm_ok(cc),
+    }
+}
+
 pub(crate) mod kvio;
 pub(crate) mod mla;
 pub(crate) mod moe;

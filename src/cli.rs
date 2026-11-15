@@ -91,7 +91,7 @@ flags:
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
-  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2, qwen3moe)
+  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2, qwen3moe, gpt-oss)
               routed experts of N layers (auto: as many as fit after the context's cache; smallest
               first) resident on the GPU instead of the CPU; same results (the GPU twins of the
               CPU's kernels); default 0; as AXON_GPU_EXPERTS
@@ -245,7 +245,7 @@ models (docs/models.md):
         gemma3 (Gemma 3 1B and 4B; on cuda the whole model on the GPU); mixture-of-experts models:
         qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight) and gpt-oss
         (gpt-oss-20b), whose experts run on the CPU under --device cuda (--gpu-experts moves
-        qwen3moe's and deepseek2's to the GPU)
+        some or all of them to the GPU)
   a Hugging Face checkpoint directory of a qwen2, qwen3 or llama model (config.json, tokenizer.json,
         model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
         the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted

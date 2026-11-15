@@ -48,6 +48,12 @@ fn twin_refusals() {
     for cc in [(8, 0), (8, 6), (8, 9), (9, 0), (12, 0)] {
         twin_gemm_ok(cc).unwrap();
     }
+    // MXFP4's batched twin is dp4a: sm_61+; the r8 types' still sm_80+.
+    for cc in [(6, 1), (7, 5), (8, 9), (12, 0)] {
+        twin_gemm_ok_for(cc, crate::quant::MXFP4).unwrap();
+    }
+    assert!(twin_gemm_ok_for((6, 0), crate::quant::MXFP4).is_err());
+    assert!(twin_gemm_ok_for((7, 5), crate::quant::Q4_K).is_err());
     use crate::quant::*;
     for qt in [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4] {
         twin_type(qt).unwrap();
@@ -67,15 +73,16 @@ pub(super) const OSS_NBS: [usize; 5] = [1, 7, 48, 129, 1152];
 /// Layer l of `m` on the GPU vs `cpu.moe_layer_batch` at every nb of NBS:
 /// nb random hidden states (every third token 8x larger), routed by the CPU's
 /// router; then nb invariance on the largest batch (the decode GEMV, token by
-/// token). Below sm_80 the batched path must refuse, and the GEMV path is
-/// checked against the CPU instead.
+/// token). Where the batched path can't run (below sm_80; MXFP4's below
+/// sm_61) it must refuse, and the GEMV path is checked against the CPU
+/// instead.
 fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
     check_layer_at(g, ex, cpu, l, what, &NBS)
 }
 
 /// `check_layer` at the batch sizes `nbs` (nb invariance on the largest).
 pub(super) fn check_layer_at(
-    g: &Gpu,
+    _g: &Gpu,
     ex: &CudaExperts,
     cpu: &Qwen2,
     l: usize,
@@ -84,7 +91,7 @@ pub(super) fn check_layer_at(
 ) {
     let mut rng = Rng(0x6d6f_6572_6573_0000 ^ l as u64);
     let (dim, k) = (cpu.dim, ex.k);
-    let mma = twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    let mma = ex.mma.is_ok();
     assert_eq!(ex.fused(), crate::vmath::fused(), "one F: the host CPU's");
     let mut used = vec![0usize; ex.n_e];
     let big = *nbs.iter().max().unwrap();
@@ -383,64 +390,65 @@ fn resident_placement_and_identity() {
     assert_eq!(GpuExperts::parse("auto"), Ok(GpuExperts::Auto));
     assert_eq!(GpuExperts::parse("12"), Ok(GpuExperts::N(12)));
     assert!(GpuExperts::parse("-1").is_err() && GpuExperts::parse("all").is_err());
-    twin_identity(true, true, true).unwrap();
-    twin_identity(true, false, false).unwrap();
+    twin_identity(true, true, true, true).unwrap();
+    twin_identity(true, true, false, false).unwrap();
     assert!(
-        twin_identity(false, true, true)
+        twin_identity(true, false, true, true)
             .unwrap_err()
             .contains("AXON_REPACK=0")
     );
     assert!(
-        twin_identity(true, true, false)
+        twin_identity(true, true, true, false)
             .unwrap_err()
             .contains("fused")
     );
-    assert!(twin_identity(true, false, true).is_err());
+    assert!(twin_identity(true, true, false, true).is_err());
+    // MXFP4 (repack not needed): AXON_REPACK=0 is fine, F still must match.
+    twin_identity(false, false, true, true).unwrap();
+    twin_identity(false, true, false, false).unwrap();
+    assert!(twin_identity(false, false, true, false).is_err());
 }
 
 /// The fixture with an extra F32 tensor `name` of `dims` (zeros).
-fn fixture_plus(name: &str, dims: &[u64]) -> Model {
+fn fixture_plus(extra: &[(String, Vec<u64>)]) -> Model {
     let o = Opt {
         q_lora: false,
         yarn: false,
     };
     let (meta, mut list, mut data) =
         crate::model::deepseek2_tests::fixture_tensors(o, crate::quant::Q8_0);
-    list.push((name.to_string(), dims.to_vec(), crate::quant::F32));
-    data.push(vec![0u8; 4 * dims.iter().product::<u64>() as usize]);
+    for (name, dims) in extra {
+        list.push((name.clone(), dims.clone(), crate::quant::F32));
+        data.push(vec![0u8; 4 * dims.iter().product::<u64>() as usize]);
+    }
     let l: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
     crate::gguf::build_for_test_with(&meta, &l, &data)
 }
 
-/// Expert biases are refused, with the tensor named, by the check `upload`
-/// runs before any upload (#122 review): on the fixture with a synthetic
-/// `ffn_{gate,up,down}_exps.bias` (gpt-oss's shapes: [rows, n_e]) in layer
-/// 1; layer 2 and the plain fixture pass. No GPU needed; with one,
-/// `CudaExperts::upload` itself refuses.
+/// Expert biases need MXFP4 experts (only oss.cu's twins add them; stage B
+/// lifted the refusal of biases as such): `upload` refuses them on the Q8_0
+/// fixture's layer 1, all three (gpt-oss's shapes, [rows, n_e]: "non-MXFP4")
+/// or one ("missing"), naming the layer; layer 2, without, uploads.
 #[test]
-fn expert_biases_refused_before_upload() {
+fn expert_biases_need_mxfp4() {
     use crate::model::deepseek2_tests::FX;
-    let (plain, _) = ds2_fixture(
-        Opt {
-            q_lora: false,
-            yarn: false,
-        },
-        crate::quant::Q8_0,
-    );
-    refuse_expert_biases(&plain, 1).unwrap();
-    for (p, rows) in [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)] {
-        let name = format!("blk.1.ffn_{p}_exps.bias");
-        let m = fixture_plus(&name, &[rows as u64, FX.n_exp as u64]);
-        let e = refuse_expert_biases(&m, 1).unwrap_err();
-        assert!(e.contains(&name) && e.contains("expert biases"), "{e}");
-        refuse_expert_biases(&m, 2).unwrap();
-        if let Some(g) = crate::testutil::gpu() {
-            let km = Kernels::module_for(&g, &m).unwrap();
-            let e = CudaExperts::upload(&g, &km, &m, 1, FX.k_exp)
-                .err()
-                .expect("refused");
-            assert!(e.contains(&name), "{e}");
-            CudaExperts::upload(&g, &km, &m, 2, FX.k_exp).unwrap();
-        }
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let all: Vec<(String, Vec<u64>)> = [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)]
+        .iter()
+        .map(|&(p, rows)| {
+            let name = format!("blk.1.ffn_{p}_exps.bias");
+            (name, vec![rows as u64, FX.n_exp as u64])
+        })
+        .collect();
+    for (set, why) in [(&all[..], "non-MXFP4"), (&all[..1], "missing")] {
+        let m = fixture_plus(set);
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let e = CudaExperts::upload(&g, &km, &m, 1, FX.k_exp)
+            .err()
+            .expect("refused");
+        assert!(e.contains("layer 1") && e.contains(why), "{e}");
+        CudaExperts::upload(&g, &km, &m, 2, FX.k_exp).unwrap();
     }
 }
