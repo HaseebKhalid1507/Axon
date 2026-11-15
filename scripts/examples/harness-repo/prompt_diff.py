@@ -72,14 +72,16 @@ def main():
     ap.add_argument("bodies", nargs="+")
     a = ap.parse_args()
     work = tempfile.mkdtemp(prefix="prompt-diff-")
-    bodies = [(os.path.basename(p), json.load(open(p))) for p in a.bodies]
+    # Both servers serve the alias the bodies name (Axon refuses a model name it doesn't serve, llama-server ignores it)
+    bodies = [(os.path.basename(p), dict(json.load(open(p)), model="prompt-diff")) for p in a.bodies]
     route = lambda b: "/v1/responses" if "input" in b and "messages" not in b else "/v1/chat/completions"
     bad = 0
 
     # llama.cpp: the server harness_accept.py runs (--jinja), on the CPU; renders, tokenizes, serves
     lp = free_port()
     llog = open(os.path.join(work, "llama.log"), "w")
-    ls = up([a.llama_server, "-m", a.model, "--host", "127.0.0.1", "--port", str(lp), "--jinja", "-c", str(a.ctx),
+    ls = up([a.llama_server, "-m", a.model, "-a", "prompt-diff", "--host", "127.0.0.1", "--port", str(lp), "--jinja",
+             "-c", str(a.ctx),
              "-np", "1", "-ngl", "0", "-t", str(a.threads), "--no-warmup"], lp, llog)
     ver = subprocess.run([a.llama_server, "--version"], capture_output=True, text=True).stderr.strip().splitlines()
     print("PROMPT-DIFF llama-server %s; axon %s; model %s" % (
@@ -122,8 +124,8 @@ def main():
     ap_ = free_port()
     alog = open(os.path.join(work, "axon.log"), "w")
     try:
-        ax = up([a.axon, "serve", a.model, "--host", "127.0.0.1", "--port", str(ap_), "--device", "cpu",
-                 "--ctx", str(a.ctx)], ap_, alog)
+        ax = up([a.axon, "serve", a.model, "--alias", "prompt-diff", "--host", "127.0.0.1", "--port", str(ap_),
+                 "--device", "cpu", "--ctx", str(a.ctx)], ap_, alog)
         try:
             for name, b in bodies:
                 n, err = served_count(ap_, rows[name]["route"], b)
@@ -163,15 +165,20 @@ def main():
             d = list(difflib.unified_diff(lt.splitlines(), at.splitlines(), "llama.cpp", "axon", n=0, lineterm=""))
             print("    text diff (- llama.cpp, + axon): %d lines differ" % sum(
                 1 for x in d if x[:1] in "+-" and x[:3] not in ("+++", "---")), flush=True)
-            for x in d[:60]:
-                print("      " + x[:400], flush=True)
-            # the same line, character by character, for the first differing pair
+            for x in d[:12]:
+                print("      " + x[:300], flush=True)
+            # every differing line pair, character by character: each distinct edit and how often it occurs
+            edits = {}
             for x, y in zip([x for x in d if x.startswith("-") and not x.startswith("---")],
                             [y for y in d if y.startswith("+") and not y.startswith("+++")]):
                 sm = difflib.SequenceMatcher(None, x[1:], y[1:], autojunk=False)
-                ops = [(op, x[1:][i1:i2], y[1:][j1:j2]) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
-                print("    first changed line, edits (llama.cpp -> axon): %s" % ops[:8], flush=True)
-                break
+                for op, i1, i2, j1, j2 in sm.get_opcodes():
+                    if op != "equal":
+                        k = (op, x[1:][i1:i2], y[1:][j1:j2])
+                        edits[k] = edits.get(k, 0) + 1
+            print("    every edit (llama.cpp -> axon), with its count:", flush=True)
+            for k, n in sorted(edits.items(), key=lambda kv: -kv[1]):
+                print("      %3d x %s %r -> %r" % (n, k[0], k[1][:120], k[2][:120]), flush=True)
     print("PROMPT-DIFF %s (%d bodies, %d not measured)" % ("DONE" if not bad else "INCOMPLETE", len(bodies), bad))
     return 1 if bad else 0
 
