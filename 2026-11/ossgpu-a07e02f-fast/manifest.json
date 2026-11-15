@@ -1,0 +1,49 @@
+{
+ "label": "ossgpu-a07e02f-fast",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1114-205309-3a6b",
+   "name": "ossgpu-a07e02f-fast-rel",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": null,
+   "hw": "hw-None.txt",
+   "gpu": "?",
+   "driver": "?",
+   "sha": "a07e02f",
+   "binary": "axon-test-a07e02f",
+   "started": null,
+   "ended": 1794751096.1014693,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "779d87bbd54251281b7f84543f82b367a9367ab01df9380702bc60daa032e384",
+   "log_bytes": 1210
+  },
+  {
+   "job": "1114-205309-f321",
+   "name": "ossgpu-a07e02f-fast-dbg-cpu",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": null,
+   "hw": "hw-None.txt",
+   "gpu": "CPU only (None; GPU hidden)",
+   "driver": "?",
+   "sha": "a07e02f",
+   "binary": "axon-test-dbg-a07e02f",
+   "started": null,
+   "ended": 1794751096.177526,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "3c629ee4e52de5fa1227556a5292adcc802ab292f2c507cf2732533323016e07",
+   "log_bytes": 138
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-15 08:58:17 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
