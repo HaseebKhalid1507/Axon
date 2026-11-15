@@ -1,0 +1,49 @@
+{
+ "label": "oss-7650be2-fast",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1115-091155-e51a",
+   "name": "oss-7650be2-fast-rel",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "7650be2",
+   "binary": "axon-test-7650be2",
+   "started": 1794767098.1570978,
+   "ended": 1794769889.4295685,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "dc4cc2d083ae19b806354fdc532788499d18904c8af9435597256857e1cafc15",
+   "log_bytes": 66723
+  },
+  {
+   "job": "1115-091155-a8c0",
+   "name": "oss-7650be2-fast-dbg-cpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "620.70.06",
+   "sha": "7650be2",
+   "binary": "axon-test-dbg-7650be2",
+   "started": 1794769889.4295685,
+   "ended": 1794770610.8094323,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "0c33e7b08e9b871df930b8f390b3c544445021665fd973de776a43da0a76e054",
+   "log_bytes": 61627
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-15 14:23:35 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
