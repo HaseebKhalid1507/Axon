@@ -583,7 +583,7 @@ fn cuda_experts_oss_bench() {
         for _ in 0..nb {
             let mut pick = Vec::new();
             while pick.len() < k {
-                let e = (rng.next() >> 20) as i32 % n_e as i32;
+                let e = ((rng.next() >> 20) % n_e as u64) as i32;
                 if !pick.contains(&e) {
                     pick.push(e);
                 }
