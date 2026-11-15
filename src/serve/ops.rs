@@ -304,6 +304,22 @@ pub struct Metrics {
     pub refeed_claims: AtomicU64,
     #[cfg(test)]
     pub refeed_tokens: AtomicU64,
+    /// Tests: no prompt is fed past this many tokens (`Batch::feed`;
+    /// usize::MAX, the start: no cap), to hold a request mid-feed. A
+    /// refeed's claim of its prefix (`Batch::refeed_claim`, a preempted or
+    /// unfed request's) maps pages without feeding them, so it can go past
+    /// the cap; the feed after it is held to the cap.
+    #[cfg(test)]
+    pub feed_cap: AtomicUsize,
+    /// Tests: requests whose client went away while they were fed
+    /// (`Batch::reap`): the prompt tokens fed, and of how many to feed.
+    #[cfg(test)]
+    pub reaped_fed: Mutex<Vec<(usize, usize)>>,
+    /// Tests: every claim that mapped the index's pages
+    /// (`Batch::claim_prefix`): the slot, the tokens mapped, and whether
+    /// it was a refeed's (an admission's otherwise).
+    #[cfg(test)]
+    pub claims: Mutex<Vec<(usize, u64, bool)>>,
 }
 
 impl Metrics {
@@ -361,6 +377,12 @@ impl Default for Metrics {
             refeed_claims: AtomicU64::new(0),
             #[cfg(test)]
             refeed_tokens: AtomicU64::new(0),
+            #[cfg(test)]
+            feed_cap: AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            reaped_fed: Mutex::default(),
+            #[cfg(test)]
+            claims: Mutex::default(),
             sched: Mutex::default(),
         }
     }

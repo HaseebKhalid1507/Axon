@@ -448,20 +448,21 @@ fn cache_kv(kv: KvType) -> CacheKv {
 /// with the main model's context (`ctx` = what `Backend::ctx` gives for
 /// the requested `want_ctx`), at most draft_ctx (it doesn't draft past
 /// its context). gen and chat: draft_ctx = want_ctx; serve sizes the
-/// drafter for less than a long trained context.
+/// drafter for less than a long trained context. Err: `target`'s error as
+/// it is, the drafter's after `--draft-model: `.
 pub fn load_pair<'a>(
     dm: Option<&DraftModel>,
     device: Device,
     want_ctx: usize,
     draft_ctx: usize,
     kv: KvType,
-    target: impl FnOnce() -> Backend<'a>,
+    target: impl FnOnce() -> Result<Backend<'a>, String>,
 ) -> Result<(Backend<'a>, Option<ModelDrafter<Backend<'static>>>), String> {
     let Some(dm) = dm else {
-        return Ok((target(), None));
+        return Ok((target()?, None));
     };
-    let r = dm.reserve(device, draft_ctx, kv)?;
-    let net = target();
+    let r = (dm.reserve(device, draft_ctx, kv)).map_err(|e| format!("--draft-model: {e}"))?;
+    let net = target()?;
     let ctx = net.ctx(want_ctx).min(draft_ctx);
     // A split model gets no warning: its decode is bound by reading the CPU
     // layers' weights, which a verify pass does once for all of its tokens,
@@ -474,7 +475,7 @@ pub fn load_pair<'a>(
             want_ctx.min(draft_ctx)
         );
     }
-    let d = dm.load(device, r, ctx, kv)?;
+    let d = (dm.load(device, r, ctx, kv)).map_err(|e| format!("--draft-model: {e}"))?;
     Ok((net, Some(d)))
 }
 

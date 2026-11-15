@@ -59,7 +59,13 @@ fn test_opts(path: &str, device: Device) -> Opts {
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         step_ms: super::engine::STEP_MS,
-        sched: super::engine::Sched::default(),
+        // As `Sched::default`, but a bad AXON_ADMIT fails the test instead
+        // of exiting the test process (#269).
+        sched: super::engine::Sched::from_env(
+            std::env::var("AXON_ADMIT").ok().as_deref(),
+            std::env::var("AXON_STEP_COST").ok().as_deref(),
+        )
+        .expect("AXON_ADMIT"),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -3048,8 +3054,17 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
                 }
             });
         }
-        // Both slots busy with shorts, more queued.
-        std::thread::sleep(Duration::from_millis(500));
+        // Both slots busy with shorts and one waiting at least, so the long
+        // one can't find a slot free: it waits (a sleep of 500 ms here let
+        // a slow start, a debug build on a shared GPU, admit it at once:
+        // 1114-125202-b1eb).
+        wait_for("both slots busy and a short waiting", || {
+            let sl = call(a, "GET", "/slots", "").json();
+            let busy = (sl["slots"].as_array().unwrap().iter())
+                .filter(|x| x["busy"] == true)
+                .count();
+            busy == 2 && sl["waiting"].as_array().is_some_and(|w| !w.is_empty())
+        });
         let h =
             sc.spawn(move || post(a, "/v1/completions", long).json()["choices"][0]["text"].clone());
         // The long one's last age seen in the waiting list (the longest
@@ -3087,6 +3102,101 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
         "the long prompt waited {waited} ms: past 2 x {age} ms"
     );
     assert_eq!(text, solo, "the long prompt's reply == alone");
+}
+
+/// Refusals on the engine thread come back from `start` as its error
+/// (#269), not as an exit: `--ctx` past the trained context, `--gpu-layers`
+/// without CUDA, a model file that isn't there, a draft model that isn't
+/// there, `--parallel 2` on the CPU (refused after its backend is built,
+/// which is dropped), and `--no-think` on a model that doesn't think
+/// (refused by `start` once the server is fully up: its engine and accept
+/// threads stopped and joined). Each used to call `crate::fail` (exit 2),
+/// which ended a test binary in the middle of its run with the message
+/// captured and lost (1114-174039-9861). The test process is still here to
+/// check the messages: the ones `axon serve` exits 2 with.
+#[test]
+fn serve_start_refusals_dont_exit() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let refused = |what: &str, f: &dyn Fn(&mut Opts)| -> String {
+        let mut o = test_opts(p, Device::Cpu);
+        f(&mut o);
+        match start(o) {
+            Ok(_) => panic!("{what}: the server started"),
+            Err(e) => {
+                assert!(super::is_refused(&e), "{what}: not a refusal: {e}");
+                e.to_string()
+            }
+        }
+    };
+    let e = refused("--ctx", &|o| o.ctx = Some(1 << 22));
+    assert!(e.starts_with("--ctx 4194304 is past the "), "{e}");
+    let e = refused("--gpu-layers", &|o| o.gpu_layers = Some(2));
+    assert_eq!(e, "--gpu-layers needs --device cuda");
+    let e = refused("no file", &|o| o.path = "/nonexistent/axon-269.gguf".into());
+    assert_eq!(e, "cannot open '/nonexistent/axon-269.gguf': no such file");
+    let e = refused("no draft file", &|o| {
+        o.draft_model = Some("/nonexistent/axon-269-draft.gguf".into());
+        o.max_draft = 4;
+    });
+    assert!(
+        e.starts_with("--draft-model /nonexistent/axon-269-draft.gguf: "),
+        "{e}"
+    );
+    let e = refused("--parallel", &|o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    assert_eq!(
+        e,
+        "--parallel 2: batching many requests needs the whole model on one GPU (--device cuda; \
+         not with --gpu-layers or several AXON_GPUS); this backend serves one request at a time \
+         (--parallel 1)"
+    );
+    // The test model doesn't think (an AXON_TEST_MODEL that does starts).
+    let mut o = test_opts(p, Device::Cpu);
+    o.no_think = true;
+    match start(o) {
+        Ok(_) => eprintln!("--no-think: {p} thinks: its refusal not checked"),
+        Err(e) => {
+            assert!(super::is_refused(&e), "--no-think: not a refusal: {e}");
+            assert_eq!(
+                e.to_string(),
+                format!("--no-think: {p} has no <think> token (not a thinking model)")
+            );
+        }
+    }
+}
+
+/// GET /slots's `waiting` is the engine's waiting list: empty once a
+/// request that ran alone (the S1 path: nothing else running or waiting)
+/// is done and the pool idle (#268: the list was published before the S1
+/// path took the request, and not again until the next one came, so an
+/// idle server listed a finished request as waiting).
+#[test]
+fn serve_solo_leaves_no_waiting() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    let a = s.addr;
+    for i in 0..3 {
+        let b =
+            json!({"prompt": format!("{i}. Name a colour:"), "max_tokens": 4, "temperature": 0});
+        assert_eq!(post(a, "/v1/completions", b).status, 200);
+        wait_idle(a);
+        let sl = call(a, "GET", "/slots", "").json();
+        assert_eq!(sl["waiting"], json!([]), "request {i}: {sl}");
+        assert_eq!(sl["queue_depth"], 0, "request {i}: {sl}");
+    }
 }
 
 /// Shortest-first admission (`--admit-order sjf`, the default): with 4
@@ -7853,55 +7963,74 @@ fn wait_idle(a: SocketAddr) {
     });
 }
 
-/// AXON_SHARE_KV is on by default (the 11-12 decision): "0" is the kill
-/// switch, main's paths; unset or any other value is on ("1" as when it
-/// was opt-in). Under fast kernels it is off unless "1" (#228's review).
-/// The start line says which, the kill switch when on, and echoes a value
-/// that reads as on without being 1.
+/// AXON_SHARE_KV is on by default (the 11-12 decision), off by default
+/// under fast kernels (#228's review), and read strictly (#267): "0" off
+/// (the kill switch, main's paths), "1" on, fast kernels or not, unset or
+/// empty the default; any other value refuses to start, with a message
+/// naming the valid ones (it used to read as on, or under fast kernels as
+/// off). The start line says which, what decided it, and the other way.
 #[test]
 fn share_kv_is_on_by_default() {
-    use super::{share_line, share_on};
+    use super::{ShareSet, share_env, share_line, share_on, share_said};
+    assert_eq!(share_env(None), Ok(None));
+    for v in ["", " ", "\n"] {
+        assert_eq!(share_env(Some(v)), Ok(None), "{v:?}");
+    }
+    for v in ["1", " 1\n"] {
+        assert_eq!(share_env(Some(v)), Ok(Some(true)), "{v:?}");
+    }
+    for v in ["0", " 0\n"] {
+        assert_eq!(share_env(Some(v)), Ok(Some(false)), "{v:?}");
+    }
+    for v in ["off", "false", "on", "true", "2", "01", "yes", "\u{fffd}"] {
+        let e = share_env(Some(v)).unwrap_err();
+        assert!(
+            e.starts_with(&format!("AXON_SHARE_KV={v:?}: expected 0")) && e.contains("or 1 (on)"),
+            "{v:?}: {e}"
+        );
+    }
     assert!(share_on(None, false));
-    for v in ["1", " 1\n", "", "true", "on", "off", "2"] {
-        assert!(share_on(Some(v), false), "{v:?}");
-    }
-    assert!(!share_on(Some("0"), false));
-    assert!(!share_on(Some(" 0\n"), false));
-    // Fast kernels: "1" only.
     assert!(!share_on(None, true));
-    for v in ["", "true", "on", "2", "0", " 0\n"] {
-        assert!(!share_on(Some(v), true), "fast {v:?}");
+    for fast in [false, true] {
+        assert!(share_on(Some(true), fast), "fast {fast}");
+        assert!(!share_on(Some(false), fast), "fast {fast}");
     }
-    assert!(share_on(Some("1"), true));
-    assert!(share_on(Some(" 1\n"), true));
-    let on = "shared prefix KV pages on (AXON_SHARE_KV=0 turns them off)";
-    assert_eq!(share_line(true, None, false), on);
-    assert_eq!(share_line(true, Some("1"), false), on);
-    assert_eq!(share_line(true, Some(""), false), on);
     assert_eq!(
-        share_line(true, Some("off"), false),
-        "shared prefix KV pages on (AXON_SHARE_KV=\"off\" reads as on: only 0 turns them off)"
+        share_line(ShareSet::Default, false),
+        "shared prefix KV pages on (the default; AXON_SHARE_KV=0 turns them off)"
     );
     assert_eq!(
-        share_line(false, Some(" 0\n"), false),
-        "shared prefix KV pages off (AXON_SHARE_KV=0)"
+        share_line(ShareSet::Env(true), false),
+        "shared prefix KV pages on (AXON_SHARE_KV=1, as the default; AXON_SHARE_KV=0 turns them off)"
     );
-    assert_eq!(
-        share_line(false, Some("0"), true),
-        "shared prefix KV pages off (AXON_SHARE_KV=0)"
-    );
-    let fast_off = share_line(false, None, true);
+    for fast in [false, true] {
+        assert_eq!(
+            share_line(ShareSet::Env(false), fast),
+            "shared prefix KV pages off (AXON_SHARE_KV=0)"
+        );
+    }
+    let fast_off = share_line(ShareSet::Default, true);
     assert!(
-        fast_off.contains("fast kernels") && fast_off.contains("AXON_SHARE_KV=1"),
+        fast_off.starts_with("shared prefix KV pages off (the default under fast kernels")
+            && fast_off.contains("AXON_SHARE_KV=1"),
         "{fast_off}"
     );
-    assert_eq!(share_line(false, Some("on"), true), fast_off);
-    let fast_on = share_line(true, Some("1"), true);
+    let fast_on = share_line(ShareSet::Env(true), true);
     assert!(
-        fast_on.contains("fast kernels") && fast_on.contains("AXON_SHARE_KV=0"),
+        fast_on.starts_with("shared prefix KV pages on under fast kernels (AXON_SHARE_KV=1)")
+            && fast_on.contains("AXON_SHARE_KV=0"),
         "{fast_on}"
     );
-    assert_eq!(share_line(false, None, false), "shared prefix KV pages off");
+    assert_eq!(
+        share_line(ShareSet::Opts(false), true),
+        "shared prefix KV pages off (set by the caller)"
+    );
+    // Under --quiet: said when the variable set it or fast kernels turned
+    // the default off; not for the plain default, nor `Opts::share`.
+    assert!(share_said(ShareSet::Env(false), false));
+    assert!(share_said(ShareSet::Default, true));
+    assert!(!share_said(ShareSet::Default, false));
+    assert!(!share_said(ShareSet::Opts(true), true));
 }
 
 /// Shared prefix KV pages are off by default while fast kernels run
@@ -7924,7 +8053,9 @@ fn serve_share_off_under_fast_kernels() {
         ));
         return;
     }
-    if let Ok(v) = std::env::var("AXON_SHARE_KV") {
+    if let Ok(v) = std::env::var("AXON_SHARE_KV")
+        && !v.trim().is_empty()
+    {
         crate::testutil::skip_note(format_args!(
             "AXON_SHARE_KV={v:?} is set: the default isn't what runs"
         ));
@@ -7947,6 +8078,102 @@ fn serve_share_off_under_fast_kernels() {
         );
         assert_eq!(sl.get("pages_warm").is_some(), share, "{num}: {sl}");
     }
+}
+
+/// Shared prefix KV pages on under fast kernels (AXON_SHARE_KV=1, here
+/// `Opts::share`; #267), the path where a debug build's duplicate-block
+/// byte check is skipped (`Batch::index_pages`: fast kernels' rows change
+/// with the chunking). The FP8 checkpoint under `--numerics fast` on a GPU
+/// with e4m3 tensor cores, `serve_share_dup_swapped`'s traffic: R decodes
+/// (prompts fed 64 tokens a step, two at a time) while A and B, a long
+/// common prefix each, prefill side by side, so whichever is behind writes
+/// blocks the other has just indexed and swaps them for the index's
+/// pages; then a probe with A's prefix maps its whole pages. Every reply
+/// comes back, duplicates were swapped (the unchecked path ran), the probe
+/// reports the prefix cached, and a debug build's per-step checks of the
+/// pool, the index and their holds pass. The texts aren't compared with
+/// sharing off: fast mode's paths are graded at the logits, not held
+/// equal (`identity_checks`).
+#[test]
+fn serve_share_on_under_fast_kernels() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    if !fast_kernels_on(p, Device::Cuda) {
+        crate::testutil::skip_note(format_args!(
+            "no fast kernels on this GPU (FP8's are sm_89 and later)"
+        ));
+        return;
+    }
+    let prefix =
+        "The surveyors mapped each valley, ridge and stream of the northern range. ".repeat(32);
+    let a_text =
+        format!("{prefix}Alder walked the east trail, counting cairns. What did Alder count?");
+    let b_text =
+        format!("{prefix}Birch walked the west trail, counting pines. What did Birch count?");
+    let req = |t: &str, n: usize| json!({"prompt": t, "max_tokens": n, "temperature": 0});
+    let s = server_with(p, Device::Cuda, |o| {
+        o.parallel = 4;
+        o.parallel_set = true;
+        o.prefill_chunk = 64;
+        o.sched.step_tokens = 64;
+        o.sched.lanes = 2;
+        o.numerics = Numerics::Fast;
+        o.share = Some(true);
+    });
+    let a = s.addr;
+    let id = call(a, "GET", "/identity", "").json();
+    assert_eq!(id["numerics"], Numerics::Fast.tag(), "{id}");
+    let busy = || {
+        (call(a, "GET", "/slots", "").json()["slots"].as_array())
+            .unwrap()
+            .iter()
+            .filter(|x| x["busy"] == true)
+            .count()
+    };
+    let start = std::sync::Barrier::new(2);
+    let r_body = req("Write a long story about a fox who learns to sail.", 600);
+    let got: Vec<(String, u64)> = std::thread::scope(|sc| {
+        let r = sc.spawn(|| share_reply(a, &r_body));
+        wait_for("R decoding", || busy() >= 1);
+        let ab: Vec<_> = [&a_text, &b_text]
+            .into_iter()
+            .map(|t| {
+                let (start, b) = (&start, req(t, 16));
+                sc.spawn(move || {
+                    start.wait();
+                    share_reply(a, &b)
+                })
+            })
+            .collect();
+        let mut v: Vec<_> = ab.into_iter().map(|h| h.join().unwrap()).collect();
+        v.push(r.join().unwrap());
+        v
+    });
+    wait_idle(a);
+    assert!(
+        got.iter().all(|r| !r.0.is_empty()),
+        "an empty reply: {got:?}"
+    );
+    let swapped = s.swapped();
+    assert!(
+        swapped > 0,
+        "no duplicate: A and B didn't prefill the prefix together"
+    );
+    let probe = share_reply(a, &req(&format!("{prefix}Where did Alder walk?"), 8));
+    let n = prompt_tokens(a, &prefix);
+    assert!(
+        probe.1 >= (n - 1) / 64 * 64,
+        "the probe's cached tokens {}, the prefix {n} tokens ({swapped} pages swapped)",
+        probe.1
+    );
+    wait_idle(a);
+    let sl = call(a, "GET", "/slots", "").json();
+    assert!(sl.get("pages_warm").is_some(), "sharing off: {sl}");
 }
 
 /// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
@@ -8494,8 +8721,18 @@ fn serve_share_dup_swapped() {
 /// (design §5.3 `serve_share_cancel`) give their pages back: a request then
 /// needing 20 of the pool's 24 pages is admitted, the idle slots' rows and
 /// the index's warm pages giving theirs up (some evicted), and gets the
-/// reply it gets with sharing off. Debug builds check the pool, the index
-/// and their holds against each other after every step.
+/// reply it gets with sharing off. Two streams of 600 tokens share the
+/// prefix: the first decodes, the second waits for pages (the first's
+/// admission reserves them for its reply; it may start once there are).
+/// A third, a long private part after the prefix, is held mid-feed
+/// (`Server::feed_cap`): its admission maps the prefix's pages (the claim
+/// logged in its slot, `Server::claims`: the shared-tokens counter can't
+/// say whose, as the second's admission moves it too), it is fed two pages
+/// past them and no further, and the engine drops it from its prompts
+/// being fed (`Server::reaped_fed`; #267: until then the step budget could
+/// feed its private part before the drop was seen, so it may have been
+/// decoding). Debug builds check the pool, the index and their holds
+/// against each other after every step.
 #[test]
 fn serve_share_cancel_frees() {
     let Some(_) = crate::testutil::gpu() else {
@@ -8529,6 +8766,12 @@ fn serve_share_cancel_frees() {
     let want = share_reply(off.addr, &big).0;
     let n = prompt_tokens(off.addr, &prefix);
     let nb = prompt_tokens(off.addr, &format!("{text}Summary:"));
+    // A third, a long private part after the prefix: gone while it's fed.
+    let long = format!(
+        "{}And then?",
+        "The storm came from the west and stayed. ".repeat(30)
+    );
+    let n3 = prompt_tokens(off.addr, &format!("{prefix}{long}")) as usize;
     drop(off);
     let s = server_with(p, Device::Cuda, |o| {
         opts(o);
@@ -8553,27 +8796,77 @@ fn serve_share_cancel_frees() {
         .iter()
         .map(|q| stream(q, 600))
         .collect();
-    wait_for("both decoding", || g.load(Ordering::Relaxed) >= g0 + 40);
-    // A third, a long private part after the prefix: gone while it's fed.
-    let long = format!(
-        "{}And then?",
-        "The storm came from the west and stayed. ".repeat(30)
-    );
-    // Gone once admitted: its admission maps the prefix's pages (counted
-    // then), and its private part is fed a chunk a step after. Waiting on
-    // the others' tokens instead (as before #228's review) let it be
-    // dropped before its admission now and then (a09b1bd's one red).
-    let shared = || {
-        let m = call(a, "GET", "/metrics", "").body;
-        metric(&m, "axon_prompt_shared_tokens_total").unwrap()
+    // The two streams' request ids, once the engine has both: the first
+    // decoding (40 tokens out), the second decoding or waiting for pages.
+    let known = || {
+        let sl = call(a, "GET", "/slots", "").json();
+        let busy = (sl["slots"].as_array().unwrap().iter())
+            .filter(|x| x["busy"] == true)
+            .map(|x| x["request_id"].clone());
+        let waiting = (sl["waiting"].as_array().unwrap().iter()).map(|x| x["id"].clone());
+        let mut v: Vec<Value> = Vec::new();
+        for id in busy.chain(waiting).filter(|v| !v.is_null()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+        v
     };
-    let pages = (n - 1) / 64;
-    let s0 = shared();
-    let c3 = stream(&long, 50);
-    wait_for("the third's admission, mapping the prefix's pages", || {
-        shared() >= s0 + 64 * pages
+    wait_for("the first decoding, the engine holding both", || {
+        g.load(Ordering::Relaxed) >= g0 + 40 && known().len() == 2
     });
+    let running = known();
+    // Its admission maps the prefix's pages, and it is fed from there two
+    // pages and no further (`feed_cap`; the others decode on), so it is
+    // surely mid-feed when its client goes. Waiting on the others' tokens
+    // instead (as before #228's review) let it be dropped before its
+    // admission now and then (a09b1bd's one red); waiting on its admission
+    // alone (#228) let the step budget feed it all first.
+    let pages = (n - 1) / 64;
+    let cap = 64 * pages as usize + 128;
+    assert!(
+        n3 > cap + 64,
+        "the third: {n3} prompt tokens, held at {cap}"
+    );
+    let k0 = s.claims().len();
+    s.feed_cap(cap);
+    let c3 = stream(&long, 50);
+    // Its slot, once it's held at the cap.
+    let slot3 = std::cell::Cell::new(None);
+    wait_for("the third fed two pages past the prefix's", || {
+        let sl = call(a, "GET", "/slots", "").json();
+        let third = (sl["slots"].as_array().unwrap().iter()).find(|x| {
+            x["busy"] == true
+                && !running.contains(&x["request_id"])
+                && x["held_tokens"].as_u64() == Some(cap as u64)
+        });
+        slot3.set(third.map(|x| x["id"].as_u64().unwrap() as usize));
+        third.is_some()
+    });
+    let slot3 = slot3.get().unwrap();
+    // Its admission's claim: the last one since it was sent not a
+    // refeed's in its slot (it holds the slot from its admission on, still
+    // held at the cap now).
+    let claims = s.claims().split_off(k0);
+    let mapped = (claims.iter().rev())
+        .find(|c| c.0 == slot3 && !c.2)
+        .map(|c| c.1);
     drop(c3);
+    wait_for("the third dropped while being fed", || {
+        !s.reaped_fed().is_empty()
+    });
+    s.feed_cap(usize::MAX);
+    let fed = s.reaped_fed();
+    assert_eq!(fed.len(), 1, "{fed:?}");
+    // Its admission mapped the prefix's pages, and it went with two pages
+    // of its private part fed (the cap), before the rest.
+    assert!(
+        mapped.is_some_and(|t| t >= 64 * pages),
+        "the third (slot {slot3}) mapped {mapped:?} tokens, the prefix's pages {pages}; claims \
+         {claims:?}"
+    );
+    assert_eq!(fed[0].0, cap, "fed {fed:?}, the prefix's pages {pages}");
+    assert!(fed[0].1 > cap, "fed {fed:?}: its whole prompt");
     drop(cs);
     wait_idle(a);
     let (t, _) = share_reply(a, &big);

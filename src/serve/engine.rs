@@ -542,9 +542,9 @@ pub(super) struct Batch<'a, 't> {
     /// take, a key collision): it waits, as with no backlog, until the
     /// batch steps, admits or the tier grows.
     stalled: bool,
-    /// Shared prefixes (`set_share`; None: AXON_SHARE_KV=0,
-    /// or a plain pool, and every path below is main's, decision for
-    /// decision).
+    /// Shared prefixes (`set_share`; None: off, by AXON_SHARE_KV=0 or
+    /// fast kernels' default, or a plain pool, and every path below is
+    /// main's, decision for decision).
     share: Option<Share>,
     /// Prompt tokens admissions mapped from the prefix index so far.
     pub shared_tokens: u64,
@@ -816,12 +816,17 @@ fn pages_for(n: usize, size: usize) -> usize {
 }
 
 impl<'a, 't> Batch<'a, 't> {
+    /// `sched`: the server's (its flags over AXON_ADMIT / AXON_STEP_COST,
+    /// checked before the start); not `Sched::default()` here, which exits
+    /// on a bad AXON_ADMIT (a server's start never exits its process, #269).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         net: &'a Backend<'a>,
         pool: <Backend<'a> as BatchLm>::Pool,
         slots: usize,
         ctx: usize,
         policy: ChunkPolicy,
+        sched: Sched,
         log: bool,
         generated: Arc<AtomicU64>,
     ) -> Batch<'a, 't> {
@@ -840,9 +845,7 @@ impl<'a, 't> Batch<'a, 't> {
             seqs: Vec::new(),
             pre: Vec::new(),
             policy,
-            // From the environment (AXON_ADMIT, AXON_STEP_COST: `Sched`'s
-            // Default); the server sets it from its flags after `new`.
-            sched: Sched::default(),
+            sched,
             cost: StepCost {
                 pass_cap_us: policy.step_ms as f64 * 0.5e3,
                 ..StepCost::default()
@@ -1026,6 +1029,8 @@ impl<'a, 't> Batch<'a, 't> {
                 true => &m.refeed_shared_tokens,
             }
             .fetch_add(n, Ordering::Relaxed);
+            #[cfg(test)]
+            m.claims.lock().unwrap().push((slot, n, refeed));
         }
         Ok(cl.reuse)
     }
@@ -1722,6 +1727,14 @@ impl<'a, 't> Batch<'a, 't> {
         }
         let f = &self.pre[i];
         let n = n.min(f.seq.hist.len() - 1 - f.fed);
+        // Tests: not past `Metrics::feed_cap` tokens (a request held
+        // mid-feed: `serve_share_cancel_frees`), counted after a refeed's
+        // claim (which may itself have mapped up to or past it).
+        #[cfg(test)]
+        let n = match self.metrics.as_ref() {
+            Some(m) => n.min(m.feed_cap.load(Ordering::Relaxed).saturating_sub(f.fed)),
+            None => n,
+        };
         let n = match n {
             0 => 0,
             n => self.feedable(i, n)?,
@@ -1959,6 +1972,11 @@ impl<'a, 't> Batch<'a, 't> {
         while i < self.pre.len() {
             if self.pre[i].seq.job.cancel.load(Ordering::Relaxed) {
                 let f = self.pre.remove(i);
+                #[cfg(test)]
+                if let Some(m) = &self.metrics {
+                    let n = f.seq.hist.len() - 1;
+                    m.reaped_fed.lock().unwrap().push((f.fed, n));
+                }
                 self.finish(f.seq, End::Gone);
             } else {
                 i += 1;

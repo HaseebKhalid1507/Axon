@@ -1839,6 +1839,40 @@ fn conversion_refused_before_it_is_made() {
     assert!(load_ram(&d.0, wish, true, &|_| host(need.total() - tol), tol).is_ok());
 }
 
+/// A check that answers `Stop` (a refused model: `cli::try_open_model_with`,
+/// `axon::load`) ends the load right there: no conversion is sized (`ram`
+/// is never asked: it panics here), made or FP8-scanned, and the error is
+/// `CopyWish::stopped`'s. #269's review: the answer was dropped, so a
+/// refused checkpoint was converted in full before its refusal came back.
+#[test]
+fn stop_converts_nothing() {
+    use std::cell::Cell;
+    let bf16 = Dir::new("stop-bf16");
+    write_tiny(&bf16, 1);
+    let fp8 = Dir::new("stop-fp8");
+    write_tiny_fp8(&fp8, |_| {});
+    for d in [&bf16, &fp8] {
+        let checked = Cell::new(false);
+        let stop = |m: &Model| {
+            assert!(!m.tensors.is_empty());
+            checked.set(true);
+            gguf::CopyWish::Stop
+        };
+        let r = load_ram(
+            &d.0,
+            stop,
+            true,
+            &|_| panic!("a conversion sized after Stop"),
+            0,
+        );
+        let Err(e) = r else {
+            panic!("{}: loaded after Stop", d.0.display());
+        };
+        assert!(checked.get());
+        assert_eq!(e.to_string(), gguf::CopyWish::stopped().to_string());
+    }
+}
+
 /// #208 on the FP8 0.5B: its BF16 embedding and lm_head made F16 (2 x
 /// 151936 x 896 x 2 bytes, 519 MiB) with its vectors, and the threads'
 /// buffers, refused a byte under the edge, loaded at it. The edge is the

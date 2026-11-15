@@ -97,9 +97,9 @@ pub use tokenizer::{Tokenizer, Utf8Stream};
 // Crate-root paths the modules use (`crate::PREFILL_BATCH`, `crate::fail`,
 // ...), from before the library split, when they lived in main.rs.
 pub(crate) use cli::{
-    DEFAULT_CHAT_CTX, backend_and_drafter, check_stream_decode, copy_for, device_env, draft_env,
-    draft_env_set, fail, kv_env, kv_flag, model_arg, numerics_flag, open_model_with, placement,
-    round_draft,
+    DEFAULT_CHAT_CTX, check_stream_decode, copy_for, device_env, draft_env, draft_env_set, fail,
+    kv_env, kv_flag, model_arg, numerics_flag, round_draft, try_backend_and_drafter,
+    try_open_model_with, try_placement,
 };
 pub(crate) use generate::{PREFILL_BATCH, argmax};
 
@@ -115,15 +115,15 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
     let m = gguf::load_to_run(path, (device == Device::Cuda).then_some(false), |m| {
         if let Err(e) = model::check_supported(m) {
             unsupported = Some(e);
-            return gguf::CopyWish::MapOnly;
+            // Not loaded any further (`CopyWish::Stop`).
+            return gguf::CopyWish::Stop;
         }
         model::cpu_copy_wish(m)
-    })
-    .map_err(|e| format!("{path}: {e}"))?;
-    match unsupported {
-        Some(e) => Err(format!("{path}: {e}")),
-        None => Ok(m),
+    });
+    if let Some(e) = unsupported {
+        return Err(format!("{path}: {e}"));
     }
+    m.map_err(|e| format!("{path}: {e}"))
 }
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the

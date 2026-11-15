@@ -134,9 +134,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: AXON_KV_PAGES, else as many as fit;
     /// tests squeeze the pool with it).
     pub kv_pages: Option<usize>,
-    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, on unless
-    /// "0", the kill switch, and off while fast kernels run unless "1":
-    /// `share_on`; a paged pool only).
+    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, `share_env`:
+    /// "0" off, the kill switch, "1" on, unset or empty the default, on
+    /// unless fast kernels run, `share_on`; a paged pool only).
     pub share: Option<bool>,
     /// Tool calls streamed as they are generated on OpenAI's APIs (None:
     /// AXON_TOOL_STREAM, on unless "0"; #260).
@@ -915,6 +915,8 @@ struct Handover<'r> {
     slot_ctx: Option<usize>,
     /// Most requests to hold off the channel (the batch's slots).
     room: usize,
+    /// Where `waiting` is published for GET /slots (`publish_waiting`).
+    metrics: Arc<ops::Metrics>,
 }
 
 impl Handover<'_> {
@@ -925,12 +927,21 @@ impl Handover<'_> {
         let Some(ctx) = self.slot_ctx else {
             return false;
         };
+        let n = self.waiting.len();
         self.waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
+        let mut changed = self.waiting.len() != n;
         while !self.waiting.iter().any(|j| fits_slot(j, ctx)) && self.waiting.len() < self.room {
             match self.jobs.try_recv() {
-                Ok(j) => self.waiting.push_back(j),
+                Ok(j) => {
+                    self.waiting.push_back(j);
+                    changed = true;
+                }
                 Err(_) => break,
             }
+        }
+        // Requests taken in while one runs alone wait too (/slots).
+        if changed {
+            publish_waiting(&self.metrics, self.waiting);
         }
         self.waiting.iter().any(|j| fits_slot(j, ctx))
     }
@@ -938,7 +949,13 @@ impl Handover<'_> {
 
 impl<'a> Engine<'a> {
     fn run(&mut self, job: Job, ho: Option<Handover>) -> Option<Seq<'a>> {
+        // With a pool, the batch's waiting list, which still lists the job
+        // (#268): published again without it once its slot shows it busy,
+        // so the server never looks idle with a request in it.
         if job.cancel.load(Ordering::Relaxed) {
+            if let Some(ho) = &ho {
+                publish_waiting(&self.metrics, ho.waiting);
+            }
             return None;
         }
         let id = job.id;
@@ -953,6 +970,9 @@ impl<'a> Engine<'a> {
                 pages: None,
             },
         );
+        if let Some(ho) = &ho {
+            publish_waiting(&self.metrics, ho.waiting);
+        }
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
         // The tier stores the cache's new whole pages (no pool: nothing
         // else runs, and the next request may take the cache).
@@ -1208,7 +1228,20 @@ fn engine(
     jobs: mpsc::Receiver<Job>,
     stop: Arc<AtomicBool>,
 ) {
-    let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
+    // A start that can't go on is refused through `ready` (`start` returns
+    // it; `run` exits with it, code 2), never exited here: a server started
+    // in a process, a test's, must not end that process (#269: a test
+    // binary exited 2 with its message captured and lost).
+    macro_rules! refuse {
+        ($why:expr) => {{
+            let _ = ready.send(Err(Refused($why)));
+            return;
+        }};
+    }
+    let (device, gpu_layers) = match crate::try_placement(o.device, o.gpu_layers) {
+        Ok(p) => p,
+        Err(why) => refuse!(why),
+    };
     // A paged pool of a set size: tests (`Opts::kv_pages`), or
     // AXON_KV_PAGES=N (serve gates under an undersized pool; as tests',
     // refused if no paged pool fits).
@@ -1222,11 +1255,31 @@ fn engine(
             }
         },
     };
+    // Shared prefix KV pages: `Opts::share`, else AXON_SHARE_KV, read
+    // strictly before the model loads (a value other than 0, 1 or empty
+    // refuses to start, #267), whether or not a paged pool comes of it.
+    let share_set = match o.share {
+        Some(b) => ShareSet::Opts(b),
+        None => {
+            let v = std::env::var_os("AXON_SHARE_KV").map(|v| v.to_string_lossy().into_owned());
+            match share_env(v.as_deref()) {
+                Ok(Some(b)) => ShareSet::Env(b),
+                Ok(None) => ShareSet::Default,
+                Err(why) => {
+                    let _ = ready.send(Err(Refused(why)));
+                    return;
+                }
+            }
+        }
+    };
     let rope = crate::rope::RopeArgs {
         ctx: o.ctx,
         ..o.rope.clone()
     };
-    let model = crate::open_model_with(&o.path, crate::copy_for(device), &rope);
+    let model = match crate::try_open_model_with(&o.path, crate::copy_for(device), &rope) {
+        Ok(m) => m,
+        Err(why) => refuse!(why),
+    };
     let trained = model.ctx_len() as usize;
     let yarn = crate::rope::yarn(&model).is_some();
     let fit = o.ctx.is_none();
@@ -1234,7 +1287,7 @@ fn engine(
     // much of it as fits, `Backend::new`'s fit); a split, a pipeline or
     // --gpu-layers keep the old cap (`SPLIT_CTX`).
     let want = match o.ctx {
-        Some(n) if trained > 0 && n > trained => crate::fail(&format!(
+        Some(n) if trained > 0 && n > trained => refuse!(format!(
             "--ctx {n} is past the {trained} tokens {} {}{}",
             o.path,
             if yarn {
@@ -1267,13 +1320,22 @@ fn engine(
     if let Some(why) =
         moe_parallel_refusal(crate::model::is_moe(&model), o.parallel, o.parallel_set)
     {
-        crate::fail(&why);
+        refuse!(why);
     }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
-    let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
-        crate::draft::DraftModel::open(&crate::model_arg(p), crate::copy_for(device), &model, tok)
-            .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
-    });
+    let dm = match o.draft_model.as_ref().filter(|_| o.max_draft > 0) {
+        None => None,
+        Some(p) => {
+            let opened = crate::pull::resolve(p).and_then(|path| {
+                crate::draft::DraftModel::open(&path, crate::copy_for(device), &model, tok)
+                    .map_err(|e| format!("--draft-model {e}"))
+            });
+            match opened {
+                Ok(d) => Some(d),
+                Err(why) => refuse!(why),
+            }
+        }
+    };
     // The Q6_K prefill copy waits for the cache and slots (below).
     // AXON_PAGED_KV, read once for this server.
     let paged_env = o.paged.unwrap_or_else(crate::cuda::qwen2::pages::paged_env);
@@ -1284,7 +1346,7 @@ fn engine(
         gpu_experts: None,
         numerics: o.numerics,
     };
-    let (mut net, drafter) = crate::backend_and_drafter(
+    let loaded = crate::try_backend_and_drafter(
         &model,
         dm.as_ref(),
         device,
@@ -1295,6 +1357,10 @@ fn engine(
         place,
         draft_ctx,
     );
+    let (mut net, drafter) = match loaded {
+        Ok(l) => l,
+        Err(why) => refuse!(why),
+    };
     let ctx = net.ctx(want);
     let why = match &net.0 {
         _ if ctx >= want => None,
@@ -1351,7 +1417,7 @@ fn engine(
     // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
     // at a time, and an explicit --parallel N there is refused.
     if o.parallel > 1 && o.parallel_set && !matches!(&net.0, Inner::Cuda(_)) {
-        crate::fail(&format!(
+        refuse!(format!(
             "--parallel {}: batching many requests needs the whole model on one GPU \
              (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
              serves one request at a time (--parallel 1)",
@@ -1568,21 +1634,28 @@ fn engine(
             step_tokens: o.sched.step_tokens,
             legacy: o.sched.legacy,
         };
-        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
-        b.sched = o.sched;
+        let mut b = Batch::new(
+            &net,
+            pool,
+            n,
+            slot_ctx,
+            policy,
+            o.sched,
+            o.log,
+            e.generated.clone(),
+        );
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
         b.metrics = Some(o.metrics.clone());
         // Shared prefixes (a paged pool's; on by default, off under fast
-        // kernels): said at start, on with the kill switch, off with why.
+        // kernels): the start line says which and why. Under --quiet too
+        // when AXON_SHARE_KV set it or fast kernels turned the default off.
         let fast = net.fast_kernels();
-        let env = std::env::var("AXON_SHARE_KV").ok();
-        let env = o.share.is_none().then_some(env).flatten();
-        let on = b.set_share(o.share.unwrap_or_else(|| share_on(env.as_deref(), fast)));
+        let on = b.set_share(share_on(share_set.value(), fast));
         SHARING.store(on, Ordering::Relaxed);
-        if o.log && b.pages().is_some() {
-            eprintln!("axon serve: {}", share_line(on, env.as_deref(), fast));
+        if (o.log || share_said(share_set, fast)) && b.pages().is_some() {
+            eprintln!("axon serve: {}", share_line(share_set, fast));
         }
         b
     });
@@ -1859,17 +1932,18 @@ fn engine(
                 n
             }
         };
-        if let Some(m) = &b.metrics {
-            let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
-            m.publish_waiting(w.collect());
-        }
+        publish_waiting(&e.metrics, &waiting);
         if admitted == 0 && b.idle() {
             if let Some(job) = waiting.pop_front() {
+                // Not waiting any more: `Engine::run` publishes the list
+                // without it (#268: else an idle server showed it waiting
+                // until the next request).
                 let ho = Handover {
                     jobs: &jobs,
                     waiting: &mut waiting,
                     slot_ctx: Some(b.ctx),
                     room: b.slots,
+                    metrics: e.metrics.clone(),
                 };
                 // It runs in a slot (the engine's cache is a view of it,
                 // pointed at the one with its longest prefix, else the
@@ -1903,6 +1977,12 @@ fn engine(
             fatal(b, &err, None);
         }
     }
+}
+
+/// The engine's waiting list, for GET /slots (`Metrics::publish_waiting`).
+fn publish_waiting(m: &ops::Metrics, waiting: &VecDeque<Job>) {
+    let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
+    m.publish_waiting(w.collect());
 }
 
 /// Whether a request refused for pages, waiting `age` ms, ends the
@@ -2064,49 +2144,97 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
-/// AXON_SHARE_KV's value `v` read, `fast` whether the backend runs fast
-/// kernels (`Backend::fast_kernels`): on unless "0" (the kill switch;
-/// spaces around it are trimmed), so `false` or `off` read as on. Opt-in
-/// ("1" only) until the 11-12 decision: same bits in every gate, no
-/// measured cell worse (#210, #211), #218 fixed and a soak under pool
-/// pressure (docs/log/2026-11-12-share-default.md).
+/// What decides shared prefix KV pages (`share_on`): `Opts::share`,
+/// AXON_SHARE_KV (`share_env`), or neither (the default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShareSet {
+    Default,
+    Env(bool),
+    Opts(bool),
+}
+
+impl ShareSet {
+    /// The value set (None: the default).
+    fn value(self) -> Option<bool> {
+        match self {
+            ShareSet::Default => None,
+            ShareSet::Env(b) | ShareSet::Opts(b) => Some(b),
+        }
+    }
+}
+
+/// AXON_SHARE_KV's value `v` (None: unset), spaces around it trimmed:
+/// "0" off (the kill switch), "1" on, unset or empty None (the default,
+/// `share_on`). Anything else is an error naming the valid values, and
+/// the server refuses to start, as for a bad AXON_ADMIT (which, unlike
+/// this, reads a value that isn't UTF-8 as unset; #267: until then only
+/// "0" turned sharing off, so `off` and `false` read as on, and under fast
+/// kernels only "1" turned it on, so `on` and `true` read as off).
+fn share_env(v: Option<&str>) -> Result<Option<bool>, String> {
+    match v.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("0") => Ok(Some(false)),
+        Some("1") => Ok(Some(true)),
+        Some(_) => Err(format!(
+            "AXON_SHARE_KV={:?}: expected 0 (shared prefix KV pages off) or 1 (on), or unset \
+             or empty for the default (on; off under fast kernels)",
+            v.unwrap_or_default()
+        )),
+    }
+}
+
+/// Shared prefix KV pages on or off: `set` if set (`ShareSet::value`),
+/// else the default, on unless `fast`, whether the backend runs fast
+/// kernels (`Backend::fast_kernels`). Opt-in ("1") until the 11-12
+/// decision: same bits in every gate, no measured cell worse (#210,
+/// #211), #218 fixed and a soak under pool pressure
+/// (docs/log/2026-11-12-share-default.md).
 ///
 /// Under fast kernels (an FP8 checkpoint under `--numerics fast`, which
-/// `--datacenter` implies) off unless "1" (#228's review): their rows
+/// `--datacenter` implies) off by default (#228's review): their rows
 /// change with how a prompt is chunked, so two requests' copies of a
 /// block can differ in their bytes, and a request that maps another's
 /// page reads KV it didn't compute. That is within fast mode's tolerance,
 /// as a cached prefix is there (docs/determinism.md), but it isn't the
 /// byte equality sharing rests on in exact mode, which no gate holds
-/// fast mode to.
-fn share_on(v: Option<&str>, fast: bool) -> bool {
-    match v.map(str::trim) {
-        Some("0") => false,
-        Some("1") => true,
-        _ => !fast,
-    }
+/// fast mode to. "1" turns them on there too.
+fn share_on(set: Option<bool>, fast: bool) -> bool {
+    set.unwrap_or(!fast)
 }
 
-/// serve's start line about shared prefix KV pages (a paged pool's): `on`
-/// whether they are, `v` AXON_SHARE_KV's value (None: unset, or `Opts`
-/// decided), `fast` as `share_on`'s. On: with the kill switch, and a value
-/// that isn't 0 or 1 echoed, since it reads as on. Off: why.
-fn share_line(on: bool, v: Option<&str>, fast: bool) -> String {
+/// Whether the start line about shared prefix KV pages (`share_line`)
+/// prints under --quiet too: when AXON_SHARE_KV set them, or fast kernels
+/// turned the default off (#267). The plain default, or `Opts::share`
+/// (tests, the library), only without --quiet.
+fn share_said(set: ShareSet, fast: bool) -> bool {
+    matches!(set, ShareSet::Env(_)) || (fast && set == ShareSet::Default)
+}
+
+/// serve's start line about shared prefix KV pages (a paged pool's), `set`
+/// and `fast` as `share_on`'s: on or off, what decided it, and how to turn
+/// it the other way.
+fn share_line(set: ShareSet, fast: bool) -> String {
     const ON: &str = "shared prefix KV pages on";
-    match (on, v.map(str::trim)) {
-        (true, Some("1")) if fast => format!(
+    const OFF: &str = "shared prefix KV pages off";
+    match (set, fast) {
+        (ShareSet::Env(true), true) => format!(
             "{ON} under fast kernels (AXON_SHARE_KV=1): a request may read a block's KV as \
              another request's chunking computed it, within fast mode's tolerance; \
              AXON_SHARE_KV=0 turns them off"
         ),
-        (true, None | Some("" | "1")) => format!("{ON} (AXON_SHARE_KV=0 turns them off)"),
-        (true, Some(v)) => format!("{ON} (AXON_SHARE_KV={v:?} reads as on: only 0 turns them off)"),
-        (false, Some("0")) => "shared prefix KV pages off (AXON_SHARE_KV=0)".into(),
-        (false, _) if fast => "shared prefix KV pages off: fast kernels can give two requests' \
-                               copies of a block different bytes (AXON_SHARE_KV=1 shares them \
-                               anyway)"
-            .into(),
-        (false, _) => "shared prefix KV pages off".into(),
+        (ShareSet::Env(true), false) => {
+            format!("{ON} (AXON_SHARE_KV=1, as the default; AXON_SHARE_KV=0 turns them off)")
+        }
+        (ShareSet::Env(false), _) => format!("{OFF} (AXON_SHARE_KV=0)"),
+        (ShareSet::Opts(true), _) => format!("{ON} (set by the caller)"),
+        (ShareSet::Opts(false), _) => format!("{OFF} (set by the caller)"),
+        (ShareSet::Default, false) => {
+            format!("{ON} (the default; AXON_SHARE_KV=0 turns them off)")
+        }
+        (ShareSet::Default, true) => format!(
+            "{OFF} (the default under fast kernels: they can give two requests' copies of a \
+             block different bytes; AXON_SHARE_KV=1 shares them anyway)"
+        ),
     }
 }
 
@@ -2495,6 +2623,24 @@ impl Server {
         self.sh.metrics.swapped.load(Ordering::Relaxed)
     }
 
+    /// No prompt fed past `cap` tokens from now on (`Metrics::feed_cap`;
+    /// usize::MAX: no cap).
+    pub fn feed_cap(&self, cap: usize) {
+        self.sh.metrics.feed_cap.store(cap, Ordering::Relaxed);
+    }
+
+    /// Requests cancelled while being fed so far: the prompt tokens fed,
+    /// and of how many (`Metrics::reaped_fed`).
+    pub fn reaped_fed(&self) -> Vec<(usize, usize)> {
+        self.sh.metrics.reaped_fed.lock().unwrap().clone()
+    }
+
+    /// The claims that mapped pages so far: slot, tokens, a refeed's
+    /// (`Metrics::claims`).
+    pub fn claims(&self) -> Vec<(usize, u64, bool)> {
+        self.sh.metrics.claims.lock().unwrap().clone()
+    }
+
     /// Refed prefills that claimed a prefix again, and its tokens
     /// (`Metrics::refeed_claims`, `refeed_tokens`).
     pub fn refeed_claims(&self) -> (u64, u64) {
@@ -2657,10 +2803,12 @@ pub fn start(o: Opts) -> io::Result<Server> {
         }
     };
     if o.no_think && !l.template.as_ref().is_some_and(Template::thinks) {
-        crate::fail(&format!(
+        server.shutdown();
+        let why = format!(
             "--no-think: {} has no <think> token (not a thinking model)",
             o.path
-        ));
+        );
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, Refused(why)));
     }
     let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
     l.identity = l.identity.with_serve(serve);
