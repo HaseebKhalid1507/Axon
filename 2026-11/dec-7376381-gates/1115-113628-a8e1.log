@@ -1,0 +1,222 @@
+[axon-run 11:36:28] submitted 1115-113628-a8e1 by /home/haseeb/.cache/axon-dec: /usr/bin/bash cbcheck.sh ./axon-base-cb-9f3630c ./axon-7376381 ./constrain_check.py ./serve_md5_share-v3.py ./harness_accept.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/out-7376381 /home/haseeb/.cache/axon-dec/cb/replays
+[axon-run 16:19:39] scope axon-job-1115-113628-a8e1-1794777579.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 16:19:39] job 1115-113628-a8e1 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-113628-a8e1-1794777579 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash cbcheck.sh ./axon-base-cb-9f3630c ./axon-7376381 ./constrain_check.py ./serve_md5_share-v3.py ./harness_accept.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/out-7376381 /home/haseeb/.cache/axon-dec/cb/replays
+axon-q 16:19:39 start slot 16-23: /usr/bin/bash cbcheck.sh ./axon-base-cb-9f3630c ./axon-7376381 ./constrain_check.py ./serve_md5_share-v3.py ./harness_accept.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/o
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 620.70.06
+fingerprint fp_bcc7e3b70e4d38c4 numerics exact/2 banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:55319/v1']
+CELL codex-greedy           546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-seed1            546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-greedy        546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-seed2         546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-greedy              546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-seed3               546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-259-seed4        01ad5615b1ac4734c1c321a1f44a219b tool_calls ok:update_plan,ok:exec_command
+CELL codex-required-seed5   c60ba43b42845fd9761b007b5e242120 tool_calls ok:exec_command
+batched == alone: True; pins: recorded
+STRESS {"cut": 2, "finish_length": 2, "finish_tool_calls": 198, "ok": 255, "replies": 200, "replies_with_call": 200}
+METRICS {"axon_constraint_fallback_total": 3889.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 116.0, "axon_constraint_mask_seconds_total": 0.034968, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 23706.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+== Qwen2.5-7B-Instruct-Q4_K_M cand default (cells, batched, stress): FAIL
+fingerprint fp_bcc7e3b70e4d38c4 numerics exact/2 banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:46091/v1']
+CELL codex-greedy           546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-seed1            546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-greedy        546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-seed2         546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-greedy              546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-seed3               546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-259-seed4        01ad5615b1ac4734c1c321a1f44a219b tool_calls ok:update_plan,ok:exec_command
+CELL codex-required-seed5   c60ba43b42845fd9761b007b5e242120 tool_calls ok:exec_command
+batched == alone: True; pins: match
+METRICS {"axon_constraint_fallback_total": 65.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 112.0, "axon_constraint_mask_seconds_total": 0.000896, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 344.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+== Qwen2.5-7B-Instruct-Q4_K_M cand default again (pins): FAIL
+fingerprint fp_b2504638ff9dd867 numerics exact/2 banner ['axon serve: constrained tool calls off (--no-constrain)']
+CELL codex-greedy           546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-seed1            546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-greedy        546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-seed2         546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-greedy              546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-seed3               546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-259-seed4        96b96d5ac17c7331ccee0f9021bca653 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   c60ba43b42845fd9761b007b5e242120 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404; codex-259-seed4: badjson exec_command
+fingerprint fp_b2504638ff9dd867 numerics exact/2 banner ['axon serve: constrained tool calls off (AXON_CONSTRAIN=0)']
+CELL codex-greedy           546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-seed1            546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-greedy        546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-seed2         546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-greedy              546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-seed3               546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-259-seed4        96b96d5ac17c7331ccee0f9021bca653 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   c60ba43b42845fd9761b007b5e242120 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404; codex-259-seed4: badjson exec_command
+fingerprint fp_a8751e8770d5c48f numerics exact/1 banner []
+CELL codex-greedy           546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-seed1            546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-greedy        546750fbb54eef2c1935ed5c92732180 None http:404
+CELL opencode-seed2         546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-greedy              546750fbb54eef2c1935ed5c92732180 None http:404
+CELL pi-seed3               546750fbb54eef2c1935ed5c92732180 None http:404
+CELL codex-259-seed4        96b96d5ac17c7331ccee0f9021bca653 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   c60ba43b42845fd9761b007b5e242120 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404; codex-259-seed4: badjson exec_command
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen2.5-7B-Instruct-Q4_K_M --no-constrain == main: PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen2.5-7B-Instruct-Q4_K_M AXON_CONSTRAIN=0 == main: PASS
+fingerprint fp_bcc7e3b70e4d38c4 numerics exact/2 banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:55319/v1']
+fingerprint fp_b2504638ff9dd867 numerics exact/2 banner ['axon serve: constrained tool calls off (--no-constrain)']
+fingerprint fp_a8751e8770d5c48f numerics exact/1 banner []
+fingerprint fp_723b6ca7734b37a3 numerics exact/2 banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 1087 pages x 64 = 69568 tokens (2 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:53427/v1']
+CELL codex-greedy           ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-seed1            ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-greedy        ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-seed2         ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-greedy              ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-seed3               ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-259-seed4        a50c5e60512fde1ceb5f3812d02eb9df length cut:exec_command
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: recorded
+METRICS {"axon_constraint_fallback_total": 31.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 106.0, "axon_constraint_mask_seconds_total": 0.000249, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 178.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+== Qwen3-8B-Q4_K_M cand default (cells, batched, stress): FAIL
+fingerprint fp_723b6ca7734b37a3 numerics exact/2 banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 1088 pages x 64 = 69632 tokens (2 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:43061/v1']
+CELL codex-greedy           ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-seed1            ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-greedy        ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-seed2         ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-greedy              ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-seed3               ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-259-seed4        a50c5e60512fde1ceb5f3812d02eb9df length cut:exec_command
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: match
+METRICS {"axon_constraint_fallback_total": 31.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 106.0, "axon_constraint_mask_seconds_total": 0.000282, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 178.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+== Qwen3-8B-Q4_K_M cand default again (pins): FAIL
+fingerprint fp_8445d21c739929f0 numerics exact/2 banner ['axon serve: constrained tool calls off (--no-constrain)']
+CELL codex-greedy           ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-seed1            ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-greedy        ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-seed2         ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-greedy              ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-seed3               ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-259-seed4        a50c5e60512fde1ceb5f3812d02eb9df length cut:exec_command
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+fingerprint fp_8445d21c739929f0 numerics exact/2 banner ['axon serve: constrained tool calls off (AXON_CONSTRAIN=0)']
+CELL codex-greedy           ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-seed1            ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-greedy        ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-seed2         ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-greedy              ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-seed3               ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-259-seed4        a50c5e60512fde1ceb5f3812d02eb9df length cut:exec_command
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+fingerprint fp_d8dcd4e9cbf52110 numerics exact/1 banner []
+CELL codex-greedy           ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-seed1            ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-greedy        ac8450a2077459697af78575a6cc8c8b None http:404
+CELL opencode-seed2         ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-greedy              ac8450a2077459697af78575a6cc8c8b None http:404
+CELL pi-seed3               ac8450a2077459697af78575a6cc8c8b None http:404
+CELL codex-259-seed4        a50c5e60512fde1ceb5f3812d02eb9df length cut:exec_command
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+VERDICT FAIL: codex-greedy: http 404; codex-seed1: http 404; opencode-greedy: http 404; opencode-seed2: http 404; pi-greedy: http 404; pi-seed3: http 404
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen3-8B-Q4_K_M --no-constrain == main: PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen3-8B-Q4_K_M AXON_CONSTRAIN=0 == main: PASS
+fingerprint fp_723b6ca7734b37a3 numerics exact/2 banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 1087 pages x 64 = 69568 tokens (2 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 36d73576c3eae002)) on http://127.0.0.1:53427/v1']
+fingerprint fp_8445d21c739929f0 numerics exact/2 banner ['axon serve: constrained tool calls off (--no-constrain)']
+fingerprint fp_d8dcd4e9cbf52110 numerics exact/1 banner []
+cand: ready after 1.0 s
+SERVE cand: cached 13038, restored None, shared 1920.0, evicted 0.0, preempted 0, unfed 0, pages 512, generated 840 (max 40, >1024: 0), digest 1f746f32f7a7
+SERVE MD5 cuda q8 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 21/21 same
+== serve md5 (no tools) cuda Qwen2.5-7B-Instruct-Q4_K_M: PASS
+cand: ready after 1.0 s
+SERVE cand: cached 13083, restored None, shared None, evicted None, preempted None, unfed None, pages None, generated 840 (max 40, >1024: 0), digest ca1591ef8e4a
+SERVE MD5 cpu f16 qwen2.5-0.5b-q4_k_m.gguf: 21/21 same
+== serve md5 (no tools) cpu qwen2.5-0.5b-q4_k_m: PASS
+REPLAY 01-codex-exec-command              runaway  greedy FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 01-codex-exec-command              runaway  seed1  FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 01-codex-exec-command              runaway  seed2  FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 02-codex-apply-patch               runaway  greedy FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 02-codex-apply-patch               runaway  seed1  FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 02-codex-apply-patch               runaway  seed2  FAIL stalls 0 tokens None/8192 finish None calls http:404
+REPLAY 03-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 03-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 03-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 04-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 04-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 04-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 05-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 05-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 05-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 06-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 06-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 06-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 07-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 07-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 07-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 08-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 08-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 08-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 09-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 09-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 09-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 10-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 10-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 10-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 11-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 11-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 11-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 12-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 12-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 12-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 13-board-of-zeros                  legit    greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 13-board-of-zeros                  legit    seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 13-board-of-zeros                  legit    seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 14-c-table-of-zeros                legit    greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 14-c-table-of-zeros                legit    seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 14-c-table-of-zeros                legit    seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 15-html-table-of-empty-cells       legit    greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 15-html-table-of-empty-cells       legit    seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 15-html-table-of-empty-cells       legit    seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 16-csv-of-80-identical-rows        known-fp greedy -    stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 16-csv-of-80-identical-rows        known-fp seed1  -    stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 16-csv-of-80-identical-rows        known-fp seed2  -    stalls 0 tokens None/4096 finish None calls http:404
+STALL-LINES 0
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+VERDICT FAIL: 01-codex-exec-command greedy: ['http']; 01-codex-exec-command seed1: ['http']; 01-codex-exec-command seed2: ['http']; 02-codex-apply-patch greedy: ['http']; 02-codex-apply-patch seed1: ['http']; 02-codex-apply-patch seed2: ['http']; 03-pi-edit greedy: ['http']; 03-pi-edit seed1: ['http']; 03-pi-edit seed2: ['http']; 04-pi-edit greedy: ['http']; 04-pi-edit seed1: ['http']; 04-pi-edit seed2: ['http']; 05-pi-edit greedy: ['http']; 05-pi-edit seed1: ['http']; 05-pi-edit seed2: ['http']; 06-pi-edit greedy: ['http']; 06-pi-edit seed1: ['http']; 06-pi-edit seed2: ['http']; 07-pi-edit greedy: ['http']; 07-pi-edit seed1: ['http']
+== replay Qwen2.5-7B-Instruct-Q4_K_M (runaways end, legit data doesn't stall): FAIL
+REPLAY 00-pi-edit                         runaway  greedy FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 00-pi-edit                         runaway  seed1  FAIL stalls 0 tokens None/4096 finish None calls http:404
+REPLAY 00-pi-edit                         runaway  seed2  FAIL stalls 0 tokens None/4096 finish None calls http:404
+STALL-LINES 0
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+VERDICT FAIL: 00-pi-edit greedy: ['http']; 00-pi-edit seed1: ['http']; 00-pi-edit seed2: ['http']
+== replay Qwen2.5-0.5B-Instruct-Q4_0 (runaways end, legit data doesn't stall): FAIL
+CBCHECK FAIL: Qwen2.5-7B-Instruct-Q4_K_M cand default (cells, batched, stress) Qwen2.5-7B-Instruct-Q4_K_M cand default again (pins) Qwen3-8B-Q4_K_M cand default (cells, batched, stress) Qwen3-8B-Q4_K_M cand default again (pins) replay Qwen2.5-7B-Instruct-Q4_K_M (runaways end, legit data doesn't stall) replay Qwen2.5-0.5B-Instruct-Q4_0 (runaways end, legit data doesn't stall)
+axon-podjob: rc 1; run dir kept: /home/haseeb/.cache/axon-podjob-runs/cbcheck-HWvC9Gg9
+[axon-run 16:26:45] exit 1 after 426.0s (host bella)

@@ -1,0 +1,17 @@
+[axon-run 11:36:29] submitted 1115-113629-cc70 by /home/haseeb/.cache/axon-dec: /home/haseeb/.cache/axon-dec/bin/axon-test-7376381 --ignored --nocapture mask_cost_real
+[axon-run 16:26:46] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 16:26:46] scope axon-job-1115-113629-cc70-1794778006.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17998 MB): an OOM here kills only this job
+[axon-run 16:26:46] job 1115-113629-cc70 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-113629-cc70-1794778006 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dec/bin/axon-test-7376381 --ignored --nocapture mask_cost_real --test-threads 6
+axon-q 16:26:46 start slot 16-23: /home/haseeb/.cache/axon-dec/bin/axon-test-7376381 --ignored --nocapture mask_cost_real --test-threads 6
+
+running 1 test
+Vocab::new: 56.8 ms
+tokenized call:
+mask cost, vocab 151936 (333588 trie nodes), 84 tokens x 20: per token median 0.22 us, p99 6.11 us, max 7.2 us; first pass over the call (cold cache) 8.9 ms; string body compile 0.01 ms (14 allowed, 0 deep); 35 cached entries
+byte by byte:
+mask cost, vocab 151936 (333588 trie nodes), 198 tokens x 20: per token median 0.22 us, p99 5.79 us, max 7.3 us; first pass over the call (cold cache) 9.2 ms; string body compile 0.01 ms (14 allowed, 0 deep); 89 cached entries
+test constrain::model_tests::mask_cost_real ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.18s
+
+[axon-run 16:26:46] exit 0 after 0.3s (host bella)
