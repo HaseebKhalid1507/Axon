@@ -1,0 +1,53 @@
+{
+ "source": "axon issue #259: the 8 <tool_call> blocks returned as text in job 1113-010041-0dce (codex x Qwen2.5-7B-Instruct Q4_K_M, axon-3014eeb), from the codex session rollouts on bella. body: the reply after its first <tool_call> token; reject_at: the byte of body where a JSON-constrained call must stop (the first byte, or special token, the grammar refuses).",
+ "cases": [
+  {
+   "session": "rollout-2026-11-14T04-51-54-01a1d978-7b6a-78b0-a8fa-a73b6c74595d.jsonl",
+   "why": "raw control byte in a string",
+   "reject_at": 56,
+   "body": "\n{\"name\": \"apply_patch\", \"arguments\": {\"patch\": \"```diff\ndiff --git a/ledger/pricing.py b/ledger/pricing.py\nindex 1234567..89abcdef 100644\n--- a/ledger/pricing.py\n+++ b/ledger/pricing.py\n@@ -13,7 +13,7 @@ def apply_discount(cents, pct):\n     if not 0 <= pct <= 100:\n         raise ValueError(\"discount out of range\")\n     # BUG (planted): integer division truncates instead of rounding half up.\n-    return cents - (cents * pct) // 100\n+    return round(cents - (cents * pct) / 100)\n ```\"}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T04-52-06-01a1d978-ab2f-7622-bf73-fee6d85708d9.jsonl",
+   "why": "unescaped quote inside a string",
+   "reject_at": 56,
+   "body": "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"echo '{\"order_id\": \"o1\", \"customer\": \"ann\", \"items\": [{\"sku\": \"ABC-001\", \"description\": \"pen\", \"quantity\": 2, \"price\": 150}]}'' >> orders.jsonl\", \"login\": false, \"max_output_tokens\": 10000}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T04-52-12-01a1d978-c2c8-7020-98a0-61d31549d72a.jsonl",
+   "why": "a second <tool_call> before </tool_call>",
+   "reject_at": 522,
+   "body": "\n{\"name\": \"apply_patch\", \"arguments\": {\"content\": \"diff --git a/ledger/cli.py b/ledger/cli.py\\nindex 1234567..89abcdef 100644\\n--- a/ledger/cli.py\\n+++ b/ledger/cli.py\\n@@ -12,6 +12,7 @@ import click\\n import ledger.formats as formats\\n from ledger.reports import report\\n \\n+@click.option('--format', type=click.Choice(['text', 'csv']), default='text', help='Output format (text or csv). Default is text.')\\n @click.command()\\n def report(ctx):\\n     click.echo('Generating report...')\\n\", \"file_path\": \"ledger/cli.py\"}}\n<tool_call>\n<tool_call>\n{\"name\": \"apply_patch\", \"arguments\": {\"content\": \"diff --git a/ledger/reports.py b/ledger/reports.py\\nindex 1234567..89abcdef 100644\\n--- a/ledger/reports.py\\n+++ b/ledger/reports.py\\n@@ -10,6 +10,7 @@\\n import click\\n from ledger.formats import render\\n \\n+def report(format='text'):\\n     click.echo('Generating report...')\\n     if format == 'text':\\n         # Existing text report logic\\n\", \"file_path\": \"ledger/reports.py\"}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T04-52-29-01a1d979-05cc-7882-aed6-5de565602fe4.jsonl",
+   "why": "unescaped quote inside a string",
+   "reject_at": 587,
+   "body": "\n{\"name\": \"apply_patch\", \"arguments\": {\"patch\": \"diff --git a/ledger/validate.py b/ledger/validate.py\\nnew file mode 100644\\nindex 0000000..b525f9a\\n--- /dev/null\\n+++ b/ledger/validate.py\\n@@ -0,0 +1,12 @@\\n+def check_rate(s):\\n+    valid_rates = set(ledger.pricing.TAX_RATES)\\n+    if s in valid_rates:\\n+        return s\\n+    else:\\n+        raise ValueError(f'Invalid rate: {s}. Valid rates are: {\", \".join(valid_rates)}')\\n+\\n+if __name__ == '__main__':\\n+    print(check_rate('0.05'))\\n+    print(check_rate('0.1'))\\n+    print(check_rate('0.06'))\\n+    print(check_rate('0.07'))\"}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T05-10-18-01a1d989-55c9-7063-ab92-9217e88e43ab.jsonl",
+   "why": "unescaped quote inside a string",
+   "reject_at": 203,
+   "body": "\n{\"name\": \"apply_patch\", \"arguments\": {\"patch\": \"diff --git a/ledger/formats.py b/ledger/formats.py\\n--- a/ledger/formats.py\\n+++ b/ledger/formats.py\\n@@ -13,6 +13,14 @@ def as_text(rows):\\n     return \"\\n\".join([head, \\\"-\\\" * len(head)] + body)\\n \\n FORMATS = {\\\"text\\\": as_text}\\n+\\n+def as_text(rows):\\n+    if not rows:\\n+        return \\\"(no rows)\\\"\\n+    keys = list(rows[0])\\n+    widths = {k: max(len(k), *(len(str(r[k])) for r in rows)) for k in keys}\\n+\\n+    # Determine which columns are integers\\n+    integer_columns = {k for k in keys if all(isinstance(r[k], int) for r in rows)}\\n     head = \\\"  \\\".join(k.rjust(widths[k]) if k in integer_columns else k.ljust(widths[k]) for k in keys)\\n     body = [\\\"  \\\".join(str(r[k]).rjust(widths[k]) if k in integer_columns else str(r[k]).ljust(widths[k]) for k in keys) for r in rows]\\n     return \\\"\\\\n\\\".join([head, \\\"-\\\" * len(head)] + body)\\n \\n FORMATS = {\\\"text\\\": as_text}\\n\", \"path\": \"/home/haseeb/.cache/axon-eval/accept/qwen2.5-7b-codex-1114-041519/axon-codex/r1-align/ledger/formats.py\"}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T05-10-28-01a1d989-7afa-75a3-99ff-beebd8f691f3.jsonl",
+   "why": "invalid escape",
+   "reject_at": 283,
+   "body": "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"echo -e 'from typing import Dict\\n\\nclass Store:\\n    def __init__(self):\\n        self.orders: Dict[str, str] = {}\\n\\n    def delete(self, order_id: str) -> None:\\n        if order_id not in self.orders:\\n            raise KeyError(f\\'No such order: {order_id}\\')\\n        del self.orders[order_id]\\n\\n        print(f\\'deleted {order_id}\\')' > ledger/storage.py\", \"login\": false, \"max_output_tokens\": 10000, \"yield_time_ms\": 10000}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T05-17-37-01a1d990-08bb-7e52-941c-23d88eef0a32.jsonl",
+   "why": "unescaped quote inside a string",
+   "reject_at": 100,
+   "body": "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"echo 'from typing import Literal\\\\n\\\\nTAX_RATES = {\"standard\": 20, \"reduced\": 5, \"zero\": 0}\\\\n\\\\ndef apply_discount(cents: int, pct: int) -> int:\\\\n    if not 0 <= pct <= 100:\\\\n        raise ValueError(\"discount out of range\")\\\\n    return cents - (cents * pct + 50) // 100\\\\n\\\\nrate_choices = Literal[\"standard\", \"reduced\", \"zero\"]\\\\n\\\\ndef tax(cents: int, rate: rate_choices = \\\"standard\\\") -> int:\\\\n    \\\"\\\"\\\"Tax on cents at a named rate, rounded half up.\\\"\\\"\\\"\\\\n    pct = TAX_RATES[rate]\\\\n    return (cents * pct + 50) // 100\\\\n\\\\nrate_choices = Literal[\"standard\", \"reduced\", \"zero\"]\\\\n\\\\ndef total(order, rate: rate_choices = \\\"standard\\\") -> int:\\\\n    \\\"\\\"\\\"Order total: subtotal, minus the order's discount, plus tax.\\\"\\\"\\\"\\\\n    net = apply_discount(order.subtotal_cents, order.discount_pct)\\\\n    return net + tax(net, rate)' > ledger/pricing.py\", \"yield_time_ms\": 10000}}\n</tool_call>"
+  },
+  {
+   "session": "rollout-2026-11-14T05-17-47-01a1d990-2ea9-7fa1-bed5-40aa0cb3ff1f.jsonl",
+   "why": "invalid escape",
+   "reject_at": 73,
+   "body": "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i 's/raise KeyError\\(message\\)/raise OrderNotFound\\(message\\)/' ledger/storage.py\", \"login\": true}}\n</tool_call>"
+  }
+ ]
+}

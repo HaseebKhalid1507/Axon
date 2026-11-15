@@ -1,5 +1,5 @@
-//! Axon: CPU and CUDA inference for GGUF language models (the README lists
-//! the supported families), bit-exact across decode, batched prefill and
+//! Axon: CPU and CUDA inference for GGUF language models (docs/models.md
+//! lists the supported families), bit-exact across decode, batched prefill and
 //! speculative verify.
 //!
 //! The `axon` binary is a thin wrapper over this crate. The public API is
@@ -46,7 +46,7 @@
 //! changes behaviour. `AXON_GPUS` picks the GPU(s): the only way in 0.1
 //! (read at each `Backend::new`). A value the engine can't use for
 //! `AXON_SIMD`, `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error from
-//! `load` and `Backend::new`. README; #118.
+//! `load` and `Backend::new`. docs/environment.md; #118.
 //!
 //! [`Backend`] and [`BackendCache`] are opaque, [`Lm`] is sealed, and
 //! [`Device`], [`KvType`], [`Numerics`] and [`GenStats`] are
@@ -58,6 +58,7 @@ mod mv;
 mod chat;
 #[doc(hidden)]
 pub mod cli;
+mod constrain;
 mod cuda;
 mod draft;
 mod generate;
@@ -73,11 +74,13 @@ mod model;
 mod moe;
 mod numerics;
 mod pool;
+mod pull;
 mod quant;
 mod rope;
 mod safetensors;
 mod sample;
 mod serve;
+mod sha256;
 mod spec;
 #[cfg(test)]
 mod testutil;
@@ -94,8 +97,9 @@ pub use tokenizer::{Tokenizer, Utf8Stream};
 // Crate-root paths the modules use (`crate::PREFILL_BATCH`, `crate::fail`,
 // ...), from before the library split, when they lived in main.rs.
 pub(crate) use cli::{
-    DEFAULT_CHAT_CTX, backend_and_drafter, check_stream_decode, copy_for, device_env, draft_env,
-    draft_env_set, fail, kv_env, kv_flag, numerics_flag, open_model_with, placement, round_draft,
+    DEFAULT_CHAT_CTX, check_stream_decode, copy_for, device_env, draft_env, draft_env_set, fail,
+    kv_env, kv_flag, model_arg, numerics_flag, round_draft, try_backend_and_drafter,
+    try_open_model_with, try_placement,
 };
 pub(crate) use generate::{PREFILL_BATCH, argmax};
 
@@ -111,20 +115,20 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
     let m = gguf::load_to_run(path, (device == Device::Cuda).then_some(false), |m| {
         if let Err(e) = model::check_supported(m) {
             unsupported = Some(e);
-            return gguf::CopyWish::MapOnly;
+            // Not loaded any further (`CopyWish::Stop`).
+            return gguf::CopyWish::Stop;
         }
         model::cpu_copy_wish(m)
-    })
-    .map_err(|e| format!("{path}: {e}"))?;
-    match unsupported {
-        Some(e) => Err(format!("{path}: {e}")),
-        None => Ok(m),
+    });
+    if let Some(e) = unsupported {
+        return Err(format!("{path}: {e}"));
     }
+    m.map_err(|e| format!("{path}: {e}"))
 }
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the
-/// command line, `["axon", "serve", "model.gguf", flags...]` (README,
-/// `axon serve --help`). Blocks. It behaves as the CLI does, process exits
+/// command line, `["axon", "serve", "model.gguf", flags...]`
+/// (docs/serving.md; its flags: `axon --help`). Blocks. It behaves as the CLI does, process exits
 /// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
 /// `AXON_DRAFT`) prints a message and exits with code 2, so does a start
 /// the server refuses (an explicit `--parallel N` that doesn't fit in GPU

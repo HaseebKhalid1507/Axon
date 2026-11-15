@@ -83,8 +83,31 @@ GPU natively with `--numerics fast` (sm_89+; the prefill GEMM's tensor cores mul
 Fast FP8 **fails its bars on bella** (sm_120): 7B tg128 32 tok/s vs Q4_K_M's 85–101 (decode runs
 without CUDA graphs: the follow-up), top-1 95.9 % vs the 97 % bar; it isn't measured on an H100. Block-scaled FP8, NVFP4, MoE and the other
 architectures are refused with a message (roadmap). The pre-tokenizer must be one
-Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+Axon knows (Qwen2's or Llama 3's regex: recognized, never executed; `deepseek-r1-qwen`, the
+DeepSeek-R1 Qwen2.5 distills' name for Qwen2's, as llama.cpp maps it: those distills, ollama's
+`deepseek-r1:1.5b` to `:32b`, load since #249); SentencePiece-style
 `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
+
+### Getting models: `axon pull`
+
+`axon pull NAME` downloads a GGUF from Hugging Face into the models directory: by a short name
+(`axon pull --list`: about ten models for local coding agents, from qwen2.5-coder and qwen3 4B/8B/14B
+to llama3.1-8b, gemma3-4b, gpt-oss-20b and the 30B-A3B mixtures of experts), each a fixed file at a
+pinned commit with its SHA-256, or any single-file GGUF as `OWNER/REPO/FILE.gguf` (or the file's
+`https://huggingface.co/OWNER/REPO/resolve/main/FILE` URL), checked against the SHA-256 Hugging Face
+publishes for it (the Git LFS oid). No registry. The models directory is `$AXON_MODELS_DIR`, else
+`$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`; a file lands in
+`OWNER/REPO/FILE` under it (`OWNER/REPO/DIR/FILE` for a file in a directory of the repo). The bytes come
+through `curl` (HTTPS only, redirects included; `-q`, so `~/.curlrc` is not read), are hashed as they
+arrive into `FILE.part`, and the file is renamed into place only once its size and SHA-256 match (a
+mismatch deletes the `.part`). An interrupted pull resumes where its `.part` ends, if `FILE.part.want`
+says it was a download of the same file (SHA-256 and size; a `.part` of an older version starts over).
+Gated repos need `HF_TOKEN` (an access token; given to curl on its stdin, not its command line; curl
+7.58 or newer, which doesn't send it on to another host). `gen`, `chat`, `serve` and `info` take a
+pulled model by its name (`axon chat qwen3-8b`), its `OWNER/REPO/FILE.gguf` or its file name, wherever
+they take a path; a name not pulled yet says the command that pulls it. `axon serve qwen3-8b` serves
+the model as `qwen3-8b` (`/v1/models`, a request's `model`).
+Split GGUFs (`-00001-of-0000N.gguf`) are refused: axon loads single files.
 
 ## Hardware
 
@@ -101,12 +124,26 @@ thread counts for a given answer to it.
 ### NVIDIA GPUs
 
 GPU (`--device cuda` or `AXON_DEVICE=cuda`): NVIDIA, Linux only. Nothing CUDA is needed
-to build. At run time axon loads the driver (`libcuda.so.1`) and NVRTC (`libnvrtc.so`,
-`.so.13` or `.so.12`, from the library path or the toolkit's `lib64` under `$CUDA_PATH`,
-`/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU on first use and
-caches them in `~/.cache/axon/cuda` (`$XDG_CACHE_HOME/axon/cuda`). The driver must
-support CUDA 12 or newer, and at least NVRTC's CUDA major version. A GPU newer than
-NVRTC gets PTX for the driver to compile. If the first NVRTC found can't target the GPU
+to build, and a release binary needs nothing but the NVIDIA driver (`libcuda.so.1`) to
+run: it carries its kernels precompiled (the kernel pack: `axon kernels build`, embedded
+with `--cfg axon_kernel_pack`) for sm_75, sm_80, sm_86, sm_89, sm_90 and sm_90a, and
+sm_120 (RTX 20/30/40/50, A100, H100), plus compute_120 PTX that the driver compiles for a
+GPU newer than sm_120. Data-center Blackwell (B200/B300: sm_100, sm_103) is numerically
+below sm_120, so neither the PTX nor a cubin covers it: it needs NVRTC (a CUDA toolkit), as
+do Pascal and Volta. Each is NVRTC's output for the same source and options as a run-time compile,
+so the same code. The pack needs a driver for its NVRTC's CUDA major: CUDA 13, driver
+R580 or newer. On an older driver `--device cuda` compiles with NVRTC if a CUDA 12 toolkit
+is installed, and otherwise stops with one line: the driver it found, that the kernels
+need R580+, and `--device cpu` to run on the CPU instead. `axon kernels list` says what the binary carries and where this GPU's
+kernels come from, and exits non-zero when the pack lacks some of the binary's kernel modules
+(a pack built from another version of axon); `AXON_KERNEL_PACK=0` turns the pack off
+([environment.md](environment.md)).
+Otherwise (a source build, a GPU or driver the pack doesn't cover) axon loads NVRTC
+(`libnvrtc.so`, `.so.13` or `.so.12`, from the library path or the toolkit's `lib64`
+under `$CUDA_PATH`, `/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU
+on first use and caches them in `~/.cache/axon/cuda` (`$XDG_CACHE_HOME/axon/cuda`). The
+driver must support CUDA 12 or newer, and at least NVRTC's CUDA major version. A GPU
+newer than NVRTC gets PTX for the driver to compile. If the first NVRTC found can't target the GPU
 (NVRTC 13 dropped Pascal and Volta), the next one installed is tried, so a GTX 1050
 (sm_61) runs on NVRTC 12.x beside 13; a GPU no installed NVRTC can target is refused.
 The int8 tensor-core GEMMs (batched prefill, speculative verify) and the tensor-core

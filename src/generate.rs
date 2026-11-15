@@ -62,6 +62,9 @@ pub struct GenOpts<'a> {
     /// Sample (sample.rs) instead of picking greedily: crate-internal in
     /// 0.1 (the sampler's settings have no public, validated constructor yet).
     pub(crate) sample: Option<&'a mut sample::Sampler>,
+    /// Constrained decoding (`crate::constrain`, `sample::generate_constrained`):
+    /// crate-internal, as `sample`.
+    pub(crate) constraint: Option<&'a mut crate::constrain::Constraint>,
 }
 
 impl<'a> GenOpts<'a> {
@@ -74,6 +77,7 @@ impl<'a> GenOpts<'a> {
             stop,
             max_draft: 0,
             sample: None,
+            constraint: None,
         }
     }
 }
@@ -113,6 +117,25 @@ pub fn generate<M: Lm>(
             std::io::ErrorKind::InvalidInput,
             STREAM_DECODE_DRAFT,
         ));
+    }
+    if let Some(c) = o.constraint {
+        let picker = match o.sample {
+            Some(s) => sample::Picker::Sample(s),
+            None => sample::Picker::Greedy,
+        };
+        return sample::generate_constrained(
+            net,
+            cache,
+            prompt,
+            logits,
+            o.n_gen,
+            o.stop,
+            o.max_draft,
+            picker,
+            c,
+            draft,
+            emit,
+        );
     }
     if let Some(s) = o.sample {
         return sample::generate(
@@ -400,6 +423,7 @@ mod tests {
                     stop: &[],
                     max_draft: k,
                     sample: None,
+                    constraint: None,
                 },
                 &mut |h, max| {
                     let at = h.len() - prompt.len();

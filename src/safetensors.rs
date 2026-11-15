@@ -1471,7 +1471,8 @@ pub fn checkpoint_metadata(dir: &Path) -> io::Result<(Value, Meta)> {
 /// table and metadata are built and before any weight is read (`main`'s
 /// `check_supported`), as `gguf::load_to_run`'s `wants_copy`; the shards
 /// are always mapped (the converted tensors live in the anonymous `aux`
-/// arena), so its answer is not used. `fill` false: the tensors that need
+/// arena), so of its answer only `Stop` is used: the load ends there,
+/// before any conversion or FP8 scan (`CopyWish::stopped`). `fill` false: the tensors that need
 /// converting aren't (their bytes can't be read; `axon info`). Converting
 /// them is refused first (`conv_verdict`, #208) if the RAM available
 /// can't hold it.
@@ -1651,7 +1652,10 @@ pub(crate) fn load_ram(
         put_freqs(&mut small);
         m.set_aux(small.make_read_only()?);
     }
-    let _ = check(&m);
+    if check(&m) == crate::gguf::CopyWish::Stop {
+        // Refused: nothing converted, scanned or asked of `ram` (#269).
+        return Err(crate::gguf::CopyWish::stopped());
+    }
     if aux_len > freq_bytes.next_multiple_of(64) && fill {
         // Refused before any of it is made (#208: the FP8 0.5B's 520 MiB
         // were OOM-killed under a cap before any check ran).

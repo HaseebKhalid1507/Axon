@@ -1040,7 +1040,7 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
 /// `wants_copy` says what the model wants: `Want(bool)`, the copy that
 /// pays or not (the choice above); `MapOnly`, mapped whatever `copy` and
 /// AXON_MMAP say (a MoE model: a copy beside its r8 arena would hold the
-/// experts twice).
+/// experts twice); `Stop`, not loaded at all (`CopyWish::stopped`).
 pub fn load_to_run(
     path: &str,
     copy: Option<bool>,
@@ -1059,6 +1059,7 @@ pub fn load_to_run(
     // Always asked (the caller may check the model there), used if `copy`
     // is None.
     let copy = match wants_copy(&m) {
+        CopyWish::Stop => return Err(CopyWish::stopped()),
         CopyWish::MapOnly => false,
         CopyWish::Want(wanted) => copy.unwrap_or_else(|| copy_choice(None, len, wanted)),
     };
@@ -1085,6 +1086,22 @@ pub enum CopyWish {
     Want(bool),
     /// Always mapped.
     MapOnly,
+    /// Refused (the caller's check, which keeps its own message): the load
+    /// ends here, `stopped`'s error, before anything is copied, converted
+    /// or read (no rope unpermute, no read-ahead thread, no safetensors
+    /// conversion; #269's review: a refusal that let the load go on paid
+    /// all of it first).
+    Stop,
+}
+
+impl CopyWish {
+    /// The load's error after a `Stop` (the caller says why instead).
+    pub fn stopped() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "refused before its weights were read",
+        )
+    }
 }
 
 /// Bytes per read-ahead request. One MADV_WILLNEED reads at most the
@@ -1963,6 +1980,22 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(mapped.file_backed());
         assert!(!copied.file_backed());
+    }
+
+    /// `load_to_run`: `Stop` ends the load with `CopyWish::stopped`'s
+    /// error, whatever `copy` says (the caller's refusal, #269).
+    #[test]
+    fn load_to_run_stop_loads_nothing() {
+        let path = std::env::temp_dir().join(format!("axon-stop-{}.gguf", std::process::id()));
+        std::fs::write(&path, valid().pad_to(32, 64 + 4096)).unwrap();
+        let p = path.to_str().unwrap();
+        for copy in [None, Some(true), Some(false)] {
+            let Err(e) = load_to_run(p, copy, |_| CopyWish::Stop) else {
+                panic!("copy {copy:?}: loaded after Stop");
+            };
+            assert_eq!(e.to_string(), CopyWish::stopped().to_string());
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A string array long enough for the threaded parse (`Reader::strings`)

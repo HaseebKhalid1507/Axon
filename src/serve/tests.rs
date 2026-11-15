@@ -31,6 +31,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
 fn test_opts(path: &str, device: Device) -> Opts {
     Opts {
         path: path.into(),
+        name: None,
         host: "127.0.0.1".into(),
         port: 0,
         device,
@@ -53,11 +54,18 @@ fn test_opts(path: &str, device: Device) -> Opts {
         slot_ctx: None,
         kv_pages: None,
         share: None,
+        tool_stream: Some(true),
         paged: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         step_ms: super::engine::STEP_MS,
-        sched: super::engine::Sched::default(),
+        // As `Sched::default`, but a bad AXON_ADMIT fails the test instead
+        // of exiting the test process (#269).
+        sched: super::engine::Sched::from_env(
+            std::env::var("AXON_ADMIT").ok().as_deref(),
+            std::env::var("AXON_STEP_COST").ok().as_deref(),
+        )
+        .expect("AXON_ADMIT"),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -65,6 +73,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         cache_ram: super::tier::CacheRam::Bytes(0),
         cache_ram_alloc: super::tier::Alloc::Thread,
         numerics: Numerics::Exact,
+        constrain: None,
     }
 }
 
@@ -211,6 +220,7 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
             stop: &tok.eog(),
             max_draft: 0,
             sample: None,
+            constraint: None,
         },
         &mut |_, _| Vec::new(),
         &mut |id| {
@@ -223,11 +233,17 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
     out
 }
 
-/// `axon chat --temp 0`'s first reply to `msg` on `net`, at most `n`
-/// tokens, with run_chat's default system message for `arch`.
-fn chat_text<M: Lm>(net: &M, tok: &Tokenizer, arch: &str, msg: &str, n: usize) -> String {
-    let system = (arch == "qwen2").then_some(crate::chat::DEFAULT_SYSTEM);
-    let mut c = crate::chat::Chat::new(net, tok, system, 256).unwrap();
+/// `axon chat --temp 0`'s first reply to `msg` on `net` (model `m`), at
+/// most `n` tokens, with run_chat's default system message (the template's).
+fn chat_text<M: Lm>(
+    net: &M,
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    msg: &str,
+    n: usize,
+) -> String {
+    let system = crate::chat::default_system(m);
+    let mut c = crate::chat::Chat::new(net, tok, m, system.as_deref(), 256).unwrap();
     c.max_reply = n;
     let mut text = Utf8Stream::default();
     let mut out = String::new();
@@ -279,7 +295,7 @@ fn serve_matches_gen_and_chat(path: &str, device: Device) {
         .unwrap();
         (
             gen_text(&net, &tok, PROMPT, 32),
-            chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
+            chat_text(&net, &tok, &m, CHAT_MSG, 24),
         )
     };
     serve_checks(path, device, &gen_ref, &chat_ref);
@@ -885,6 +901,47 @@ fn serve_http_behaviour() {
     );
 }
 
+/// `chat_prompt` (AXON_LOGITS_CHAT, scripts/golden.py) renders a request
+/// body as `completion` does: the template's ids for the messages,
+/// `chat_template_kwargs` honoured, request errors as their message.
+#[test]
+fn chat_prompt_renders_as_completion() {
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m).unwrap();
+    let body =
+        br#"{"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]}"#;
+    let ids = super::chat_prompt(&tok, &m, body).unwrap();
+    let msg = |role, c: &str| Message {
+        role,
+        content: c.into(),
+    };
+    let msgs = [
+        msg(Role::System, "S"),
+        msg(Role::User, "a"),
+        msg(Role::Assistant, "b"),
+        msg(Role::User, "c"),
+    ];
+    assert_eq!(ids, t.render(&tok, &msgs, false));
+    assert_eq!(
+        tok.decode(&ids),
+        "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n<|im_start|>assistant\n"
+    );
+    // qwen2 doesn't think: enable_thinking changes nothing.
+    let off = br#"{"messages": [{"role": "user", "content": "a"}], "chat_template_kwargs": {"enable_thinking": false}}"#;
+    assert_eq!(
+        super::chat_prompt(&tok, &m, off).unwrap(),
+        t.render(&tok, &[msg(Role::User, "a")], false)
+    );
+    let e = super::chat_prompt(&tok, &m, b"{").unwrap_err();
+    assert!(e.starts_with("invalid JSON"), "{e}");
+    let e = super::chat_prompt(&tok, &m, br#"{"messages": []}"#).unwrap_err();
+    assert_eq!(e, "'messages' is empty");
+}
+
 /// The chat prompt is `axon chat`'s: the same building blocks (frame), the
 /// default system message for qwen2, the empty think block for qwen3.
 #[test]
@@ -893,7 +950,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let msg = |role, c: &str| Message {
         role,
         content: c.into(),
@@ -936,7 +993,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tok3 = Tokenizer::from_gguf(&m3);
-    let t3 = Template::new(&tok3, &m3.arch).unwrap();
+    let t3 = Template::new(&tok3, &m3).unwrap();
     let msgs = [
         msg(Role::User, "a"),
         msg(Role::Assistant, "<think>\nhmm\n</think>\n\nb"),
@@ -958,7 +1015,7 @@ fn chat_template_matches_chat() {
         return;
     };
     let tokl = Tokenizer::from_gguf(&ml);
-    let tl = Template::new(&tokl, &ml.arch).unwrap();
+    let tl = Template::new(&tokl, &ml).unwrap();
     assert!(!tl.thinks());
     let head = |sys: &str| {
         format!(
@@ -1018,7 +1075,7 @@ fn gemma3_template_matches_llama_cpp() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     assert!(!t.thinks());
     let (bos, eot) = (2u32, 106u32);
     assert!(t.stop().contains(&eot) && t.stop().contains(&tok.eos()));
@@ -1068,7 +1125,7 @@ fn text_out_reasoning_and_stops() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m3);
-    let t = Template::new(&tok, &m3.arch).unwrap();
+    let t = Template::new(&tok, &m3).unwrap();
     let think = t.think.as_ref().map(|&(o, c, _)| (o, c));
     let run = |text: &str, think, stops: &[&str]| {
         let mut out = super::TextOut {
@@ -1082,6 +1139,7 @@ fn text_out_reasoning_and_stops() {
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
             metrics: None,
+            stream_calls: false,
         };
         let (mut c, mut r) = (String::new(), String::new());
         for id in tok.encode_special(text) {
@@ -1658,21 +1716,29 @@ fn serve_tool_calls() {
         let v = post(a, "/v1/chat/completions", req.clone()).json();
         let ch = &v["choices"][0];
         let m = &ch["message"];
-        if ch["finish_reason"] != "tool_calls" {
-            // Not a call (cut off, or not JSON): the block is content, verbatim.
+        let Some(calls) = m["tool_calls"].as_array() else {
+            // Not a call (not JSON before its arguments): the block is
+            // content, verbatim.
             assert!(
                 m["content"].as_str().unwrap().contains("<tool_call>"),
                 "{v}"
             );
             continue;
-        }
-        let calls = m["tool_calls"].as_array().unwrap();
+        };
         assert!(!calls.is_empty(), "{v}");
-        for c in calls {
+        // A call whose arguments began is a call (#260): cut off by
+        // max_tokens, it ends the reply ("length") with what was written.
+        let cut = ch["finish_reason"] == "length";
+        if !cut {
+            assert_eq!(ch["finish_reason"], "tool_calls", "{v}");
+        }
+        for (i, c) in calls.iter().enumerate() {
             assert!(c["id"].as_str().unwrap().starts_with("call_"), "{v}");
             assert_eq!(c["type"], "function");
             let args = c["function"]["arguments"].as_str().unwrap();
-            serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+            if !(cut && i + 1 == calls.len()) {
+                serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+            }
         }
 
         let mut sreq = req.clone();
@@ -1711,7 +1777,7 @@ fn serve_tool_calls() {
                 scalls[i]["arguments"] = json!(args);
             }
         }
-        assert_eq!(finish.as_deref(), Some("tool_calls"));
+        assert_eq!(finish.as_deref(), ch["finish_reason"].as_str());
         assert_eq!(content, m["content"].as_str().unwrap_or(""));
         let whole: Vec<Value> = calls
             .iter()
@@ -1720,6 +1786,9 @@ fn serve_tool_calls() {
             )
             .collect();
         assert_eq!(scalls, whole);
+        if cut {
+            continue;
+        }
 
         // The next turn: the call and its result appended; the cache is reused.
         let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
@@ -1739,6 +1808,214 @@ fn serve_tool_calls() {
         assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {v2}");
         assert!(v2["usage"]["prompt_tokens"].as_u64().unwrap() > p1);
     }
+}
+
+/// #260, over HTTP on the test model (CPU): on chat completions and
+/// Responses a call streams as it is generated (its id and name, then its
+/// arguments a piece at a time); with `tool_stream` off (AXON_TOOL_STREAM=0)
+/// it goes out whole once decided, as before. The tokens are the same either
+/// way, so the same call. A call cut off by max_tokens is a call with what
+/// was written (finish "length", `axon_tool_calls_invalid_total`) where
+/// decide-whole mode returns the block as content
+/// (`axon_tool_calls_dropped_total`); on /v1/responses its item is
+/// `incomplete`. Streamed and whole replies agree in both modes.
+#[test]
+fn serve_tool_calls_streamed() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let tools = json!([{"type": "function", "function": {"name": "get_weather",
+        "description": "Get the weather in a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]}}}]);
+    let rtools = json!([{"type": "function", "name": "get_weather",
+        "description": "Get the weather in a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]}}]);
+    let ask = "What's the weather in Paris?";
+    let named = json!({"type": "function", "function": {"name": "get_weather"}});
+    let chat = |n: u64, stream: bool| {
+        json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+               "tool_choice": named, "temperature": 0, "max_tokens": n, "stream": stream})
+    };
+    // A chat stream: (content, [(name, arguments, tool_call chunks)], finish).
+    let chat_stream = |a: SocketAddr, body: Value| {
+        let ev = post(a, "/v1/chat/completions", body).events();
+        assert_eq!(ev.last().map(String::as_str), Some("[DONE]"));
+        let (mut content, mut calls, mut finish) = (String::new(), Vec::new(), String::new());
+        for e in ev.iter().filter(|e| *e != "[DONE]") {
+            let v: Value = serde_json::from_str(e).unwrap();
+            let c = &v["choices"][0];
+            content.push_str(c["delta"]["content"].as_str().unwrap_or(""));
+            if let Some(f) = c["finish_reason"].as_str() {
+                finish = f.to_string();
+            }
+            for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                let i = tc["index"].as_u64().unwrap() as usize;
+                if i == calls.len() {
+                    assert!(
+                        tc["id"].is_string() && tc["function"]["name"].is_string(),
+                        "{e}"
+                    );
+                    calls.push((
+                        tc["function"]["name"].as_str().unwrap().to_string(),
+                        String::new(),
+                        0,
+                    ));
+                }
+                calls[i]
+                    .1
+                    .push_str(tc["function"]["arguments"].as_str().unwrap_or(""));
+                calls[i].2 += 1;
+            }
+        }
+        (content, calls, finish)
+    };
+    let mut seen = Vec::new();
+    for streaming in [true, false] {
+        let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+            o.tool_stream = Some(streaming)
+        });
+        let a = s.addr;
+        // A whole call.
+        let v = post(a, "/v1/chat/completions", chat(48, false)).json();
+        let ch = &v["choices"][0];
+        assert_eq!(ch["finish_reason"], "tool_calls", "{v}");
+        let c = &ch["message"]["tool_calls"][0]["function"];
+        let (name, args) = (
+            c["name"].as_str().unwrap(),
+            c["arguments"].as_str().unwrap(),
+        );
+        assert_eq!(name, "get_weather");
+        assert!(
+            serde_json::from_str::<Value>(args).unwrap().is_object(),
+            "{v}"
+        );
+        let (content, calls, finish) = chat_stream(a, chat(48, true));
+        assert_eq!((content.as_str(), finish.as_str()), ("", "tool_calls"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].0.as_str(), calls[0].1.as_str()), (name, args));
+        if streaming {
+            assert!(
+                calls[0].2 >= 3,
+                "a head, then the arguments in pieces: {calls:?}"
+            );
+        } else {
+            assert_eq!(calls[0].2, 2, "a head and the arguments at once: {calls:?}");
+        }
+        // The same through /v1/responses, streamed: a function_call item
+        // with an arguments delta per piece (decide-whole: one).
+        let rbody = json!({"input": ask, "tools": rtools,
+                           "tool_choice": {"type": "function", "name": "get_weather"},
+                           "temperature": 0, "max_output_tokens": 48, "stream": true});
+        let mut rbody_whole = rbody.clone();
+        rbody_whole["stream"] = json!(false);
+        let r = post(a, "/v1/responses", rbody);
+        let ev = responses_events(&r);
+        let added = ev
+            .iter()
+            .position(|(n, v)| {
+                n == "response.output_item.added" && v["item"]["type"] == "function_call"
+            })
+            .expect("a function_call item");
+        let deltas: Vec<usize> = (0..ev.len())
+            .filter(|&i| ev[i].0 == "response.function_call_arguments.delta")
+            .collect();
+        assert!(deltas.iter().all(|&i| i > added));
+        assert!(
+            if streaming {
+                deltas.len() >= 2
+            } else {
+                deltas.len() == 1
+            },
+            "{deltas:?}"
+        );
+        let (_, _, rcalls, _) = responses_stream(&r);
+        assert_eq!(rcalls, [(name.to_string(), args.to_string())]);
+        // Cut off by max_tokens inside the arguments.
+        let v = post(a, "/v1/chat/completions", chat(4, false)).json();
+        let ch = &v["choices"][0];
+        assert_eq!(ch["finish_reason"], "length", "{v}");
+        let m = &ch["message"];
+        let (content, calls, finish) = chat_stream(a, chat(4, true));
+        assert_eq!(finish, "length");
+        let g = prom_parse(&call(a, "GET", "/metrics", "").body);
+        let counts = (
+            g["axon_tool_calls_invalid_total"],
+            g["axon_tool_calls_dropped_total"],
+        );
+        if streaming {
+            let cut = m["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            assert!(
+                args.starts_with(cut) && cut.len() < args.len(),
+                "{cut:?} of {args:?}"
+            );
+            assert!(serde_json::from_str::<Value>(cut).is_err(), "{cut}");
+            assert_eq!(m["tool_calls"][0]["function"]["name"], "get_weather");
+            assert_eq!(content, "");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                (calls[0].0.as_str(), calls[0].1.as_str()),
+                ("get_weather", cut)
+            );
+            assert_eq!(counts, (2.0, 0.0));
+        } else {
+            let text = m["content"].as_str().unwrap();
+            assert!(text.starts_with("<tool_call>"), "{v}");
+            assert!(m["tool_calls"].is_null(), "{v}");
+            assert_eq!((content.as_str(), calls.len()), (text, 0));
+            assert_eq!(counts, (0.0, 2.0));
+        }
+        // The same cut on /v1/responses: the call is the reply's last item,
+        // its arguments not an object, so its item is `incomplete` (as
+        // OpenAI marks it), whole and streamed alike. Decide-whole: the
+        // block is the incomplete message.
+        let rcut = |stream: bool| {
+            json!({"input": ask, "tools": rtools,
+                   "tool_choice": {"type": "function", "name": "get_weather"},
+                   "temperature": 0, "max_output_tokens": 4, "stream": stream})
+        };
+        let r = post(a, "/v1/responses", rcut(false)).json();
+        assert_eq!(r["status"], "incomplete", "{r}");
+        let (_, _, rcalls, sr) = responses_stream(&post(a, "/v1/responses", rcut(true)));
+        let shape = |r: &Value| -> Vec<(Value, Value, Value)> {
+            let items = r["output"].as_array().unwrap();
+            items
+                .iter()
+                .map(|i| {
+                    (
+                        i["type"].clone(),
+                        i["status"].clone(),
+                        i["arguments"].clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(shape(&sr), shape(&r), "streamed {sr} whole {r}");
+        let last = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["status"], "incomplete", "{r}");
+        if streaming {
+            assert_eq!(last["type"], "function_call", "{r}");
+            let cut = last["arguments"].as_str().unwrap();
+            assert!(args.starts_with(cut) && cut.len() < args.len(), "{r}");
+            assert_eq!(rcalls, [("get_weather".to_string(), cut.to_string())]);
+        } else {
+            assert_eq!(last["type"], "message", "{r}");
+            assert!(rcalls.is_empty(), "{sr}");
+        }
+        // A whole call (not cut) stays `completed`.
+        let r = post(a, "/v1/responses", rbody_whole.clone()).json();
+        let it = r["output"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            (&it["type"], &it["status"]),
+            (&json!("function_call"), &json!("completed")),
+            "{r}"
+        );
+        seen.push((name.to_string(), args.to_string()));
+    }
+    assert_eq!(seen[0], seen[1], "the same tokens, the same call");
 }
 
 /// Continuous batching (stage S2, GPU), `parallel` 8: requests sent
@@ -1878,6 +2155,201 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
             assert_eq!(t, s1, "{what} stagger {stagger} ms: request {i}");
         }
     }
+}
+
+/// Constrained tool calls (`Opts::constrain`, AXON_CONSTRAIN=1) end to end,
+/// on the CPU (one request at a time: `sample::generate_constrained`) and
+/// on CUDA (the batch's masked rows, `RowHead::Sample.mask`): a request
+/// without tools gets the same reply and fingerprint from a server with
+/// constraints on or off; a tools request (tool_choice auto) gets its own
+/// `system_fingerprint` (`identity::constrain_field`), and every call it
+/// makes has arguments that parse (but a call cut by `max_tokens`), with no
+/// `<tool_call>` block left in the content of a reply that stopped; on CUDA, tools requests and plain ones
+/// sent together get what each gets alone (handing over to the batch
+/// partway too, with drafting).
+#[test]
+fn serve_constrained_tool_calls() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([{"type": "function", "function": {"name": "exec_command",
+        "description": "Run a shell command",
+        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}},
+                       "required": ["cmd"]}}}]);
+    let ask = "In ledger/cli.py replace raise KeyError(f'No such account: {name}') with raise \
+               ValueError(\"unknown \\\"account\\\"\"), then print \"done\".";
+    let treq = |extra: Value| {
+        let mut r = json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+                           "max_tokens": 96});
+        for (k, v) in extra.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        r
+    };
+    let tbodies = [
+        treq(json!({"temperature": 0})),
+        treq(json!({"temperature": 0.8, "seed": 1})),
+        treq(json!({"temperature": 1.2, "seed": 2, "top_k": 0})),
+    ];
+    let plain = json!({"messages": [{"role": "user", "content": "Name three colors."}],
+                       "max_tokens": 24, "temperature": 0});
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for dev in devices {
+        let off = server_with(p, dev, |o| o.constrain = Some(false));
+        let on = server_with(p, dev, |o| {
+            o.constrain = Some(true);
+            if dev == Device::Cuda {
+                o.parallel = 4;
+                o.max_draft = 3;
+            }
+        });
+        let a = post(off.addr, "/v1/chat/completions", plain.clone()).json();
+        let b = post(on.addr, "/v1/chat/completions", plain.clone()).json();
+        assert_eq!(a["choices"], b["choices"], "{dev:?}: a plain request");
+        assert_eq!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        let fp = a["system_fingerprint"].as_str().unwrap().to_string();
+        let (mut calls, mut cfps) = (0, Vec::new());
+        for body in &tbodies {
+            let v0 = post(off.addr, "/v1/chat/completions", body.clone()).json();
+            assert_eq!(
+                v0["system_fingerprint"],
+                fp.as_str(),
+                "{dev:?}: constraints off"
+            );
+            let r = post(on.addr, "/v1/chat/completions", body.clone());
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            let vfp = v["system_fingerprint"].as_str().unwrap().to_string();
+            assert_ne!(vfp, fp, "{dev:?}: a constrained reply's fingerprint");
+            cfps.push(vfp);
+            let ch = &v["choices"][0];
+            let cut = ch["finish_reason"] == "length";
+            let cs = ch["message"]["tool_calls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for (i, c) in cs.iter().enumerate() {
+                let args = c["function"]["arguments"].as_str().unwrap();
+                // A call cut by max_tokens comes back as a call with what
+                // was written (#260): only the reply's last call can be.
+                if !(cut && i + 1 == cs.len()) {
+                    serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                }
+                calls += 1;
+            }
+            if ch["finish_reason"] != "length" {
+                let content = ch["message"]["content"].as_str().unwrap_or("");
+                assert!(
+                    !content.contains("<tool_call>"),
+                    "{dev:?}: an unparsed call: {v}"
+                );
+            }
+            eprintln!("{dev:?} constrained: {}", ch["message"]);
+        }
+        // One grammar: one fingerprint for every constrained request.
+        assert!(cfps.windows(2).all(|w| w[0] == w[1]), "{cfps:?}");
+        assert!(calls > 0, "{dev:?}: no call made");
+        if dev == Device::Cuda {
+            let mut bodies: Vec<Value> = tbodies.to_vec();
+            bodies.extend(batch_bodies(true).into_iter().take(3));
+            bodies.push(treq(json!({"temperature": 0, "repetition_penalty": 1.2})));
+            constrained_together_vs_alone(on.addr, &bodies);
+        }
+    }
+}
+
+/// `batched_vs_solo` for replies that may be tool calls: content,
+/// reasoning, the calls' names and arguments (not their ids, which are
+/// unique), the finish reason and the token count, alone and sent together
+/// (at once, and staggered: the first hands over to the batch).
+fn constrained_together_vs_alone(a: SocketAddr, bodies: &[Value]) {
+    let reply = |r: &Resp| -> Value {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        let ch = &v["choices"][0];
+        let m = &ch["message"];
+        let calls: Vec<Value> = (m["tool_calls"].as_array().into_iter().flatten())
+            .map(|c| json!([c["function"]["name"], c["function"]["arguments"]]))
+            .collect();
+        json!([
+            m["content"],
+            m["reasoning_content"],
+            calls,
+            ch["finish_reason"],
+            v["usage"]["completion_tokens"],
+            v["system_fingerprint"]
+        ])
+    };
+    let alone: Vec<Value> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/chat/completions", b.clone())))
+        .collect();
+    for stagger in [0u64, 60] {
+        let together: Vec<Value> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (bodies.iter().enumerate())
+                .map(|(i, b)| {
+                    sc.spawn(move || {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(stagger));
+                        }
+                        reply(&post(a, "/v1/chat/completions", b.clone()))
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, (t, s1)) in together.iter().zip(&alone).enumerate() {
+            assert_eq!(t, s1, "constrained, stagger {stagger} ms: request {i}");
+        }
+    }
+}
+
+/// A model `axon serve` was given by a name `axon pull` resolved (#231
+/// review): the name is its id in /v1/models and a request naming it is
+/// served; given by path, the id is the file's stem, as before.
+#[test]
+fn serve_pulled_name_is_the_model_id() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let s = server_with(p, Device::Cpu, |o| {
+        o.name = Some("qwen2.5-0.5b".into());
+        o.alias = None;
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], "qwen2.5-0.5b", "{v}");
+    assert_eq!(v["data"].as_array().unwrap().len(), 1, "{v}");
+    let ask = |model: &str| {
+        post(
+            a,
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 2, "temperature": 0}),
+        )
+    };
+    let r = ask("qwen2.5-0.5b");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["model"], "qwen2.5-0.5b");
+    let stem = std::path::Path::new(p)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        ask(stem).status,
+        404,
+        "the file's stem is not a name it was given"
+    );
+    drop(s);
+    let s = server_with(p, Device::Cpu, |o| o.alias = None);
+    let v = call(s.addr, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["id"], stem, "a path keeps its stem: {v}");
 }
 
 /// A pool whose slots are shorter than the context (`slot_ctx`, as when
@@ -2052,7 +2524,7 @@ fn serve_paged_pressure() {
         .iter()
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
-    // Shared prefixes (off unless the run sets AXON_SHARE_KV=1): no page
+    // Shared prefixes (on unless the run sets AXON_SHARE_KV=0): no page
     // is shared (the prompts differ from their first page on), and the
     // index's warm pages (a preempted request's) are neither held nor free.
     let warm = sl.get("pages_warm").map_or(0, |w| w.as_u64().unwrap());
@@ -2582,8 +3054,17 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
                 }
             });
         }
-        // Both slots busy with shorts, more queued.
-        std::thread::sleep(Duration::from_millis(500));
+        // Both slots busy with shorts and one waiting at least, so the long
+        // one can't find a slot free: it waits (a sleep of 500 ms here let
+        // a slow start, a debug build on a shared GPU, admit it at once:
+        // 1114-125202-b1eb).
+        wait_for("both slots busy and a short waiting", || {
+            let sl = call(a, "GET", "/slots", "").json();
+            let busy = (sl["slots"].as_array().unwrap().iter())
+                .filter(|x| x["busy"] == true)
+                .count();
+            busy == 2 && sl["waiting"].as_array().is_some_and(|w| !w.is_empty())
+        });
         let h =
             sc.spawn(move || post(a, "/v1/completions", long).json()["choices"][0]["text"].clone());
         // The long one's last age seen in the waiting list (the longest
@@ -2621,6 +3102,101 @@ fn serve_sjf_long_prompt_admitted_within_age_bound() {
         "the long prompt waited {waited} ms: past 2 x {age} ms"
     );
     assert_eq!(text, solo, "the long prompt's reply == alone");
+}
+
+/// Refusals on the engine thread come back from `start` as its error
+/// (#269), not as an exit: `--ctx` past the trained context, `--gpu-layers`
+/// without CUDA, a model file that isn't there, a draft model that isn't
+/// there, `--parallel 2` on the CPU (refused after its backend is built,
+/// which is dropped), and `--no-think` on a model that doesn't think
+/// (refused by `start` once the server is fully up: its engine and accept
+/// threads stopped and joined). Each used to call `crate::fail` (exit 2),
+/// which ended a test binary in the middle of its run with the message
+/// captured and lost (1114-174039-9861). The test process is still here to
+/// check the messages: the ones `axon serve` exits 2 with.
+#[test]
+fn serve_start_refusals_dont_exit() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let refused = |what: &str, f: &dyn Fn(&mut Opts)| -> String {
+        let mut o = test_opts(p, Device::Cpu);
+        f(&mut o);
+        match start(o) {
+            Ok(_) => panic!("{what}: the server started"),
+            Err(e) => {
+                assert!(super::is_refused(&e), "{what}: not a refusal: {e}");
+                e.to_string()
+            }
+        }
+    };
+    let e = refused("--ctx", &|o| o.ctx = Some(1 << 22));
+    assert!(e.starts_with("--ctx 4194304 is past the "), "{e}");
+    let e = refused("--gpu-layers", &|o| o.gpu_layers = Some(2));
+    assert_eq!(e, "--gpu-layers needs --device cuda");
+    let e = refused("no file", &|o| o.path = "/nonexistent/axon-269.gguf".into());
+    assert_eq!(e, "cannot open '/nonexistent/axon-269.gguf': no such file");
+    let e = refused("no draft file", &|o| {
+        o.draft_model = Some("/nonexistent/axon-269-draft.gguf".into());
+        o.max_draft = 4;
+    });
+    assert!(
+        e.starts_with("--draft-model /nonexistent/axon-269-draft.gguf: "),
+        "{e}"
+    );
+    let e = refused("--parallel", &|o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    assert_eq!(
+        e,
+        "--parallel 2: batching many requests needs the whole model on one GPU (--device cuda; \
+         not with --gpu-layers or several AXON_GPUS); this backend serves one request at a time \
+         (--parallel 1)"
+    );
+    // The test model doesn't think (an AXON_TEST_MODEL that does starts).
+    let mut o = test_opts(p, Device::Cpu);
+    o.no_think = true;
+    match start(o) {
+        Ok(_) => eprintln!("--no-think: {p} thinks: its refusal not checked"),
+        Err(e) => {
+            assert!(super::is_refused(&e), "--no-think: not a refusal: {e}");
+            assert_eq!(
+                e.to_string(),
+                format!("--no-think: {p} has no <think> token (not a thinking model)")
+            );
+        }
+    }
+}
+
+/// GET /slots's `waiting` is the engine's waiting list: empty once a
+/// request that ran alone (the S1 path: nothing else running or waiting)
+/// is done and the pool idle (#268: the list was published before the S1
+/// path took the request, and not again until the next one came, so an
+/// idle server listed a finished request as waiting).
+#[test]
+fn serve_solo_leaves_no_waiting() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    let a = s.addr;
+    for i in 0..3 {
+        let b =
+            json!({"prompt": format!("{i}. Name a colour:"), "max_tokens": 4, "temperature": 0});
+        assert_eq!(post(a, "/v1/completions", b).status, 200);
+        wait_idle(a);
+        let sl = call(a, "GET", "/slots", "").json();
+        assert_eq!(sl["waiting"], json!([]), "request {i}: {sl}");
+        assert_eq!(sl["queue_depth"], 0, "request {i}: {sl}");
+    }
 }
 
 /// Shortest-first admission (`--admit-order sjf`, the default): with 4
@@ -4765,7 +5341,7 @@ fn harmony_calls_from_channels() {
         return;
     };
     let tok = Tokenizer::from_gguf(&m);
-    let t = Template::new(&tok, &m.arch).unwrap();
+    let t = Template::new(&tok, &m).unwrap();
     let render = |extra: &str| {
         let body = format!(
             r#"{{"messages": [{{"role": "user", "content": "Weather in Paris?"}}], "tools": [{{"type": "function", "function": {{"name": "get_weather", "parameters": {{"type": "object", "properties": {{"city": {{"type": "string"}}}}}}}}}}]{extra}}}"#
@@ -4787,6 +5363,7 @@ fn harmony_calls_from_channels() {
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
             metrics: None,
+            stream_calls: false,
         };
         let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
         for (i, &id) in ids.iter().enumerate() {
@@ -4814,6 +5391,7 @@ fn harmony_calls_from_channels() {
                     (Piece::Text(t), Some(l)) if l.starts_with("text ") => l.push_str(&t),
                     (Piece::Text(t), _) => v.push(format!("text {t}")),
                     (Piece::Call(c), _) => v.push(format!("call {} {}", c.name, c.args)),
+                    (Piece::Head(_) | Piece::Args(_), _) => {}
                 }
             }
             v
@@ -4954,6 +5532,7 @@ fn harmony_calls_from_channels() {
         stop: super::StopMatcher::new(Vec::new()),
         call: super::CallState::None,
         metrics: Some(m.clone()),
+        stream_calls: false,
     };
     for id in tok.encode_special(&format!("{head}[1]<|end|>")) {
         out.push(id);
@@ -5170,6 +5749,170 @@ fn harmony_calls_from_channels() {
     assert!(render(r#", "tool_choice": "none""#).is_none());
 }
 
+/// #260: stream mode through `TextOut` (gpt-oss): a call is framed once its
+/// arguments open with `{`, they go out as their tokens come, and the reply
+/// still ends at the token that closes the object (the same tokens as in
+/// decide-whole mode, so the same call). From then on it is a call: cut off
+/// (the token limit, a header, its `<|call|>`) it is a call with what was
+/// written, never reasoning, and not counted as dropped. Arguments that
+/// never open with `{` are never framed: reasoning, as before. Tokenizer
+/// only.
+#[test]
+fn harmony_calls_streamed() {
+    use super::tools::{self, Piece};
+    let Some(m) = crate::testutil::gptoss_model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m).unwrap();
+    let render = || {
+        let body = r#"{"messages": [{"role": "user", "content": "Weather in Paris?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]}"#;
+        let r = tools::parse(body.as_bytes()).unwrap().unwrap();
+        tools::render(&t, &tok, &r, false).ok().unwrap().channels
+    };
+    let mx = std::sync::Arc::new(super::ops::Metrics::default());
+    // (content pieces, reasoning, the token that ended the reply).
+    let run = |ids: &[u32], stream: bool| {
+        let mut out = super::TextOut {
+            tok: &tok,
+            utf8: Utf8Stream::default(),
+            think: None,
+            channels: render(),
+            reasoning: false,
+            first: true,
+            strip_nl: false,
+            stop: super::StopMatcher::new(Vec::new()),
+            call: super::CallState::None,
+            metrics: Some(mx.clone()),
+            stream_calls: stream,
+        };
+        let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
+        for (i, &id) in ids.iter().enumerate() {
+            let (a, b, hit) = out.push(id);
+            c.push(a);
+            r.push_str(&b);
+            if hit {
+                stopped = Some(i);
+                break;
+            }
+        }
+        if stopped.is_none() {
+            let (a, b) = out.finish();
+            c.push(a);
+            r.push_str(&b);
+        }
+        (c, r, stopped)
+    };
+    // The parser (stream mode) over the content pieces: (calls as
+    // "name args", the arguments' pieces, the content piece of the head).
+    let parse = |pieces: &[String]| {
+        let mut p = tools::Parser::new_harmony();
+        p.configure(true, None);
+        let (mut calls, mut args, mut head_at) = (Vec::new(), 0, None);
+        for (i, s) in pieces.iter().enumerate() {
+            for x in p.push(s) {
+                match x {
+                    Piece::Head(_) => head_at = head_at.or(Some(i)),
+                    Piece::Args(_) => args += 1,
+                    Piece::Call(c) => calls.push(format!("{} {}", c.name, c.args)),
+                    Piece::Text(_) => {}
+                }
+            }
+        }
+        for x in p.finish() {
+            if let Piece::Call(c) = x {
+                calls.push(format!("{} {}", c.name, c.args));
+            }
+        }
+        (calls, args, head_at)
+    };
+    let head = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
+    let v = json!({"cmd": "echo }\"} \\\" \\\\ ]", "o": {"a": {}, "b": [1, {"c": "]}\"{"}, []]},
+                   "u": "é😀}\\\\"});
+    let args = v.to_string();
+    let per_char: Vec<u32> = args
+        .chars()
+        .flat_map(|ch| tok.encode(&ch.to_string()))
+        .collect();
+    for body in [tok.encode(&args), per_char] {
+        let mut ids = tok.encode_special(head);
+        ids.extend(&body);
+        ids.extend(tok.encode_special("<|call|>"));
+        let (c0, r0, s0) = run(&ids, false);
+        let (c1, r1, s1) = run(&ids, true);
+        assert_eq!(
+            (s1, r1.as_str()),
+            (s0, r0.as_str()),
+            "the reply ends where it did"
+        );
+        let (calls, n_args, head_at) = parse(&c1);
+        assert_eq!(calls, [format!("get_weather {args}")]);
+        assert_eq!(calls, parse(&c0).0, "the same call");
+        // Streamed: the head at the arguments' first token, a piece per
+        // token after it.
+        assert_eq!(head_at, Some(tok.encode_special(head).len()), "{c1:?}");
+        // (A token that ends inside a character sends nothing yet.)
+        assert!(
+            n_args > 10 && n_args + 8 >= body.len(),
+            "{n_args} pieces for {} tokens",
+            body.len()
+        );
+        // One token short (the token limit): a call with what was written.
+        let short = &ids[..ids.len() - 2];
+        let (c, r, _) = run(short, true);
+        let (calls, _, _) = parse(&c);
+        assert_eq!(r, "");
+        assert_eq!(calls.len(), 1);
+        let cut = calls[0].strip_prefix("get_weather ").unwrap();
+        assert!(args.starts_with(cut) && cut.len() < args.len(), "{cut}");
+    }
+    let before = mx.tool_calls_dropped.load(Ordering::Relaxed);
+    // Cut off otherwise: a header, its `<|call|>`; reasoning after a header
+    // still goes where its channel says.
+    for end in [
+        "",
+        "<|call|>",
+        "<|end|>",
+        "<|channel|>analysis<|message|>We need a joke.",
+    ] {
+        let (c, r, _) = run(
+            &tok.encode_special(&format!("{head}{{\"city\": {end}")),
+            true,
+        );
+        assert_eq!(parse(&c).0, ["get_weather {\"city\":"], "{end}");
+        let more = if end.contains("analysis") {
+            "We need a joke."
+        } else {
+            ""
+        };
+        assert_eq!(r, more, "{end}");
+    }
+    assert_eq!(mx.tool_calls_dropped.load(Ordering::Relaxed), before);
+    // Never an object: never framed; reasoning, as before, and dropped.
+    for v in ["42", "[1]", "\"x\"", "null", ""] {
+        let (c, r, _) = run(&tok.encode_special(&format!("{head}{v}<|end|>")), true);
+        assert!(parse(&c).0.is_empty(), "{v}: {c:?}");
+        assert_eq!(r, v);
+    }
+    assert_eq!(mx.tool_calls_dropped.load(Ordering::Relaxed), before + 5);
+    // Text before the `{`: framed only if it is blanks `trim` drops, where
+    // `call_made` parses from, so streamed and decided whole agree: U+3000
+    // is (a call), `é` isn't (never framed, never made: reasoning).
+    for (pre, made) in [("\u{3000}", true), ("é", false), (" é ", false)] {
+        let ids = tok.encode_special(&format!("{head}{pre}{{\"city\": \"Paris\"}}<|call|>"));
+        let (c0, r0, s0) = run(&ids, false);
+        let (c1, r1, s1) = run(&ids, true);
+        assert_eq!((s1, r1.as_str()), (s0, r0.as_str()), "{pre:?}");
+        let (calls, _, head_at) = parse(&c1);
+        assert_eq!(calls, parse(&c0).0, "{pre:?}");
+        assert_eq!(
+            (calls.len(), head_at.is_some()),
+            (usize::from(made), made),
+            "{pre:?}: {c1:?}"
+        );
+    }
+}
+
 fn rtools_of(params: &Value) -> Value {
     json!([{"type": "function", "name": "get_weather",
         "description": "Get the current weather in a city", "parameters": params}])
@@ -5178,8 +5921,9 @@ fn rtools_of(params: &Value) -> Value {
 /// gpt-oss-20b calls a tool for real (CUDA, greedy): asked for the weather
 /// with a get_weather tool it calls it (OpenAI shape, streamed and whole the
 /// same: reasoning in `reasoning_content`, the call's id and name in its
-/// first delta, then its arguments, no call in the finish chunk); given the
-/// result, it answers with it (also with `tools: []`); named tool_choice
+/// first delta, then its arguments a piece at a time as they are generated
+/// (#260; the tests' `tool_stream` is on), no call in the finish chunk);
+/// given the result, it answers with it (also with `tools: []`); named tool_choice
 /// calls at once; required calls one of the offered tools; Responses and
 /// ollama /api/chat call too; asked to repeat the call syntax, no endpoint
 /// (streamed or whole) returns a call made of that text.
@@ -5248,11 +5992,23 @@ fn serve_gptoss_tool_calls() {
         (sr.as_str(), sc.as_str(), sargs.as_str()),
         (reasoning, "", args)
     );
-    assert_eq!(deltas.len(), 2, "{deltas:?}");
+    // The head (id, name, no arguments yet), then the arguments in pieces
+    // (#260): each only `index` and `function.arguments`, never empty, and
+    // more than one (the object is several tokens). Their concatenation is
+    // the whole reply's arguments (above).
+    assert!(deltas.len() > 2, "{deltas:?}");
     assert!(deltas[0]["id"].as_str().unwrap().starts_with("call_"));
     assert_eq!(deltas[0]["type"], "function");
     assert_eq!(deltas[0]["function"]["name"], "get_weather");
     assert_eq!(deltas[0]["function"]["arguments"], "");
+    for d in &deltas[1..] {
+        assert_eq!(d.as_object().unwrap().len(), 2, "{d}");
+        assert_eq!(d["function"].as_object().unwrap().len(), 1, "{d}");
+        assert!(
+            !d["function"]["arguments"].as_str().unwrap().is_empty(),
+            "{d}"
+        );
+    }
 
     // The result goes back: the answer uses it, and the prompt reuses the cache.
     let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
@@ -7207,18 +7963,217 @@ fn wait_idle(a: SocketAddr) {
     });
 }
 
-/// AXON_SHARE_KV is opt-in (#207's timing clauses failed, so #187 ships
-/// sharing off by default): on for "1" only; unset, "0" or anything else
-/// is off, main's paths.
+/// AXON_SHARE_KV is on by default (the 11-12 decision), off by default
+/// under fast kernels (#228's review), and read strictly (#267): "0" off
+/// (the kill switch, main's paths), "1" on, fast kernels or not, unset or
+/// empty the default; any other value refuses to start, with a message
+/// naming the valid ones (it used to read as on, or under fast kernels as
+/// off). The start line says which, what decided it, and the other way.
 #[test]
-fn share_kv_is_opt_in() {
-    use super::share_on;
-    assert!(!share_on(None));
-    for v in ["", "0", "true", "yes", "2", "on"] {
-        assert!(!share_on(Some(v)), "{v:?}");
+fn share_kv_is_on_by_default() {
+    use super::{ShareSet, share_env, share_line, share_on, share_said};
+    assert_eq!(share_env(None), Ok(None));
+    for v in ["", " ", "\n"] {
+        assert_eq!(share_env(Some(v)), Ok(None), "{v:?}");
     }
-    assert!(share_on(Some("1")));
-    assert!(share_on(Some(" 1\n")));
+    for v in ["1", " 1\n"] {
+        assert_eq!(share_env(Some(v)), Ok(Some(true)), "{v:?}");
+    }
+    for v in ["0", " 0\n"] {
+        assert_eq!(share_env(Some(v)), Ok(Some(false)), "{v:?}");
+    }
+    for v in ["off", "false", "on", "true", "2", "01", "yes", "\u{fffd}"] {
+        let e = share_env(Some(v)).unwrap_err();
+        assert!(
+            e.starts_with(&format!("AXON_SHARE_KV={v:?}: expected 0")) && e.contains("or 1 (on)"),
+            "{v:?}: {e}"
+        );
+    }
+    assert!(share_on(None, false));
+    assert!(!share_on(None, true));
+    for fast in [false, true] {
+        assert!(share_on(Some(true), fast), "fast {fast}");
+        assert!(!share_on(Some(false), fast), "fast {fast}");
+    }
+    assert_eq!(
+        share_line(ShareSet::Default, false),
+        "shared prefix KV pages on (the default; AXON_SHARE_KV=0 turns them off)"
+    );
+    assert_eq!(
+        share_line(ShareSet::Env(true), false),
+        "shared prefix KV pages on (AXON_SHARE_KV=1, as the default; AXON_SHARE_KV=0 turns them off)"
+    );
+    for fast in [false, true] {
+        assert_eq!(
+            share_line(ShareSet::Env(false), fast),
+            "shared prefix KV pages off (AXON_SHARE_KV=0)"
+        );
+    }
+    let fast_off = share_line(ShareSet::Default, true);
+    assert!(
+        fast_off.starts_with("shared prefix KV pages off (the default under fast kernels")
+            && fast_off.contains("AXON_SHARE_KV=1"),
+        "{fast_off}"
+    );
+    let fast_on = share_line(ShareSet::Env(true), true);
+    assert!(
+        fast_on.starts_with("shared prefix KV pages on under fast kernels (AXON_SHARE_KV=1)")
+            && fast_on.contains("AXON_SHARE_KV=0"),
+        "{fast_on}"
+    );
+    assert_eq!(
+        share_line(ShareSet::Opts(false), true),
+        "shared prefix KV pages off (set by the caller)"
+    );
+    // Under --quiet: said when the variable set it or fast kernels turned
+    // the default off; not for the plain default, nor `Opts::share`.
+    assert!(share_said(ShareSet::Env(false), false));
+    assert!(share_said(ShareSet::Default, true));
+    assert!(!share_said(ShareSet::Default, false));
+    assert!(!share_said(ShareSet::Opts(true), true));
+}
+
+/// Shared prefix KV pages are off by default while fast kernels run
+/// (`share_on`): the FP8 checkpoint under `--numerics fast` on a GPU with
+/// e4m3 tensor cores, a paged pool of 2 slots, AXON_SHARE_KV unset: /slots
+/// has no prefix-index counts (they show only while sharing is on). The
+/// same server in exact mode (the checkpoint's exact kernels) has them.
+#[test]
+fn serve_share_off_under_fast_kernels() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    if !fast_kernels_on(p, Device::Cuda) {
+        crate::testutil::skip_note(format_args!(
+            "no fast kernels on this GPU (FP8's are sm_89 and later)"
+        ));
+        return;
+    }
+    if let Ok(v) = std::env::var("AXON_SHARE_KV")
+        && !v.trim().is_empty()
+    {
+        crate::testutil::skip_note(format_args!(
+            "AXON_SHARE_KV={v:?} is set: the default isn't what runs"
+        ));
+        return;
+    }
+    let body = json!({"prompt": "The lighthouse keeper wrote", "max_tokens": 8, "temperature": 0});
+    for (num, share) in [(Numerics::Fast, false), (Numerics::Exact, true)] {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.parallel = 2;
+            o.parallel_set = true;
+            o.numerics = num;
+        });
+        let r = call(s.addr, "POST", "/v1/completions", &body.to_string());
+        assert_eq!(r.status, 200, "{num}: {}", r.body);
+        wait_idle(s.addr);
+        let sl = call(s.addr, "GET", "/slots", "").json();
+        assert!(
+            sl.get("pages_total").is_some(),
+            "{num}: no paged pool: {sl}"
+        );
+        assert_eq!(sl.get("pages_warm").is_some(), share, "{num}: {sl}");
+    }
+}
+
+/// Shared prefix KV pages on under fast kernels (AXON_SHARE_KV=1, here
+/// `Opts::share`; #267), the path where a debug build's duplicate-block
+/// byte check is skipped (`Batch::index_pages`: fast kernels' rows change
+/// with the chunking). The FP8 checkpoint under `--numerics fast` on a GPU
+/// with e4m3 tensor cores, `serve_share_dup_swapped`'s traffic: R decodes
+/// (prompts fed 64 tokens a step, two at a time) while A and B, a long
+/// common prefix each, prefill side by side, so whichever is behind writes
+/// blocks the other has just indexed and swaps them for the index's
+/// pages; then a probe with A's prefix maps its whole pages. Every reply
+/// comes back, duplicates were swapped (the unchecked path ran), the probe
+/// reports the prefix cached, and a debug build's per-step checks of the
+/// pool, the index and their holds pass. The texts aren't compared with
+/// sharing off: fast mode's paths are graded at the logits, not held
+/// equal (`identity_checks`).
+#[test]
+fn serve_share_on_under_fast_kernels() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::fp8_model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    if !fast_kernels_on(p, Device::Cuda) {
+        crate::testutil::skip_note(format_args!(
+            "no fast kernels on this GPU (FP8's are sm_89 and later)"
+        ));
+        return;
+    }
+    let prefix =
+        "The surveyors mapped each valley, ridge and stream of the northern range. ".repeat(32);
+    let a_text =
+        format!("{prefix}Alder walked the east trail, counting cairns. What did Alder count?");
+    let b_text =
+        format!("{prefix}Birch walked the west trail, counting pines. What did Birch count?");
+    let req = |t: &str, n: usize| json!({"prompt": t, "max_tokens": n, "temperature": 0});
+    let s = server_with(p, Device::Cuda, |o| {
+        o.parallel = 4;
+        o.parallel_set = true;
+        o.prefill_chunk = 64;
+        o.sched.step_tokens = 64;
+        o.sched.lanes = 2;
+        o.numerics = Numerics::Fast;
+        o.share = Some(true);
+    });
+    let a = s.addr;
+    let id = call(a, "GET", "/identity", "").json();
+    assert_eq!(id["numerics"], Numerics::Fast.tag(), "{id}");
+    let busy = || {
+        (call(a, "GET", "/slots", "").json()["slots"].as_array())
+            .unwrap()
+            .iter()
+            .filter(|x| x["busy"] == true)
+            .count()
+    };
+    let start = std::sync::Barrier::new(2);
+    let r_body = req("Write a long story about a fox who learns to sail.", 600);
+    let got: Vec<(String, u64)> = std::thread::scope(|sc| {
+        let r = sc.spawn(|| share_reply(a, &r_body));
+        wait_for("R decoding", || busy() >= 1);
+        let ab: Vec<_> = [&a_text, &b_text]
+            .into_iter()
+            .map(|t| {
+                let (start, b) = (&start, req(t, 16));
+                sc.spawn(move || {
+                    start.wait();
+                    share_reply(a, &b)
+                })
+            })
+            .collect();
+        let mut v: Vec<_> = ab.into_iter().map(|h| h.join().unwrap()).collect();
+        v.push(r.join().unwrap());
+        v
+    });
+    wait_idle(a);
+    assert!(
+        got.iter().all(|r| !r.0.is_empty()),
+        "an empty reply: {got:?}"
+    );
+    let swapped = s.swapped();
+    assert!(
+        swapped > 0,
+        "no duplicate: A and B didn't prefill the prefix together"
+    );
+    let probe = share_reply(a, &req(&format!("{prefix}Where did Alder walk?"), 8));
+    let n = prompt_tokens(a, &prefix);
+    assert!(
+        probe.1 >= (n - 1) / 64 * 64,
+        "the probe's cached tokens {}, the prefix {n} tokens ({swapped} pages swapped)",
+        probe.1
+    );
+    wait_idle(a);
+    let sl = call(a, "GET", "/slots", "").json();
+    assert!(sl.get("pages_warm").is_some(), "sharing off: {sl}");
 }
 
 /// Shared prefix KV pages change no reply (docs/design/shared-prefix-pages.md
@@ -7415,6 +8370,11 @@ fn serve_share_pressure() {
         };
         let v0 = victims(a);
         let (rc0, rt0) = s.refeed_claims();
+        let refed = |a: SocketAddr| {
+            let m = call(a, "GET", "/metrics", "").body;
+            metric(&m, "axon_refeed_shared_tokens_total").unwrap()
+        };
+        let rm0 = refed(a);
         // Again, its prefix now in the index (warm or held): each request
         // maps it when admitted. One preempted or unfed after that claims
         // it again when it is fed again (`refeed_claim`, #212): the oldest
@@ -7446,6 +8406,13 @@ fn serve_share_pressure() {
             "{what}: again: {v} victims, {} refed claims of {} tokens",
             rc - rc0,
             rt - rt0
+        );
+        // #219: the refed claims' pages have their own counter (a refed
+        // prefill holds nothing, so all it claims is mapped pages).
+        assert_eq!(
+            refed(a) - rm0,
+            rt - rt0,
+            "{what}: axon_refeed_shared_tokens_total"
         );
         let sl = call(a, "GET", "/slots", "").json();
         let m = call(a, "GET", "/metrics", "").body;
@@ -7754,8 +8721,18 @@ fn serve_share_dup_swapped() {
 /// (design §5.3 `serve_share_cancel`) give their pages back: a request then
 /// needing 20 of the pool's 24 pages is admitted, the idle slots' rows and
 /// the index's warm pages giving theirs up (some evicted), and gets the
-/// reply it gets with sharing off. Debug builds check the pool, the index
-/// and their holds against each other after every step.
+/// reply it gets with sharing off. Two streams of 600 tokens share the
+/// prefix: the first decodes, the second waits for pages (the first's
+/// admission reserves them for its reply; it may start once there are).
+/// A third, a long private part after the prefix, is held mid-feed
+/// (`Server::feed_cap`): its admission maps the prefix's pages (the claim
+/// logged in its slot, `Server::claims`: the shared-tokens counter can't
+/// say whose, as the second's admission moves it too), it is fed two pages
+/// past them and no further, and the engine drops it from its prompts
+/// being fed (`Server::reaped_fed`; #267: until then the step budget could
+/// feed its private part before the drop was seen, so it may have been
+/// decoding). Debug builds check the pool, the index and their holds
+/// against each other after every step.
 #[test]
 fn serve_share_cancel_frees() {
     let Some(_) = crate::testutil::gpu() else {
@@ -7789,6 +8766,12 @@ fn serve_share_cancel_frees() {
     let want = share_reply(off.addr, &big).0;
     let n = prompt_tokens(off.addr, &prefix);
     let nb = prompt_tokens(off.addr, &format!("{text}Summary:"));
+    // A third, a long private part after the prefix: gone while it's fed.
+    let long = format!(
+        "{}And then?",
+        "The storm came from the west and stayed. ".repeat(30)
+    );
+    let n3 = prompt_tokens(off.addr, &format!("{prefix}{long}")) as usize;
     drop(off);
     let s = server_with(p, Device::Cuda, |o| {
         opts(o);
@@ -7813,29 +8796,82 @@ fn serve_share_cancel_frees() {
         .iter()
         .map(|q| stream(q, 600))
         .collect();
-    wait_for("both decoding", || g.load(Ordering::Relaxed) >= g0 + 40);
-    // A third, a long private part after the prefix: gone while it's fed.
-    let long = format!(
-        "{}And then?",
-        "The storm came from the west and stayed. ".repeat(30)
-    );
-    let g1 = g.load(Ordering::Relaxed);
-    let c3 = stream(&long, 50);
-    wait_for("its prompt being fed", || {
-        g.load(Ordering::Relaxed) >= g1 + 6
+    // The two streams' request ids, once the engine has both: the first
+    // decoding (40 tokens out), the second decoding or waiting for pages.
+    let known = || {
+        let sl = call(a, "GET", "/slots", "").json();
+        let busy = (sl["slots"].as_array().unwrap().iter())
+            .filter(|x| x["busy"] == true)
+            .map(|x| x["request_id"].clone());
+        let waiting = (sl["waiting"].as_array().unwrap().iter()).map(|x| x["id"].clone());
+        let mut v: Vec<Value> = Vec::new();
+        for id in busy.chain(waiting).filter(|v| !v.is_null()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+        v
+    };
+    wait_for("the first decoding, the engine holding both", || {
+        g.load(Ordering::Relaxed) >= g0 + 40 && known().len() == 2
     });
+    let running = known();
+    // Its admission maps the prefix's pages, and it is fed from there two
+    // pages and no further (`feed_cap`; the others decode on), so it is
+    // surely mid-feed when its client goes. Waiting on the others' tokens
+    // instead (as before #228's review) let it be dropped before its
+    // admission now and then (a09b1bd's one red); waiting on its admission
+    // alone (#228) let the step budget feed it all first.
+    let pages = (n - 1) / 64;
+    let cap = 64 * pages as usize + 128;
+    assert!(
+        n3 > cap + 64,
+        "the third: {n3} prompt tokens, held at {cap}"
+    );
+    let k0 = s.claims().len();
+    s.feed_cap(cap);
+    let c3 = stream(&long, 50);
+    // Its slot, once it's held at the cap.
+    let slot3 = std::cell::Cell::new(None);
+    wait_for("the third fed two pages past the prefix's", || {
+        let sl = call(a, "GET", "/slots", "").json();
+        let third = (sl["slots"].as_array().unwrap().iter()).find(|x| {
+            x["busy"] == true
+                && !running.contains(&x["request_id"])
+                && x["held_tokens"].as_u64() == Some(cap as u64)
+        });
+        slot3.set(third.map(|x| x["id"].as_u64().unwrap() as usize));
+        third.is_some()
+    });
+    let slot3 = slot3.get().unwrap();
+    // Its admission's claim: the last one since it was sent not a
+    // refeed's in its slot (it holds the slot from its admission on, still
+    // held at the cap now).
+    let claims = s.claims().split_off(k0);
+    let mapped = (claims.iter().rev())
+        .find(|c| c.0 == slot3 && !c.2)
+        .map(|c| c.1);
     drop(c3);
+    wait_for("the third dropped while being fed", || {
+        !s.reaped_fed().is_empty()
+    });
+    s.feed_cap(usize::MAX);
+    let fed = s.reaped_fed();
+    assert_eq!(fed.len(), 1, "{fed:?}");
+    // Its admission mapped the prefix's pages, and it went with two pages
+    // of its private part fed (the cap), before the rest.
+    assert!(
+        mapped.is_some_and(|t| t >= 64 * pages),
+        "the third (slot {slot3}) mapped {mapped:?} tokens, the prefix's pages {pages}; claims \
+         {claims:?}"
+    );
+    assert_eq!(fed[0].0, cap, "fed {fed:?}, the prefix's pages {pages}");
+    assert!(fed[0].1 > cap, "fed {fed:?}: its whole prompt");
     drop(cs);
     wait_idle(a);
     let (t, _) = share_reply(a, &big);
     assert_eq!(t, want, "the pool-sized request after the cancels");
     wait_idle(a);
     let m = call(a, "GET", "/metrics", "").body;
-    let pages = (n - 1) / 64;
-    let shared = metric(&m, "axon_prompt_shared_tokens_total").unwrap();
-    assert!(
-        shared >= 64 * pages,
-        "the third maps the prefix's {pages} pages: {shared}: {m}"
-    );
     assert!(metric(&m, "axon_pages_evicted_total").unwrap() > 0, "{m}");
 }

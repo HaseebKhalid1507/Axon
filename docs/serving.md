@@ -14,13 +14,17 @@ positions it has; no extra cache for a request running alone); elsewhere it
 runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
 uses) and ollama's native API ([docs/serve-apis.md](serve-apis.md)). Operations: `--api-key`,
 `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
-`--cache-ram BYTES|auto` (opt-in, default 0: off) keeps conversations' KV pages in pinned host RAM
+`--cache-ram BYTES|auto|off` (opt-in, default off; `auto` is the smaller of 4 GiB and a quarter of the
+RAM available after the model, off under a binding cgroup limit) keeps conversations' KV pages in pinned host RAM
 and copies them back on the next turn, bit for bit. Copies of pages the GPU pool still holds are
 written only into free room and are the first evicted, so the tier's useful capacity is about its
-size, not its size minus the pool's. Its gate passed on an RTX 4090; making it the default (`auto`) is
-a later change, and on bella its resume likely misses the gate's 0.3 s
-([design](design/kv-ram-tier-exclusive.md) §6, §14). `AXON_SHARE_KV=1` (opt-in, off by default)
-lets requests share the KV pages of a common prompt prefix, same bits (#207, #216; [below](#operations-auth-metrics-slots)).
+size, not its size minus the pool's. An evicted 25k-token session resumes in 0.141 s against a
+2.713 s re-prefill on an RTX 4090, and in 0.36–0.51 s against 8.6–8.8 s on bella (two TAINTED reads)
+([design](design/kv-ram-tier-exclusive.md) §6, §14). It stays opt-in until #233 (the first request waits
+3.2–4.0 s for the pinning) and #234 (the write-behind costs 2.3 % tok/s at C=16 on a 4090) are fixed.
+Requests share the KV pages of a common prompt prefix, same bits (on by default; `AXON_SHARE_KV=0` turns it
+off; off by default under `--numerics fast`'s FP8 kernels, where `AXON_SHARE_KV=1` turns it on; #207, #216;
+[below](#operations-auth-metrics-slots)).
 
 ## Starting a server, and its flags
 
@@ -137,9 +141,14 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   that starts with tokens a cache (or a slot) already holds (a chat follow-up resending the
   conversation, a shared system prompt) only runs the model over the rest
   (`usage.prompt_tokens_details.cached_tokens`).
-- Chat prompts are framed as `axon chat` frames them (ChatML, or Llama 3's template with its
-  BOS and system block; Qwen2.5's default system message when none is given; Qwen3 earlier
-  replies without their reasoning), and end on the same tokens (Llama 3: `<|eot_id|>` too).
+- Chat prompts are framed as `axon chat` frames them: as the GGUF's own chat template does,
+  token for token (ChatML, Llama 3's headers with BOS, Gemma, DeepSeek, harmony, Kimi, Mistral;
+  the template's default system message when none is given, e.g. Qwen2.5's or Qwen2's; earlier
+  replies of a thinking model without their reasoning, as Qwen3's and R1's templates drop it;
+  see [usage.md](usage.md#chat)), and end on the same tokens (Llama 3: `<|eot_id|>` too).
+  Tools need a template that renders them (Qwen2.5, Qwen3, Llama 3.1/3.2, gpt-oss): a request
+  with tools, or a tool turn, for a model whose template has none (Qwen2, Qwen1.5, Llama 3.0) is
+  a 400, as ollama refuses it.
   `/v1/completions` tokenizes and stops as `gen` does (BOS for Llama 3). Qwen3 thinks
   unless `chat_template_kwargs: {"enable_thinking": false}` (or `--no-think` as the server
   default); the reasoning comes as `reasoning_content`, apart from `content`
@@ -187,7 +196,10 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
   `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
   `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`,
-  `axon_tool_calls_dropped_total` (gpt-oss calls begun but not finished as a JSON object), and the histograms
+  `axon_tool_calls_dropped_total` (tool calls begun but returned as no call: a `<tool_call>` block or
+  Llama JSON reply that isn't a JSON object with a string name, as content, or a gpt-oss call whose arguments
+  never opened as an object, as reasoning), `axon_tool_calls_invalid_total` (calls returned whose `arguments`
+  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value), and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). The scheduler's (#131): `axon_waiting_requests`,
@@ -202,6 +214,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   "steps_eager_oom"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
   alone is in the slot it runs in (on the CPU, a split or a pipeline, the one cache is slot 0).
+  `waiting`: the requests the engine holds for a slot (with a pool), not the ones running; empty on an idle
+  server (#268: a request that had run alone stayed listed until the next one came).
   With the paged pool, each slot adds `pages_used`, and the object `pages_free`, `pages_total`, `page_tokens`,
   `preempted` and `prefills_unfed`. The two OOM counters: CUDA graphs given up, and steps run kernel by kernel, for
   lack of VRAM (never fatal, the same bits).
@@ -221,31 +235,50 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
-- **Shared prefix KV pages** (the GPU's paged pool; opt-in, `AXON_SHARE_KV=1`: off by default; whether that
-  changes: [roadmap](roadmap.md#plan)). A request whose
+- **Shared prefix KV pages** (the GPU's paged pool; on by default, `AXON_SHARE_KV=0` turns them off and
+  `AXON_SHARE_KV=1` turns them on; unset or empty is the default; any other value, `false` or `off` say, refuses
+  to start, naming the valid ones, #267). The start line says on or off and what decided it: the default, the
+  variable, or fast kernels' default (below); it prints under `--quiet` too when the variable is set to `0` or `1`, or fast kernels
+  turned sharing off. A request whose
   prompt starts with whole pages (64 positions) another request already computed, the same
   tokens after the same prefix, maps those pages instead of computing them again, and prefills
   only the rest: subagents that share a system prompt and tool catalog hold one copy of it. Same
   bits: a page is reused only under the same tokens and the same parent page, so its rows are the
-  ones the request would compute. Pages enter the index as they fill; a request writes only pages
+  ones the request would compute (exact kernels: under `--numerics fast` on an FP8 checkpoint the
+  rows change with how a prompt is chunked, so sharing is off there by default; `AXON_SHARE_KV=1` turns it on,
+  within fast mode's tolerance, as a cached prefix is; [determinism](determinism.md)).
+  **What a client can learn:** `usage.prompt_tokens_details.cached_tokens` counts the pages a
+  request mapped, so it now includes pages another client computed. A request learns how many
+  64-token blocks at the start of its prompt someone else sent recently, as with any shared
+  prompt cache (before, only an idle slot's last conversation could tell it that). On a server
+  shared by several users who shouldn't learn about each other's prompts (one `--api-key` for
+  all of them, say), set `AXON_SHARE_KV=0`. Pages enter the index as they fill; a request writes only pages
   it alone holds (a prompt that continues mid-way into a shared page is fed again from that page's
   start). When a slot gives pages up, the indexed ones stay on the GPU (warm) for a later prompt,
   until room is needed: then the least recently used warm leaf goes first (with `--cache-ram`, to
   the RAM tier), before an idle slot's pages. `GET /slots` adds `pages_warm` and `pages_shared`;
   `/metrics` `axon_kv_pages_warm`, `axon_kv_pages_shared`, `axon_prompt_shared_tokens_total`
-  (tokens mapped from the index: admissions' prompts, and since #216 a preempted request's tokens so far,
-  generated ones included, when it is fed again; #219) and `axon_pages_evicted_total` (warm pages given up for
-  room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server under
-  memory pressure.
-- `--cache-ram BYTES|auto` (default 0: off): a KV RAM tier. A conversation's KV pages (64
+  (admissions' prompt tokens mapped from the index), `axon_refeed_shared_tokens_total` (tokens a preempted
+  or unfed request maps from the index again when it is fed again: its prompt and what it generated so far;
+  apart since #219, so preemption doesn't inflate the prompt count) and `axon_pages_evicted_total` (warm
+  pages given up for room). `AXON_KV_PAGES=N` sizes the pool to N pages (at most what fits), for testing a server
+  under memory pressure. If the server exits with an engine failure while sharing is on, the line names
+  `AXON_SHARE_KV=0`: restart with it to rule sharing out. The win is subagent fan-out: eight subagents on a 6,006-token prefix reach their first
+  token in 0.591× the time (#211); the agent board's Synaps-shaped trace shares only 4–7 % of its prompt tokens,
+  so it gains little there.
+- `--cache-ram BYTES|auto|off` (default 0: off): a KV RAM tier. A conversation's KV pages (64
   positions, every layer) are copied to host memory as they fill, so when its slot goes to
   another conversation they are kept there instead of dropped; its next turn copies the
   longest stored prefix back and prefills only the rest. Same bits: the rows are moved, not
-  recomputed (a tail under 64 positions is prefilled again). BYTES takes K/M/G suffixes;
-  `auto` is half the RAM available after the model, at most 8 GiB; the banner says the size.
-  On the GPU the **whole size is page-locked (unswappable) RAM from server start**, used or
+  recomputed (a tail under 64 positions is prefilled again). `auto` is the smaller
+  of 4 GiB and a quarter of the RAM available after the model (the host's `MemAvailable`, or a
+  memory cgroup's room if that is less). It is **off when a cgroup limit is the tighter bound**
+  (a container, a systemd scope with `MemoryMax`): pinned memory counts against the limit and
+  can't be reclaimed. The banner says the size, or why it is off. BYTES (K/M/G suffixes) sets
+  the size, under a cgroup too; `0` or `off` (the default) turns the tier off. On the GPU
+  the **whole size is page-locked (unswappable) RAM from server start**, used or
   not: a thread pins it in 64 MiB pieces while the server already runs (or, with
-  `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 8 GiB
+  `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 4 GiB
   at start. With the GPU's paged pool, pages are copied as they fill only into the tier's free room
   (while requests decode, at most 16 MiB a step; an idle server copies the rest in 64 MiB pieces and
   takes a new request between two), and a slot's pages not yet stored are copied when it gives its
@@ -292,25 +325,66 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>{args}<|call|>`).
   Other chat formats answer a tool request with a 400. A request without tools or tool
   turns is rendered exactly as before.
-- The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
-  Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
-  first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
-  Text outside the blocks streams as `content`. Nothing of a block reaches `content`
-  while it is still being decided, and blank lines that only separate text from calls are
-  dropped. Not streamed: `message.tool_calls`, with `content` null if there was no text.
-  Call ids are `call_` plus 24 hex digits.
-- A block that isn't a JSON object with a string `"name"` (invalid JSON, or the reply was
-  cut off mid-call) is not a call: it is returned as `content`, tags and all. So
-  `arguments` is always valid JSON. A string `arguments` value is used as the arguments if
-  it is itself JSON, else returned as its JSON string literal. Qwen3's reasoning still
-  comes as `reasoning_content`. gpt-oss is stricter: arguments must be a JSON object, and a
-  call that ends without one (a header, its `<|call|>`, the token limit) is not a call. Its
-  text comes back as `reasoning_content` (it was on the commentary channel), never as
-  `content`, and is counted in `axon_tool_calls_dropped_total`.
-- The parser reads tags, not prose or JSON. `<tool_call>` written in ordinary text opens a
-  block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
-  JSON string value ends the block early (the call then fails to parse and is returned
-  as content).
+- The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`
+  (`"length"` if the token limit cut the reply). Text outside the blocks streams as `content`,
+  and blank lines that only separate text from calls are dropped. Not streamed:
+  `message.tool_calls`, with `content` null if there was no text. Call ids are `call_` plus
+  24 hex digits.
+- **Streamed, a call goes out as it is generated** (#260), as OpenAI and llama-server send it:
+  a `delta.tool_calls` chunk with `index`, `id`, `type` and `function.name` as soon as the
+  call's name is read and its arguments open with `{`, then a chunk of `function.arguments`
+  per piece of text. On `/v1/responses` the call is its own item at that point
+  (`response.output_item.added`, then `response.function_call_arguments.delta` events). So a
+  call that runs on (a looping argument, and no `max_tokens`) is visible from its first
+  tokens; before, nothing of it went out until its block closed, and a client with an idle
+  timeout hung up (codex's is 300 s: #260's runaway call was silent for 340 s).
+- **Which blocks are calls.** Up to that point a block is held, and decided as soon as its text
+  can't begin a JSON object any more: then it is not a call, and it comes back as `content`,
+  tags and all, from there on. A block whose object closes without arguments that open with
+  `{` (a string or array `arguments`, or the name after them) is decided whole: a call if it
+  is a JSON object with a string `"name"`, else content. A string `arguments` value is used as
+  the arguments if it is itself JSON, else returned as its JSON string literal.
+- **Once a call's head is out it is a call**, as in OpenAI's API, where `arguments` is the
+  model's text and clients check it. Arguments that stop being JSON (an unescaped quote, a raw
+  newline, a bad escape: #259's failures) are returned as written up to the block's end, less
+  the object's closing `}`. A reply cut off mid-call is a call with what was written. Either
+  way `arguments` isn't a valid JSON object, and the call is counted in
+  `axon_tool_calls_invalid_total`. A harness then reports the call as failed to the model,
+  which can try again; before, the block came back as text, which ended codex's turn. This
+  holds **streamed or not**: a whole (`"stream": false`) reply decides its calls the same way,
+  so the two always agree (`AXON_TOOL_STREAM=0` restores the old rule for both). On
+  `/v1/responses` a call the token limit cut (the reply's last item, its arguments not a JSON
+  object, in an `incomplete` response) has `status: "incomplete"`, as OpenAI marks it; any
+  other call is `completed`. A stop string that hits inside a call's arguments also ends it
+  with what was written, with `finish_reason: "tool_calls"`; on `/v1/responses` that call is
+  `completed` (the finish is `stop`, not the token limit). Other text after the call's object
+  ends the block there: `<tool_call>` opens the next call (#259's "a valid object followed by
+  a second `<tool_call>`"), anything else is content, less the block's own `</tool_call>` if it
+  comes later (the first one before the next `<tool_call>`), so a call's own stray
+  `</tool_call>` doesn't show in `content`. A block that never becomes a call still comes back
+  as content, tags and all, and so does a second stray `</tool_call>`.
+- **`AXON_TOOL_STREAM=0`** (exactly `0`) turns this off: every call goes out once its block is decided, as
+  two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
+  text when the reply ends), and a block that isn't a JSON object with a string `"name"`
+  (invalid JSON, or cut off mid-call) is returned as `content`, so `arguments` is always
+  valid JSON. The ollama routes always work this way (an ollama call is a whole object).
+- Qwen3's reasoning still comes as `reasoning_content`. gpt-oss: its calls stream the same
+  way once their arguments open with `{` (after nothing but blanks). A call whose arguments
+  never do (a number, an array, nothing, other text first) is not a call: its text comes back as `reasoning_content` (it was on the
+  commentary channel), never as `content`, and is counted in `axon_tool_calls_dropped_total`.
+  With `AXON_TOOL_STREAM=0` that also holds for a call that ends without a whole JSON
+  object (a header, its `<|call|>`, the token limit).
+- The parser reads tags and JSON, not prose. `<tool_call>` written in ordinary text opens a
+  block (which comes back as content if it isn't a call). In a call's arguments, a
+  `</tool_call>` inside a JSON string is the string's text, so a call writing a file that
+  mentions the tag stays whole; anywhere else it ends the block. A string the model leaves
+  open usually goes bad at the newline Hermes writes before the tag, so the tag still ends
+  the block. If the model also leaves out that newline, the tag stays string text and the
+  open string swallows what follows: the rest of the reply goes into the call's (invalid)
+  arguments, and a later `<tool_call>` in it is lost. That is rare. #266 tracks the fix:
+  arguments that have gone bad end at the next `<tool_call>`. With
+  `AXON_TOOL_STREAM=0` the tag ends the block wherever it is, as before: inside a string, the
+  block fails to parse and is returned as content.
 - The format is chosen per model family from the vocabulary (ChatML with or without
   `<think>`, or Llama 3's headers), not read from the GGUF's template. Models of a known
   family with a different tool format, such as Qwen3-Coder's XML `<function=...>` calls,
@@ -374,5 +448,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 - ollama: `stream` defaults to true (NDJSON); `options` carries the sampling settings
   (`num_predict` is the token limit; `num_ctx` and the runtime options are ignored: the
   server's `--ctx` applies); `think`; tool calls with object arguments; ollama's counts and
-  durations. The model answers to its file name and `--alias`, with or without `:latest`.
+  durations. The model answers to its file name (or, given by a name `axon pull`
+  resolved, such as `axon serve qwen3-8b`, that name) and `--alias`, with or without
+  `:latest`.
   `format` (JSON / structured output), images and embeddings are refused with a clear error.

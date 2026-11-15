@@ -41,7 +41,7 @@ mod responses;
 mod tier;
 pub mod tools;
 
-use crate::chat::{self, Framing, special};
+use crate::chat::{self, Format, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
@@ -89,6 +89,12 @@ const ACCEPT_DRAIN: usize = 64 << 10;
 /// `axon serve`'s settings.
 pub struct Opts {
     pub path: String,
+    /// The model's id (/v1/models, a request's `model`) when it isn't
+    /// `path`'s file stem: the name `axon serve` was given when `axon pull`
+    /// resolved it to `path` (an alias, OWNER/REPO/FILE.gguf, a pulled
+    /// file's name), so a client asks for the model by the name it was
+    /// served as. None (a path): the stem.
+    pub name: Option<String>,
     pub host: String,
     pub port: u16,
     pub device: Device,
@@ -128,9 +134,13 @@ pub struct Opts {
     /// A paged pool's KV pages (None: AXON_KV_PAGES, else as many as fit;
     /// tests squeeze the pool with it).
     pub kv_pages: Option<usize>,
-    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, off unless
-    /// "1": opt-in, #207's timing clauses; a paged pool only).
+    /// Shared prefix KV pages on or off (None: AXON_SHARE_KV, `share_env`:
+    /// "0" off, the kill switch, "1" on, unset or empty the default, on
+    /// unless fast kernels run, `share_on`; a paged pool only).
     pub share: Option<bool>,
+    /// Tool calls streamed as they are generated on OpenAI's APIs (None:
+    /// AXON_TOOL_STREAM, on unless "0"; #260).
+    pub tool_stream: Option<bool>,
     /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
     /// with Some(false)).
     pub paged: Option<bool>,
@@ -164,15 +174,19 @@ pub struct Opts {
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
     /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
-    /// default; opt-in until the tier is exclusive: it is written as pages
-    /// fill, so it holds about its own size, the GPU pool's pages included,
-    /// agent-workload.md §6 row B's result).
+    /// default; `auto` is the smaller of 4 GiB and a quarter of the RAM
+    /// available after the model, off under a binding cgroup limit). Not on
+    /// by default until #233 and #234 are fixed (11-13: its A/B failed the
+    /// 2 % rule on a 4090, and its first request waited for the pinning).
     pub cache_ram: tier::CacheRam,
     /// How its page-locked memory is taken (AXON_KV_RAM_ALLOC).
     pub cache_ram_alloc: tier::Alloc,
     /// `--numerics` (`crate::numerics`), or `--datacenter`'s fast: the
     /// whole server's (every slot's cache is one mode's), in its identity.
     pub numerics: Numerics,
+    /// Constrained tool calls (`crate::constrain`) on or off (None:
+    /// AXON_CONSTRAIN, off unless "1": opt-in until the spec's PR B).
+    pub constrain: Option<bool>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -196,15 +210,26 @@ pub struct Template {
     /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
     /// `enable_thinking: false` opens a reply with.
     think: Option<(u32, u32, Vec<u32>)>,
-    /// Used when the messages don't start with a system message (Qwen2.5's
-    /// template brings one, Qwen3's and Llama 3's none).
-    default_system: Option<&'static str>,
+    /// Used when the messages don't start with a system message: the
+    /// template's (`chat::default_system`: Qwen2.5's, Qwen2's; Qwen1.5's,
+    /// Qwen3's and Llama 3's have none).
+    default_system: Option<String>,
+    /// Whether the template renders tools (`<tool_call>` in ChatML, Llama
+    /// 3.1's `ipython`; harmony always), or the file has no template.
+    pub(crate) tools: bool,
 }
 
 impl Template {
-    /// None if the vocabulary has no chat markers (no chat endpoint).
-    pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
-        let fr = Framing::new(tok)?;
+    /// None if the vocabulary has no chat markers (no chat endpoint). The
+    /// details come from the model file's own template
+    /// (`Framing::from_model`, `chat::default_system`).
+    pub fn new(tok: &Tokenizer, m: &crate::gguf::Model) -> Option<Template> {
+        let fr = Framing::from_model(tok, m)?;
+        let tools = chat::chat_template(m).is_none_or(|t| match fr.format {
+            Format::ChatMl => t.contains("<tool_call>"),
+            Format::Llama3 { .. } => t.contains("ipython"),
+            _ => true,
+        });
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -214,8 +239,8 @@ impl Template {
         Some(Template {
             fr,
             think,
-            // As `axon chat`: Qwen2.5's default system message for qwen2.
-            default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
+            default_system: chat::default_system(m),
+            tools,
         })
     }
 
@@ -228,21 +253,19 @@ impl Template {
     /// else the default one; Llama 3 always has one), each message framed,
     /// then the assistant's opening (with the empty reasoning block if
     /// `no_think` and the model thinks), as `axon chat` frames a
-    /// conversation. An earlier reply of a thinking model is kept as its
-    /// text after `</think>`, leading newlines dropped, as the Qwen3
-    /// template (and `axon chat`) render it.
+    /// conversation. An earlier reply of a thinking model is kept as the
+    /// framing's `think_strip` says (its text after `</think>`, as the
+    /// template and `axon chat` render it).
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
         let (system, rest) = match msgs.split_first() {
             Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
-            _ => (self.default_system, msgs),
+            _ => (self.default_system.as_deref(), msgs),
         };
         let mut t = self.fr.system(tok, system);
         for (i, m) in rest.iter().enumerate() {
-            let text = match (m.role, &self.think) {
-                (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
-                    Some((_, c)) => c.trim_start_matches('\n'),
-                    None => &m.content,
-                },
+            let strip = self.think.as_ref().and(self.fr.think_strip);
+            let text = match (m.role, strip) {
+                (Role::Assistant, Some(how)) => how.apply(&m.content),
                 _ => &m.content,
             };
             // Mistral's first user message carries the system message
@@ -265,6 +288,35 @@ impl Template {
     }
 }
 
+/// The prompt `/v1/chat/completions` runs for the request `body`, rendered as
+/// `completion` renders it with the server's defaults: thinking on unless
+/// the body's `chat_template_kwargs` turns it off, tools through
+/// `tools::render`, the framing `Template::new` reads from the model file.
+/// `axon logits` prints it for AXON_LOGITS_CHAT=FILE, so scripts/golden.py
+/// can hold the chat framing against llama.cpp's template, token by token.
+pub fn chat_prompt(
+    tok: &Tokenizer,
+    m: &crate::gguf::Model,
+    body: &[u8],
+) -> Result<Vec<u32>, String> {
+    let g = api::parse(body, true).map_err(|e| e.msg)?;
+    let Prompt::Chat { messages, no_think } = &g.prompt else {
+        return Err("not a chat request".into());
+    };
+    // No framing: the reason `completion` gives (without its /v1/completions hint).
+    let t = Template::new(tok, m).ok_or_else(|| match Framing::bad_end(tok) {
+        Some(why) => format!("this model has no chat framing: {why}"),
+        None => "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma)".to_string(),
+    })?;
+    let no_think = no_think.unwrap_or(false) && t.thinks();
+    match &g.tools {
+        None => Ok(t.render(tok, messages, no_think)),
+        Some(tr) => tools::render(&t, tok, tr, no_think)
+            .map(|r| r.ids)
+            .map_err(|e| e.msg),
+    }
+}
+
 /// What a connection asks the engine for.
 struct Job {
     prompt: Vec<u32>,
@@ -278,6 +330,8 @@ struct Job {
     /// gpt-oss (harmony): the analysis channel to reasoning, the final
     /// channel to content, the markers nowhere.
     channels: Option<chat::Channels>,
+    /// Harmony with tools: stream calls (`TextOut::stream_calls`).
+    stream_calls: bool,
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
@@ -285,6 +339,9 @@ struct Job {
     arrived: Instant,
     /// Its prompt's block keys (`block_keys`), worked out at most once.
     keys: std::cell::OnceCell<Vec<crate::kvstore::Key>>,
+    /// Constrained decoding (`crate::constrain`): the request's state, which
+    /// goes with it (alone, into the batch, preempted and fed again).
+    constraint: Option<crate::constrain::Constraint>,
 }
 
 impl Job {
@@ -317,6 +374,8 @@ struct Shared {
     path: String,
     no_think: bool,
     think_inline: bool,
+    /// Tool calls streamed on OpenAI's APIs (`Opts::tool_stream`).
+    tool_stream: bool,
     sample: SampleArgs,
     max_tokens: Option<usize>,
     /// The `extra` header lines of every response (CORS).
@@ -468,6 +527,9 @@ struct TextOut<'t> {
     call: CallState,
     /// Counts dropped calls (`axon_tool_calls_dropped_total`).
     metrics: Option<Arc<ops::Metrics>>,
+    /// Harmony with tools: stream a call's arguments as they come (#260;
+    /// the job's `stream_calls`), framed once they open with `{`.
+    stream_calls: bool,
 }
 
 /// A harmony reply's call, as `TextOut` reads it.
@@ -475,8 +537,10 @@ struct TextOut<'t> {
 enum CallState {
     #[default]
     None,
-    /// Open: its recipient, its arguments' text so far and their scan.
-    Open(String, String, tools::ArgScan),
+    /// Open: its recipient, its arguments' text so far, their scan, and
+    /// whether its frame went out (stream mode: its arguments opened with
+    /// `{`, and it is a call whatever follows).
+    Open(String, String, tools::ArgScan, bool),
     /// Made: the reply is over.
     Done,
 }
@@ -536,9 +600,9 @@ impl TextOut<'_> {
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, String::new(), true);
             }
@@ -547,13 +611,16 @@ impl TextOut<'_> {
         let mut r = String::new();
         if !now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.finish();
-            if self.call_push(&t)
-                && let Some(f) = self.call_made()
-            {
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            if closed && let Some(f) = self.call_made() {
                 c.push_str(&f);
                 return (c, r, true);
             }
-            r = self.call_dropped();
+            match self.call_cut() {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
         }
         if ch.ended() {
             // `<|call|>`: the reply is over.
@@ -596,7 +663,8 @@ impl TextOut<'_> {
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
             Some(to) if matches!(self.call, CallState::None) => {
-                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
+                self.call =
+                    CallState::Open(to.to_string(), String::new(), Default::default(), false);
                 tools::harmony_text(&self.stop.finish())
             }
             _ => String::new(),
@@ -607,7 +675,7 @@ impl TextOut<'_> {
     /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
     fn call_push(&mut self, t: &str) -> bool {
         match &mut self.call {
-            CallState::Open(_, args, scan) => {
+            CallState::Open(_, args, scan, _) => {
                 args.push_str(t);
                 scan.feed(t)
             }
@@ -618,7 +686,7 @@ impl TextOut<'_> {
     /// The open call's frame, if its arguments are a whole JSON object:
     /// parsed once, when the scan closes the top-level object.
     fn call_made(&mut self) -> Option<String> {
-        let CallState::Open(to, args, scan) = &mut self.call else {
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
             return None;
         };
         let a = args.trim();
@@ -626,9 +694,58 @@ impl TextOut<'_> {
             scan.kill();
             return None;
         }
-        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        let f = if *framed {
+            // Stream mode: its frame and arguments went out as they came.
+            tools::HARMONY_CALL_END.to_string()
+        } else {
+            tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END
+        };
         self.call = CallState::Done;
         Some(f)
+    }
+
+    /// Stream mode: what of the open call goes out with `t` (just added to
+    /// its arguments): nothing until they open with `{`, then its frame
+    /// and the arguments from that `{`, then each piece as it comes.
+    fn call_stream(&mut self, t: &str) -> String {
+        if !self.stream_calls {
+            return String::new();
+        }
+        let CallState::Open(to, args, scan, framed) = &mut self.call else {
+            return String::new();
+        };
+        if *framed {
+            return tools::harmony_text(t);
+        }
+        let name = to.strip_prefix("functions.").unwrap_or(to);
+        if !scan.began() || name.is_empty() {
+            return String::new();
+        }
+        // Framed only where `call_made` parses from: what comes before the
+        // `{` must be blanks its `trim` drops. (`ArgScan` skips any non-ASCII
+        // byte there; with other text first the call is never made, so it
+        // isn't framed: reasoning, as in decide-whole mode.)
+        let at = args.find('{').unwrap_or(0);
+        if !args[..at].trim().is_empty() {
+            return String::new();
+        }
+        *framed = true;
+        let a = &args[at..];
+        tools::harmony_call_open(to) + &tools::harmony_text(a)
+    }
+
+    /// Stream mode: an open call whose frame went out ends without its
+    /// arguments being a whole object (a header, its `<|call|>`, the token
+    /// limit): still a call, so its end frame (the parser counts it in
+    /// `axon_tool_calls_invalid_total`). None if its frame didn't go out.
+    fn call_cut(&mut self) -> Option<String> {
+        match self.call {
+            CallState::Open(_, _, _, true) => {
+                self.call = CallState::None;
+                Some(tools::HARMONY_CALL_END.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// The open call isn't one: its text (reasoning). Counted, and logged
@@ -636,7 +753,7 @@ impl TextOut<'_> {
     /// "the model didn't call".
     fn call_dropped(&mut self) -> String {
         match std::mem::take(&mut self.call) {
-            CallState::Open(to, args, _) => {
+            CallState::Open(to, args, _, _) => {
                 if let Some(m) = &self.metrics {
                     m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -673,14 +790,15 @@ impl TextOut<'_> {
         if matches!(self.call, CallState::Open(..)) {
             // The reply ended inside the call (the token limit).
             let t = self.utf8.finish();
-            let made = if self.call_push(&t) {
-                self.call_made()
-            } else {
-                None
-            };
+            let closed = self.call_push(&t);
+            c.push_str(&self.call_stream(&t));
+            let made = if closed { self.call_made() } else { None };
             match made {
                 Some(f) => c.push_str(&f),
-                None => r = self.call_dropped(),
+                None => match self.call_cut() {
+                    Some(f) => c.push_str(&f),
+                    None => r = self.call_dropped(),
+                },
             }
         }
         let unheaded = ch.take_unheaded();
@@ -741,7 +859,10 @@ fn or_exit<T>(what: &str, f: impl FnOnce() -> T) -> T {
                 .map(String::as_str)
                 .or_else(|| p.downcast_ref::<&str>().copied())
                 .unwrap_or("?");
-            eprintln!("axon serve: the engine failed on {what}: {msg}; exiting");
+            eprintln!(
+                "axon serve: the engine failed on {what}: {msg}; exiting{}",
+                share_hint()
+            );
             std::process::exit(70);
         }
     }
@@ -753,6 +874,13 @@ fn or_exit<T>(what: &str, f: impl FnOnce() -> T) -> T {
 fn debug() -> bool {
     static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *D.get_or_init(|| std::env::var_os("AXON_SERVE_DEBUG").is_some_and(|v| v == "1"))
+}
+
+/// AXON_TOOL_STREAM: tool calls streamed as they are generated on OpenAI's
+/// APIs (#260), on unless "0", the kill switch: then every call goes out
+/// whole once decided, as before #260.
+fn tool_stream_env() -> bool {
+    std::env::var_os("AXON_TOOL_STREAM").is_none_or(|v| v != "0")
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
@@ -768,6 +896,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> T
         stop: StopMatcher::new(job.stops.clone()),
         call: CallState::None,
         metrics: Some(metrics.clone()),
+        stream_calls: job.stream_calls,
     }
 }
 
@@ -786,6 +915,8 @@ struct Handover<'r> {
     slot_ctx: Option<usize>,
     /// Most requests to hold off the channel (the batch's slots).
     room: usize,
+    /// Where `waiting` is published for GET /slots (`publish_waiting`).
+    metrics: Arc<ops::Metrics>,
 }
 
 impl Handover<'_> {
@@ -796,12 +927,21 @@ impl Handover<'_> {
         let Some(ctx) = self.slot_ctx else {
             return false;
         };
+        let n = self.waiting.len();
         self.waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
+        let mut changed = self.waiting.len() != n;
         while !self.waiting.iter().any(|j| fits_slot(j, ctx)) && self.waiting.len() < self.room {
             match self.jobs.try_recv() {
-                Ok(j) => self.waiting.push_back(j),
+                Ok(j) => {
+                    self.waiting.push_back(j);
+                    changed = true;
+                }
                 Err(_) => break,
             }
+        }
+        // Requests taken in while one runs alone wait too (/slots).
+        if changed {
+            publish_waiting(&self.metrics, self.waiting);
         }
         self.waiting.iter().any(|j| fits_slot(j, ctx))
     }
@@ -809,7 +949,13 @@ impl Handover<'_> {
 
 impl<'a> Engine<'a> {
     fn run(&mut self, job: Job, ho: Option<Handover>) -> Option<Seq<'a>> {
+        // With a pool, the batch's waiting list, which still lists the job
+        // (#268): published again without it once its slot shows it busy,
+        // so the server never looks idle with a request in it.
         if job.cancel.load(Ordering::Relaxed) {
+            if let Some(ho) = &ho {
+                publish_waiting(&self.metrics, ho.waiting);
+            }
             return None;
         }
         let id = job.id;
@@ -824,6 +970,9 @@ impl<'a> Engine<'a> {
                 pages: None,
             },
         );
+        if let Some(ho) = &ho {
+            publish_waiting(&self.metrics, ho.waiting);
+        }
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
         // The tier stores the cache's new whole pages (no pool: nothing
         // else runs, and the next request may take the cache).
@@ -855,7 +1004,9 @@ impl<'a> Engine<'a> {
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
     /// hands over (returns its state, the cache holding its rows) when
     /// another request arrives that could share a step with it.
-    fn job(&mut self, owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+    fn job(&mut self, mut owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+        // Out of the job while it runs alone; back in if it hands over.
+        let mut constraint = owned.constraint.take();
         let job = &owned;
         let cancelled = || job.cancel.load(Ordering::Relaxed);
         let t0 = Instant::now();
@@ -937,6 +1088,7 @@ impl<'a> Engine<'a> {
                 stop: &job.stop_ids,
                 max_draft: self.max_draft,
                 sample: sampler.as_mut(),
+                constraint: constraint.as_mut(),
             },
             &mut |h, max| source.draft(h, max),
             &mut |id| {
@@ -973,7 +1125,10 @@ impl<'a> Engine<'a> {
             hist.extend_from_slice(&ids);
             self.hist = hist[..hist.len() - 1].to_vec();
             return Some(Seq {
-                job: owned,
+                job: Job {
+                    constraint,
+                    ..owned
+                },
                 slot: 0,
                 hist,
                 ids,
@@ -1060,6 +1215,9 @@ struct Loaded {
     /// The GGUF's architecture and parameter count (ollama.rs: /api/show).
     arch: String,
     params: u64,
+    /// Constrained tool calls (`Opts::constrain`): the Hermes grammar on
+    /// this vocabulary, for a Qwen2.5-family template (PR A of the spec).
+    constrain: Option<Arc<crate::constrain::Grammar>>,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -1070,7 +1228,20 @@ fn engine(
     jobs: mpsc::Receiver<Job>,
     stop: Arc<AtomicBool>,
 ) {
-    let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
+    // A start that can't go on is refused through `ready` (`start` returns
+    // it; `run` exits with it, code 2), never exited here: a server started
+    // in a process, a test's, must not end that process (#269: a test
+    // binary exited 2 with its message captured and lost).
+    macro_rules! refuse {
+        ($why:expr) => {{
+            let _ = ready.send(Err(Refused($why)));
+            return;
+        }};
+    }
+    let (device, gpu_layers) = match crate::try_placement(o.device, o.gpu_layers) {
+        Ok(p) => p,
+        Err(why) => refuse!(why),
+    };
     // A paged pool of a set size: tests (`Opts::kv_pages`), or
     // AXON_KV_PAGES=N (serve gates under an undersized pool; as tests',
     // refused if no paged pool fits).
@@ -1084,11 +1255,31 @@ fn engine(
             }
         },
     };
+    // Shared prefix KV pages: `Opts::share`, else AXON_SHARE_KV, read
+    // strictly before the model loads (a value other than 0, 1 or empty
+    // refuses to start, #267), whether or not a paged pool comes of it.
+    let share_set = match o.share {
+        Some(b) => ShareSet::Opts(b),
+        None => {
+            let v = std::env::var_os("AXON_SHARE_KV").map(|v| v.to_string_lossy().into_owned());
+            match share_env(v.as_deref()) {
+                Ok(Some(b)) => ShareSet::Env(b),
+                Ok(None) => ShareSet::Default,
+                Err(why) => {
+                    let _ = ready.send(Err(Refused(why)));
+                    return;
+                }
+            }
+        }
+    };
     let rope = crate::rope::RopeArgs {
         ctx: o.ctx,
         ..o.rope.clone()
     };
-    let model = crate::open_model_with(&o.path, crate::copy_for(device), &rope);
+    let model = match crate::try_open_model_with(&o.path, crate::copy_for(device), &rope) {
+        Ok(m) => m,
+        Err(why) => refuse!(why),
+    };
     let trained = model.ctx_len() as usize;
     let yarn = crate::rope::yarn(&model).is_some();
     let fit = o.ctx.is_none();
@@ -1096,7 +1287,7 @@ fn engine(
     // much of it as fits, `Backend::new`'s fit); a split, a pipeline or
     // --gpu-layers keep the old cap (`SPLIT_CTX`).
     let want = match o.ctx {
-        Some(n) if trained > 0 && n > trained => crate::fail(&format!(
+        Some(n) if trained > 0 && n > trained => refuse!(format!(
             "--ctx {n} is past the {trained} tokens {} {}{}",
             o.path,
             if yarn {
@@ -1129,13 +1320,22 @@ fn engine(
     if let Some(why) =
         moe_parallel_refusal(crate::model::is_moe(&model), o.parallel, o.parallel_set)
     {
-        crate::fail(&why);
+        refuse!(why);
     }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
-    let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
-        crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
-            .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
-    });
+    let dm = match o.draft_model.as_ref().filter(|_| o.max_draft > 0) {
+        None => None,
+        Some(p) => {
+            let opened = crate::pull::resolve(p).and_then(|path| {
+                crate::draft::DraftModel::open(&path, crate::copy_for(device), &model, tok)
+                    .map_err(|e| format!("--draft-model {e}"))
+            });
+            match opened {
+                Ok(d) => Some(d),
+                Err(why) => refuse!(why),
+            }
+        }
+    };
     // The Q6_K prefill copy waits for the cache and slots (below).
     // AXON_PAGED_KV, read once for this server.
     let paged_env = o.paged.unwrap_or_else(crate::cuda::qwen2::pages::paged_env);
@@ -1146,7 +1346,7 @@ fn engine(
         gpu_experts: None,
         numerics: o.numerics,
     };
-    let (mut net, drafter) = crate::backend_and_drafter(
+    let loaded = crate::try_backend_and_drafter(
         &model,
         dm.as_ref(),
         device,
@@ -1157,6 +1357,10 @@ fn engine(
         place,
         draft_ctx,
     );
+    let (mut net, drafter) = match loaded {
+        Ok(l) => l,
+        Err(why) => refuse!(why),
+    };
     let ctx = net.ctx(want);
     let why = match &net.0 {
         _ if ctx >= want => None,
@@ -1198,7 +1402,7 @@ fn engine(
     if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
-    let template = Template::new(tok, &model.arch);
+    let template = Template::new(tok, &model);
     let kvs = match &net.0 {
         Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
@@ -1213,7 +1417,7 @@ fn engine(
     // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
     // at a time, and an explicit --parallel N there is refused.
     if o.parallel > 1 && o.parallel_set && !matches!(&net.0, Inner::Cuda(_)) {
-        crate::fail(&format!(
+        refuse!(format!(
             "--parallel {}: batching many requests needs the whole model on one GPU \
              (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
              serves one request at a time (--parallel 1)",
@@ -1430,15 +1634,28 @@ fn engine(
             step_tokens: o.sched.step_tokens,
             legacy: o.sched.legacy,
         };
-        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
-        b.sched = o.sched;
+        let mut b = Batch::new(
+            &net,
+            pool,
+            n,
+            slot_ctx,
+            policy,
+            o.sched,
+            o.log,
+            e.generated.clone(),
+        );
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
         b.metrics = Some(o.metrics.clone());
-        // Shared prefixes (a paged pool's): said at start when on.
-        if b.set_share(o.share.unwrap_or_else(share_env)) && o.log {
-            eprintln!("axon serve: shared prefix KV pages on (AXON_SHARE_KV=1)");
+        // Shared prefixes (a paged pool's; on by default, off under fast
+        // kernels): the start line says which and why. Under --quiet too
+        // when AXON_SHARE_KV set it or fast kernels turned the default off.
+        let fast = net.fast_kernels();
+        let on = b.set_share(share_on(share_set.value(), fast));
+        SHARING.store(on, Ordering::Relaxed);
+        if (o.log || share_said(share_set, fast)) && b.pages().is_some() {
+            eprintln!("axon serve: {}", share_line(share_set, fast));
         }
         b
     });
@@ -1448,12 +1665,14 @@ fn engine(
     // 2-6 s instead of 2 (MEASURED 1027-134559-a975, 20G; the suspect, not
     // proven). The identity doesn't depend on the tier.
     let identity = crate::identity::of(&o.path, &model, &net);
-    // The KV RAM tier (`--cache-ram`): sized against the RAM available now
-    // (the model loaded). On the GPU the whole size is page-locked from
-    // here on, by a thread (or before the server answers, with
-    // AXON_KV_RAM_ALLOC=start), used or not; a CPU's pages are ordinary
-    // memory, taken as pages are stored.
-    let ram = match o.cache_ram.bytes(crate::gguf::mem_available()) {
+    // The KV RAM tier (`--cache-ram`, default off): sized against the RAM
+    // available now (the model loaded), and what bounds it (auto is off
+    // under a binding cgroup limit). On the GPU the whole size is
+    // page-locked from here on, by a thread (or before the server answers,
+    // with AXON_KV_RAM_ALLOC=start), used or not; a CPU's pages are
+    // ordinary memory, taken as pages are stored.
+    let avail = crate::gguf::mem::avail();
+    let ram = match o.cache_ram.bytes(avail.as_ref()) {
         Ok(n) => n,
         Err(why) => {
             let _ = ready.send(Err(Refused(why)));
@@ -1461,9 +1680,10 @@ fn engine(
         }
     };
     let tier_note = match ram {
-        0 if o.cache_ram == tier::CacheRam::Auto => {
-            Some(", KV RAM tier off (--cache-ram auto: RAM available unknown)".to_string())
-        }
+        0 if o.cache_ram == tier::CacheRam::Auto => Some(format!(
+            ", KV RAM tier off (--cache-ram auto: {})",
+            tier::CacheRam::auto_off(avail.as_ref()).unwrap_or_else(|| "under a page".into())
+        )),
         0 => None,
         n => {
             let on = match batch.as_mut() {
@@ -1510,7 +1730,41 @@ fn engine(
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
-    let banner = banner + tier_note.as_deref().unwrap_or("");
+    // Constrained tool calls (`Opts::constrain`): the Hermes grammar on this
+    // vocabulary (its automaton tables: ~0.1 s at 152k tokens), built once.
+    // On, the banner names it; asked for but refused, one line says why,
+    // even under --quiet (an operator who set AXON_CONSTRAIN=1 must be able
+    // to tell it's off).
+    let constrain = o.constrain.then(|| {
+        let g = match template.as_ref().map(tools::family) {
+            Some(Some(tools::Family::Qwen25)) => {
+                let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
+                crate::constrain::Grammar::hermes(v).map(Arc::new)
+            }
+            Some(Some(f)) => Err(format!(
+                "the chat template's tool calls are {}; this release holds Qwen2.5's \
+                 Hermes calls only",
+                match f {
+                    tools::Family::Qwen3 => "Qwen3's (Hermes after <think>)",
+                    tools::Family::Llama31 => "Llama 3.1's",
+                    tools::Family::Harmony => "gpt-oss's (Harmony)",
+                    tools::Family::Qwen25 => unreachable!(),
+                }
+            )),
+            Some(None) => Err("the chat template has no tool-call format".into()),
+            None => Err("the model has no chat template".into()),
+        };
+        g.map_err(|why| {
+            eprintln!("axon serve: constrained tool calls (AXON_CONSTRAIN=1) off: {why}")
+        })
+        .ok()
+    });
+    let constrain = constrain.flatten();
+    let banner = banner
+        + tier_note.as_deref().unwrap_or("")
+        + &(constrain.as_ref())
+            .map(|g| format!(", constrained tool calls ({})", g.field()))
+            .unwrap_or_default();
     if ready
         .send(Ok(Loaded {
             tok,
@@ -1531,6 +1785,7 @@ fn engine(
             identity,
             arch: model.arch.clone(),
             params: model.total_params(),
+            constrain,
         }))
         .is_err()
     {
@@ -1677,17 +1932,18 @@ fn engine(
                 n
             }
         };
-        if let Some(m) = &b.metrics {
-            let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
-            m.publish_waiting(w.collect());
-        }
+        publish_waiting(&e.metrics, &waiting);
         if admitted == 0 && b.idle() {
             if let Some(job) = waiting.pop_front() {
+                // Not waiting any more: `Engine::run` publishes the list
+                // without it (#268: else an idle server showed it waiting
+                // until the next request).
                 let ho = Handover {
                     jobs: &jobs,
                     waiting: &mut waiting,
                     slot_ctx: Some(b.ctx),
                     room: b.slots,
+                    metrics: e.metrics.clone(),
                 };
                 // It runs in a slot (the engine's cache is a view of it,
                 // pointed at the one with its longest prefix, else the
@@ -1721,6 +1977,12 @@ fn engine(
             fatal(b, &err, None);
         }
     }
+}
+
+/// The engine's waiting list, for GET /slots (`Metrics::publish_waiting`).
+fn publish_waiting(m: &ops::Metrics, waiting: &VecDeque<Job>) {
+    let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
+    m.publish_waiting(w.collect());
 }
 
 /// Whether a request refused for pages, waiting `age` ms, ends the
@@ -1761,7 +2023,10 @@ fn admit_order(b: &Batch, waiting: &VecDeque<Job>, age_ms: u64) -> Vec<u64> {
 /// A device error in the batch: every request in it (and `tx`'s) gets it,
 /// then the process exits (CUDA errors are sticky; see `or_exit`).
 fn fatal(b: &mut Batch, err: &str, tx: Option<mpsc::Sender<Event>>) -> ! {
-    eprintln!("axon serve: the engine failed: {err}; exiting");
+    eprintln!(
+        "axon serve: the engine failed: {err}; exiting{}",
+        share_hint()
+    );
     b.fail_all(err);
     if let Some(tx) = tx {
         let _ = tx.send(Event::Error(err.to_string()));
@@ -1879,16 +2144,113 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
-/// AXON_SHARE_KV: shared prefix KV pages, off unless "1" (`share_on`).
-fn share_env() -> bool {
-    share_on(std::env::var("AXON_SHARE_KV").ok().as_deref())
+/// What decides shared prefix KV pages (`share_on`): `Opts::share`,
+/// AXON_SHARE_KV (`share_env`), or neither (the default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShareSet {
+    Default,
+    Env(bool),
+    Opts(bool),
 }
 
-/// AXON_SHARE_KV's value read: on for "1" only, opt-in. #187 ships sharing
-/// off by default if any of its timing clauses fails, and #207's did (the
-/// fan-out's siblings and s4's TTFT-new; docs/log/2026-11-06-shared-prefix-pages-c3.md).
-fn share_on(v: Option<&str>) -> bool {
-    v.is_some_and(|v| v.trim() == "1")
+impl ShareSet {
+    /// The value set (None: the default).
+    fn value(self) -> Option<bool> {
+        match self {
+            ShareSet::Default => None,
+            ShareSet::Env(b) | ShareSet::Opts(b) => Some(b),
+        }
+    }
+}
+
+/// AXON_SHARE_KV's value `v` (None: unset), spaces around it trimmed:
+/// "0" off (the kill switch), "1" on, unset or empty None (the default,
+/// `share_on`). Anything else is an error naming the valid values, and
+/// the server refuses to start, as for a bad AXON_ADMIT (which, unlike
+/// this, reads a value that isn't UTF-8 as unset; #267: until then only
+/// "0" turned sharing off, so `off` and `false` read as on, and under fast
+/// kernels only "1" turned it on, so `on` and `true` read as off).
+fn share_env(v: Option<&str>) -> Result<Option<bool>, String> {
+    match v.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("0") => Ok(Some(false)),
+        Some("1") => Ok(Some(true)),
+        Some(_) => Err(format!(
+            "AXON_SHARE_KV={:?}: expected 0 (shared prefix KV pages off) or 1 (on), or unset \
+             or empty for the default (on; off under fast kernels)",
+            v.unwrap_or_default()
+        )),
+    }
+}
+
+/// Shared prefix KV pages on or off: `set` if set (`ShareSet::value`),
+/// else the default, on unless `fast`, whether the backend runs fast
+/// kernels (`Backend::fast_kernels`). Opt-in ("1") until the 11-12
+/// decision: same bits in every gate, no measured cell worse (#210,
+/// #211), #218 fixed and a soak under pool pressure
+/// (docs/log/2026-11-12-share-default.md).
+///
+/// Under fast kernels (an FP8 checkpoint under `--numerics fast`, which
+/// `--datacenter` implies) off by default (#228's review): their rows
+/// change with how a prompt is chunked, so two requests' copies of a
+/// block can differ in their bytes, and a request that maps another's
+/// page reads KV it didn't compute. That is within fast mode's tolerance,
+/// as a cached prefix is there (docs/determinism.md), but it isn't the
+/// byte equality sharing rests on in exact mode, which no gate holds
+/// fast mode to. "1" turns them on there too.
+fn share_on(set: Option<bool>, fast: bool) -> bool {
+    set.unwrap_or(!fast)
+}
+
+/// Whether the start line about shared prefix KV pages (`share_line`)
+/// prints under --quiet too: when AXON_SHARE_KV set them, or fast kernels
+/// turned the default off (#267). The plain default, or `Opts::share`
+/// (tests, the library), only without --quiet.
+fn share_said(set: ShareSet, fast: bool) -> bool {
+    matches!(set, ShareSet::Env(_)) || (fast && set == ShareSet::Default)
+}
+
+/// serve's start line about shared prefix KV pages (a paged pool's), `set`
+/// and `fast` as `share_on`'s: on or off, what decided it, and how to turn
+/// it the other way.
+fn share_line(set: ShareSet, fast: bool) -> String {
+    const ON: &str = "shared prefix KV pages on";
+    const OFF: &str = "shared prefix KV pages off";
+    match (set, fast) {
+        (ShareSet::Env(true), true) => format!(
+            "{ON} under fast kernels (AXON_SHARE_KV=1): a request may read a block's KV as \
+             another request's chunking computed it, within fast mode's tolerance; \
+             AXON_SHARE_KV=0 turns them off"
+        ),
+        (ShareSet::Env(true), false) => {
+            format!("{ON} (AXON_SHARE_KV=1, as the default; AXON_SHARE_KV=0 turns them off)")
+        }
+        (ShareSet::Env(false), _) => format!("{OFF} (AXON_SHARE_KV=0)"),
+        (ShareSet::Opts(true), _) => format!("{ON} (set by the caller)"),
+        (ShareSet::Opts(false), _) => format!("{OFF} (set by the caller)"),
+        (ShareSet::Default, false) => {
+            format!("{ON} (the default; AXON_SHARE_KV=0 turns them off)")
+        }
+        (ShareSet::Default, true) => format!(
+            "{OFF} (the default under fast kernels: they can give two requests' copies of a \
+             block different bytes; AXON_SHARE_KV=1 shares them anyway)"
+        ),
+    }
+}
+
+/// Whether this process's server shares prefix KV pages, for the exit
+/// lines (`share_hint`). Set once at start; one server per process outside
+/// the tests.
+static SHARING: AtomicBool = AtomicBool::new(false);
+
+/// What the engine's exit lines (`or_exit`, `fatal`) add while shared
+/// prefix KV pages are on: their kill switch, so that whoever reads a
+/// crash can rule sharing out (#228's review).
+fn share_hint() -> &'static str {
+    match SHARING.load(Ordering::Relaxed) {
+        true => " (shared prefix KV pages are on; AXON_SHARE_KV=0 turns them off)",
+        false => "",
+    }
 }
 
 /// AXON_KV_PAGES=N: a paged pool of N KV pages at most (None: unset). Not
@@ -2204,6 +2566,7 @@ struct EngineOpts {
     cache_ram: tier::CacheRam,
     cache_ram_alloc: tier::Alloc,
     numerics: Numerics,
+    constrain: bool,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2258,6 +2621,24 @@ impl Server {
     /// Duplicate pages swapped for the index's so far (`Metrics::swapped`).
     pub fn swapped(&self) -> u64 {
         self.sh.metrics.swapped.load(Ordering::Relaxed)
+    }
+
+    /// No prompt fed past `cap` tokens from now on (`Metrics::feed_cap`;
+    /// usize::MAX: no cap).
+    pub fn feed_cap(&self, cap: usize) {
+        self.sh.metrics.feed_cap.store(cap, Ordering::Relaxed);
+    }
+
+    /// Requests cancelled while being fed so far: the prompt tokens fed,
+    /// and of how many (`Metrics::reaped_fed`).
+    pub fn reaped_fed(&self) -> Vec<(usize, usize)> {
+        self.sh.metrics.reaped_fed.lock().unwrap().clone()
+    }
+
+    /// The claims that mapped pages so far: slot, tokens, a refeed's
+    /// (`Metrics::claims`).
+    pub fn claims(&self) -> Vec<(usize, u64, bool)> {
+        self.sh.metrics.claims.lock().unwrap().clone()
     }
 
     /// Refed prefills that claimed a prefix again, and its tokens
@@ -2342,14 +2723,17 @@ pub fn start(o: Opts) -> io::Result<Server> {
         cache_ram: o.cache_ram,
         cache_ram_alloc: o.cache_ram_alloc,
         numerics: o.numerics,
+        constrain: o.constrain.unwrap_or_else(crate::constrain::env_on),
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
         .name("axon-engine".into())
         .spawn(move || engine(eo, ready_tx, jobs_rx, stop2))?;
-    let model_id = std::path::Path::new(&o.path)
-        .file_stem()
-        .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned());
+    let model_id = o.name.clone().unwrap_or_else(|| {
+        std::path::Path::new(&o.path)
+            .file_stem()
+            .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned())
+    });
     // A request's own repetition_penalty, else the server's flag, else 1
     // (off, as OpenAI and llama-server; `axon chat`'s 1.1 would quietly
     // penalize the punctuation and indentation of code and JSON).
@@ -2370,6 +2754,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         alias: o.alias,
         no_think: o.no_think,
         think_inline: o.think_inline,
+        tool_stream: o.tool_stream.unwrap_or_else(tool_stream_env),
         sample,
         max_tokens: o.max_tokens,
         extra,
@@ -2418,21 +2803,30 @@ pub fn start(o: Opts) -> io::Result<Server> {
         }
     };
     if o.no_think && !l.template.as_ref().is_some_and(Template::thinks) {
-        crate::fail(&format!(
+        server.shutdown();
+        let why = format!(
             "--no-think: {} has no <think> token (not a thinking model)",
             o.path
-        ));
+        );
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, Refused(why)));
     }
     let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
     l.identity = l.identity.with_serve(serve);
     if o.log {
+        // A pulled model's name, then its file.
+        let file = match o.name {
+            Some(_) => format!("{}, ", o.path),
+            None => String::new(),
+        };
         eprintln!(
-            "axon serve: {model_id} ({}) on http://{addr}/v1{}",
+            "axon serve: {model_id} ({file}{}) on http://{addr}/v1{}",
             l.banner,
-            if l.template.is_none() {
-                " (no chat tokens: /v1/completions only)"
-            } else {
-                ""
+            match &l.template {
+                Some(_) => String::new(),
+                None => match Framing::bad_end(l.tok) {
+                    Some(why) => format!(" (no chat framing: {why}: /v1/completions only)"),
+                    None => " (no chat tokens: /v1/completions only)".into(),
+                },
             }
         );
         eprintln!("axon serve: identity {}", l.identity.line());
@@ -2879,16 +3273,17 @@ fn run_request(
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return out.err(
-                    c,
-                    ApiError::new(
-                        400,
-                        "invalid_request_error",
+                let msg = match Framing::bad_end(m.tok) {
+                    Some(why) => {
+                        format!("this model has no chat framing: {why}; use /v1/completions")
+                    }
+                    None => {
                         "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma); use \
-                         /v1/completions",
-                    ),
-                    keep,
-                );
+                             /v1/completions"
+                            .into()
+                    }
+                };
+                return out.err(c, ApiError::new(400, "invalid_request_error", msg), keep);
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
             channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);
@@ -2930,6 +3325,15 @@ fn run_request(
         // As `axon gen`: BOS if the model adds one, its end-of-generation set.
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
+    // Constrained tool calls (`Opts::constrain`; the spec's PR A): Hermes
+    // with tool_choice auto, armed until the reply's `<tool_call>`.
+    let constraint = match (&g.tools, &m.constrain) {
+        (Some(tr), Some(gr)) if parser.is_some() && tr.choice == tools::Choice::Auto => {
+            Some(crate::constrain::Constraint::new(gr.clone()))
+        }
+        _ => None,
+    };
+    let constraint_field = (constraint.as_ref()).map(|c| c.grammar().field().to_string());
     if prompt.is_empty() {
         return out.err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
     }
@@ -2938,6 +3342,12 @@ fn run_request(
     }
     if sh.max_prompt_tokens.is_some_and(|max| prompt.len() > max) {
         return out.err(c, over_max(format!("{} tokens", prompt.len())), keep);
+    }
+    // OpenAI's APIs stream a call as it is generated (#260); ollama's calls
+    // are whole objects, so its replies decide each call whole.
+    let stream_calls = parser.is_some() && sh.tool_stream && !matches!(out, Out::Ollama(_));
+    if let Some(p) = parser.as_mut() {
+        p.configure(stream_calls, Some(sh.metrics.clone()));
     }
     let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
@@ -2954,11 +3364,13 @@ fn run_request(
         stops: g.stop.clone(),
         think,
         channels,
+        stream_calls,
         cancel: cancel.clone(),
         tx,
         id: n,
         arrived,
         keys: Default::default(),
+        constraint,
     };
     match sh.jobs.try_send(job) {
         Ok(()) => {
@@ -2986,7 +3398,16 @@ fn run_request(
         _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
-    let model = (model, m.identity.fingerprint());
+    // A constrained request's bits are its grammar's too: its fingerprint
+    // says so (the maintainer's ruling 1 on the spec's §6: the serve field,
+    // per request; unconstrained ones keep the server's).
+    let fp = match &constraint_field {
+        Some(f) => (m.identity.clone())
+            .with_serve_extra(crate::identity::constrain_field(f))
+            .fingerprint(),
+        None => m.identity.fingerprint(),
+    };
+    let model = (model, fp);
     // Out of flight just before the response's last write (`on_end`): a
     // client that has all of it never sees it counted (#112). Else (an
     // error, a client gone) as the handler returns.
@@ -3193,6 +3614,8 @@ fn whole(
                         match piece {
                             tools::Piece::Text(t) => text.push_str(&t),
                             tools::Piece::Call(c) => calls.push(c),
+                            // A streamed call's pieces: its `Call` is whole.
+                            tools::Piece::Head(_) | tools::Piece::Args(_) => {}
                         }
                     }
                     let h = api::head(id, "chat.completion", created, model.0, &model.1);
@@ -3259,17 +3682,30 @@ fn stream(
         c.send(api::sse(&u(api::chat_chunk(&h, true, "", "", None))).as_bytes())?;
     }
     let mut buf = String::new();
-    // Tools: the content and calls the parser has decided, as chunks.
+    // Tools: the content and calls the parser has decided, as chunks. A
+    // streamed call: a chunk with its id and name, then one per piece of its
+    // arguments (OpenAI's shape); a call decided whole: the same two chunks
+    // at once.
     let mut ncalls = 0;
+    let mut streaming = false;
     let mut pieces = |buf: &mut String, ps: Vec<tools::Piece>| {
         for p in ps {
             match p {
                 tools::Piece::Text(t) => {
                     buf.push_str(&api::sse(&u(api::chat_chunk(&h, false, &t, "", None))));
                 }
+                tools::Piece::Head(call) => {
+                    buf.push_str(&api::sse(&u(tools::call_head_chunk(&h, ncalls, &call))));
+                    streaming = true;
+                }
+                tools::Piece::Args(a) => {
+                    buf.push_str(&api::sse(&u(tools::call_args_chunk(&h, ncalls, &a))));
+                }
                 tools::Piece::Call(call) => {
-                    for j in tools::call_chunks(&h, ncalls, &call) {
-                        buf.push_str(&api::sse(&u(j)));
+                    if !std::mem::replace(&mut streaming, false) {
+                        for j in tools::call_chunks(&h, ncalls, &call) {
+                            buf.push_str(&api::sse(&u(j)));
+                        }
                     }
                     ncalls += 1;
                 }
@@ -3347,7 +3783,7 @@ fn stream(
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto] \
+     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto|off] \
      [--numerics exact|fast] [--datacenter] [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
@@ -3382,8 +3818,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         crate::fail(SERVE_USAGE);
     };
+    // `model_arg` returns a path that exists as given; anything else it
+    // returns is what `axon pull` resolved the name to.
+    let resolved = crate::model_arg(path);
     let mut o = Opts {
-        path: path.clone(),
+        name: (resolved != *path).then(|| path.clone()),
+        path: resolved,
         host: "127.0.0.1".into(),
         port: 8080,
         device: crate::device_env(),
@@ -3406,6 +3846,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         slot_ctx: None,
         kv_pages: None,
         share: None,
+        tool_stream: None,
         paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
@@ -3418,6 +3859,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cache_ram: tier::CacheRam::Bytes(0),
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
+        constrain: None,
     };
     let mut k = None;
     let key_from;
@@ -3606,5 +4048,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod template_tests;
 #[cfg(test)]
 mod tests;

@@ -6,8 +6,8 @@
 use crate::generate::{GenOpts, generate};
 use crate::numerics::{self, Numerics};
 use crate::{
-    chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, rope, sample,
-    serve, spec, tokenizer,
+    chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, pull, rope,
+    sample, serve, spec, tokenizer,
 };
 use lm::{Backend, Device, Inner, Lm};
 use std::env;
@@ -52,13 +52,17 @@ usage:
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
-            [--cache-ram BYTES|auto]
+            [--cache-ram BYTES|auto|off]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
                                             up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
-                                            time; README: axon serve)
+                                            time; docs/serving.md)
+  axon kernels list | build ...             the precompiled GPU kernels (axon kernels --help)
+  axon pull <name | owner/repo/file.gguf>   download a GGUF from Hugging Face, checked against its
+                                            SHA-256, into the models directory (axon pull --list: the
+                                            names); gen, chat, serve and info then take the name
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -77,12 +81,13 @@ flags:
               \"auto\" picks the smallest GGUF next to the model, at most 1/8 its size, that
               can draft for it (none: drafting off)
   -k K        logits: how many logits to print (default 10)
-  --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; a model too big for its memory
-              is split: the last layers that fit on the GPU, the first ones on the CPU)
-  --gpu-layers N  gen, chat: with --device cuda, run the last N layers (and the output head) on
-              the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu; default: all
-              if they fit with 256 MiB to spare, else as many as fit with another 640 MiB left
-              for the desktop; an explicit N only needs the 256 MiB)
+  --device D  gen, chat, serve: cpu or cuda (an NVIDIA GPU; a model too big for its memory
+              is split: the last layers that fit on the GPU, the first ones on the CPU);
+              default: $AXON_DEVICE, else cpu
+  --gpu-layers N  gen, chat, serve: with --device cuda, run the last N layers (and the output
+              head) on the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu;
+              default: all if they fit with 256 MiB to spare, else as many as fit with another
+              640 MiB left for the desktop; an explicit N only needs the 256 MiB)
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
@@ -90,9 +95,9 @@ flags:
               routed experts of N layers (auto: as many as fit after the context's cache; smallest
               first) resident on the GPU instead of the CPU; same results (the GPU twins of the
               CPU's kernels); default 0; as AXON_GPU_EXPERTS
-  --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
-              position and head, half the memory; slightly different results; on a split, the
-              GPU layers' cache, so more layers fit); as AXON_KV
+  --kv T      gen, chat, serve: KV cache type, f16 (default) or q8 (cuda only: int8 with a
+              scale per position and head, half the memory; slightly different results; on a
+              split, the GPU layers' cache, so more layers fit); as AXON_KV
   --numerics M  gen, logits, chat, serve: exact (default) or fast. exact: decode == batched prefill ==
               verify, bit for bit, the same reply alone or batched (docs/determinism.md). fast: kernels
               that change the float order are allowed (results graded against exact, not equal) and
@@ -103,7 +108,8 @@ flags:
   --datacenter  serve: the datacenter bundle; today only --numerics fast (an explicit --numerics
               wins). Later it grows to what a datacenter deployment wants (tensor parallel, FP8)
   --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3/llama)
-  --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
+  --no-think  chat, serve: qwen3: answer without reasoning first (by default it thinks, as
+              ollama does; serve: for the requests that don't set enable_thinking)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
               split); when the conversation outgrows it, the oldest exchanges are forgotten
@@ -164,17 +170,16 @@ flags:
               before prefill (the rendered prompt: template and tool tokens count)
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
               and its slot freed, as if it had disconnected (default: off; at least 1000).
-              The clock starts once the client's receive buffer is full (README)
-  --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
-              or auto: half the RAM available, at most 8G) when their slot is reused, and copy
-              them back on the next turn instead of prefilling again (same bits; default 0: off).
-              On the GPU the whole size is pinned (unswappable) RAM from start. Opt-in: the tier
-              copies pages as they fill, so it holds about its size, the GPU pool's pages included;
-              it helps only when the work written during a gap fits between the pool's size and
-              the tier's. Sizing: useful capacity ~ --cache-ram minus the GPU pool's KV bytes (7B
-              f16: 56 KiB a position; bella's pool ~5.4-6.0 GiB, so 6G buys almost nothing, about
-              20G is where it works). An exclusive tier is pending
-              (docs/design/agent-workload.md §6)
+              The clock starts once the client's receive buffer is full (docs/serving.md)
+  --cache-ram BYTES|auto|off  serve: keep conversations' KV pages in host RAM when their slot
+              is reused, and copy them back on the next turn instead of prefilling again (same
+              bits; default 0: off). auto: the smaller of 4G and a quarter of the RAM available
+              after the model, off under a memory cgroup limit tighter than the host's free RAM
+              (the banner says why); BYTES (K/M/G): that size, cgroup or not; 0 or off: no tier.
+              On the GPU the whole size is pinned (unswappable) RAM from start. The tier is
+              exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
+              still holds first, so its useful capacity is about its size (a 7B f16 position is
+              56 KiB). Off on a CPU/GPU split, several GPUs and MoE models (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
@@ -185,15 +190,16 @@ flags:
               --yarn-attn-factor); without --rope-scale, chat/serve take F = ceil(--ctx / N);
               --rope-scaling none drops a GGUF's own rope.scaling keys
 
-sampling flags (gen, chat; applied in this order, as llama.cpp):
+sampling flags (gen, chat, serve; applied in this order, as llama.cpp; serve: the defaults for
+the requests that don't set their own):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
-                      (default 1.1; 1 = off)
+                      (default 1.1, serve 1; 1 = off)
   --repeat-last-n N   how many tokens back the penalty looks, prompt included (default 64; 0 = off)
   --top-k K           keep the K most likely tokens (default 40; 0 = off: all of them, slower,
                       as is K > 256 on the GPU)
   --top-p P           then the fewest whose probability adds up to P (default 0.9; 1 = off)
   --min-p P           then those at least P times as likely as the top one (default 0 = off)
-  --temp T            then divide the logits by T and draw (default: gen 0, chat 0.8);
+  --temp T            then divide the logits by T and draw (default: gen 0, chat and serve 0.8);
                       0 = greedy: the highest logit, no penalty, no other flag applies
   --seed S            the random seed (default: a new one each run, printed by gen)
 
@@ -234,9 +240,16 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M),
-or, on the CPU, a Hugging Face checkpoint directory of one (config.json, tokenizer.json and
-model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of the same weights).";
+models (docs/models.md):
+  GGUF: qwen2, qwen3 and llama (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B, Llama-3.2-3B-Instruct, Q4_K_M);
+        gemma3 (Gemma 3 1B and 4B; on cuda the whole model on the GPU); mixture-of-experts models:
+        qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight) and gpt-oss
+        (gpt-oss-20b), whose experts run on the CPU under --device cuda (--gpu-experts moves
+        qwen3moe's and deepseek2's to the GPU)
+  a Hugging Face checkpoint directory of a qwen2, qwen3 or llama model (config.json, tokenizer.json,
+        model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
+        the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted
+        at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+)";
 
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
@@ -283,37 +296,71 @@ pub(crate) fn open_model_with(
     copy: Option<bool>,
     rope: &rope::RopeArgs,
 ) -> gguf::Model {
+    try_open_model_with(path, copy, rope).unwrap_or_else(|e| fail(&e))
+}
+
+/// `open_model_with` as a Result: Err is the message it exits with
+/// (serve's engine refuses its start with it instead: a server started in
+/// a process, a test's, must not exit that process, #269).
+pub(crate) fn try_open_model_with(
+    path: &str,
+    copy: Option<bool>,
+    rope: &rope::RopeArgs,
+) -> Result<gguf::Model, String> {
     // The CPU kernels' environment, before anything is read (as `load`).
-    if let Err(e) = crate::quant::env_check() {
-        fail(&e);
-    }
-    let mut m = gguf::load_to_run(path, copy, |m| {
+    crate::quant::env_check()?;
+    // An unsupported model: refused before its weights are copied, read
+    // or converted (`CopyWish::Stop`: the load ends there, the header
+    // mapped and dropped), with the check's message.
+    let mut bad = None;
+    let m = gguf::load_to_run(path, copy, |m| {
         // With rope flags the check waits for them (below).
         if rope.is_empty()
             && let Err(e) = model::check_supported(m)
         {
-            fail(&format!("{path}: {e}"));
+            bad = Some(format!("{path}: {e}"));
+            return gguf::CopyWish::Stop;
         }
         // A MoE file is always mapped (`reads_matrices_in_place`'s note).
         model::cpu_copy_wish(m)
-    })
-    .unwrap_or_else(|e| load_failed(path, e));
+    });
+    if let Some(e) = bad {
+        return Err(e);
+    }
+    let mut m = m.map_err(|e| load_message(path, &e))?;
     if !rope.is_empty() {
-        for line in rope.apply(&mut m).unwrap_or_else(|e| fail(&e)) {
+        for line in rope.apply(&mut m)? {
             eprintln!("axon: {line}");
         }
-        if let Err(e) = model::check_supported(&m) {
-            fail(&format!("{path}: {e}"));
-        }
+        model::check_supported(&m).map_err(|e| format!("{path}: {e}"))?;
     }
-    m
+    Ok(m)
+}
+
+/// A model argument as a path: a name `axon pull` knows, a Hugging Face
+/// file or a pulled file's name in the models directory, else as given
+/// (`pull::resolve`); a usage error for a name that isn't pulled yet.
+pub(crate) fn model_arg(a: &str) -> String {
+    pull::resolve(a).unwrap_or_else(|e| fail(&e))
 }
 
 fn load_failed(path: &str, e: std::io::Error) -> ! {
+    fail(&load_message(path, &e))
+}
+
+/// `load_failed`'s message.
+fn load_message(path: &str, e: &std::io::Error) -> String {
     match e.kind() {
-        std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
-        _ => fail(&format!("cannot load '{path}': {e}")),
+        std::io::ErrorKind::NotFound => format!("cannot open '{path}': no such file"),
+        _ => format!("cannot load '{path}': {e}"),
     }
+}
+
+/// The GPU kernels this binary was built with (`axon kernels build`; a
+/// release's src/main.rs embeds them): `--device cuda` loads them instead
+/// of compiling with NVRTC (`cuda::pack`). Call before `main`.
+pub fn set_kernel_pack(bytes: &'static [u8]) {
+    cuda::set_embedded_pack(bytes);
 }
 
 /// The `axon` binary's entry point.
@@ -342,7 +389,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU and CUDA inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
+                "axon {}: CPU and CUDA inference for GGUF language models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -363,20 +410,32 @@ fn run() -> std::io::Result<()> {
     if args[1] == "serve" {
         return serve::run(&args);
     }
+    if args[1] == "kernels" {
+        cuda::kernels_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
+        return Ok(());
+    }
+    if args[1] == "pull" {
+        pull::pull_cmd(&args[2..]).unwrap_or_else(|e| fail(&e));
+        return Ok(());
+    }
 
     // `axon info <model>`, or just `axon <model>`.
-    let path = match args[1].as_str() {
+    let path = &model_arg(match args[1].as_str() {
         "info" if args.len() >= 3 => &args[2],
         "info" => fail("usage: axon info <model.gguf | checkpoint dir> [rope flags]"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
         // A lone argument is a model to summarize, unless it can't be one.
-        p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
+        p if args.len() == 2
+            && (p.ends_with(".gguf")
+                || std::path::Path::new(p).exists()
+                || pull::alias(p).is_some()) =>
+        {
             &args[1]
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, chat, serve, info)"
+            "unknown command '{c}' (commands: gen, logits, chat, serve, info, kernels, pull)"
         )),
-    };
+    });
 
     // --rope-scaling and friends, as gen takes them: the fingerprints
     // below are for the model as those flags run it.
@@ -511,7 +570,9 @@ fn open_draft_model(
     tok: &tokenizer::Tokenizer,
 ) -> Option<draft::DraftModel> {
     let mut path = path.or_else(draft::model_env).filter(|_| k > 0)?;
-    if path == "auto" {
+    if path != "auto" {
+        path = model_arg(&path);
+    } else {
         match draft::auto_path(model_path, m, tok) {
             Some(p) => {
                 eprintln!("axon: --draft-model auto: {p}");
@@ -532,7 +593,7 @@ fn open_draft_model(
     )
 }
 
-/// `backend` with the draft model `dm`'s VRAM held while the main model is
+/// The model (`try_backend`) with the draft model `dm`'s VRAM held while it is
 /// placed (`draft::load_pair`: for a `draft_ctx`-token cache), then the
 /// drafter for its context (at most draft_ctx).
 #[allow(clippy::too_many_arguments)]
@@ -547,13 +608,40 @@ pub(crate) fn backend_and_drafter<'a>(
     place: lm::Placing,
     draft_ctx: usize,
 ) -> (Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>) {
+    try_backend_and_drafter(
+        model, dm, device, ctx, gpu_layers, kv, fit, place, draft_ctx,
+    )
+    .unwrap_or_else(|e| fail(&e))
+}
+
+/// `backend_and_drafter` as a Result: Err is the message it exits with
+/// (serve's engine refuses its start with it instead, as
+/// `try_open_model_with`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_backend_and_drafter<'a>(
+    model: &'a gguf::Model,
+    dm: Option<&draft::DraftModel>,
+    device: Device,
+    ctx: usize,
+    gpu_layers: Option<usize>,
+    kv: kv::KvType,
+    fit: bool,
+    place: lm::Placing,
+    draft_ctx: usize,
+) -> Result<(Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>), String> {
     draft::load_pair(dm, device, ctx, draft_ctx, kv, || {
-        backend(model, device, ctx, gpu_layers, kv, fit, place)
+        try_backend(model, device, ctx, gpu_layers, kv, fit, place)
     })
-    .unwrap_or_else(|e| match device {
-        Device::Cuda => fail(&format!("--device cuda: --draft-model: {e}")),
-        Device::Cpu => fail(&format!("--draft-model: {e}")),
-    })
+    .map_err(|e| device_message(device, e))
+}
+
+/// A backend's or drafter's error as the CLI says it: `--device cuda: `
+/// first on the GPU.
+fn device_message(device: Device, e: String) -> String {
+    match device {
+        Device::Cuda => format!("--device cuda: {e}"),
+        Device::Cpu => e,
+    }
 }
 
 /// --gpu-experts' value: a count or "auto" (a usage error otherwise).
@@ -600,13 +688,15 @@ pub(crate) fn device_env() -> Device {
     Device::from_env().unwrap_or_else(|e| fail(&e))
 }
 
-/// $AXON_GPU_LAYERS (--gpu-layers' default on CUDA), if set.
-fn gpu_layers_env() -> Option<usize> {
-    let v = env::var("AXON_GPU_LAYERS").ok()?;
-    Some(
-        v.parse::<usize>()
-            .unwrap_or_else(|_| fail(&format!("AXON_GPU_LAYERS needs a whole number, got '{v}'"))),
-    )
+/// $AXON_GPU_LAYERS (--gpu-layers' default on CUDA), if set; Err: not a
+/// whole number.
+fn gpu_layers_var() -> Result<Option<usize>, String> {
+    let Ok(v) = env::var("AXON_GPU_LAYERS") else {
+        return Ok(None);
+    };
+    v.parse::<usize>()
+        .map(Some)
+        .map_err(|_| format!("AXON_GPU_LAYERS needs a whole number, got '{v}'"))
 }
 
 /// --device and --gpu-layers (else $AXON_GPU_LAYERS on CUDA) as the
@@ -614,20 +704,33 @@ fn gpu_layers_env() -> Option<usize> {
 /// 0 GPU layers is the plain CPU backend (loaded as --device cpu loads it,
 /// see `copy_for`). Before `open_model_with`.
 pub(crate) fn placement(device: Device, gpu_layers: Option<usize>) -> (Device, Option<usize>) {
+    try_placement(device, gpu_layers).unwrap_or_else(|e| fail(&e))
+}
+
+/// `placement` as a Result: Err is the message it exits with (as
+/// `try_open_model_with`).
+pub(crate) fn try_placement(
+    device: Device,
+    gpu_layers: Option<usize>,
+) -> Result<(Device, Option<usize>), String> {
     if device == Device::Cpu && gpu_layers.is_some() {
-        fail("--gpu-layers needs --device cuda");
+        return Err("--gpu-layers needs --device cuda".into());
     }
-    let gpu_layers = gpu_layers.or_else(|| (device == Device::Cuda).then(gpu_layers_env)?);
-    match gpu_layers {
+    let g = match gpu_layers {
+        None if device == Device::Cuda => gpu_layers_var()?,
+        g => g,
+    };
+    Ok(match g {
         Some(0) => (Device::Cpu, None),
         g => (device, g),
-    }
+    })
 }
 
 /// The model on `device` with room for `ctx` tokens, split as `gpu_layers`
-/// says (`placement`'s) and `place` (`Backend::new_capped`); a usage error
-/// if the GPU can't be used (no driver or device, too little memory, ...).
-fn backend<'a>(
+/// says (`placement`'s) and `place` (`Backend::new_capped`); Err if the GPU
+/// can't be used (no driver or device, too little memory, ...), without
+/// the CLI's `--device cuda: ` (`device_message`).
+fn try_backend<'a>(
     model: &'a gguf::Model,
     device: Device,
     ctx: usize,
@@ -635,17 +738,13 @@ fn backend<'a>(
     kv: kv::KvType,
     fit: bool,
     place: lm::Placing,
-) -> Backend<'a> {
-    let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place);
-    let net = net.unwrap_or_else(|e| match device {
-        Device::Cuda => fail(&format!("--device cuda: {e}")),
-        Device::Cpu => fail(&e),
-    });
+) -> Result<Backend<'a>, String> {
+    let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place)?;
     // --numerics fast where no fast kernel exists yet: said once, here.
     if let Some(note) = numerics::fast_note(&net) {
         eprintln!("{note}");
     }
-    net
+    Ok(net)
 }
 
 /// The copy-vs-map choice for loading a model for `device`: the GPU reads
@@ -726,7 +825,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             if cmd == "gen" { "-n 32" } else { "-k 10" }
         ));
     }
-    let (path, prompt) = (&args[2], &args[3]);
+    let (path, prompt) = (&model_arg(&args[2]), &args[3]);
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
     let mut max_draft = None;
@@ -816,6 +915,20 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
     let mut ids = tok.encode_prompt(prompt);
+    // AXON_LOGITS_CHAT=FILE: `logits` after the chat prompt `serve` renders
+    // for FILE, a /v1/chat/completions request body ({"messages": [...]}),
+    // instead of the prompt's; its ids are printed first. scripts/golden.py
+    // compares them with llama.cpp's rendering of the GGUF's template.
+    if let Some(f) = env::var_os("AXON_LOGITS_CHAT").filter(|v| !v.is_empty() && cmd == "logits") {
+        if env::var_os("AXON_LOGITS_IDS").is_some_and(|v| !v.is_empty()) {
+            fail("AXON_LOGITS_CHAT and AXON_LOGITS_IDS: set one");
+        }
+        let body = std::fs::read(&f)
+            .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT {}: {e}", f.to_string_lossy())));
+        ids = crate::serve::chat_prompt(&tok, &model, &body)
+            .unwrap_or_else(|e| fail(&format!("AXON_LOGITS_CHAT: {e}")));
+        println!("chat prompt ids ({}): {:?}", ids.len(), ids);
+    }
     // AXON_LOGITS_IDS=1,2,3: `logits` of these token ids instead of the
     // prompt's (oracles compare on ids, never on text); with
     // AXON_LOGITS_ALL or AXON_LOGITS_PREFIX, several sequences separated by
@@ -1060,6 +1173,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             stop: &tok.eog(),
             max_draft,
             sample: sampler.as_mut(),
+            constraint: None,
         },
         &mut |h, max| source.draft(h, max),
         &mut |id| {
@@ -1246,6 +1360,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
+    let path = &model_arg(path);
     let mut system = None;
     let mut no_think = false;
     let mut ctx = None;
@@ -1431,11 +1546,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             }
         );
     }
-    // Qwen2.5's template brings a default system message, Qwen3's none.
-    let system = system
-        .or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()))
-        .or_else(|| chat::template_default_system(&model));
-    let mut conv = chat::Chat::new(&net, &tok, system.as_deref(), ctx)
+    // The template's default system message (Qwen2.5's, Qwen2's, Kimi's),
+    // if it has one; the framing's details from the template too.
+    let system = system.or_else(|| chat::default_system(&model));
+    let fr = chat::Framing::from_model(&tok, &model);
+    let mut conv = chat::Chat::with_framing(&net, &tok, fr, system.as_deref(), ctx)
         .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     if no_think && !conv.thinks() {
         fail(&format!(
@@ -1915,6 +2030,43 @@ mod tests {
         }
     }
 
+    /// `--help` (#222): the RAM tier is exclusive since #201, not
+    /// "pending"; the model list names every architecture the loader takes
+    /// and FP8 on the GPU; no pointer into the README, whose reference
+    /// moved to docs/ in #223.
+    #[test]
+    fn help_is_current() {
+        let flat = super::USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            "The tier is exclusive",
+            "default 0: off). auto: the smaller of 4G and a quarter of the RAM available after the model",
+            "0 or off: no tier",
+            "gemma3",
+            "qwen3moe",
+            "deepseek2",
+            "gpt-oss",
+            "FP8",
+            "natively with --numerics fast",
+            "time; docs/serving.md)",
+            // serve takes the placement, KV and sampling flags too (shady on #225).
+            "--device D gen, chat, serve: cpu or cuda",
+            "default: $AXON_DEVICE, else cpu",
+            "--gpu-layers N gen, chat, serve:",
+            "--kv T gen, chat, serve:",
+            "--no-think chat, serve:",
+            "sampling flags (gen, chat, serve;",
+            "(default 1.1, serve 1; 1 = off)",
+        ] {
+            assert!(flat.contains(want), "--help lacks {want:?}");
+        }
+        for stale in ["pending", "README"] {
+            assert!(!flat.contains(stale), "--help still says {stale:?}");
+        }
+    }
+
     use super::{gen_budget, placement, utf8_args};
     use crate::generate::{GenOpts, argmax, generate};
 
@@ -2175,6 +2327,7 @@ mod tests {
                                 stop: &[eos],
                                 max_draft: k,
                                 sample: None,
+                                constraint: None,
                             },
                             &mut draft,
                             &mut |t| {

@@ -85,7 +85,7 @@ AXON_SIMD=scalar cargo test        # the scalar path, as CI runs it
 ```
 
 - No GPU? Set `AXON_SKIP_GPU_TESTS=1` and say so in the PR. The skip is visible in the output.
-- No models? `AXON_SKIP_MODEL_TESTS=1` gets CI parity, nothing more. A change to model, kernel or
+- No models? `AXON_SKIP_MODEL_TESTS=1` gets `check`'s parity, nothing more. A change to model, kernel or
   serve code needs the model tests run, by you or by a maintainer.
 - Changed numerics on purpose? Also run an accuracy A/B (ΔNLL, top-1, KL) against `main`
   ([methodology: Gates](docs/methodology.md#gates)).
@@ -271,9 +271,12 @@ Code and body written by <agent> (<model>). A human reviewed the diff before the
 
 ## GPU testing
 
-CI has no GPU and no models: it skips the GPU and model tests (`AXON_SKIP_GPU_TESTS=1`,
+CI has no GPU. Per PR, `check` skips the GPU and model tests (`AXON_SKIP_GPU_TESTS=1`,
 `AXON_SKIP_MODEL_TESTS=1`) and runs the rest, plus the scalar path and a qemu Nehalem run that catches
-any AVX instruction leaking into the baseline build. Green CI does not mean the GPU paths work.
+any AVX instruction leaking into the baseline build; next to it, `model-oracles` downloads the test model
+(qwen2.5-0.5b-instruct q4_k_m, cached) and runs the tests that check it against independent references (HF
+tokenizer, ollama's greedy output, gguf-py's dequantizer). Nightly: the whole suite on the CPU with the test
+models, and the fuzzers. Green CI does not mean the GPU paths work.
 
 - **If you have an NVIDIA GPU:** run the full suite and the GPU md5 sets yourself, and post the results
   with the GPU, driver and CUDA version.

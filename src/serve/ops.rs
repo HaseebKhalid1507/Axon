@@ -236,9 +236,15 @@ pub struct Metrics {
     pub idle_evictions: AtomicU64,
     /// Prompts refused by `--max-prompt-tokens`.
     pub refused_prompts: AtomicU64,
-    /// gpt-oss tool calls begun but not finished as a JSON object
-    /// (returned as reasoning).
+    /// Tool calls the model began that came back as no call: Hermes
+    /// (`<tool_call>`) and Llama (JSON reply) blocks that aren't a JSON
+    /// object with a string "name" (returned as content), and gpt-oss calls
+    /// whose arguments never opened as an object (returned as reasoning).
     pub tool_calls_dropped: AtomicU64,
+    /// Calls returned whose `arguments` aren't a JSON object: streamed calls
+    /// cut off by the token limit or whose JSON went bad (#260), and calls
+    /// given a non-object value.
+    pub tool_calls_invalid: AtomicU64,
     pub ttft: Histogram,
     pub itl: Histogram,
     /// Batched steps that fed prompt beside running rows, and those with
@@ -267,6 +273,12 @@ pub struct Metrics {
     /// Prompt tokens admissions mapped from the prefix index (shared
     /// prefixes; their rows weren't prefilled).
     pub shared_tokens: AtomicU64,
+    /// Tokens refed prefills (preempted or unfed) mapped from the prefix
+    /// index again: their prompt and what they generated so far
+    /// (`Batch::refeed_claim`, #212). Apart from `shared_tokens` (#219), so
+    /// preemption doesn't inflate the prompt count a sharing win is read
+    /// from.
+    pub refeed_shared_tokens: AtomicU64,
     /// Pages the prefix index gave up for room (shared prefixes).
     pub pages_evicted: AtomicU64,
     /// Pages copied by a spill (a slot giving its rows up), of those
@@ -292,6 +304,22 @@ pub struct Metrics {
     pub refeed_claims: AtomicU64,
     #[cfg(test)]
     pub refeed_tokens: AtomicU64,
+    /// Tests: no prompt is fed past this many tokens (`Batch::feed`;
+    /// usize::MAX, the start: no cap), to hold a request mid-feed. A
+    /// refeed's claim of its prefix (`Batch::refeed_claim`, a preempted or
+    /// unfed request's) maps pages without feeding them, so it can go past
+    /// the cap; the feed after it is held to the cap.
+    #[cfg(test)]
+    pub feed_cap: AtomicUsize,
+    /// Tests: requests whose client went away while they were fed
+    /// (`Batch::reap`): the prompt tokens fed, and of how many to feed.
+    #[cfg(test)]
+    pub reaped_fed: Mutex<Vec<(usize, usize)>>,
+    /// Tests: every claim that mapped the index's pages
+    /// (`Batch::claim_prefix`): the slot, the tokens mapped, and whether
+    /// it was a refeed's (an admission's otherwise).
+    #[cfg(test)]
+    pub claims: Mutex<Vec<(usize, u64, bool)>>,
 }
 
 impl Metrics {
@@ -320,6 +348,7 @@ impl Default for Metrics {
             idle_evictions: AtomicU64::new(0),
             refused_prompts: AtomicU64::new(0),
             tool_calls_dropped: AtomicU64::new(0),
+            tool_calls_invalid: AtomicU64::new(0),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             step: Histogram::new(STEP_BOUNDS),
@@ -335,6 +364,7 @@ impl Default for Metrics {
             kv_ram_pinned: AtomicU64::new(0),
             kv_ram_gpu_pages: AtomicU64::new(0),
             shared_tokens: AtomicU64::new(0),
+            refeed_shared_tokens: AtomicU64::new(0),
             pages_evicted: AtomicU64::new(0),
             kv_ram_spilled: AtomicU64::new(0),
             #[cfg(test)]
@@ -347,6 +377,12 @@ impl Default for Metrics {
             refeed_claims: AtomicU64::new(0),
             #[cfg(test)]
             refeed_tokens: AtomicU64::new(0),
+            #[cfg(test)]
+            feed_cap: AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            reaped_fed: Mutex::default(),
+            #[cfg(test)]
+            claims: Mutex::default(),
             sched: Mutex::default(),
         }
     }
@@ -501,8 +537,17 @@ impl Metrics {
         counter(
             &mut o,
             "axon_tool_calls_dropped_total",
-            "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
+            "Tool calls begun but returned as no call: a <tool_call> block or JSON reply that \
+             isn't a JSON object with a string name (as content), a gpt-oss call whose arguments \
+             never opened as an object (as reasoning).",
             self.tool_calls_dropped.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_tool_calls_invalid_total",
+            "Tool calls returned whose arguments are not a JSON object (a streamed call cut off \
+             or whose JSON went bad, or a non-object value).",
+            self.tool_calls_invalid.load(Ordering::Relaxed),
         );
         // The tier's lines: while it's on, and after it turned off (its
         // gauges 0, its counters kept).
@@ -591,6 +636,13 @@ impl Metrics {
                 "axon_prompt_shared_tokens_total",
                 "Prompt tokens whose KV pages were mapped from the prefix index, not prefilled.",
                 self.shared_tokens.load(Ordering::Relaxed),
+            );
+            counter(
+                &mut o,
+                "axon_refeed_shared_tokens_total",
+                "Tokens of preempted or unfed requests (their prompt and what they generated) \
+                 whose KV pages were mapped from the prefix index again when they were fed again.",
+                self.refeed_shared_tokens.load(Ordering::Relaxed),
             );
             counter(
                 &mut o,
@@ -917,6 +969,7 @@ mod tests {
         assert!(!m.render(0).contains("axon_kv_pages_warm"));
         // On: their counts in /slots, gauges and counters in /metrics.
         m.shared_tokens.store(640, Ordering::Relaxed);
+        m.refeed_shared_tokens.store(192, Ordering::Relaxed);
         m.pages_evicted.store(3, Ordering::Relaxed);
         let share = PagesView {
             share: Some((4, 2)),
@@ -933,6 +986,7 @@ mod tests {
             "axon_kv_pages_warm 4",
             "axon_kv_pages_shared 2",
             "axon_prompt_shared_tokens_total 640",
+            "axon_refeed_shared_tokens_total 192",
             "axon_pages_evicted_total 3",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in\n{text}");

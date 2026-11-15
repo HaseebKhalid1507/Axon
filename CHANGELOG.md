@@ -6,6 +6,275 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)
+- **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages
+  off, `1` on (under fast kernels too), unset or empty is the default (on; off under fast kernels). Any other
+  value refuses to start with a message naming the valid ones; before, `off` and `false` read as on, and under fast
+  kernels `on` and `true` read as off. A value that isn't UTF-8 refuses too (`AXON_ADMIT` reads one as unset). The
+  start line says on or off and what decided it, and prints under `--quiet` too when the variable is set to `0` or
+  `1`, or fast kernels turned sharing off.
+- **/slots `waiting` is what the engine holds** (#268). A request that ran alone (nothing else running or waiting)
+  stayed in the published waiting list until the next request came; the list is now published again once its slot
+  shows it busy. Requests taken in while one runs alone (to hand it over to the batch) are published as they come,
+  where before they showed only once it was done.
+- **A server's start refuses, it doesn't exit** (#269). `serve::start`'s refusals that called `crate::fail`
+  (exit 2) on the engine thread now come back as its error, as the paged pool's always did: an unreadable or
+  unsupported model, a CUDA backend that couldn't be made, `--ctx` past the trained context, `--parallel` on a
+  backend that can't batch, a MoE model with `--parallel`, a draft model that won't open, `--gpu-layers` without
+  CUDA, `--no-think` on a model without `<think>`. `axon serve` still exits 2 with the same message; a process that
+  starts servers itself (the test binary) keeps running. It came up when the debug test binary exited 2 in the
+  middle of the share gates with its message captured and lost (1114-174039-9861).
+- **An unsupported main model given no rope flag is refused before its weights are read**, by the CLI (`gen`,
+  `logits`, `chat`, `serve`), `serve::start` and `axon::load` (which takes no rope flags). The support check's
+  answer now stops the load: nothing copied, no rope unpermute, no read-ahead thread, and a safetensors checkpoint
+  isn't converted or FP8-scanned. `axon::load` used to load the whole model (a checkpoint converted in full) before
+  returning the refusal; the CLI exited from inside the check, which a refusal returned as an error can't do. Two
+  refusals still check a model that is already loaded, as they did before:
+  - **With a rope flag** (`--rope-scaling`, `--rope-scale`, `--yarn-*`) the check waits until the flags are written
+    into the loaded model's metadata (`cli::try_open_model_with`). On CUDA the file is mapped and its read-ahead
+    thread started first, and the thread goes on reading the whole file after the refusal (dropping the model
+    doesn't stop it). On the CPU the model is copied in full first when the copy pays (else mapped and read ahead,
+    as on CUDA). A safetensors checkpoint is converted first on either.
+  - **A `--draft-model`** is opened in full (`DraftModel::open`: `gguf::load_with`) before its support and
+    vocabulary checks. On the CPU the whole draft is copied into RAM (unless `AXON_MMAP` or the memory guard maps
+    it); on CUDA it is mapped and its rope unpermuted. No read-ahead thread on this path. A safetensors draft is
+    converted first.
+
+  `axon gen`, `logits`, `chat` and `serve` exit on either refusal, as before, so the read-ahead and the copy end
+  with the process. Only a process that calls `serve::start` itself and outlives a refused start (the test binary)
+  keeps paying them. A stop flag for the read-ahead thread is a follow-up on #267.
+- **Tests.** `serve_share_on_under_fast_kernels`: sharing on under FP8 fast kernels (`AXON_SHARE_KV=1`), the path
+  where a debug build's duplicate-page byte check is skipped, with duplicates swapped (skipped without e4m3
+  tensor cores). `serve_share_cancel_frees` now proves its third request is dropped while being fed: a test-only
+  cap holds it two pages into its private part, and the engine records it reaped from its prompts being fed. Its
+  second stream waits for pages rather than decoding (the first's admission reserves pages for its reply): the
+  test said "both decoding" and now says which. The third's prefix mapping is read from a test-only log of the
+  claims, by slot: the shared-tokens counter it read moves when the second is admitted too.
+  `serve_start_refusals_dont_exit` checks six of the refusals above on the CPU (a full start refused by `--no-think`
+  among them); `stop_converts_nothing` and `load_to_run_stop_loads_nothing`, that a refused load stops.
+  `serve_solo_leaves_no_waiting` covers #268. `serve_sjf_long_prompt_admitted_within_age_bound` waits until both
+  slots are busy and a short request waits before it sends the long prompt (it failed once in a debug suite on a
+  shared GPU, 1114-125202-b1eb: the long one found a slot free).
+
+### Shared prefix KV pages on by default; #218's hold order; refeed claims counted apart (11-12 decision; #218, #219)
+- **On by default** (`AXON_SHARE_KV=0` turns them off; it was opt-in, `AXON_SHARE_KV=1`). `AXON_SHARE_KV` takes `0`,
+  `1` or nothing, and any other value refuses to start (#267, above); the start line says on or off and why. Same
+  bits on or off.
+  **Off under fast kernels** (an FP8 checkpoint under `--numerics fast`, which `--datacenter` implies) unless
+  `AXON_SHARE_KV=1`: their rows change with a prompt's chunking, so two copies of a block can differ. An engine
+  failure's exit line names `AXON_SHARE_KV=0` while sharing is on. `cached_tokens` now counts pages another client
+  computed (serving.md says what that exposes). On its
+  own: the KV RAM tier stays off by default (#226). In the A/B on an RTX 4090 (#228, job 1112-233524-d38d) sharing
+  alone passed every cell (C=8 ITL p99 0.980×, C=16 tok/s 1.001×), but the tier failed, so the planned pairing was
+  dropped (the lead's ruling, 11-13). The win is subagent fan-out (#211: eight subagents' TTFT 0.591× on a shared
+  6,006-token prefix); the agent board's Synaps-shaped trace shares only 4–7 % of its prompt tokens.
+- **#218:** `index_pages` takes the index's hold on a swapped block only once `replace_pages` has mapped it into the
+  slot, so an error in between leaves no hold on a page the slot doesn't map. A refeed claim alone no longer counts
+  as a prefill step's progress.
+- **#219:** a preempted or unfed request's claim of shared pages counts in the new
+  `axon_refeed_shared_tokens_total`, so `axon_prompt_shared_tokens_total` is admissions' prompt tokens again.
+
+### Constrained tool calls, opt-in (`AXON_CONSTRAIN=1`; PR A of #259)
+- **A Hermes tool call is valid JSON.** With `AXON_CONSTRAIN=1`, `axon serve` on a Qwen2.5-family model holds a
+  tool call (`tool_choice` auto) to `{"name": STRING, "arguments": OBJECT}` from its `<tool_call>` token to
+  `</tool_call>`: each token is picked from those a JSON automaton allows, and no special token (EOS,
+  `<|im_end|>`, a second `<tool_call>`) can be picked inside a string. None of the 8 malformed calls in #259 can be
+  generated. Valid doesn't mean right: where the model would have written an unescaped quote, the string ends
+  there (`"cmd": "echo '{"` and then a forced `,` or `}`), so the call parses but may not be what was meant.
+- **What it doesn't fix yet.**
+  - `max_tokens` can still cut a call short. Inside a call EOS is banned, so `max_tokens` is the only stop, and
+    there is no bound on a runaway call yet (PR B). Cut once its arguments have opened, a call comes back as a call
+    (#260's rules, below) whose `arguments` aren't valid JSON, counted in `axon_tool_calls_invalid_total`. Cut
+    earlier, or with `AXON_TOOL_STREAM=0`, it comes back as content.
+  - The grammar allows `</tool_call>` spelled out inside any string (it is string text there). Since #260 the
+    Parser agrees inside a string in the call's arguments. It still ends the block at the tag inside the name
+    string, and anywhere with `AXON_TOOL_STREAM=0` or on the ollama routes (decided whole). There the block is cut
+    at the tag, isn't a call, and comes back as content (PR B, ruling 5).
+- **Unchanged.** Requests without tools and every request with the variable unset are unchanged, bit for bit.
+  Text before a call too. After a call the position takes the unconstrained head again (the text differs only
+  because the call did).
+- **Same bits however it runs.** A constrained reply is the same decoded, drafted, verified or batched beside other
+  requests. Its `system_fingerprint` names the grammar (`constrain hermes-json <hash>` in the `serve` field), so it
+  isn't an unconstrained reply's: every tools request gets it, even one whose reply makes no call. Unconstrained
+  fingerprints don't move.
+- **It says whether it's on.** The startup banner ends with `constrained tool calls (hermes-json <hash>)`. A model
+  it can't hold (not the Qwen2.5 template family, no `<tool_call>` token, a vocabulary without every byte as a
+  token) gets one line saying why, even under `--quiet`.
+- Off by default until the follow-ups (#259's PR B: on by default, `required`/named calls, the tool-name enum).
+### Tool calls stream as they are generated (#260)
+- **Streamed, a call's head goes out as soon as its name is read and its arguments open with `{`**, then its
+  arguments a piece at a time: `delta.tool_calls` chunks on `/v1/chat/completions`, a `function_call` item with
+  `response.function_call_arguments.delta` events on `/v1/responses`. Before, nothing of a call went out until its
+  block closed. In #260 a looping call (codex, Qwen2.5-7B, job 1113-010041-0dce) sent nothing for 340 s, so codex's
+  300 s idle timeout fired, and its retry decoded at half speed beside the runaway.
+- **A block is decided as soon as it can't be a call** (its text stops being a prefix of a JSON object), and streams
+  as content from there, where it used to be held to its end.
+- **Changed: once its head is out, a call is a call.** Arguments that go bad after that point (#259's unescaped
+  quotes, raw newlines, bad escapes) come back as written, and a reply cut off mid-call comes back as a call with what
+  was written. Either way `arguments` isn't valid JSON, as OpenAI's API allows, and the call is counted in the new
+  `axon_tool_calls_invalid_total`. Before, such a block came back as content, which ended codex's turn. This applies
+  streamed or not: a `"stream": false` reply decides calls the same way. Other text after a call's object ends its
+  block: a `<tool_call>` there opens the next call, and the block's own `</tool_call>`, if it comes later, is dropped
+  rather than shown as content.
+- On `/v1/responses` a call cut off by the token limit has item `status: "incomplete"` (it was `completed`).
+- In a call's arguments a `</tool_call>` inside a JSON string is the string's text (it used to cut the call there).
+- gpt-oss: a call is framed only when nothing but blanks comes before its arguments' `{`, where the call is parsed
+  from (other text first: reasoning, as before).
+- Llama 3.1/3.2's JSON calls and gpt-oss's calls stream the same way (gpt-oss once its arguments open with `{`).
+- `axon_tool_calls_dropped_total` now also counts `<tool_call>` blocks and Llama JSON replies returned as content.
+  It used to count gpt-oss calls only.
+- **Kill switch `AXON_TOOL_STREAM=0`:** calls decided whole and sent once decided, as before, on every route. The
+  ollama routes always work this way (an ollama call is a whole object).
+- The output tokens are unchanged. What changes is how the text is split into content and calls, and when it is
+  sent.
+
+### Chat prompts follow each GGUF's own template, token for token (#246, closes #238, #239, #240, #241, #249)
+- **The template picks the variant.** The vocabulary still picks the format. Fixed substrings of
+  `tokenizer.chat_template` (no Jinja) choose within it, so `axon chat` and serve frame these files differently now:
+  - **Llama 3.0** (#241): no "Cutting Knowledge Date" lines, and a system block only when a system message is given.
+    Llama 3.1, 3.2 and 3.3 are unchanged.
+  - **DeepSeek R1** (R1-0528, the distills) and **V3** (#238): a reply opens with `<｜Assistant｜>` alone, so R1
+    reasons. Before, they got V3.1's `</think>` and reasoning was switched off. BOS is written whenever the template
+    writes it.
+  - **Earlier DeepSeek replies** drop their reasoning as the template does, in serve and in `axon chat` alike
+    (`axon chat` used to keep all of it). R1's (R1-0528, the distills): the text after the last `</think>`, newlines
+    kept. V3.1's: what follows the first `</think>`. Qwen3's rule is unchanged: after the last, newlines dropped.
+  - **DeepSeek multi-turn** (#240): an earlier reply is `<｜Assistant｜>{text}<｜end▁of▁sentence｜>`. Before, the
+    marker was missing and the reply was glued onto the user turn.
+- **The default system message is the template's** (#239): Qwen2's is "You are a helpful assistant.", and Qwen1.5, the
+  R1 distills and Qwen3 have none. Qwen2.5's "You are Qwen, ..." now comes only from its template, or for a `qwen2`
+  file without one. Any ChatML template with a fixed default gets that default whatever its architecture
+  (Qwen2.5-Math's, for example). A fine-tune whose template has no default loses Qwen2.5's, except on a tool
+  request, which still gets it (#256).
+- **Tools need a template that renders them.** A request with tools, or a tool turn, for Qwen2, Qwen1.5 or Llama 3.0
+  is now a 400, as ollama refuses it. These used to render in Qwen2.5's or Llama 3.1's format.
+- **DeepSeek-R1's Qwen2.5 distills load** (#249): pre-tokenizer `deepseek-r1-qwen` is Qwen2's, as llama.cpp maps it.
+- **A broken `bos_token_id` or `eos_token_id`** (past the vocabulary) never reaches a prompt. A bad BOS is dropped,
+  as the tokenizer drops it. A bad EOS on a format that ends turns with EOS (DeepSeek, Mistral) leaves no chat
+  framing, instead of a panic in the model: the chat endpoint gives a 400, `axon chat` an error and serve's banner a
+  note, each naming the id ("eos_token_id N is past the vocabulary").
+- **Pinned by a fixture**, `tests/fixtures/chat_templates.json`, built by `scripts/chat_template_fixtures.py` from
+  pinned Hugging Face revisions: 16 families and 148 conversations, Axon's ids equal to `apply_chat_template`'s.
+  The conversations also run through `axon chat` turn by turn. Message text that spells special tokens stays text
+  in every family.
+- **Saved sessions:** a resumed `axon chat` session keeps its old tokens, and the new turns use the new framing. A
+  conversation that changed framing (Llama 3.0, R1, Qwen2 or Qwen1.5 without a system message) mixes the two.
+  Serve's prompt cache is keyed by tokens, so changed prompts only miss it.
+
+### Tests: the FP8 gate off the GPU test lock; GPU fast vs GPU exact in the suites (#232)
+- **`gpu_fp8_fast_vs_exact_sanity` replaces `gpu_fp8_graded_vs_fp8_ref` in every suite.** It runs the FP8 0.5B
+  checkpoint's fast mode against its exact mode on the same GPU, every arm at >= 1000 positions, with no
+  statistics: finite logits, max |dlogit| < 12, loose deterministic bars (top-1 >= 80 % an arm, KL mean <= 3× the
+  floor's, verify rows >= 85 %), a fast kernel in every arm, and the router's FP8 table. It holds the GPU test
+  lock for about a minute (55–174 s on packed pods). The old test held it through its CPU reference, over 2700 s
+  on packed pods, and 138 GPU tests of one suite failed on the lock timeout behind it.
+- **The run of record, `gpu_fp8_graded_vs_fp8_ref_1000`, is `#[ignore]`d.** It grades against the CPU's fp8-ref with
+  the statistical bars, unchanged. It runs its CPU nets before it takes the lock. It runs by hand on PRs that touch
+  the FP8 kernels, their routing or the FP8 load path, on sm_120 and on sm_89 (two different FP8 GEMM paths); not
+  yet nightly (docs/testing.md, the PR template).
+  - Until #245 lands, a failure means look, not block: a bootstrap suggests its bars flag about 1 in 3 harmless
+    numerics changes.
+  - Its CPU reference is slow because the CPU's float matmul is a serial scalar dot (#244).
+- `graded_in_two_passes_is_graded_at_once`: the two-pass grading equals the interleaved one, field for field
+  (docs/log/2026-11-13-fp8-gate-lock.md).
+
+### Release tarball and `install.sh`: Linux x86-64, one command (#230)
+- **A tag `vX.Y.Z` builds the Linux x86-64 tarball** (`.github/workflows/release.yml`) into a *draft* GitHub release.
+  The tarball holds `axon` with its kernel pack built in (#227), compiled from the tagged source by NVRTC 13.4.92 on
+  a runner with no GPU, built in `manylinux_2_28` (glibc 2.28+), plus the license notices: `THIRD_PARTY_LICENSES.txt`
+  for every linked crate, and the Rust standard library's. The build fails if the tag isn't the binary's version,
+  the pack lacks a module, the binary needs a newer glibc, or a crate's license is off the allowed list (also
+  checked in CI on every PR). Actions are pinned by commit and the image by digest; the tarball is built to be
+  reproducible (docs/releasing.md step 4 checks it; no two builds of one commit have been compared yet). A pull
+  request that touches the release files builds and tests it without a release.
+- **`install.sh`** (`curl -fsSL …/install.sh | sh`, POSIX sh) puts `axon` in `~/.local/bin` after checking the
+  tarball's SHA-256. Running it again changes nothing. It first runs the binary where it will live, so a noexec
+  `/tmp` doesn't matter, and it names a noexec install dir. It warns when another `axon` comes first on PATH, and
+  says "no published release yet" (build from source) while there is none. `AXON_VERSION`, `AXON_INSTALL_DIR`.
+- Publishing a draft takes the hand checks in docs/releasing.md: the pack byte-checked against bella's NVRTC, the
+  md5 gate, a driver-only machine. Nothing is published yet: until v0.1.0 is, the README says to build from
+  source.
+- **Only the tag's push makes a draft** (#257, shady's SHOULD on #230). A `workflow_dispatch` on the tag
+  (releasing.md step 4, the reproducibility check) has the same `github.ref`, so it used to add a second draft
+  with its own tarball; it now only builds. The release job also refuses when a release for the tag, draft or
+  published, exists already, so "Re-run all jobs" on the tag's run can't add one either. The `kernels-pack`
+  artifact is kept 30 days (was 7), for releasing.md step 1.
+- **The draft is made only while the tag names the commit the run built** (#261, the must-fix in #258, from
+  shady's review of #257). A tag moved while its first run was still building used to let that stale run make
+  the draft, holding the old commit's tarball; the new commit's run then hit the one-release check. The pack
+  job now records the commit it checked out, and the build job checks it built the same one. Before
+  `gh release create`, the release job asks GitHub which commit the tag names (`commits/refs/tags/<tag>`, which
+  peels an annotated tag), and asks again after the upload. A mismatch or an API error uploads nothing. The
+  draft's notes name the commit. `scripts/release/test_draft_guards.sh` tests the step against a stub `gh` on
+  every release PR. releasing.md: a failed upload leaves a half-made draft; delete it, then re-run.
+- **Publishing is one checked command, tied to the tarball that was checked; the draft's title fails closed**
+  (#265, shady's reviews of #261 and #265). releasing.md ran the tag check only first, hours before publishing,
+  and nothing tied the publish to the tarball the GPU checks ran on. Now `scripts/release/publish.sh vX.Y.Z
+  SHA256` is the publish step, with the SHA-256 written next to the hand checks' results. It publishes only if:
+  - there is one draft for the tag, titled "Axon vX.Y.Z (checked; publish with scripts/release/publish.sh)", with
+    its three assets uploaded;
+  - SHA256 equals both the notes' "SHA-256 of the tarball" and the digest GitHub computed for the uploaded
+    tarball, so a draft made again after the checks (the tag moved, the tarball re-uploaded) is refused;
+  - the tag names the commit in the notes, checked last.
+
+  Then one `gh release edit --title "Axon vX.Y.Z" --tag --verify-tag --draft=false` sets the final title and
+  publishes. Right after, it asks for the tag's commit again and re-reads the release; on a miss, or an answer
+  it can't read, it turns the release back into a DO NOT PUBLISH draft and fails. The 1–2 s between the last
+  check and the publish can't be closed from the client; a tag ruleset on `refs/tags/v*` would close it
+  (releasing.md; the maintainer's call, not set up). `--check` runs the same checks first, publishes nothing,
+  and prints the tarball's SHA-256. When the tag is gone (a 422) it refuses: the draft's target is main, so
+  publishing would create the tag at main's tip, with the old commit's tarball. The release job:
+  - says "re-run this job" when GitHub gave no commit for the tag (a transient error, or the tag deleted),
+    not "the other run makes the draft";
+  - creates the draft titled "DO NOT PUBLISH: Axon vX.Y.Z (unchecked)", and retitles it "Axon vX.Y.Z (checked;
+    …)" only after the tag check after the upload passes. A failed, cancelled or lost job leaves a draft that
+    says not to publish it, and the web page's Publish button would publish a visibly mis-titled release;
+  - runs one at a time per tag (a `concurrency` group, never cancelling the running one).
+
+  `scripts/release/test_draft_guards.sh` pins the create's, the edits' and publish.sh's exact arguments
+  (`--draft`, `--verify-tag`, the titles, `--repo`, the revert) and the notes' two lines, and tests publish.sh.
+  No `--target` on the create: GITHUB_TOKEN can't create a release whose target's workflows differ from main's.
+
+### `axon pull`: GGUFs from Hugging Face by name, checked against their SHA-256 (#231)
+- **`axon pull NAME | OWNER/REPO/FILE.gguf`** downloads a GGUF into the models directory (`$AXON_MODELS_DIR`,
+  else `$XDG_DATA_HOME/axon/models`, else `~/.local/share/axon/models`) through `curl`, HTTPS only, resumable,
+  with progress. Nothing reaches its final name until its size and SHA-256 match: a name's pinned checksum, or
+  the one Hugging Face publishes for the file (the LFS oid), fetched at the commit that reported it. No registry.
+- **About ten names** (`axon pull --list`) for local coding agents, each a file at a pinned commit, each run on axon
+  (`axon info` and a greedy gen) before it was listed.
+- **`gen`, `chat`, `serve`, `info` and `--draft-model` take a name** where they took a path. `axon serve NAME`
+  serves the model as `NAME` (`/v1/models`, a request's `model`); given a path, as before, its file stem.
+- **New variables:** `AXON_MODELS_DIR` and `HF_TOKEN` (gated repos; curl 7.58+).
+- Names and paths are untrusted input: owner, repo and every path component are checked against a strict
+  allow-list before any path is built (fuzzed); curl runs with `-q` (no `~/.curlrc`).
+
+### Precompiled GPU kernels: `--device cuda` with only the NVIDIA driver (#227)
+- **A release binary carries its CUDA kernels precompiled** (the kernel pack): cubins for sm_75, sm_80, sm_86,
+  sm_89, sm_90, sm_90a and sm_120, plus compute_120 PTX for newer GPUs. So `--device cuda` needs no CUDA toolkit
+  and no NVRTC, only a driver for CUDA 13 (R580+). Each entry is NVRTC 13.4's output for the run-time compile's
+  source, options and target, so the same code: the md5 gate matches main's NVRTC output.
+- **Not covered:** data-center Blackwell (sm_100/sm_103, below sm_120), Pascal, Volta and drivers before R580 still
+  need NVRTC; with none, `--device cuda` stops with one line naming the driver and the way out.
+- **`axon kernels list [PACK]`** says what the binary (or a pack file) carries and where this GPU's kernels come
+  from; it exits non-zero when the pack lacks some of the binary's kernel modules. **`axon kernels build OUT`**
+  compiles a pack with NVRTC (no GPU needed); OUT must name a file, and the build's temp files go in a new
+  directory beside it, the only thing it deletes.
+- **New variables:** `AXON_KERNEL_PACK=0` (the kill switch: NVRTC only, as a source build) or `only` (never
+  NVRTC), and `AXON_KERNEL_PACK_FILE=PATH` (a pack file instead of the built-in one; an unreadable or invalid one
+  is a warning, then NVRTC).
+- Source builds are unchanged: no pack, NVRTC as before.
+
+### `axon serve --cache-ram auto` capped at 4 GiB, off under a binding cgroup; `--cache-ram off` (#226)
+- **`auto` is now the smaller of 4 GiB and a quarter of the RAM available after the model.** Before, it was half
+  that RAM, up to 8 GiB, page-locked from start.
+- **`auto` is off under a binding memory cgroup** (a container or systemd scope whose limit is tighter than the host's
+  free RAM), because pinned memory counts against the limit. The banner says why. An explicit `--cache-ram SIZE`
+  still turns the tier on.
+- **`--cache-ram off`** is the same as `0`.
+- **The default is still off.** The 11-12 decision made `auto` the default, but its A/B failed the 2 % rule on an
+  RTX 4090 (C=16 tok/s 0.977×, C=8 ITL p99 1.103×), and the first request after each start waited 3.2–4.0 s for the
+  pinning. The flip waits for #233 and #234 (the lead's ruling, 11-13).
+
 ### Shared prefix KV pages C3.1: duplicate pages swapped, refed prefills claim again (#216, closes #212, #213, #214)
 - Still opt-in (`AXON_SHARE_KV=1`). Unset, every changed path takes main's decisions.
 - **#213: a duplicate page is swapped for the index's.** Two prompts prefilling one prefix side by side each wrote
