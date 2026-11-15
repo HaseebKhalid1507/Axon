@@ -69,7 +69,7 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
 4. **Compatibility audit:** the 30 most-pulled ollama models, each: runs, refused, or prompt differs from llama.cpp's
    (`scripts/zoo.py`; last sweep 18 small files, [hardening.md](hardening.md#model-zoo-results-2026-10-18-measured)). It orders weeks 2–3.
    Measured 11-13 (PR #235): [log/2026-11-13-compat-audit.md](log/2026-11-13-compat-audit.md). 13 of 30 chat after
-   #246, 17 load; the refusals ranked by pulls are #243.
+   #246 (4 of them fixed by #246, not re-measured), 17 load; the refusals ranked by pulls are #243.
 5. **Harness acceptance test:** opencode, codex and pi on fixed tasks, scored on completion.
    `scripts/examples/harness-repo/make_repo.py` already builds one such task.
    Measured on Qwen2.5-7B 11-13 to 11-15 (PR #235, `scripts/harness_accept.py`):

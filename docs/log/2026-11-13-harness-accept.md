@@ -18,9 +18,11 @@
   - llama.cpp 4413a19 with `-ngl 999 -fa on --jinja -b 2048 -ub 2048 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -np 4`,
     32k per sequence.
   - **The pin's age:** 4413a19 is b11580, the 10-18 zoo's build. The release boards (#270) use b12387, 807 builds
-    newer. This test exercises what llama.cpp changes fastest (the Responses API, the tool-call parsers), so
-    llama-server's error counts here are b11580's: its 400 on codex's goal item (#273) may be fixed upstream. Qwen3-8B
-    was queued on b11580 before this was raised; swapping meant resubmitting, so the whole test keeps one pin.
+    newer. llama-server's HTTP errors here are all codex's goal item (#273), and current llama.cpp refuses it too:
+    in b12387 (a956a85) and in master 900f01ba0 (11-15), `tools/server/server-chat.cpp` takes a
+    `function_call_output` only with a string `call_id` (line 217). Codex's item has none, so it reaches the `else`
+    that throws `Cannot determine type of 'item'` (line 283). The input-item chain is the same in both. The whole
+    test keeps one pin: the Qwen3-8B jobs, resubmitted 11-15 for the recorder fix, stay on b11580.
   - Both get the model card's sampler (Qwen2.5: temp 0.7, top-k 20, top-p 0.8, min-p 0, repeat penalty off). No
     harness sends temperature or top_p.
   - **Arms** (`--engines`, 11-14): `axon` is main's defaults (since the merge: tool calls streamed, #262; shared
@@ -177,9 +179,10 @@ What the malformed replies are, from the request records (`finish`, `cut`) and t
 
 The HTTP errors are the fairness row: four of llama-server's 14 codex tasks (pyproject, delete-cmd, stubs, exception)
 ended on its 400 `Cannot determine type of 'item'`, an API gap both engines share (Axon refuses the same item, once,
-in write-tests). llama's 4/42 passes and 3/42 tasks with a malformed reply include those four cut-off tasks. The
-proxy lost the 4 records (fixed at f9b5e85), so 82f7's own SUMMARY says llama `herr 0`, and `rescore` can't bring
-them back: the counts come from codex's `.out` files.
+in write-tests). It isn't the old pin: b12387 and master 900f01ba0 refuse the item the same way (Method). llama's 4/42
+passes and 3/42 tasks with a malformed reply include those four cut-off tasks. The proxy lost the 4 records (fixed at
+f9b5e85), so 82f7's own SUMMARY says llama `herr 0`, and `rescore` can't bring them back: the counts come from codex's
+`.out` files.
 
 - **Codex since #262 retries a broken call instead of stopping.** A call whose arguments don't parse now comes back
   as a call (before: as text, which codex took as the final answer). Codex answers `failed to parse function
@@ -242,7 +245,7 @@ them back: the counts come from codex's `.out` files.
   82f7 run dir, `codex_unsupported()` gives the 23 / 29 / 0 above, in 9 / 10 / 0 tasks (and 6 in 0dce). The rollouts
   hold one such line per call; a plain grep over the run dir also counts codex's `.out` files, hence 46 / 58. The
   cross-check against `tc_unoffered` comes with the first codex run at f9b5e85 or later (Qwen3-8B, job
-  1115-091436-4c28).
+  1115-100625-03fd).
 - **`capture`:** one turn of a task against a stub server, saving each request body, with no model and no GPU.
   `scripts/examples/harness-repo/prompt_diff.py` (and `.sh` for axon-podjob) renders the same body through both
   engines (below).
@@ -250,11 +253,15 @@ them back: the counts come from codex's `.out` files.
 
 ## Both engines' prompt for the same request
 
-Job 1115-094332-ff94 (jade, CPU, PROMPT-DIFF DONE; scripts as at ce5b852, named `412bde1` in the job before a local reword). `harness_accept.py capture` saved the bugfix task's first request
-from pi 0.80.3 and opencode 2.2.6 (avante) and codex 0.144.5 (jade, in the job). These are older than bella's
-versions, but send the same request shape. `prompt_diff.py` sent each body to both servers (served prompt counts).
-For the two chat bodies, it also dumped both renderings, Axon's from `AXON_LOGITS_CHAT` and llama.cpp's from
-`/apply-template`, and diffed them character by character.
+Job 1115-094332-ff94 (jade, CPU, PROMPT-DIFF DONE; scripts as at ce5b852, named `412bde1` in the job before a local
+reword). `harness_accept.py capture` saved the bugfix task's first request from pi 0.80.3 and opencode 2.2.6 (avante)
+and codex 0.144.5 (jade, in the job). These are older than the runs' versions (opencode 2.2.7, codex 0.169.0, pi
+0.85.1). pi and opencode send as many tools as in the runs (4 and 12, all function tools; `n_tools` in the runs'
+`requests.jsonl`). **Codex doesn't:** 0.144.5 sends 10 top-level tools and 0.169.0 sends 9, and 0.144.5's first prompt
+is about 1,050 tokens longer (on llama.cpp, 7706 against 6629–6689, median 6651, over job 82f7's 14 tasks).
+`prompt_diff.py` sent each body to both servers (served prompt counts). For the two chat bodies, it also dumped both
+renderings, Axon's from `AXON_LOGITS_CHAT` and llama.cpp's from `/apply-template`, and diffed them character by
+character.
 
 - **Model:** jade's Qwen2.5-0.5B-Instruct (Qwen's file): the run model's template, except for #248's doubled braces
   in the tool instruction.
@@ -276,23 +283,30 @@ For the two chat bodies, it also dumped both renderings, Axon's from `AXON_LOGIT
 - **Cost:** retokenizing the text with Qwen2.5's tokenizer reproduces both gaps exactly (14, 46). `strict` costs 4
   tokens per tool (16 on pi, 48 on opencode); #248's braces cost llama.cpp 2. On the run model's template, Axon's
   prompt is 4 tokens per function tool longer. That is about 1 % of a first request, part of the cached prefix after it.
-- **Codex** can't be rendered: neither engine has a template endpoint for the Responses API. Its gap is 38. About 32
-  of that is 8 × `strict`, less the braces' 2 on llama.cpp's side, which leaves about 8 tokens I haven't identified.
-  They come from the two engines' Responses-to-chat conversions.
-- **The runs' gaps** (first request of each task, shady's review: 26 codex, 46 opencode, 15 pi) fit the same rule.
-  They are 4 per function tool, minus a token or two for the arm's workspace path, which carries the arm's name and is
-  in the prompt. llama's path is one character longer. The `axon-constrain` arm, whose path is 10 characters longer,
-  is 44 / 50 / 17 longer than llama.
+- **Codex's gap is unexplained.** Its request can't be rendered: neither engine has a template endpoint for the
+  Responses API.
+  - 0.144.5's gap is 38. 8 × `strict`, less the braces' 2 on llama.cpp's side, is 30, which leaves about 8 tokens
+    somewhere in the two engines' Responses-to-chat conversions.
+  - The runs' codex is 0.169.0, which sends a different tool list (above). Its gap, 26, fits the `strict` rule only
+    if 7 of its 9 tools are function tools. That wasn't measured: `harness_accept.py capture --harness codex` with
+    0.169.0 (on bella) would settle it.
+- **The runs' pi and opencode gaps fit the rule** (first request of each task, shady's review: 46 opencode, 15 pi).
+  They are 4 per function tool (48, 16), minus a token or two for the arm's workspace path, which carries the arm's
+  name and is in the prompt; llama's path is one character longer. The `axon-constrain` arm's path is 9 characters
+  longer than llama's, and its gaps are 50 / 17 (and 44 on codex).
 - Not filed: neither rendering is wrong. If identical prompts matter more than following the request, dropping
   `strict` in `hermes()` is a one-line change.
 
 ## Pending
 
 - Qwen3-8B, `axon` and `llama` (no constrained arm: #264 holds Qwen2.5's Hermes calls only, and Qwen3's start
-  after `<think>`), turn timeout 600 s for thinking, binary `axon-a6f7f18`, script f9b5e85, engine order rotated, one
-  job per harness, queued `--low` on bella (held 11-15):
-  - codex 1115-091436-4c28 (replaces 1115-090345-4036, killed);
-  - opencode 1115-090828-1d9e and pi 1115-090829-adba (replace 9dd0 and fd58, killed).
+  after `<think>`), turn timeout 600 s for thinking, binary `axon-a6f7f18`, engine order rotated, one job per
+  harness, queued `--low` on bella (held 11-15). Scripts at 9540224 (`harness_accept.py` = b8c16f4's, sha256
+  `4e328b756e8e`), so the recorder fix covers the Qwen3 rows:
+  - codex 1115-100625-03fd (`llama,axon`), opencode 1115-100626-2969 (`axon,llama`), pi 1115-100626-e973
+    (`llama,axon`);
+  - they replace 4c28, 1d9e and adba (script f9b5e85, the `ValueError`-only guard), dropped from the queue before
+    they ran, and those replaced 4036, 9dd0 and fd58.
 - gpt-oss-20b on 7 tasks (experts on the CPU, slow), after Qwen3-8B.
 
 ## Raw
