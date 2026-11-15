@@ -1,0 +1,17 @@
+[axon-run 17:29:54] submitted 1115-172953-2d62 by /home/haseeb/.cache/axon-dec: /home/haseeb/.cache/axon-dec/bin/axon-test-c5fd607 --ignored --nocapture constrained_step_cost_cuda
+[axon-run 18:50:00] VRAM: claiming the learned 8762 MB instead of --vram 9000 (name:dec-*-cost-step7b)
+[axon-run 18:50:00] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 18:50:00] scope axon-job-1115-172953-2d62-1794786600.scope in app-axonjobs.slice: MemoryMax 8765 MB, MemoryHigh 7888 MB, no swap, oomd pressure kill 80% (claim 840 MB): an OOM here kills only this job
+[axon-run 18:50:00] job 1115-172953-2d62 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-172953-2d62-1794786600 --slice=app-axonjobs.slice -p MemoryMax=8765M -p MemoryHigh=7888M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dec/bin/axon-test-c5fd607 --ignored --nocapture constrained_step_cost_cuda --test-threads 6
+axon-q 18:50:00 waiting: stagger
+axon-q 18:50:16 start slot 16-23: /home/haseeb/.cache/axon-dec/bin/axon-test-c5fd607 --ignored --nocapture constrained_step_cost_cuda --test-threads 6
+
+running 1 test
+testutil: GPU has 11.56 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+constrained greedy reply: "{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i 's/raise KeyError.*/raise ValueError(\\\"unknown \\\\\\\"account\\\\\\\"\\\")/g' ledger/cli.py && echo 'done'\"}}\n</tool_call>"
+constrained step cost (/home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf, 7615616512 params, 47 engaged tokens x 10): greedy 10.897 ms, sampled k40 10.922 ms (+0.2%), constrained 10.941 ms (+0.4% vs greedy, +0.2% vs sampled); fallbacks 0 of 470
+test constrain::model_tests::constrained_step_cost_cuda ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1000 filtered out; finished in 18.34s
+
+[axon-run 18:50:34] exit 0 after 34.5s (host bella)

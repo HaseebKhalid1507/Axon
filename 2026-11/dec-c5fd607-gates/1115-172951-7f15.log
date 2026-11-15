@@ -1,0 +1,58 @@
+[axon-run 17:29:51] submitted 1115-172951-7f15 by /home/haseeb/.cache/axon-wt-dec-cb: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-c5fd607 constrain:: serve_constrained serve_tool_calls serve_identity serve_batched_matches_solo pool_steps_match_solo
+[axon-run 18:23:37] VRAM: claiming the learned 3309 MB instead of --vram 5000 (name:dec-*-cb-dbg)
+[axon-run 18:23:37] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 18:23:37] scope axon-job-1115-172951-7f15-1794785017.scope in app-axonjobs.slice: MemoryMax 9157 MB, MemoryHigh 8241 MB, no swap, oomd pressure kill 80% (claim 4084 MB): an OOM here kills only this job
+[axon-run 18:23:37] job 1115-172951-7f15 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-172951-7f15-1794785017 --slice=app-axonjobs.slice -p MemoryMax=9157M -p MemoryHigh=8241M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-c5fd607 constrain:: serve_constrained serve_tool_calls serve_identity serve_batched_matches_solo pool_steps_match_solo --test-threads 4
+axon-q 18:23:37 start slot 16-23: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-c5fd607 constrain:: serve_constrained serve_tool_calls serve_identity serve_batched_matches_solo pool_steps_match_solo --test-threads 4
+
+running 44 tests
+test constrain::model_tests::constrained_step_cost_cuda ... ignored
+test constrain::model_tests::mask_cost_real ... ignored
+test constrain::model_tests::real_vocab_masks ... ok
+test constrain::tests::bounded_space ... ok
+test constrain::tests::cands_masked_reference ... ok
+test constrain::tests::constrain_env_strict ... ok
+testutil: GPU has 11.56 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test constrain::tests::constrained_drafting_matches_plain ... ok
+test constrain::tests::constrained_drafting_past_a_stall ... ok
+test constrain::tests::draft_copies_not_counted ... ok
+test constrain::tests::finisher_closes_from_anywhere ... ok
+test constrain::tests::forced_seeds ... ok
+test constrain::tests::held_json_matches_its_oracle ... ok
+test constrain::tests::hermes_cycle ... ok
+test constrain::tests::hermes_field ... ok
+test constrain::tests::hermes_field_hashes_the_graph ... ok
+test constrain::tests::hermes_grammars_kept ... ok
+test constrain::tests::hermes_names ... ok
+test constrain::tests::hermes_triggers ... ok
+test constrain::tests::json_matches_parse_json ... ok
+test constrain::tests::long_cycles_stall ... ok
+test constrain::tests::malformed_259_impossible ... ok
+test constrain::tests::mask_cost_synthetic ... ignored
+test constrain::tests::masked_via_rows ... ok
+test constrain::tests::masks_match_naive ... ok
+test constrain::tests::one_kind_arrays ... ok
+test constrain::tests::parser_agrees_on_random_calls ... ok
+test constrain::tests::stalled_call_closes ... ok
+test constrain::tests::stalled_reply_ends ... ok
+test constrain::tests::unheld_counted_said_once ... ok
+test constrain::tests::verify_cands_masked_rows ... ok
+test constrain::model_tests::cpu_constrained_contract ... ok
+test constrain::model_tests::split_backends_constrained_contract ... ok
+test serve::tests::serve_constrained_forced_and_default ... ok
+test serve::tests::serve_batched_matches_solo ... ok
+test serve::tests::serve_constrained_tool_calls ... ok
+test serve::tests::serve_identity ... ok
+test constrain::model_tests::cuda_constrained_contract has been running for over 60 seconds
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test serve::tests::serve_identity_cpu ... ok
+test serve::tests::serve_identity_fast ... ok
+test serve::tests::serve_tool_calls ... ok
+test serve::tests::serve_tool_calls_streamed ... ok
+test serve::tests::serve_constrained_stall ... ok
+test constrain::model_tests::cuda_constrained_contract ... ok
+test serve::tests::serve_identity_fast_cpu ... ok
+
+test result: ok. 41 passed; 0 failed; 3 ignored; 0 measured; 957 filtered out; finished in 89.23s
+
+[axon-run 18:25:07] exit 0 after 89.5s (host bella)
