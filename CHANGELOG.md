@@ -6,7 +6,7 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
-### gpt-oss experts on the GPU, stages 0 and A: MXFP4 twin kernels, not wired in yet (#PRNUM)
+### gpt-oss experts on the GPU, stages 0 and A: MXFP4 twin kernels, not wired in yet (#271)
 - **`AXON_MOE_PROFILE=1` covers prefill too.** Every batched pass of a model with experts on the CPU now prints
   the per-layer columns (GPU segment, copy down, CPU experts, copy up), the pass's wall time and the experts' share.
   Before, it printed decode steps only. Nothing changes without the variable.
