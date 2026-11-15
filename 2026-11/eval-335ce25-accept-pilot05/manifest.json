@@ -1,0 +1,29 @@
+{
+ "label": "eval-335ce25-accept-pilot05",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-192659-4112",
+   "name": "eval-335ce25-accept-pilot05",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "335ce25",
+   "binary": "bash",
+   "started": 1794714553.8404207,
+   "ended": 1794714734.7271607,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "35d3d907ac46cc44441b6d78654ceebe12b46fc1e03c0ae5ca93e10e10299925",
+   "log_bytes": 23525
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 22:52:16 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
