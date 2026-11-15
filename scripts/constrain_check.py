@@ -436,6 +436,8 @@ def replay(a):
                            tokens=rep.get("tokens"), cap=cap, finish=rep.get("finish"), judged=judged,
                            args_len=[len(x[1] or "") for x in rep.get("calls") or []], s=round(time.time() - t0, 1),
                            calls=[[n, (x or "")[-160:]] for n, x in rep.get("calls") or []])
+                if ok is not True:  # a failure or a known false positive: the whole reply, to see why
+                    row["reply"] = {"content": rep.get("content"), "calls": rep.get("calls")}
                 rows.append(row)
                 print("REPLAY %-34s %-8s %-6s %-4s stalls %d tokens %s/%s finish %s calls %s" % (
                     name, c["kind"], mode, {True: "ok", False: "FAIL", None: "-"}[ok], stalls, rep.get("tokens"),

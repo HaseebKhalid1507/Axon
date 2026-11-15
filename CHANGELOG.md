@@ -19,16 +19,16 @@ measurements behind them.
   `max_tokens`). Whitespace outside strings is bounded as llama.cpp's grammars bound it (one space, or one or two
   newlines then at most 20 spaces or tabs); an array keeps its first item's kind (a pi runaway wrote an edit object,
   then `false` 1,900 times); and a call whose last 1,024 tokens are at most 8 distinct ones, or whose last 2,048
-  repeat one cycle of at most 64, is closed the shortest way from there, and the reply ends after it. In the
+  repeat one cycle of at most 256, is closed the shortest way from there, and the reply ends after it. In the
   acceptance runs' 6,333 calls 12 of the 13 runaways trip a stall rule (the 13th, a 623-piece list loop, ended by
-  itself) and no other call comes near one (at most 28 pieces of text in a stretch of 8 distinct ones, 119 in a
+  itself) and no other call comes near one (at most 28 pieces of text in a stretch of 8 distinct ones, 383 in a
   cycle); no array mixed kinds and no whitespace run went past llama.cpp's rule outside the runaways.
 - **A stalled call arrives cut off.** The client gets a well-formed call whose arguments stop where it stalled (a
   file written short, a command run short), and the close may invent its last piece: one more array item (`true`,
   `0`, `""`), one more object member (`"": 0`), one more digit. Data of one value over and over can trip it: a CSV
-  of 80 identical rows does after about 1,050 tokens; with greedy decoding a retry stops at the same place
-  (`--no-constrain` writes it). Each stall is a line on stderr whatever the log level (`#N: a held tool call
-  stalled after T tokens ...`) and counts in `axon_constraint_stalls_total`.
+  of 80 identical rows does after about 1,050 tokens, a 32×32 matrix of zeros after about 1,040; with greedy
+  decoding a retry stops at the same place (`--no-constrain` writes it). Each stall is a line on stderr whatever
+  the log level (`#N: a held tool call stalled after T tokens ...`) and counts in `axon_constraint_stalls_total`.
 - **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
   its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
   refuses to start (PR A read only `1` as on).

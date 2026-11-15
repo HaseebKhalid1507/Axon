@@ -394,8 +394,8 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     times; in the acceptance runs' calls no other array mixed kinds.
   - **A stalled call is cut off.** When the last 1,024 tokens of a call are no more than 8
     distinct tokens (`false, false, ...`, a string of `\n\n\n...`), or its last 2,048 repeat
-    one cycle of at most 64 tokens (`--exclude=*.pyc --exclude=*.pyc ...`, a list in a
-    loop), it is closed the shortest way from there: the string ends, then each open array
+    one cycle of at most 256 tokens (`--exclude=*.pyc --exclude=*.pyc ...`, a list in a
+    loop, a 72-token block of code 53 times), it is closed the shortest way from there: the string ends, then each open array
     and object, then `</tool_call>`, and the reply ends after it (only its stop token is
     allowed), so a model in a loop can't open the next call and stall again. **The client
     gets a well-formed call whose arguments are cut where it stalled:** a file written
@@ -408,9 +408,9 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     and counts in `axon_constraint_stalls_total`. In the acceptance runs' 6,333 calls 12
     of the 13 runaways trip a rule (their stretches are 1,969 to 50,837 tokens' worth of
     text); the 13th, a 623-piece list loop, ended by itself first. The other calls stay far
-    from both (at most 28 in a stretch of 8 distinct pieces, 119 in a cycle). Data of one
+    from both (at most 28 in a stretch of 8 distinct pieces, 383 in a cycle). Data of one
     value over and over can still trip it: a CSV of 80 identical rows does after about
-    1,050 tokens. The windows were 256 and 512 until shady's review of #274 found that
+    1,050 tokens, a 32×32 matrix of zeros after about 1,040. The windows were 256 and 512 until shady's review of #274 found that
     those cut real data (a 9×9 board of zeros, a C table of 256 zeros, `[true, ...]` ×200);
     when in doubt the rule doesn't fire.
 

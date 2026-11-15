@@ -1837,6 +1837,86 @@ fn stalled_call_closes() {
     assert_eq!(g.counters.stalls.load(Relaxed), n0 + 3);
 }
 
+/// A long block written over and over (cbcheck's replay of 09-pi-edit,
+/// seed 2, 11-15: one 72-token block of code 53 times, to `max_tokens`) is
+/// a cycle: closed once `LOOP_WINDOW` tokens repeat it, for any period up
+/// to `LOOP_PERIOD` (it was 64: that block got through). A block one token
+/// longer than `LOOP_PERIOD` isn't seen, and a varying block isn't a cycle.
+/// Windows smaller than `LOOP_PERIOD` (the serve tests') still see both
+/// rules: the ring holds `LOOP_PERIOD` tokens, the few-ids rule reads its
+/// last `window`.
+#[test]
+fn long_cycles_stall() {
+    use super::{LOOP_PERIOD, LOOP_WINDOW, STALL_IDS, Stall, Stalled};
+    let (v, sp) = toy_vocab(29, 50);
+    let head = b"\n{\"name\": \"x\", \"arguments\": {\"cmd\": \"";
+    let begin = |c: &mut Constraint| {
+        assert!(c.accept(sp[0]));
+        for &b in head {
+            assert!(c.accept(b as u32));
+        }
+    };
+    let letters: Vec<u32> = (b'a'..=b'z').map(u32::from).collect();
+    // A block of `n` letters at random (26 ids: not few), its own period n.
+    let block = |n: usize, seed: u64| -> Vec<u32> {
+        let mut r = seed;
+        loop {
+            let b: Vec<u32> = (0..n).map(|_| *pick(&mut r, &letters)).collect();
+            if (1..n).all(|p| n % p != 0 || b.chunks(p).any(|c| c != &b[..p])) {
+                return b;
+            }
+        }
+    };
+    // (the stall, how many of `b`'s tokens it took: the head's count too).
+    let run = |g: &Arc<Grammar>, b: &[u32], limit: usize| -> (Option<Stalled>, usize) {
+        let mut c = Constraint::new(g.clone());
+        begin(&mut c);
+        let mut fed = 0;
+        while fed < limit && !c.stalled() {
+            assert!(c.accept(b[fed % b.len()]));
+            fed += 1;
+        }
+        (c.stall(), fed)
+    };
+    let g = Arc::new(hermes(v.clone()));
+    for n in [72, 128, LOOP_PERIOD] {
+        let (st, fed) = run(&g, &block(n, n as u64), 3 * LOOP_WINDOW);
+        let st = st.unwrap_or_else(|| panic!("{n}: no stall"));
+        assert!(st.cycle && st.window == LOOP_WINDOW, "{n}: {st:?}");
+        assert!(
+            (LOOP_WINDOW - 32..=LOOP_WINDOW).contains(&fed),
+            "{n}: after {fed}"
+        );
+    }
+    assert_eq!(run(&g, &block(LOOP_PERIOD + 1, 7), 3 * LOOP_WINDOW).0, None);
+    let mut r = 0x9e37u64;
+    let varying: Vec<u32> = (0..3 * LOOP_WINDOW)
+        .map(|_| *pick(&mut r, &letters))
+        .collect();
+    assert_eq!(run(&g, &varying, varying.len()).0, None);
+    // The serve tests' windows: 64 of at most 8 ids, 128 of one cycle.
+    let small = Stall {
+        window: 64,
+        loop_window: 128,
+    };
+    let g = Arc::new(Grammar::hermes_stall(v.clone(), &names(&["x"]), small).unwrap());
+    let (few, fed) = run(&g, &letters[..STALL_IDS], 1000);
+    assert!(
+        fed == 64 && few.is_some_and(|s| !s.cycle && s.window == 64),
+        "{few:?} after {fed}"
+    );
+    let (st, fed) = run(&g, &block(20, 3), 1000);
+    assert!(
+        (108..=128).contains(&fed) && st.is_some_and(|s| s.cycle && s.window == 128),
+        "{st:?} after {fed}"
+    );
+    let (st, fed) = run(&g, &block(100, 5), 1000);
+    assert!(
+        fed <= 128 && st.is_some_and(|s| s.cycle),
+        "{st:?} after {fed}"
+    );
+}
+
 /// After a call that stalled, a reply given its end tokens (`with_end`:
 /// the server's stop tokens) may take only those, so a model in a loop
 /// can't open the next call and stall again (shady's review of #274);

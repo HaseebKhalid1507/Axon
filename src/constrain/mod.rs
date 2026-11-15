@@ -35,7 +35,7 @@
 //! bounds it and an array keeps its first item's kind (`pda::Style::HELD`),
 //! and a call that stalls (its last 1024 tokens no more than 8 distinct
 //! ones, `false, false, ...` or `\n\n\n...` in a string, or its last 2048
-//! one cycle of at most 64 tokens over and over: `STALL_WINDOW`) is closed
+//! one cycle of at most 256 tokens over and over: `STALL_WINDOW`) is closed
 //! the shortest way (`pda::Graph::finisher`), and the reply ends after it.
 //! A stalled call arrives cut off where it stalled, maybe with an invented
 //! last item or member (the shortest one that closes it), so a stall is
@@ -75,18 +75,26 @@ const OPEN: &[u8] = b"<tool_call>";
 /// long, or periodic over 3,416: `, false` 1,900 times, whitespace,
 /// `--exclude=*.pyc` over and over, a list of strings in a loop); the 13th,
 /// a 623-piece list loop, ends by itself first. No other call comes near:
-/// at most 28 pieces of 8 distinct ones, 119 periodic. Data of one value
-/// over and over can still trip it: a CSV of 80 identical rows does after
-/// ~1,050 tokens (the PR's table of shady's cases).
+/// at most 28 pieces of 8 distinct ones, 383 periodic (period up to 256;
+/// 119 up to 64). Data of one value over and over can still trip it: a
+/// CSV of 80 identical rows does after ~1,050 tokens, a 32×32 matrix of
+/// zeros after ~1,040 (the PR's table of shady's cases).
+///
+/// `LOOP_PERIOD` was 64 until a replay of a runaway (cbcheck, 11-15) wrote
+/// one 72-token block of code over and over, 53 times, to `max_tokens`:
+/// no rule saw it. At 256 a cycle must still fill `LOOP_WINDOW` (8 or more
+/// times over), and the acceptance calls' longest periodic stretch at 512
+/// is 522 pieces.
 pub const STALL_WINDOW: usize = 1024;
 pub const STALL_IDS: usize = 8;
 pub const LOOP_WINDOW: usize = 2048;
-pub const LOOP_PERIOD: usize = 64;
+pub const LOOP_PERIOD: usize = 256;
 
 /// The stall rules' windows: `STALL_WINDOW` and `LOOP_WINDOW` in a server,
 /// smaller in the serve tests (`serve::Opts::constrain_stall`), so a call
-/// there stalls in a few tokens. `window` is at least `LOOP_PERIOD` (the ring of
-/// recent tokens is what the cycle rule looks back into).
+/// there stalls in a few tokens. The ring of a call's recent tokens holds
+/// the larger of `window` and `LOOP_PERIOD` (the cycle rule looks back into
+/// it); the few-ids rule reads its last `window`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stall {
     pub window: usize,
@@ -304,7 +312,7 @@ impl Grammar {
         if names.is_empty() {
             return Err("no tool names to hold a call to".into());
         }
-        assert!(stall.window >= LOOP_PERIOD && stall.loop_window <= u32::MAX as usize);
+        assert!(stall.window > 0 && stall.loop_window <= u32::MAX as usize);
         let (graph, start) = hermes_graph(close, names)?;
         Ok(Grammar {
             finish: Masks::new(graph.finisher(), vocab.clone(), counters.clone()),
@@ -374,7 +382,7 @@ impl Hermes {
     /// stall rules' windows (`Stall::DEFAULT` but in tests).
     pub fn new(vocab: Arc<Vocab>, counters: Arc<Counters>, stall: Stall) -> Result<Hermes, String> {
         let (open, close) = hermes_markers(&vocab)?;
-        assert!(stall.window >= LOOP_PERIOD);
+        assert!(stall.window > 0);
         Ok(Hermes {
             vocab,
             field: hermes_field(open, close, stall),
@@ -500,8 +508,9 @@ pub struct Constraint {
     /// Free: the reply's last bytes outside reasoning that may still begin
     /// a spelled `<tool_call>` (fewer than its length).
     tail: Vec<u8>,
-    /// Engaged: the call's last tokens (a ring of at most the grammar's
-    /// `Stall::window`, the next write at `at`), how many it has taken, for
+    /// Engaged: the call's last tokens (a ring of the larger of the
+    /// grammar's `Stall::window` and `LOOP_PERIOD`, the next write at `at`),
+    /// how many it has taken, for
     /// each period p (`runs[p - 1]`) how many tokens in a row equal the one
     /// p before, and whether it stalled (its states then take
     /// `Grammar::finish`'s edges).
@@ -575,24 +584,32 @@ impl Constraint {
             window: w,
             loop_window,
         } = self.g.stall;
+        let ring = w.max(LOOP_PERIOD);
         let mut cycle = false;
         for p in 1..=LOOP_PERIOD {
             let r = &mut self.runs[p - 1];
-            if self.taken >= p && self.recent[(self.at + w - p) % w] == id {
+            // The token p back: `at - p` in the ring (`at` < ring and p <=
+            // ring, so it wraps once at most; no division a period).
+            let back = self.at + ring - p;
+            let back = if back >= ring { back - ring } else { back };
+            if self.taken >= p && self.recent[back] == id {
                 *r += 1;
                 cycle |= *r as usize + p >= loop_window;
             } else {
                 *r = 0;
             }
         }
-        if self.recent.len() < w {
+        if self.recent.len() < ring {
             self.recent.push(id);
         } else {
             self.recent[self.at] = id;
         }
-        self.at = (self.at + 1) % w;
+        self.at += 1;
+        if self.at == ring {
+            self.at = 0;
+        }
         self.taken += 1;
-        if !cycle && (self.recent.len() < w || !self.few_ids()) {
+        if !cycle && (self.taken < w || !self.few_ids(w)) {
             return;
         }
         self.stalled = true;
@@ -606,11 +623,14 @@ impl Constraint {
         }
     }
 
-    /// The stall window holds at most `STALL_IDS` distinct ids.
-    fn few_ids(&self) -> bool {
+    /// The call's last `w` tokens (the stall window) are at most
+    /// `STALL_IDS` distinct ids.
+    fn few_ids(&self, w: usize) -> bool {
         let mut seen = [0u32; STALL_IDS];
         let mut n = 0;
-        for &x in &self.recent {
+        // Newest first: the ring before `at`, then from its end back.
+        let (new, old) = self.recent.split_at(self.at.min(self.recent.len()));
+        for &x in new.iter().rev().chain(old.iter().rev()).take(w) {
             if !seen[..n].contains(&x) {
                 if n == STALL_IDS {
                     return false;
