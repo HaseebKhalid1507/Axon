@@ -1,7 +1,7 @@
 # Coding-agent acceptance test: opencode, codex and pi on Axon and llama-server (PR #235)
 
-- Date: 2026-11-13; measurement fixes 11-14; rerun on main 9f3630c (#262, #264, #228) 11-14. Branch: feat/eval.
-  Status: open (PR #235).
+- Date: 2026-11-13; measurement fixes 11-14 and 11-15; rerun on main 9f3630c (#262, #264, #228) 11-14/15.
+  Branch: feat/eval. Status: open (PR #235).
 - Script: `scripts/harness_accept.py` (stdlib only), run through `scripts/harness_accept.sh` with axon-podjob.
 
 ## Method
@@ -92,8 +92,9 @@ Jobs 1113-010041-0dce (codex), 1113-010041-c777 (pi), 1114-063612-b2e0 (opencode
 | **all** | **axon** | **7 / 42** | **13** | **13 / 678 (1.9 %)** | | | | | |
 | **all** | **llama** | **6 / 42** | **1** | **1 / 658 (0.15 %)** | | | | | |
 
-No crashes, context overflows or other HTTP errors on either engine. With 14 tasks and one round, a pass-count gap
-under about ±4 means nothing.
+No crashes or context overflows on either engine. One HTTP error the proxy lost (fixed at f9b5e85, below): llama-server
+refused codex's goal item in pyproject (#273). With 14 tasks and one round, a pass-count gap under about ±4 means
+nothing.
 
 - **Codex, malformed 9 vs 0 (#259, #260):**
   - 8 are `<tool_call>` blocks whose JSON doesn't parse: unescaped quotes in shell commands (4), `\(` escapes (2),
@@ -116,18 +117,92 @@ under about ±4 means nothing.
   - The 6 calls to an unoffered tool aren't in these counts.
   - #259 is the fix.
 
+## Qwen2.5-7B after the merge (main 9f3630c)
+
+Jobs 1114-192659-82f7 (codex), 1114-192700-a2e2 (opencode), 1114-192701-202e (pi), script 335ce25, binary
+`axon-a6f7f18` (the merge's `src/`, identical to main 9f3630c's). Three arms per job, one server at a time, same
+model file and sampler as above. Rescored at f9b5e85 (no request moved).
+
+| harness | arm | tasks passed | malformed calls | malformed replies / tool-call replies | timeouts | TTFT p50 (ms) | wall p50 (s) | compactions | cold prompts (attributed to a compaction) |
+|---|---|---|---|---|---|---|---|---|---|
+| codex | axon | 0 / 14 | 363 | 362 / 1152 (31.4 %) | 5 | 65 | 261.4 | 8 | 9 (8) |
+| codex | axon-constrain | 1 / 14 | 2 | 2 / 347 (0.6 %) | 2 | 62 | 22.1 | 4 | 5 (4) |
+| codex | llama | 1 / 14 | 0 | 0 / 103 | 0 | 84 | 9.1 | 1 | 2 (1) |
+| opencode | axon | 3 / 14 | 5 | 4 / 181 (2.2 %) | 0 | 48 | 18.0 | 5 | 1 (0) |
+| opencode | axon-constrain | 1 / 14 | 3 | 3 / 408 (0.7 %) | 2 | 45 | 54.3 | 20 | 5 (0) |
+| opencode | llama | 1 / 14 | 2 | 2 / 236 (0.8 %) | 0 | 111 | 70.9 | 5 | 6 (0) |
+| pi | axon | 3 / 14 | 16 | 16 / 321 (5.0 %) | 5 | 105 | 48.4 | 67 | 66 (65) |
+| pi | axon-constrain | 4 / 14 | 10 | 10 / 178 (5.6 %) | 4 | 162 | 7.4 | 50 | 47 (46) |
+| pi | llama | 2 / 14 | 2 | 2 / 237 (0.8 %) | 2 | 137 | 20.3 | 35 | 34 (33) |
+
+What the malformed replies are, from the request records (`finish`, `cut`) and the harnesses' own session files:
+
+| | axon | axon-constrain | llama |
+|---|---:|---:|---:|
+| tasks passed, all harnesses | 6 / 42 | 6 / 42 | 4 / 42 |
+| malformed replies / tool-call replies | 382 / 1654 (23.1 %) | 15 / 933 (1.6 %) | 4 / 576 (0.7 %) |
+| JSON syntax errors (invalid escapes, unescaped quotes, raw newlines) | 378 | **0** | 0 |
+| cut short (`max_tokens`, incomplete, hang-up) | 4 | 13 | 2 |
+| a call written as prose, no `<tool_call>` | 0 | 2 | 2 |
+| tasks with at least one malformed reply | 15 / 42 | 7 / 42 | 3 / 42 |
+| codex: calls to a tool it didn't offer (`apply_patch`, rollouts' `unsupported call`) | 23 | 29 | 0 |
+| turn timeouts | 10 | 8 | 2 |
+
+No crashes or context overflows. HTTP errors: codex's goal item (#273) was refused once on axon-constrain
+(write-tests) and in 4 tasks on llama (from codex's output: the proxy lost those 4 records, fixed at f9b5e85).
+
+- **Codex since #262 retries a broken call instead of stopping.** A call whose arguments don't parse now comes back
+  as a call (before: as text, which codex took as the final answer). Codex answers `failed to parse function
+  arguments: invalid escape …`, and the model sends the identical call again: 164 of cli-bug's 199 calls repeat the
+  one before. cli-bug, stubs and pyproject took 122, 122 and 106 broken calls. That is the 31.4 %, the wall p50 of
+  261 s (8.2 s before the merge) and the 5 timeouts.
+- **The constrained arm has no syntax errors left.** Its 13 cut-short replies are runaways that the generic JSON
+  grammar allows:
+  - ~25k tokens of whitespace between tokens (codex stubs);
+  - `"edits": [{…}, false, false, …]` to pi's `max_tokens` (pi stubs, 7 replies);
+  - an endless `\n` run inside a string (codex spec-func, in a call to the unoffered `apply_patch`).
+
+  llama.cpp's grammar bounds whitespace and follows each tool's schema (#272). The name enum is PR B's (#259).
+- **Pass counts don't move** (6, 6, 4 of 42). Qwen2.5-7B finishes at most 4 of 14 tasks on any arm, which is a model
+  limit. The constraint is about reliability and cost (retry loops, timeouts, GPU hours), not the pass rate.
+- **Run-to-run spread is large.** llama-server was the same binary in both rounds, and still went from 3 to 1
+  opencode passes and from 275 to 103 codex tool-call replies. One loop can dominate a per-reply rate (cli-bug's 122),
+  so read the tasks with at least one malformed reply next to it.
+- **pi compactions** (67 axon, 50 constrained, 35 llama): every cold prompt but one follows a compaction, as before
+  the merge. The model looped to the 32k window more often on the Axon arms. Not an Axon bug.
+
+**Decision for #259 (comment 6895714846): constrained JSON is needed now.**
+- Unconstrained, every harness is over the roadmap's 1 % bar: codex 31.4 %, opencode 2.2 %, pi 5.0 %.
+- The constrained arm removes every syntax error at no cost in passes.
+- Recommended: default-on for the Hermes family, with `AXON_CONSTRAIN=0` as the kill switch; PR B's name enum;
+  #272's whitespace bound and argument types.
+
+## Measurement fixes (11-15, commits a1bf02f and f9b5e85)
+
+- **llama-server's errors were lost.** Its error object carries a numeric `"code": 400`. The proxy built the error
+  string as `code + ": " + message`, which raised, so the request was never recorded: 4 in 82f7, 1 in 0dce, all
+  codex's goal item (#273). The code is `str()`ed now; selfcheck case `err_int`.
+- **The SUMMARY's `(all)` rows** printed `dropped 0 invalid 0` beside 362 invalid calls. Axon's `/metrics` deltas are
+  floats, and the sum took ints only. Each task row had them right.
+- **New counts:**
+  - `malf_cut`: malformed replies cut by `max_tokens`, an incomplete response or a hang-up, i.e. runaways rather
+    than syntax errors. `rescore` computes it for old runs.
+  - `tc_unoffered`: calls naming a tool the request didn't offer. It walks codex's namespace tools and is counted by
+    the proxy alike on every engine. Runs before f9b5e85 show `?`; their codex counts above come from the rollouts.
+- **Self-test:** job 1115-090855-d282 (jade, sandboxed), SELFCHECK PASS.
+
 ## Pending
 
-- Qwen2.5-7B on main 9f3630c (binary `axon-a6f7f18`, the merge's `src/`, identical to main's), arms `axon`,
-  `axon-constrain` and `llama`: codex 1114-192659-82f7, opencode 1114-192700-a2e2, pi 1114-192701-202e. Plumbing
-  pilot (Qwen2.5-0.5B, 2 tasks, all arms and harnesses; not evidence): 1114-192659-4112.
-- Qwen3-8B, `axon` and `llama`, turn timeout 600 s (thinking): 1114-193001-6546, 1114-193002-76dd, 1114-193003-1ff5.
-  The grammar holds Qwen2.5's Hermes calls only, so there is no constrained arm.
+- Qwen3-8B, `axon` and `llama` (no constrained arm: #264 holds Qwen2.5's Hermes calls only, and Qwen3's start
+  after `<think>`), turn timeout 600 s for thinking, binary `axon-a6f7f18`, one job per harness:
+  - codex 1115-090345-4036 (script a1bf02f: llama's 400s are lost there; codex's output has them);
+  - opencode 1115-090828-1d9e and pi 1115-090829-adba (script f9b5e85).
 - gpt-oss-20b on 7 tasks (experts on the CPU, slow), after Qwen3-8B.
 
 ## Raw
 
-- Run dirs on bella: `~/.cache/axon-eval/accept/qwen2.5-7b-{codex-1114-041519,pi-1114-051800,opencode-1114-110413}`. Each holds
+- Run dirs on bella: `~/.cache/axon-eval/accept/qwen2.5-7b-{codex-1114-041519,pi-1114-051800,opencode-1114-110413}`
+  (before the merge) and `qwen2.5-7b-{codex-1114-225214,opencode-1115-002814,pi-1115-012835}` (after). Each holds
   results.jsonl, requests.jsonl, results-rescored.jsonl, rescore.txt, the engine logs and the harnesses' session
   files.
 - The job logs are in `~/.cache/axon-run/logs/`.
