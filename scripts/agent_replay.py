@@ -712,6 +712,9 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
         cmd = [a.llama_server, '-m', a.model, '-ngl', '0' if a.cpu else '99', '-fa', 'on', '-c', str(ctx),
                '-np', str(npl), '-kvu', '--cache-reuse', '256', '-ctk', t, '-ctv', t,
                '--port', str(port), '--host', '127.0.0.1', '--metrics']
+        # --llama-args: llama-server's own tuning (release 0.1's board: tuned by someone arguing its side), after
+        # the defaults above, so a repeated flag (-np, -c, -no-kvu) overrides them: llama.cpp's last one wins.
+        cmd += a.llama_args.split()
     elif kind == 'ollama':
         npar = max(1, axon_tokens // a.clip)
         env.update(OLLAMA_HOST=f'127.0.0.1:{port}', OLLAMA_MODELS=a.ollama_models, OLLAMA_NUM_PARALLEL=str(npar),
@@ -737,6 +740,8 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
         tokens = ctx
         cfg = (f'-c {ctx} -np {npl} -kvu --cache-reuse 256 -ctk/-ctv {t} -fa on '
                f'(--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true)')
+        if a.llama_args.split():
+            cfg += f'; then {" ".join(a.llama_args.split())} (the last of a repeated flag wins)'
         model = 'llama'
     else:
         try:
@@ -1601,6 +1606,9 @@ def main():
             p.add_argument('--axon-parallel', type=int, default=16)
             p.add_argument('--llama-server')
             p.add_argument('--llama-parallel', type=int, default=0, help='default: KV budget // clip')
+            p.add_argument('--llama-args', default='', help="more llama-server arguments, split on spaces and "
+                           "appended after the defaults (a repeated flag overrides them); recorded in the config. "
+                           "Give it with '=': --llama-args='--no-cache-idle-slots -ub 2048'")
             p.add_argument('--ollama', default='ollama')
             p.add_argument('--ollama-model', default='axon-q7')
             p.add_argument('--ollama-models', help='OLLAMA_MODELS for the board\'s ollama, used as is (default: a '
