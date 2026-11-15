@@ -447,7 +447,9 @@ fn cuda_experts_oss_match_cpu() {
     let layers = [0, 1, 12, 23];
     let km = Kernels::module_for(&g, &m).unwrap();
     let exs = upload_oss(&g, &km, &m, &layers);
-    let cpu = Qwen2::new_experts_of(&m, &layers);
+    // The CPU's experts of those layers only (`new_experts_of` is deepseek2's).
+    let skip: Vec<usize> = (0..24).filter(|l| !layers.contains(l)).collect();
+    let cpu = Qwen2::new_experts_except(&m, &skip);
     for (ex, &l) in exs.iter().zip(&layers) {
         check_layer_at(&g, ex, &cpu, l, "gpt-oss-20b", &OSS_NBS);
     }
