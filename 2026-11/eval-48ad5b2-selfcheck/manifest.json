@@ -1,0 +1,29 @@
+{
+ "label": "eval-48ad5b2-selfcheck",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-193124-b743",
+   "name": "eval-48ad5b2-selfcheck",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "48ad5b2",
+   "binary": "bash",
+   "started": 1794702684.884108,
+   "ended": 1794702707.4749727,
+   "attempts": 1,
+   "remote_job": "20261114-193129-bash-3735375",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f75446807a254e10277cae2ad336e1dbd2f8d52346d23db75a1d3ee38e71d64d",
+   "log_bytes": 5829
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 19:31:50 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

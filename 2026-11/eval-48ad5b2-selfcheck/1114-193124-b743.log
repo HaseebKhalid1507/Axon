@@ -1,0 +1,55 @@
+[axon-run 19:31:24] submitted 1114-193124-b743 by /home/haseeb/.cache/axon-wt-eval: /usr/bin/bash harness_accept.sh selfcheck ./harness_accept.py ./make_repo.py
+[axon-run 19:31:25] job 1114-193124-b743 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/harness_accept-db87e5f7c4e0 --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash harness_accept.sh selfcheck ./harness_accept.py ./make_repo.py --test-threads 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (d9413a018b71f78252f13bb3) + source of /home/haseeb/.cache/axon-podjob/harness_accept-db87e5f7c4e0
+
+sent 42,784 bytes  received 106 bytes  28,593.33 bytes/sec
+total size is 136,524  speedup is 3.18
+
+sent 168 bytes  received 35 bytes  406.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261114-193129-bash-3735375 on jade (CPU-only)
+[axon-node 19:31:29] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 19:31:29] run bash (d9413a018b71f78252f13bb3) as /home/haseeb/.cache/axon-podjob/harness_accept-db87e5f7c4e0 on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 19:31:29] memory cap (scope MemoryMax) 2769 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 19:31:29] MemAvailable 4304 MB, load ['0.78', '0.85', '0.74']; nice -n 19 ionice -c3 taskset -c 0-7
+selfcheck: sandbox True
+bugfix         OK    before: test suite fails (FAILED (failures=2)); apply_discount values: AssertionError | after: ok
+cli-bug        OK    before: ledger --db chk.jsonl add o9 ann --item ABC-001 pen 150 2: rc 1, output '", line 9, in che | after: ok
+feature-csv    OK    before: render(rows, 'csv'): ValueError: unknown format 'csv'; have ['text']; ledger --db chk.json | after: ok
+filter-resume  OK    before: ledger --db chk.jsonl report --customer ann: rc 2, output 'usage: ledger [-h] [--db DB] {a | after: ok
+rename         OK    before: customer_rows still in ['ledger/reports.py', 'tests/test_reports.py']; rows_by_customer: I | after: ok
+spec-func      OK    before: check_rate: ImportError: cannot import name 'check_rate' from 'ledger.validate' (/tmp/ha-s | after: ok
+write-tests    OK    before: tests/test_validate.py missing | after: ok
+pyproject      OK    before: pyproject.toml: FileNotFoundError: [Errno 2] No such file or directory: 'pyproject.toml' | after: ok
+answer         OK    before: ANSWER.txt is '', want 564 | after: ok
+align          OK    before: as_text alignment: AssertionError: ['name  n', '---------', 'a     5', 'bbb   123'] | after: ok
+delete-cmd     OK    before: ledger --db chk.jsonl delete b1: rc 2, output "dger [-h] [--db DB] {add,report} ...\nledge | after: ok
+stubs          OK    before: test suite fails (FAILED (errors=3)); hidden cases: NotImplementedError | after: ok
+typehints      OK    before: unannotated: ['apply_discount', 'tax', 'total'] | after: ok
+exception      OK    before: OrderNotFound: ImportError: cannot import name 'OrderNotFound' from 'ledger.storage' (/tmp | after: ok
+write-tests-2  OK    weak tests rejected: a check_sku that accepts everything passes the tests; a check_qty that accepts everything passes the tests; a check_disc
+proxy /v1/chat/completions            OK    {'status': 200, 'tc': 1, 'tc_badjson': 0, 'tc_text': 0, 'held': 0, 'srv_prompt_ms': None, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   badjson  OK    {'status': 200, 'tc': 1, 'tc_badjson': 1, 'tool_res_err': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   text_tc  OK    {'status': 200, 'tc': 0, 'tc_text': 1, 'empty': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   held     OK    {'status': 200, 'tc': 1, 'held': 1, 'cached_tokens': 100, 'srv_prompt_n': 1200, 'srv_prompt_ms': 400.0, 'srv_pred_n': 25, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   ctx      OK    {'status': 400, 'ctx_overflow': 1, 'ttft_ms': None, 'err': 'context_length_exceeded: prompt is 40000 tokens'}
+proxy /v1/chat/completions   two_calls OK    {'status': 200, 'tc': 2, 'tc_badjson': 1, 'tc_text': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/responses                   OK    {'status': 200, 'tc': 1, 'tc_badjson': 0, 'prompt_tokens': 50, 'ttft_ms': 200, 'err': None}
+proxy /v1/responses          badjson  OK    {'status': 200, 'tc': 1, 'tc_badjson': 1, 'ttft_ms': 201, 'err': None}
+proxy hang-up hold              OK    upstream closed 0.0s after the client; record cut=client status=200
+proxy hang-up hold_whole        OK    upstream closed 0.0s after the client; record cut=client status=499
+proxy outlives its task          OK    B: 0 records after 0.00s; A: 1 record(s) after 1.40s, status 200 cut None
+proxy drain cuts what's left     OK    cut 1, records 1, cut=drain, upstream saw the close: True
+compactions per harness          OK    {'pi': 2, 'codex': 1, 'opencode': 2} (want {'pi': 2, 'codex': 1, 'opencode': 2})
+WARN compactions opencode /tmp/ha-self-tqe9695d/r1-x: OperationalError: no such table: session_message
+compactions, unknown layout      OK    None (want None: reported as ?)
+cold prompts and compactions     OK    [(1, 0, 1), (0, 0, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0), (0, 0, 0), (1, 0, 0)]; row cmp 1 cold 3 c_cmp 1 c_1st 1
+arms: environments               OK    inherited arm vars dropped
+arms: start-line check           OK    (True, False, False, True, True) (want (True, False, False, True, True))
+malformed: count and rate rules  OK    ([1, 2, 2, 3], (5, 21), (None, None)) (want ([1, 2, 2, 3], (5, 21), (None, None)))
+SELFCHECK PASS (0 failures)
+[axon-node 19:31:43] exit 0 after 14.3s; lowest MemAvailable seen 4250 MB
+[axon-node 19:31:43] peak RSS 33 MB (job process tree PSS, 2 s samples x7)
+[axon-run 19:31:43] exit 0 after 18.9s (host jade)
+[axon-run 19:31:47] EXPECT ok: output matches /^SELFCHECK PASS/
