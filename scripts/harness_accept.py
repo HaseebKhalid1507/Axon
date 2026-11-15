@@ -1689,7 +1689,8 @@ def opt_sum(rs, k):
         return "-"
     if any(x is None for x in v):
         return "?"
-    return str(sum(x for x in v if isinstance(x, int)))
+    # /metrics deltas are floats (122.0): counted too, printed as integers (11-15: the (all) rows said 0 for 122)
+    return str(int(sum(x for x in v if isinstance(x, (int, float)) and not isinstance(x, bool))))
 
 
 def malf(r):
@@ -2182,6 +2183,11 @@ def selfcheck_arms():
     bad += not ok
     print("%-32s %s  %s (want ([1, 2, 2, 3], (5, 21), (None, None)))" % ("malformed: count and rate rules",
                                                                          "OK  " if ok else "FAIL", res))
+    res = (opt_sum([dict(invalid=122.0), dict(invalid=3)], "invalid"), opt_sum([dict(invalid=1.0), dict(invalid=None)],
+           "invalid"), opt_sum([dict(), dict()], "invalid"))
+    ok = res == ("125", "?", "-")
+    bad += not ok
+    print("%-32s %s  %s (want ('125', '?', '-'))" % ("summary: /metrics float deltas", "OK  " if ok else "FAIL", res))
     return bad
 
 
