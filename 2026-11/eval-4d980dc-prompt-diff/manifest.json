@@ -1,0 +1,29 @@
+{
+ "label": "eval-4d980dc-prompt-diff",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1115-093941-8aaf",
+   "name": "eval-4d980dc-prompt-diff",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "4d980dc",
+   "binary": "bash",
+   "started": 1794753581.2611275,
+   "ended": 1794753772.8563514,
+   "attempts": 1,
+   "remote_job": "20261115-094057-bash-4147469",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b32e9b22eca09d6c69d2b212e0762d47dd7ddf9fc2960e1a97d42cd1b771df09",
+   "log_bytes": 17298
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-15 09:42:55 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
