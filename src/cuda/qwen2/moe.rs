@@ -190,6 +190,28 @@ fn profile_lines(p: &[Prof]) -> Vec<String> {
     out
 }
 
+/// AXON_MOE_PROFILE's report of one batched pass of nb tokens (`moe_tokens`,
+/// each layer one step): per layer, the sum, and the pass's wall time with
+/// the CPU experts' share of it (the head and the last layer's x += y are
+/// in the wall time only).
+fn pass_report(p: &[Prof], nb: usize, wall_s: f64) {
+    for l in profile_lines(p) {
+        eprintln!("{l}");
+    }
+    let sum = |i: usize| p.iter().map(|x| x[i]).sum::<f64>();
+    let (gpu, cpu) = (sum(0), sum(1) + sum(2) + sum(3) + sum(4));
+    eprintln!(
+        "[moe profile] pass of {nb} tokens (ms): wall {:.3}, gpu segments {:.3}, round trips {:.3} \
+         (experts {:.3}: {:.1} % of the pass), rest {:.3}",
+        wall_s * 1e3,
+        gpu * 1e3,
+        cpu * 1e3,
+        sum(3) * 1e3,
+        100.0 * sum(3) / wall_s,
+        (wall_s - gpu - cpu) * 1e3
+    );
+}
+
 /// AXON_MOE_PROFILE's seconds per layer: the GPU segment (synced for the
 /// profile), the copy down and its wait, the host's unpacking, the CPU
 /// experts, y's packing and copy up; then the steps.
@@ -226,6 +248,8 @@ pub struct MoeBufs<'g> {
     graph_gen: u64,
     /// AXON_MOE_PROFILE=1: decode steps' `Prof` per layer, told on
     /// stderr every `PROFILE_EVERY` steps (the segments synced: slower).
+    /// Its presence also turns on `moe_tokens`' report of every batched
+    /// pass (`pass_report`).
     prof: Option<Vec<Prof>>,
 }
 
@@ -599,6 +623,8 @@ impl<'g> CudaQwen2<'g> {
         })
         .collect::<Vec<_>>();
         let mut picks = Vec::new();
+        let prof = mb.prof.is_some();
+        let n_layers = self.layers.len();
         for (i, r) in ps.iter().enumerate() {
             let h = match head {
                 Head::Last if i + 1 < ps.len() => Head::No,
@@ -606,23 +632,43 @@ impl<'g> CudaQwen2<'g> {
             };
             let nb = r.len();
             assert!(nb <= mb.max);
+            // AXON_MOE_PROFILE: this pass's `Prof` per layer (one step
+            // each), the GPU segments synced (slower), told after the pass.
+            let mut pp = vec![[0.0; 6]; if prof { n_layers } else { 0 }];
+            let t_pass = std::time::Instant::now();
+            let mut mark = t_pass;
             // The dense pass (embedding, attention, head), each MoE layer's
             // FFN here: the router, the experts (resident on the GPU, or
             // the host round trip), x += y.
             let mut ffn = |li: usize, x: Arg, n: usize| -> Result<(), String> {
                 // SAFETY: x holds the pass's n <= mb.max rows.
                 unsafe { self.moe_route(kind, mb, li, x, n)? };
-                match resident(res, self.first + li) {
+                // Profiled: the GPU's work since the last layer's round
+                // trip (its y up and x += y, this layer's attention and
+                // router; the embedding too in layer 0).
+                let gpu_s = match prof {
+                    true => {
+                        self.gpu.sync()?;
+                        mark.elapsed().as_secs_f64()
+                    }
+                    false => 0.0,
+                };
+                let cpu = match resident(res, self.first + li) {
                     // SAFETY: mb.r holds layer li's router output for n
                     // rows; rb is the cache's scratch (its max is mb.max's).
-                    Some((ex, rb)) => unsafe { self.moe_resident(mb, ex, rb, n)? },
-                    None => {
-                        // (profiled only in decode steps: `moe_step`)
-                        self.moe_round_trip(mb, li, n, experts)?;
+                    Some((ex, rb)) => {
+                        unsafe { self.moe_resident(mb, ex, rb, n)? };
+                        None
                     }
+                    None => Some(self.moe_round_trip(mb, li, n, experts)?),
+                };
+                if prof {
+                    prof_step(&mut pp, li, n_layers, gpu_s, cpu);
                 }
                 // SAFETY: as above.
-                unsafe { self.moe_add(kind.fns(), mb, x, n) }
+                unsafe { self.moe_add(kind.fns(), mb, x, n)? };
+                mark = std::time::Instant::now();
+                Ok(())
             };
             let input = BatchIn::Tokens(&tokens[r.clone()]);
             let place = Place::Seq {
@@ -631,6 +677,10 @@ impl<'g> CudaQwen2<'g> {
             };
             let on = &mut |_: &'static str| Ok(());
             self.pass_hooked(c, input, place, h, None, 0, on, Some(&mut ffn))?;
+            if prof {
+                self.gpu.sync()?;
+                pass_report(&pp, nb, t_pass.elapsed().as_secs_f64());
+            }
             if h == Head::Argmax {
                 picks.extend(c.b.as_mut().unwrap().picks(nb)?);
             }
