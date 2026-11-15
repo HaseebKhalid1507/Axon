@@ -45,36 +45,42 @@ fn with_tensor(name: &'static str, v: f32) -> impl FnOnce(&mut Ts) {
 /// the GPU's small-batch kernels: 483 tokens), KV and next logits bit for
 /// bit; prefill_logits == feed + forward; verify_argmax == forward per row
 /// with the same cache; a cache built as prefix + rest == one fresh
-/// prefill.
+/// prefill. At most two caches are alive at once: with `--gpu-experts auto`
+/// the placement leaves room for one cache of the net's context plus
+/// `RESIDENT_HEADROOM`, and each cache carries its own batch scratch.
 pub(super) fn contract(net: &MoeQwen3, ids: &[u32], next: u32) {
     let n = ids.len();
-    let mut a = net.new_cache(n + 1);
-    let mut b = net.new_cache(n + 1);
-    for (pos, &id) in ids.iter().enumerate() {
-        net.forward_argmax(id, pos, &mut a);
+    {
+        let mut a = net.new_cache(n + 1);
+        let mut b = net.new_cache(n + 1);
+        for (pos, &id) in ids.iter().enumerate() {
+            net.forward_argmax(id, pos, &mut a);
+        }
+        let mut s = 0;
+        for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 17, 64, 86, 128, 130] {
+            let k = k.min(n - s);
+            net.feed_batch(&ids[s..s + k], s, &mut b);
+            s += k;
+        }
+        assert_eq!(s, n);
+        assert!(
+            CudaQwen2::kv_bits(&a.c) == CudaQwen2::kv_bits(&b.c),
+            "KV caches differ"
+        );
+        let la = net.forward(next, n, &mut a);
+        let lb = net.forward(next, n, &mut b);
+        assert_eq!(bits(&la), bits(&lb), "logits differ");
     }
-    let mut s = 0;
-    for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 17, 64, 86, 128, 130] {
-        let k = k.min(n - s);
-        net.feed_batch(&ids[s..s + k], s, &mut b);
-        s += k;
-    }
-    assert_eq!(s, n);
-    assert!(
-        CudaQwen2::kv_bits(&a.c) == CudaQwen2::kv_bits(&b.c),
-        "KV caches differ"
-    );
-    let la = net.forward(next, n, &mut a);
-    let lb = net.forward(next, n, &mut b);
-    assert_eq!(bits(&la), bits(&lb), "logits differ");
     // prefill_logits == feed_batch + forward.
-    let cut = 200.min(n);
-    let mut c = net.new_cache(n + 1);
-    let lc = net.prefill_logits(&ids[..cut], 0, &mut c);
-    let mut d = net.new_cache(n + 1);
-    net.feed_batch(&ids[..cut - 1], 0, &mut d);
-    let ld = net.forward(ids[cut - 1], cut - 1, &mut d);
-    assert_eq!(bits(&lc), bits(&ld), "prefill_logits != feed + forward");
+    {
+        let cut = 200.min(n);
+        let mut c = net.new_cache(n + 1);
+        let lc = net.prefill_logits(&ids[..cut], 0, &mut c);
+        let mut d = net.new_cache(n + 1);
+        net.feed_batch(&ids[..cut - 1], 0, &mut d);
+        let ld = net.forward(ids[cut - 1], cut - 1, &mut d);
+        assert_eq!(bits(&lc), bits(&ld), "prefill_logits != feed + forward");
+    }
     // verify == forward (1, 5, 16, 32 rows after a 28-token prefill).
     let (pre, tail) = ids[..60].split_at(28);
     for tail in [&tail[..1], &tail[..5], &tail[..16], tail] {

@@ -187,6 +187,9 @@ fn oss_resident_model_bits() {
     for want in [GpuExperts::N(0), GpuExperts::N(6), GpuExperts::Auto] {
         let m = crate::gguf::load(p).unwrap();
         let net = net(g, &km, &mm, &m, 1024, want);
+        // (auto leaves one ctx-1024 cache + RESIDENT_HEADROOM: the test's
+        // caches are smaller, at most two alive at once.)
+        let free = g.info().unwrap().free_bytes >> 20;
         let r = net.resident_layers();
         let d = net.describe(512);
         match want {
@@ -209,6 +212,9 @@ fn oss_resident_model_bits() {
         }
         let v = net.vocab() as u64;
         contract(&net, &ids_mod(483, v), (9707 % v) as u32);
-        eprintln!("gpt-oss {want:?}: {d}; resident {r:?}: bits equal, contract holds");
+        eprintln!(
+            "gpt-oss {want:?}: {d}; resident {r:?}, {free} MiB free after placement: bits \
+             equal, contract holds"
+        );
     }
 }
