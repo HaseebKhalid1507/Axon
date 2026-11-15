@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034  # sourced: the variables are the callers'
 # common.sh (sourced): release 0.1's boards on bella (docs/log/2026-11-14-release-0.1-prep.md). The paths are
 # bella's: llama.cpp builds, models, the agent trace (never in this repo). Outputs go to $REL_OUT. The axon under
 # test is the release dry run's own binary (the workflow's tarball), REL_AXON.

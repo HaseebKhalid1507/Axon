@@ -6,6 +6,7 @@
 # The pod paths come from a node dir here: models linked, no NVRTC (the release binary carries its kernels), an
 # empty kernel cache, a no-op axon-node hold.
 set -u
+# shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
 MODELS=${REL_SB_MODELS:-0.5B,1.5B,3B,7B,q3-8B}; ROUNDS=${REL_SB_ROUNDS:-3}
 N=$D/sbnode; rm -rf "$N"; mkdir -p "$N/models" "$N/lib/nvrtc-none" "$N/cache" "$N/bin"

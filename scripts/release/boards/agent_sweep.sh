@@ -14,6 +14,7 @@
 # Then pick.py names the winner (its rule: pick.py and the log); agent_board.sh runs it against axon.
 # SMOKE=1: the 0.5B, a 60-s window, AXON_KV_PAGES=512: the mechanics only, next to other GPU jobs.
 set -u
+# shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
 if [ "${SMOKE:-0}" = 1 ]; then M=$MD/qwen2.5-0.5b-q4_k_m.gguf WIN=60; export AXON_KV_PAGES=512; OUT=$D/sweep-smoke
 else OUT=$D/sweep; fi

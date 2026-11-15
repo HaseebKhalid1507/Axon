@@ -4,8 +4,10 @@
 # f16 KV, speeds 1 and 4, 3 interleaved rounds (scripts/agent_board.sh's protocol; no ollama). The stop rule reads
 # speed 1's TTFT-turn p50, the median over clean rounds (docs/log/2026-11-14-release-0.1-prep.md).
 set -u
+# shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
 [ -f "$D/sweep/WINNER.env" ] || { echo "STOP: no sweep winner ($D/sweep/WINNER.env)"; exit 1; }
+# shellcheck source=/dev/null  # written by pick.py
 . "$D/sweep/WINNER.env"
 OUT=$D/board; rm -rf "$OUT"; mkdir -p "$OUT"; hw "$OUT/hw.txt"; cat "$OUT/hw.txt"
 echo "llama-server: arm $ARM ($WHICH build, -np ${PAR:-default}, args '${LARGS}')"
