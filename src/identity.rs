@@ -1070,7 +1070,10 @@ mod tests {
         .collect();
         assert!(fps[0] != fps[1] && fps[1] != fps[2] && fps[0] != fps[2]);
         use crate::sample::SampleArgs;
-        assert_eq!(serve_field(false, false, false, &SampleArgs::default()), None);
+        assert_eq!(
+            serve_field(false, false, false, &SampleArgs::default()),
+            None
+        );
         let s = SampleArgs {
             temp: Some(0.7),
             seed: Some(5),
@@ -1092,9 +1095,13 @@ mod tests {
         );
         let plain = base("sm_89");
         assert_eq!(plain.clone().with_serve(None), plain);
-        let off = plain.clone().with_serve(serve_field(false, false, true, &SampleArgs::default()));
+        let off = plain
+            .clone()
+            .with_serve(serve_field(false, false, true, &SampleArgs::default()));
         assert_ne!(off.fingerprint(), plain.fingerprint());
-        let srv = plain.clone().with_serve(serve_field(true, false, false, &s));
+        let srv = plain
+            .clone()
+            .with_serve(serve_field(true, false, false, &s));
         assert_ne!(srv.fingerprint(), plain.fingerprint());
         assert!(
             srv.canonical()

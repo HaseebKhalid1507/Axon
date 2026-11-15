@@ -623,7 +623,9 @@ fn hermes_open_tag_ends_a_call() {
     every_split(
         h,
         "<tool_call>{oops <tool_call>{\"name\": \"b\"}</tool_call>",
-        &[text("<tool_call>{oops <tool_call>{\"name\": \"b\"}</tool_call>")],
+        &[text(
+            "<tool_call>{oops <tool_call>{\"name\": \"b\"}</tool_call>",
+        )],
     );
 }
 

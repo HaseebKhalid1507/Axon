@@ -2852,8 +2852,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         );
         return Err(io::Error::new(io::ErrorKind::InvalidInput, Refused(why)));
     }
-    let serve =
-        crate::identity::serve_field(o.no_think, o.think_inline, l.no_constrain, &o.sample);
+    let serve = crate::identity::serve_field(o.no_think, o.think_inline, l.no_constrain, &o.sample);
     l.identity = l.identity.with_serve(serve);
     if o.log {
         // A pulled model's name, then its file.

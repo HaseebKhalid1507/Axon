@@ -18,9 +18,11 @@ measurements behind them.
 - **A held call can't run on** (#272: 13 of the constrained arm's 15 malformed calls were runaways cut by
   `max_tokens`). Whitespace outside strings is bounded as llama.cpp's grammars bound it (one space, or one or two
   newlines then at most 20 spaces or tabs); an array keeps its first item's kind (a pi runaway wrote an edit object,
-  then `false` 1,900 times); and a call whose last 256 tokens are at most 4 distinct ones is closed the shortest
-  way from there (`axon_constraint_stalls_total`). In the acceptance runs' 5,700 calls no array mixed kinds, no
-  value repeated more than twice in a row, and no whitespace run went past llama.cpp's rule outside the runaways.
+  then `false` 1,900 times); and a call whose last 256 tokens are at most 8 distinct ones, or whose last 512 repeat
+  one cycle of at most 64, is closed the shortest way from there (`axon_constraint_stalls_total`). In the acceptance
+  runs' 6,333 calls the 13 runaways trip a stall rule and no other call comes near one (at most 28 pieces of text in
+  a stretch of 8 distinct ones, 119 in a cycle); no array mixed kinds and no whitespace run went past llama.cpp's
+  rule outside the runaways.
 - **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
   its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
   refuses to start (PR A read only `1` as on).

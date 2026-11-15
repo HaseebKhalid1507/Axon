@@ -2314,17 +2314,22 @@ fn serve_constrained_forced_and_default() {
             let v = post(a, "/v1/chat/completions", req(choice.clone(), temp, seed)).json();
             assert_ne!(v["system_fingerprint"], fp, "constrained: {v}");
             let ch = &v["choices"][0];
-            let calls = ch["message"]["tool_calls"].as_array().unwrap_or_else(|| panic!("{v}"));
+            let calls = ch["message"]["tool_calls"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{v}"));
             let cut = ch["finish_reason"] == "length";
             for (i, c) in calls.iter().enumerate() {
                 let name = c["function"]["name"].as_str().unwrap();
                 assert!(["get_weather", "get_time"].contains(&name), "{v}");
-                if i == 0 && let Some(w) = want {
+                if i == 0
+                    && let Some(w) = want
+                {
                     assert_eq!(name, w, "{v}");
                 }
                 if !(cut && i + 1 == calls.len()) {
                     let args = c["function"]["arguments"].as_str().unwrap();
-                    let j: Value = serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                    let j: Value =
+                        serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
                     assert!(j.is_object(), "{v}");
                 }
                 n_calls += 1;

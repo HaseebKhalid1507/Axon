@@ -66,8 +66,9 @@ and the token's position, never on the batch. The tests that hold this in place:
 steps, drafted == undrafted, the device's logits-row fallback == the host's reference),
 `split_backends_constrained_contract` (the pipeline's and the CPU/GPU split's batched routes),
 `masks_match_naive` and `finisher_closes_from_anywhere`. A held call's stall guard (a call
-whose last 256 tokens are at most 4 distinct ones is closed the shortest way) reads only the
-call's own tokens, so it too is a function of the tokens so far.
+whose last 256 tokens are at most 8 distinct ones, or whose last 512 repeat one cycle, is
+closed the shortest way) reads only the call's own tokens, so it too is a function of the
+tokens so far.
 
 ## What is NOT guaranteed
 

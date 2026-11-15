@@ -33,9 +33,10 @@
 //! (`Grammar::hermes`'s name enum) and its arguments are a JSON object.
 //! A held call can't run on (#272): whitespace is bounded as llama.cpp
 //! bounds it and an array keeps its first item's kind (`pda::Style::HELD`),
-//! and a call that stalls (its last `STALL_WINDOW` tokens no more than
-//! `STALL_IDS` distinct ones: `false, false, ...`, `\n\n\n...` in a string)
-//! is closed the shortest way (`pda::Graph::finisher`). The kill switch is
+//! and a call that stalls (its last 256 tokens no more than 8 distinct
+//! ones, `false, false, ...` or `\n\n\n...` in a string, or its last 512 one
+//! cycle of at most 64 tokens over and over: `STALL_WINDOW`) is closed the
+//! shortest way (`pda::Graph::finisher`). The kill switch is
 //! `--no-constrain` / `AXON_CONSTRAIN=0`. Per-tool argument schemas are the
 //! spec's PR C.
 
@@ -59,14 +60,20 @@ use std::sync::{Arc, Mutex};
 /// Hermes's call markers, as text (a special token decodes to it).
 const OPEN: &[u8] = b"<tool_call>";
 
-/// A call stalls when its last `STALL_WINDOW` tokens are at most
-/// `STALL_IDS` distinct ids: it is then closed the shortest way. The
-/// acceptance runs' runaways repeat one or two tokens thousands of times
-/// (`, false` 1900 times; whitespace), and no call there repeats a value
-/// more than twice in a row; 256 tokens of four ids or fewer is a stall
-/// any call that writes code or text never gets near.
+/// A call stalls, and is then closed the shortest way, when its last
+/// `STALL_WINDOW` tokens are at most `STALL_IDS` distinct ids, or its last
+/// `LOOP_WINDOW` tokens repeat one cycle of at most `LOOP_PERIOD` tokens.
+/// In the acceptance runs' 6,333 calls (codex, opencode, pi, axon and
+/// llama-server; split as a byte-level pre-tokenizer splits text, a token
+/// being that piece or less), the 13 runaways trip one rule or both after
+/// 461 to 50,831 pieces (`, false` 1,900 times; whitespace;
+/// `--exclude=*.pyc` over and over; a list of strings in a loop), and no
+/// other call comes near: its longest stretch of at most 8 distinct pieces
+/// is 28, its longest periodic one 119.
 pub const STALL_WINDOW: usize = 256;
-pub const STALL_IDS: usize = 4;
+pub const STALL_IDS: usize = 8;
+pub const LOOP_WINDOW: usize = 512;
+pub const LOOP_PERIOD: usize = 64;
 
 /// What the constrained paths count (one per server: `serve::ops::Metrics`
 /// shows them; the logits-row fallbacks are `sample::MASK_FALLBACKS`).
@@ -109,11 +116,13 @@ fn hermes_desc(open: u32, close: Option<u32>) -> String {
     format!(
         "axon-constrain/2\nhermes\nopen={open}\nclose={close:?}\nname=enum(offered)\n\
          arguments=object\nmax_depth={}\nspace=llama({})\narrays=one-kind\n\
-         stall={}/{}:shortest-close\n",
+         stall={}/{},loop={}/{}:shortest-close\n",
         pda::MAX_DEPTH,
         pda::INDENT_MAX,
         STALL_WINDOW,
-        STALL_IDS
+        STALL_IDS,
+        LOOP_WINDOW,
+        LOOP_PERIOD
     )
 }
 
@@ -235,8 +244,11 @@ pub struct Hermes {
     field: String,
     counters: Arc<Counters>,
     /// Most recently used first.
-    grammars: Mutex<Vec<(Vec<Vec<u8>>, Arc<Grammar>)>>,
+    grammars: Mutex<Vec<KeptGrammar>>,
 }
+
+/// A grammar `Hermes` keeps, under its names (sorted, each once).
+type KeptGrammar = (Vec<Vec<u8>>, Arc<Grammar>);
 
 impl Hermes {
     /// Grammars kept (each with its own mask cache).
@@ -345,10 +357,13 @@ pub struct Constraint {
     /// a spelled `<tool_call>` (fewer than its length).
     tail: Vec<u8>,
     /// Engaged: the call's last tokens (a ring of at most `STALL_WINDOW`,
-    /// the next write at `at`), and whether it stalled (its states then
-    /// take `Grammar::finish`'s edges).
+    /// the next write at `at`), how many it has taken, for each period p
+    /// (`runs[p - 1]`) how many tokens in a row equal the one p before, and
+    /// whether it stalled (its states then take `Grammar::finish`'s edges).
     recent: Vec<u32>,
     at: usize,
+    taken: usize,
+    runs: [u16; LOOP_PERIOD],
     stalled: bool,
     /// A draft's copy (`draft_copy`): its tokens and stalls aren't counted
     /// (the real constraint counts the ones it takes).
@@ -368,6 +383,8 @@ impl Constraint {
             tail: Vec::new(),
             recent: Vec::new(),
             at: 0,
+            taken: 0,
+            runs: [0; LOOP_PERIOD],
             stalled: false,
             shadow: false,
         }
@@ -382,12 +399,22 @@ impl Constraint {
         }
     }
 
-    /// An engaged token taken: into the stall window; stalled (the next
-    /// states take the shortest way out) if the window is full of at most
-    /// `STALL_IDS` distinct ids.
+    /// An engaged token taken: into the stall rules (`STALL_WINDOW`'s
+    /// note); stalled (the next states take the shortest way out) when one
+    /// trips.
     fn note(&mut self, id: u32) {
         if self.stalled {
             return;
+        }
+        let mut cycle = false;
+        for p in 1..=LOOP_PERIOD {
+            let r = &mut self.runs[p - 1];
+            if self.taken >= p && self.recent[(self.at + STALL_WINDOW - p) % STALL_WINDOW] == id {
+                *r += 1;
+                cycle |= *r as usize + p >= LOOP_WINDOW;
+            } else {
+                *r = 0;
+            }
         }
         if self.recent.len() < STALL_WINDOW {
             self.recent.push(id);
@@ -395,23 +422,30 @@ impl Constraint {
             self.recent[self.at] = id;
         }
         self.at = (self.at + 1) % STALL_WINDOW;
-        if self.recent.len() == STALL_WINDOW {
-            let mut seen: [u32; STALL_IDS + 1] = [0; STALL_IDS + 1];
-            let mut n = 0;
-            for &x in &self.recent {
-                if !seen[..n].contains(&x) {
-                    if n == STALL_IDS {
-                        return;
-                    }
-                    seen[n] = x;
-                    n += 1;
+        self.taken += 1;
+        if !cycle && (self.recent.len() < STALL_WINDOW || !self.few_ids()) {
+            return;
+        }
+        self.stalled = true;
+        if !self.shadow {
+            self.g.counters.stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The stall window holds at most `STALL_IDS` distinct ids.
+    fn few_ids(&self) -> bool {
+        let mut seen = [0u32; STALL_IDS];
+        let mut n = 0;
+        for &x in &self.recent {
+            if !seen[..n].contains(&x) {
+                if n == STALL_IDS {
+                    return false;
                 }
-            }
-            self.stalled = true;
-            if !self.shadow {
-                self.g.counters.stalls.fetch_add(1, Ordering::Relaxed);
+                seen[n] = x;
+                n += 1;
             }
         }
+        true
     }
 
     /// Triggers suspended inside the reply's reasoning, `think` its
@@ -447,6 +481,8 @@ impl Constraint {
         self.tail.clear();
         self.recent.clear();
         self.at = 0;
+        self.taken = 0;
+        self.runs = [0; LOOP_PERIOD];
         self.stalled = false;
         let (mut node, mut stack) = (self.g.start, Vec::new());
         for &x in rest {
@@ -492,7 +528,10 @@ impl Constraint {
                 // `<tool_call>abc`: the tools parser holds a block the
                 // grammar can't; it decides it as it always has.
                 if !self.shadow {
-                    self.g.counters.triggers_rejected.fetch_add(1, Ordering::Relaxed);
+                    self.g
+                        .counters
+                        .triggers_rejected
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
             return;

@@ -386,17 +386,21 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
   - **An array keeps its first item's kind** (objects, strings, numbers, booleans, null,
     arrays). A runaway in #272 wrote an edit object and then `false, false, ...` 1,900
-    times; in the acceptance runs' 5,700 calls no other array mixed kinds.
-  - **A stalled call closes.** When the last 256 tokens of a call are no more than 4
-    distinct tokens (`false, false, ...`, a string of `\n\n\n...`), it is closed the
-    shortest way from there: the string ends, then each open array and object, then
-    `</tool_call>` (`axon_constraint_stalls_total`).
+    times; in the acceptance runs' calls no other array mixed kinds.
+  - **A stalled call closes.** When the last 256 tokens of a call are no more than 8
+    distinct tokens (`false, false, ...`, a string of `\n\n\n...`), or its last 512 repeat one
+    cycle of at most 64 tokens (`--exclude=*.pyc --exclude=*.pyc ...`, a list in a loop), it
+    is closed the shortest way from there: the string ends, then each open array and object,
+    then `</tool_call>` (`axon_constraint_stalls_total`). In the acceptance runs' 6,333
+    calls the 13 runaways trip a rule after 461 to 50,831 tokens' worth of text, and the
+    other calls stay far from both (at most 28 in a stretch of 8 distinct pieces, 119 in a
+    cycle).
 
   Valid isn't right: where the model would have written an unescaped quote, the string ends
   there and the call goes on from it, so the call parses but may not be what was meant (the
   harness tells the model, which can retry). What it can't write: an array of mixed kinds
-  (`[1, "a"]`), more blank space than llama.cpp allows, or 256 tokens of a few repeated ones
-  (a long run of `0, 0, 0`); per-tool argument schemas are #259's next step (PR C).
+  (`[1, "a"]`), more blank space than llama.cpp allows, 256 tokens of a few repeated ones
+  (a long run of `0, 1, 0, 1`), or 512 tokens of one block written over and over; per-tool argument schemas are #259's next step (PR C).
   `max_tokens` can still cut a call short (a call with invalid arguments, as above). The
   identity changes with it: `NUMERICS_VERSION_EXACT` is 2 (every fingerprint moved), and a
   tools request's `system_fingerprint` names the grammar

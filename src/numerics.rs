@@ -132,7 +132,7 @@ mod tests {
             Numerics::Fast.tag(),
             format!("fast/{NUMERICS_VERSION_EXACT}.{NUMERICS_VERSION_FAST}")
         );
-        assert_eq!(Numerics::Fast.version(), "1.3");
+        assert_eq!(Numerics::Fast.version(), "2.3");
         assert_eq!(Numerics::Fast.to_string(), "fast");
     }
 
