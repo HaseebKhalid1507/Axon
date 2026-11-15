@@ -245,6 +245,9 @@ pub struct Metrics {
     /// cut off by the token limit or whose JSON went bad (#260), and calls
     /// given a non-object value.
     pub tool_calls_invalid: AtomicU64,
+    /// Constrained tool calls (`crate::constrain`): what the server's
+    /// constraints counted.
+    pub constrain: std::sync::Arc<crate::constrain::Counters>,
     pub ttft: Histogram,
     pub itl: Histogram,
     /// Batched steps that fed prompt beside running rows, and those with
@@ -349,6 +352,7 @@ impl Default for Metrics {
             refused_prompts: AtomicU64::new(0),
             tool_calls_dropped: AtomicU64::new(0),
             tool_calls_invalid: AtomicU64::new(0),
+            constrain: Default::default(),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             step: Histogram::new(STEP_BOUNDS),
@@ -548,6 +552,41 @@ impl Metrics {
             "Tool calls returned whose arguments are not a JSON object (a streamed call cut off \
              or whose JSON went bad, or a non-object value).",
             self.tool_calls_invalid.load(Ordering::Relaxed),
+        );
+        let k = &self.constrain;
+        counter(
+            &mut o,
+            "axon_constraint_tokens_total",
+            "Tokens decided inside a constrained tool call (masked).",
+            k.tokens.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_constraint_fallback_total",
+            "Constrained positions whose device candidates held too few allowed tokens, decided \
+             on the whole logits row instead (this process, every server).",
+            crate::sample::MASK_FALLBACKS.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_constraint_trigger_rejected_total",
+            "A <tool_call> written out whose token went on with text the grammar refuses: left \
+             unconstrained.",
+            k.triggers_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_constraint_stalls_total",
+            "Constrained tool calls that stalled (repeating a few tokens) and were closed the \
+             shortest way.",
+            k.stalls.load(Ordering::Relaxed),
+        );
+        let _ = writeln!(
+            o,
+            "# HELP axon_constraint_mask_seconds_total Time spent working out constrained \
+             positions' token masks.\n# TYPE axon_constraint_mask_seconds_total counter\n\
+             axon_constraint_mask_seconds_total {:.6}",
+            k.mask_ns.load(Ordering::Relaxed) as f64 / 1e9
         );
         // The tier's lines: while it's on, and after it turned off (its
         // gauges 0, its counters kept).

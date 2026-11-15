@@ -415,6 +415,10 @@ fn restrictive<M: Lm>(net: &M, prompt: &[u32], n: usize, label: &str) -> usize {
     n
 }
 
+/// The tools the prompts offer (`SYSTEM`'s), and two more: the names a
+/// constrained call may take.
+const TOOLS: &[&str] = &["exec_command", "apply_patch", "read_file"];
+
 /// The grammar on the model's vocabulary.
 fn grammar(m: &Model, net_vocab: usize) -> (&'static Tokenizer, Arc<Grammar>) {
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(m)));
@@ -422,7 +426,7 @@ fn grammar(m: &Model, net_vocab: usize) -> (&'static Tokenizer, Arc<Grammar>) {
     assert!(v.byte_complete(), "a Qwen2.5 vocabulary is byte-complete");
     (
         tok,
-        Arc::new(Grammar::hermes(v).expect("Qwen2.5 has <tool_call>")),
+        Arc::new(Grammar::hermes(v, &super::tests::names(TOOLS)).expect("Qwen2.5 has <tool_call>")),
     )
 }
 
@@ -672,12 +676,12 @@ fn real_vocab_masks() {
     let n = logits_n(&m);
     let v = Arc::new(Vocab::new(&tok, n));
     assert!(v.byte_complete());
-    let g = Arc::new(Grammar::hermes(v.clone()).unwrap());
+    let g = Arc::new(Grammar::hermes(v.clone(), &super::tests::names(TOOLS)).unwrap());
     let open = tok.special_id("<tool_call>").unwrap();
     let close = tok.special_id("</tool_call>").unwrap();
     let call = "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i 's/raise \
                 KeyError(msg)/raise ValueError(\\\"bad\\\")/' ledger/cli.py && echo \\\"done\\\"\", \
-                \"n\": [1, -2.5e3, {\"k\": null}]}}\n";
+                \"n\": [1, -2.5e3], \"m\": [{\"k\": null}]}}\n";
     let mut ids = tok.encode(call);
     ids.push(close);
     let mut c = Constraint::new(g.clone());

@@ -759,7 +759,7 @@ pub fn generate_constrained<M: Lm>(
         // Row b's mask: the constraint after `next` and guesses ..b.
         let mut masks = vec![con.mask()?];
         if !guesses.is_empty() {
-            let mut cl = con.clone();
+            let mut cl = con.draft_copy();
             let mut keep = 0;
             for &g in &guesses {
                 if masks[keep].as_ref().is_some_and(|m| !m.allows(g)) || !cl.accept(g) {

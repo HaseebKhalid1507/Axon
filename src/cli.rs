@@ -52,7 +52,7 @@ usage:
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
-            [--cache-ram BYTES|auto|off]
+            [--cache-ram BYTES|auto|off] [--no-constrain]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -180,6 +180,11 @@ flags:
               exclusive: it keeps what the GPU pool gave up, and drops its copies of pages the pool
               still holds first, so its useful capacity is about its size (a 7B f16 position is
               56 KiB). Off on a CPU/GPU split, several GPUs and MoE models (docs/serving.md)
+  --no-constrain  serve: sample tool calls unconstrained. By default a Qwen2.5 or Qwen3 tool call
+              is held from its <tool_call> to </tool_call>: it names one of the request's tools,
+              its arguments are a JSON object, and it can't run on (bounded whitespace, an array's
+              items one kind, a call that repeats a few tokens is closed). AXON_CONSTRAIN=0 turns
+              it off too (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
@@ -2057,6 +2062,8 @@ mod tests {
             "--gpu-layers N gen, chat, serve:",
             "--kv T gen, chat, serve:",
             "--no-think chat, serve:",
+            "--no-constrain serve: sample tool calls unconstrained.",
+            "AXON_CONSTRAIN=0 turns it off too",
             "sampling flags (gen, chat, serve;",
             "(default 1.1, serve 1; 1 = off)",
         ] {

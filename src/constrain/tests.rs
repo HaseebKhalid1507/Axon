@@ -291,6 +291,21 @@ fn json_matches_parse_json() {
     );
 }
 
+/// The tool names the unit tests' calls take (`Grammar::hermes`'s enum):
+/// #259's (codex's shell tool and the patch tool it called unoffered),
+/// short ones the toy model can spell, and a prefix of another.
+pub(super) const NAMES: &[&str] = &["get", "x", "a", "ab", "exec_command", "apply_patch"];
+
+/// `names` as `Grammar::hermes` takes them (their JSON string bodies).
+pub(super) fn names(n: &[&str]) -> Vec<Vec<u8>> {
+    n.iter().map(|s| s.as_bytes().to_vec()).collect()
+}
+
+/// The Hermes grammar on `v`, `NAMES` offered.
+pub(super) fn hermes(v: Arc<Vocab>) -> Grammar {
+    Grammar::hermes(v, &names(NAMES)).unwrap()
+}
+
 /// A synthetic vocabulary: every single byte, JSON-ish pieces, random
 /// pieces, an empty token, three specials, and ids past the pieces.
 fn toy_vocab(seed: u64, n_rand: usize) -> (Arc<Vocab>, Vec<u32>) {
@@ -399,7 +414,7 @@ fn ids(m: &TokenMask) -> Vec<u32> {
 #[test]
 fn masks_match_naive() {
     let (v, sp) = toy_vocab(7, 3000);
-    let g = Grammar::hermes(v.clone()).unwrap();
+    let g = hermes(v.clone());
     let m = &g.masks;
     let mut s = 0x1234_5678_9abc_def1u64;
     let mut states = 0;
@@ -471,7 +486,7 @@ fn malformed_259_impossible() {
     let cases = d["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 8);
     let (v, sp) = toy_vocab(3, 500);
-    let g = Grammar::hermes(v.clone()).unwrap();
+    let g = hermes(v.clone());
     let mut whys = std::collections::BTreeMap::new();
     for c in cases {
         let body = c["body"].as_str().unwrap();
@@ -504,7 +519,7 @@ fn malformed_259_impossible() {
             &body[at.saturating_sub(30)..at + 1]
         );
         // The same through a Constraint and its masks, token by token.
-        let mut con = Constraint::new(Arc::new(Grammar::hermes(v.clone()).unwrap()));
+        let mut con = Constraint::new(Arc::new(hermes(v.clone())));
         assert!(con.accept(sp[0]) && con.engaged());
         for (k, &(_, _, id)) in syms.iter().enumerate() {
             let m = con.mask().unwrap().expect("engaged");
@@ -529,7 +544,7 @@ fn malformed_259_impossible() {
 #[test]
 fn hermes_cycle() {
     let (v, sp) = toy_vocab(11, 200);
-    let g = Arc::new(Grammar::hermes(v.clone()).unwrap());
+    let g = Arc::new(hermes(v.clone()));
     let mut c = Constraint::new(g.clone());
     let feed = |c: &mut Constraint, s: &str| {
         for &b in s.as_bytes() {
@@ -552,7 +567,7 @@ fn hermes_cycle() {
     }
     feed(
         &mut c,
-        "t\", \"arguments\": {\"q\": [1, \"</tool_call>\", {\"a\": null}]}}\n",
+        "t\", \"arguments\": {\"q\": [1, 2], \"s\": \"</tool_call>\", \"o\": {\"a\": null}}}\n",
     );
     assert!(!c.in_string());
     let m = c.mask().unwrap().unwrap();
@@ -577,19 +592,26 @@ fn hermes_cycle() {
     assert!(!c.accept(v.len() as u32 - 1), "an id past the pieces");
 }
 
-/// The grammar's name in the identity: stable for a vocabulary, and
-/// another grammar text would be another hash.
+/// The grammar's name in the identity: stable for a vocabulary, the same
+/// whatever tools are offered (they are the request's, as its prompt is),
+/// and another grammar text would be another hash (`Hermes::field` is it).
 #[test]
 fn hermes_field() {
     let (v, _) = toy_vocab(1, 10);
-    let a = Grammar::hermes(v.clone()).unwrap();
-    let b = Grammar::hermes(v).unwrap();
+    let a = hermes(v.clone());
+    let b = hermes(v.clone());
+    let c = Grammar::hermes(v.clone(), &names(&["only"])).unwrap();
     assert_eq!(a.field(), b.field());
+    assert_eq!(a.field(), c.field());
+    let h = super::Hermes::new(v.clone(), Default::default()).unwrap();
+    assert_eq!(h.field(), a.field());
     assert!(a.field().starts_with("hermes-json ") && a.field().len() == 12 + 16);
+    // No names: refused (a call couldn't name anything).
+    assert!(Grammar::hermes(v, &[]).err().unwrap().contains("no tool names"));
     // No `<tool_call>` token; not byte-complete (no 'q'): refused.
     let bytes: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
     // Each refusal says why (the server's startup line).
-    let why = |v: Vocab| Grammar::hermes(Arc::new(v)).err();
+    let why = |v: Vocab| Grammar::hermes(Arc::new(v), &names(NAMES)).err();
     let w = why(Vocab::from_pieces(256, &bytes, &[])).unwrap();
     assert!(w.contains("no <tool_call>"), "{w}");
     let mut p = bytes.clone();
@@ -598,7 +620,7 @@ fn hermes_field() {
     let w = why(Vocab::from_pieces(257, &p, &[256])).unwrap();
     assert!(w.contains("byte-complete: byte 0x71 "), "{w}");
     p[b'q' as usize] = b"q".to_vec();
-    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(257, &p, &[256]))).is_ok());
+    assert!(Grammar::hermes(Arc::new(Vocab::from_pieces(257, &p, &[256])), &names(NAMES)).is_ok());
 }
 
 /// `cands_masked` is the reference: the `k` best allowed (penalty first),
@@ -927,7 +949,7 @@ fn calls_parse(g: &Arc<Grammar>, v: &Vocab, ids: &[u32]) -> (usize, usize) {
 fn constrained_drafting_matches_plain() {
     let (v, sp) = toy_json_vocab();
     let net = Toy::new(v.clone(), &sp);
-    let g = Arc::new(Grammar::hermes(v.clone()).unwrap());
+    let g = Arc::new(hermes(v.clone()));
     let prompt = [9u32, 10, 34, 35, 9, 10];
     let (mut calls, mut engaged_runs, mut spelled_in_str) = (0, 0, 0);
     for seed in 0..300u64 {
@@ -1092,8 +1114,8 @@ fn masked_via_rows() {
 /// The call the mask-cost benches decode: a string with quotes, escapes
 /// and a backslash, numbers, nesting, a literal.
 pub(super) const COST_CALL: &str = "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i \
-    's/a/b/' x.py && echo \\\"done\\\"\", \"login\": false, \"n\": [1, 2.5, -3e2, {\"k\": null}], \
-    \"deep\": {\"a\": {\"b\": [\"c\", {\"d\": true}]}}}}\n";
+    's/a/b/' x.py && echo \\\"done\\\"\", \"login\": false, \"n\": [1, 2.5, -3e2], \"m\": [{\"k\": null}], \
+    \"deep\": {\"a\": {\"b\": [\"c\", \"d\"], \"e\": {\"d\": true}}}}}\n";
 
 /// The per-token cost of the mask (`Constraint::mask` + `accept`) at a
 /// 152k-token vocabulary, cache warm, against the spec's bar (median <= 20
@@ -1112,7 +1134,7 @@ fn mask_cost_synthetic() {
 /// `mask_cost_synthetic`'s measurement on `v`: engaged by `trig`, then
 /// `toks` (a whole call, closed or not).
 pub(super) fn mask_cost_on(v: Arc<Vocab>, trig: u32, toks: &[u32]) {
-    let g = Arc::new(Grammar::hermes(v.clone()).unwrap());
+    let g = Arc::new(hermes(v.clone()));
     let t0 = std::time::Instant::now();
     let mut c = Constraint::new(g.clone());
     c.accept(trig);
@@ -1183,4 +1205,574 @@ fn state(c: &Constraint) -> Super {
         },
         super::Phase::Free => panic!("free"),
     }
+}
+
+// ------------------------------------------------------------- PR B: held calls
+
+/// One JSON value between optional whitespace, held as a tool call's
+/// arguments are (`Style::HELD`).
+fn held_value_grammar() -> (Graph, NodeId) {
+    let mut b = Builder::new(pda::Style::HELD);
+    let j = pda::json(&mut b);
+    let top = b.node();
+    let end = b.node();
+    b.ws_loop(top);
+    b.call(top, j.value, end);
+    b.ws_loop(end);
+    b.set_accept(end);
+    (b.finish().unwrap(), top)
+}
+
+/// Every whitespace run outside strings is llama.cpp's `space`: nothing,
+/// one space, or one or two newlines then at most 20 spaces or tabs.
+fn spaces_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    let (mut i, mut ins) = (0, false);
+    while i < b.len() {
+        let c = b[i];
+        if ins {
+            match c {
+                b'\\' => i += 1,
+                b'"' => ins = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            ins = true;
+            i += 1;
+            continue;
+        }
+        if b" \t\n\r".contains(&c) {
+            let j = (i..b.len()).find(|&j| !b" \t\n\r".contains(&b[j])).unwrap_or(b.len());
+            let run = &b[i..j];
+            let nl = run.iter().take_while(|&&x| x == b'\n').count();
+            let ok = run == b" "
+                || ((1..=2).contains(&nl)
+                    && run[nl..].iter().all(|&x| x == b' ' || x == b'\t')
+                    && run.len() - nl <= pda::INDENT_MAX);
+            if !ok {
+                return false;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Every array's items are of one kind (booleans one kind).
+fn one_kind(v: &J) -> bool {
+    let k = |x: &J| match x {
+        J::Null => 0,
+        J::Bool(_) => 1,
+        J::Num(_) => 2,
+        J::Str(_) => 3,
+        J::Arr(_) => 4,
+        J::Obj(_) => 5,
+    };
+    match v {
+        J::Arr(a) => a.windows(2).all(|w| k(&w[0]) == k(&w[1])) && a.iter().all(one_kind),
+        J::Obj(m) => m.iter().all(|(_, x)| one_kind(x)),
+        _ => true,
+    }
+}
+
+/// The held JSON (`Style::HELD`) takes exactly what `tools::parse_json`
+/// parses whose whitespace runs are llama.cpp's and whose arrays keep one
+/// kind (and the depth cap): the 10k values of `json_matches_parse_json`,
+/// random and mutated, with whitespace llama allows and some it doesn't.
+#[test]
+fn held_json_matches_its_oracle() {
+    let (g, top) = held_value_grammar();
+    let mut s = 0x2545_f491_4f6c_dd1du64;
+    let (mut ok, mut by_space, mut by_kind) = (0, 0, 0);
+    let extra = [
+        "[1, 2]", "[{}, {}]", "[{}, false]", "[true, false]", "[null, null]", "[[1], [\"a\"]]",
+        "[[1], [2, \"a\"]]", "[1,  2]", "[1,\n\n\n2]", "[1,\n\t\t2]", "[1,\r\n2]", " 1", "1 ",
+        "\n1\n", "\t1", "{\"a\":  1}", "{\"a\": [\"x\", 1]}", "[\"x\", \"y\"]", "[[], {}]",
+    ];
+    let mut corpus: Vec<String> = extra.iter().map(|x| x.to_string()).collect();
+    for i in 0..10_000 {
+        let mut v = String::new();
+        gen_ws(&mut s, &mut v);
+        gen_value(&mut s, 0, &mut v);
+        gen_ws(&mut s, &mut v);
+        corpus.push(if i % 3 == 0 { mutate(&mut s, &v) } else { v });
+    }
+    corpus.push(format!("[{}]", vec!["1"; 300].join(", ")));
+    corpus.push(format!("\n{}1", " ".repeat(20)));
+    corpus.push(format!("\n{}1", " ".repeat(21)));
+    for v in &corpus {
+        let parsed = parse_json(v);
+        let sp = spaces_ok(v);
+        let kind = parsed.as_ref().is_some_and(one_kind);
+        let want = parsed.is_some() && depth(v) <= MAX_DEPTH && sp && kind;
+        assert_eq!(accepts_whole(&g, top, v.as_bytes()), want, "{v:?}");
+        ok += usize::from(want);
+        by_space += usize::from(parsed.is_some() && !sp);
+        by_kind += usize::from(parsed.is_some() && sp && !kind);
+    }
+    assert!(
+        ok > 1_000 && by_space > 500 && by_kind > 200,
+        "{ok} held, {by_space} refused for whitespace, {by_kind} for mixed arrays"
+    );
+}
+
+/// The refused byte of `body` after `<tool_call>` through a constraint
+/// (mask and accept agreeing at each byte), or None; and whether the call
+/// closed.
+fn held(g: &Arc<Grammar>, open: u32, body: &str) -> (Option<usize>, bool) {
+    let mut c = Constraint::new(g.clone());
+    assert!(c.accept(open) && c.engaged());
+    for (i, &b) in body.as_bytes().iter().enumerate() {
+        let m = c.mask().unwrap().expect("engaged");
+        let ok = c.accept(b as u32);
+        assert_eq!(ok, m.allows(b as u32), "{body:?}: mask and accept at {i}");
+        if !ok {
+            return (Some(i), c.engaged());
+        }
+    }
+    (None, !c.engaged())
+}
+
+/// A held call's whitespace in its frame and its arguments: llama.cpp's
+/// rule (#272: codex's call that wrote 25k tokens of whitespace).
+#[test]
+fn bounded_space() {
+    let (v, sp) = toy_vocab(13, 50);
+    let g = Arc::new(hermes(v));
+    let call = |ws: &str| {
+        format!("\n{{\"name\":{ws}\"get\", \"arguments\": {{\"q\":{ws}[1,{ws}2]}}}}\n</tool_call>")
+    };
+    let at = call("").find(":\"get").unwrap() + 1;
+    let ind = |n: usize, c: &str| c.repeat(n);
+    for ok in [
+        String::new(),
+        " ".into(),
+        "\n".into(),
+        "\n\n".into(),
+        "\n\t".into(),
+        "\n\n\t\t  ".into(),
+        format!("\n{}", ind(20, " ")),
+        format!("\n\n{}", ind(20, "\t")),
+    ] {
+        assert_eq!(held(&g, sp[0], &call(&ok)), (None, true), "{ok:?}");
+    }
+    for (bad, off) in [
+        ("  ".to_string(), 1),
+        ("\n\n\n".into(), 2),
+        ("\r\n".into(), 0),
+        ("\t".into(), 0),
+        (" \n".into(), 1),
+        (format!("\n{}", ind(21, " ")), 21),
+    ] {
+        assert_eq!(held(&g, sp[0], &call(&bad)).0, Some(at + off), "{bad:?}");
+    }
+    // The frame's own positions: before `{` and before the close.
+    assert_eq!(held(&g, sp[0], "\n\n\n{").0, Some(2));
+    let head = "{\"name\": \"x\", \"arguments\": {}}";
+    assert_eq!(held(&g, sp[0], &format!("{head}  </tool_call>")).0, Some(head.len() + 1));
+    assert_eq!(held(&g, sp[0], &format!("{head}\n</tool_call>")), (None, true));
+}
+
+/// A call names an offered tool, spelled as the prompt shows it (its JSON
+/// string body): an unoffered one (codex's `apply_patch`: 6 calls in #259's
+/// job, 29 in #235's constrained arm) is refused at the byte where it leaves every offered name; a name
+/// that is a prefix of another is still whole; the mask at the name's start
+/// allows only what begins one.
+#[test]
+fn hermes_names() {
+    let (v, sp) = toy_vocab(17, 400);
+    let offered = ["exec_command", "read", "read_file", "a\\\"b"];
+    let g = Arc::new(Grammar::hermes(v.clone(), &names(&offered)).unwrap());
+    let call = |n: &str| format!("\n{{\"name\": \"{n}\", \"arguments\": {{}}}}\n</tool_call>");
+    for n in offered {
+        assert_eq!(held(&g, sp[0], &call(n)), (None, true), "{n}");
+    }
+    let at = call("").find(": \"").unwrap() + 3;
+    for (n, off) in [("apply_patch", 1), ("exec", 4), ("read_files", 9), ("a\"b", 1), ("", 0)] {
+        assert_eq!(held(&g, sp[0], &call(n)).0, Some(at + off), "{n:?}");
+    }
+    // The mask at the name's first byte: `e`, `r`, `a` and the tokens that
+    // go on into an offered name, nothing else.
+    let mut c = Constraint::new(g.clone());
+    assert!(c.accept(sp[0]));
+    for &b in b"\n{\"name\": \"" {
+        assert!(c.accept(b as u32));
+    }
+    let m = c.mask().unwrap().unwrap();
+    for id in m.ids() {
+        let t = v.bytes(id);
+        assert!(
+            offered.iter().any(|n| {
+                let full = format!("{n}\", ");
+                full.as_bytes().starts_with(t) || t.starts_with(n.as_bytes())
+            }),
+            "{:?} allowed at the name",
+            String::from_utf8_lossy(t)
+        );
+    }
+    assert!(m.allows(b'e' as u32) && m.allows(b'r' as u32) && !m.allows(b'x' as u32));
+}
+
+/// An array keeps its first item's kind (#272: pi's calls that wrote
+/// `false` after an edit object 1900 times).
+#[test]
+fn one_kind_arrays() {
+    let (v, sp) = toy_vocab(19, 50);
+    let g = Arc::new(hermes(v));
+    let call = |a: &str| format!("\n{{\"name\": \"x\", \"arguments\": {{\"q\": {a}}}}}\n</tool_call>");
+    let at = call("").find("\"q\": ").unwrap() + 5;
+    for ok in ["[]", "[1, -2.5]", "[{}, {\"a\": [true]}]", "[true, false]", "[[1], [\"a\"]]", "[null]"] {
+        assert_eq!(held(&g, sp[0], &call(ok)), (None, true), "{ok}");
+    }
+    for (bad, off) in [("[{}, false]", 5), ("[1, \"a\"]", 4), ("[[1], [2, \"a\"]]", 10), ("[true, null]", 7)] {
+        assert_eq!(held(&g, sp[0], &call(bad)).0, Some(at + off), "{bad}");
+    }
+}
+
+/// The finisher's masks equal walking every token through it (as the
+/// grammar's do: `masks_match_naive`), and from any state of a random call
+/// it closes the call: following any token it allows reaches the end.
+#[test]
+fn finisher_closes_from_anywhere() {
+    let (v, sp) = toy_vocab(23, 600);
+    let g = hermes(v.clone());
+    let (m, f) = (&g.masks, &g.finish);
+    let mut s = 0x0dd_ba11u64;
+    let mut buf = Vec::new();
+    let mut closed = 0;
+    for walk in 0..30 {
+        let (mut node, mut stack) = (g.start, Vec::<NodeId>::new());
+        for step in 0..(20 + walk * 3) {
+            let want = naive(m, node, &stack);
+            let Some(&id) = (!want.is_empty()).then(|| pick(&mut s, &want)) else {
+                break;
+            };
+            node = m.walk(node, &stack, id, &mut buf).unwrap();
+            stack = buf.clone();
+            if m.graph.nodes[node as usize].accept && stack.is_empty() {
+                break;
+            }
+            if step % 5 != 0 {
+                continue;
+            }
+            // From here, the shortest way out.
+            let (mut n2, mut st2) = (node, stack.clone());
+            for k in 0..400 {
+                let tm = f.mask(n2, &st2, &mut buf);
+                let fw = naive(f, n2, &st2);
+                assert_eq!(ids(&tm), fw, "walk {walk}: finisher mask at node {n2}");
+                assert!(!fw.is_empty(), "walk {walk}: the finisher allows nothing at node {n2}");
+                for &x in &fw {
+                    assert!(
+                        m.walk(n2, &st2, x, &mut Vec::new()).is_some(),
+                        "the finisher allows what the grammar doesn't"
+                    );
+                    assert!(x != sp[0] && x != sp[2], "special {x}");
+                }
+                n2 = f.walk(n2, &st2, *pick(&mut s, &fw), &mut buf).unwrap();
+                st2 = buf.clone();
+                if f.graph.nodes[n2 as usize].accept && st2.is_empty() {
+                    closed += 1;
+                    break;
+                }
+                assert!(k < 399, "walk {walk}: the finisher didn't close");
+            }
+        }
+    }
+    assert!(closed > 100, "{closed} closes");
+}
+
+/// A call whose last `STALL_WINDOW` tokens are at most `STALL_IDS` ids is
+/// closed the shortest way: `false, false, ...` in an array, `\n\n\n...` in
+/// a string. A long call that keeps writing other tokens doesn't stall.
+#[test]
+fn stalled_call_closes() {
+    use super::{STALL_IDS, STALL_WINDOW};
+    let (v, sp) = toy_vocab(29, 50);
+    let g = Arc::new(hermes(v.clone()));
+    let tok = |s: &str| -> u32 {
+        (0..v.len() as u32)
+            .find(|&id| v.bytes(id) == s.as_bytes() && !v.is_special(id))
+            .unwrap_or_else(|| panic!("no token {s:?}"))
+    };
+    let start = |c: &mut Constraint, head: &str| {
+        assert!(c.accept(sp[0]));
+        for &b in head.as_bytes() {
+            assert!(c.accept(b as u32), "{head:?}");
+        }
+    };
+    // `[false, false, ...`: three ids (`false`, `,`, ` `).
+    let mut c = Constraint::new(g.clone());
+    start(&mut c, "\n{\"name\": \"x\", \"arguments\": {\"edits\": [false");
+    let n0 = g.counters.stalls.load(std::sync::atomic::Ordering::Relaxed);
+    let mut taken = 0;
+    while !c.stalled() {
+        for t in [",", " ", "false"] {
+            assert!(c.accept(tok(t)));
+            taken += 1;
+        }
+        assert!(taken < 2 * STALL_WINDOW, "never stalled");
+    }
+    assert!(taken + 13 >= STALL_WINDOW, "stalled after {taken}");
+    assert_eq!(g.counters.stalls.load(std::sync::atomic::Ordering::Relaxed), n0 + 1);
+    // Now only the shortest close: `]`, `}`, `}`, then `</tool_call>`.
+    for want in ["]", "}", "}"] {
+        let m = c.mask().unwrap().unwrap();
+        let only: Vec<String> = m.ids().map(|i| String::from_utf8_lossy(v.bytes(i)).into()).collect();
+        assert!(only.iter().all(|t| t.starts_with(want)), "{want}: {only:?}");
+        assert!(m.allows(tok(want)) && !m.allows(tok(",")) && !m.allows(tok(" ")));
+        assert!(c.accept(tok(want)));
+    }
+    let m = c.mask().unwrap().unwrap();
+    assert!(m.allows(sp[1]) && !m.allows(b'\n' as u32));
+    assert!(c.accept(sp[1]) && !c.engaged() && !c.stalled());
+    // The next call starts fresh.
+    start(&mut c, "\n{\"name\": \"x\", \"arguments\": {\"cmd\": \"");
+    assert!(!c.stalled());
+    let mut taken = 0;
+    while !c.stalled() {
+        assert!(c.accept(tok("\\n")));
+        taken += 1;
+        assert!(taken <= STALL_WINDOW, "never stalled");
+    }
+    // The window's other ids: the head's last few (`: "`).
+    assert!(taken + STALL_IDS >= STALL_WINDOW, "stalled after {taken}");
+    let m = c.mask().unwrap().unwrap();
+    assert!(m.allows(b'"' as u32) && !m.allows(tok("\\n")) && !m.allows(b'a' as u32));
+    // A call writing more than `STALL_IDS` ids over and over never stalls.
+    let mut c = Constraint::new(g.clone());
+    start(&mut c, "\n{\"name\": \"x\", \"arguments\": {\"cmd\": \"");
+    let five: Vec<u32> = ["a", "b", "c", "x", "y"][..STALL_IDS + 1].iter().map(|t| tok(t)).collect();
+    for i in 0..4 * STALL_WINDOW {
+        assert!(c.accept(five[i % five.len()]));
+    }
+    assert!(!c.stalled());
+}
+
+/// Triggers: `<tool_call>` as its token or spelled out, across tokens or
+/// inside one, with the bytes after it in that token taken by the grammar
+/// (refused: left free, counted); suspended inside the reply's reasoning
+/// (which only its first token opens, as `TextOut` reads it).
+#[test]
+fn hermes_triggers() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (v, sp) = toy_vocab(31, 30);
+    let mut pieces: Vec<Vec<u8>> = (0..v.len() as u32).map(|i| v.bytes(i).to_vec()).collect();
+    let extra = ["<tool", "_call", ">", ">\n", ">{", ">abc", "<tool_call>\n{", "<think>", "</think>"];
+    let first = pieces.len() as u32;
+    for p in extra {
+        pieces.push(p.as_bytes().to_vec());
+    }
+    let think = (first + 7, first + 8);
+    let mut specials = sp.clone();
+    specials.extend([think.0, think.1]);
+    let v = Arc::new(Vocab::from_pieces(pieces.len() + 1, &pieces, &specials));
+    let g = Arc::new(hermes(v.clone()));
+    let t = |s: &str| first + extra.iter().position(|x| *x == s).unwrap() as u32;
+    let bytes = |c: &mut Constraint, s: &str| s.bytes().for_each(|b| assert!(c.accept(b as u32)));
+    // Spelled across tokens, then the call.
+    let mut c = Constraint::new(g.clone());
+    bytes(&mut c, "Sure. ");
+    for x in ["<tool", "_call"] {
+        assert!(c.accept(t(x)) && !c.engaged());
+    }
+    assert!(c.accept(t(">\n")) && c.engaged(), "engaged, the newline taken");
+    let m = c.mask().unwrap().unwrap();
+    // After a newline: a second one, indentation, or the object.
+    assert!(m.allows(b'{' as u32) && m.allows(b'\n' as u32) && m.allows(b' ' as u32));
+    assert!(!m.allows(b'\r' as u32) && !m.allows(b'x' as u32) && !m.allows(sp[1]));
+    // Byte by byte, and inside one token with its tail.
+    let mut c = Constraint::new(g.clone());
+    bytes(&mut c, "<tool_call");
+    assert!(!c.engaged());
+    assert!(c.accept(t(">{")) && c.engaged());
+    assert!(c.mask().unwrap().unwrap().allows(b'"' as u32));
+    let mut c = Constraint::new(g.clone());
+    assert!(c.accept(t("<tool_call>\n{")) && c.engaged());
+    // A tail the grammar refuses: free, counted.
+    let r0 = g.counters.triggers_rejected.load(Relaxed);
+    let mut c = Constraint::new(g.clone());
+    for x in ["<tool", "_call", ">abc"] {
+        assert!(c.accept(t(x)));
+    }
+    assert!(!c.engaged());
+    assert_eq!(g.counters.triggers_rejected.load(Relaxed), r0 + 1);
+    // Not a trigger: almost, or broken up by other text.
+    let mut c = Constraint::new(g.clone());
+    bytes(&mut c, "<tool_cal> <tool <tool_call ");
+    assert!(c.accept(t(">")) && !c.engaged());
+    // Reasoning: a reply that opens with <think> holds no call until
+    // </think>, spelled or as the token.
+    let mut c = Constraint::new(g.clone()).with_think(Some(think));
+    assert!(c.accept(think.0));
+    assert!(c.accept(sp[0]) && !c.engaged());
+    bytes(&mut c, "<tool_call>");
+    assert!(!c.engaged());
+    assert!(c.accept(think.1));
+    bytes(&mut c, "\n\n");
+    assert!(c.accept(sp[0]) && c.engaged());
+    // <think> anywhere but first is text, not reasoning (as `TextOut`).
+    let mut c = Constraint::new(g.clone()).with_think(Some(think));
+    bytes(&mut c, "Hi ");
+    assert!(c.accept(think.0) && c.accept(sp[0]) && c.engaged());
+    // Spelled during a call is string text; after it, armed again.
+    let mut c = Constraint::new(g.clone());
+    assert!(c.accept(sp[0]));
+    bytes(&mut c, "{\"name\": \"x\", \"arguments\": {\"s\": \"<tool_call>\"}}");
+    assert!(c.engaged());
+    assert!(c.accept(sp[1]) && !c.engaged());
+    bytes(&mut c, "\n<tool_call>");
+    assert!(c.engaged());
+}
+
+/// tool_choice required and named: the prompt opens the call (its text
+/// after `<tool_call>`, `tools::Rendered::seed`), and the constraint starts
+/// engaged where that text leaves it: at the name (only offered names'
+/// starts), or at the arguments (only `{`). A seed the grammar refuses
+/// (a named tool it doesn't offer) is an error, never a wrong state.
+#[test]
+fn forced_seeds() {
+    let (v, _) = toy_vocab(37, 30);
+    let g = Arc::new(hermes(v.clone()));
+    let c = Constraint::forced(g.clone(), b"\n{\"name\": \"").unwrap();
+    assert!(c.engaged() && c.in_string());
+    let mut c2 = c.clone();
+    let m = c2.mask().unwrap().unwrap();
+    for b in 0..=255u8 {
+        let starts = NAMES.iter().any(|n| n.as_bytes()[0] == b);
+        assert_eq!(m.allows(b as u32), starts, "byte {:?}", b as char);
+    }
+    let mut c = Constraint::forced(g.clone(), b"\n{\"name\": \"get\", \"arguments\": ").unwrap();
+    let m = c.mask().unwrap().unwrap();
+    for b in 0..=255u8 {
+        assert_eq!(m.allows(b as u32), b == b'{', "byte {:?}", b as char);
+    }
+    for &b in b"{\"a\": 1}}\n" {
+        assert!(c.accept(b as u32));
+    }
+    assert!(c.engaged());
+    assert!(Constraint::forced(g.clone(), b"\n{\"name\": \"rm\", \"arguments\": ").is_err());
+    assert!(Constraint::forced(g, b"\n[").is_err());
+}
+
+/// `Hermes`: one grammar per set of names (order and duplicates don't
+/// matter), kept for the next request, at most `Hermes::KEEP`, the least
+/// recently used dropped; built warm (its call's masks compiled).
+#[test]
+fn hermes_grammars_kept() {
+    let (v, _) = toy_vocab(41, 100);
+    let h = super::Hermes::new(v, Default::default()).unwrap();
+    let a = h.grammar(&names(&["b", "a", "a"])).unwrap();
+    assert!(Arc::ptr_eq(&a, &h.grammar(&names(&["a", "b"])).unwrap()));
+    assert!(a.masks.cached() > 20, "warmed: {} masks", a.masks.cached());
+    let mut warm = b"\n{\"name\": \"b".to_vec();
+    warm.extend_from_slice(super::PREWARM_ARGS);
+    assert!(a.prewarm(&warm), "the warm-up call is one the grammar takes");
+    let other = h.grammar(&names(&["c"])).unwrap();
+    assert!(!Arc::ptr_eq(&a, &other));
+    for i in 0..super::Hermes::KEEP {
+        h.grammar(&names(&[&format!("t{i}")])).unwrap();
+    }
+    assert!(!Arc::ptr_eq(&a, &h.grammar(&names(&["a", "b"])).unwrap()), "dropped");
+    assert!(h.grammar(&[]).is_err());
+}
+
+/// AXON_CONSTRAIN is read strictly (as AXON_SHARE_KV): 0, 1, or unset or
+/// empty for the default (on).
+#[test]
+fn constrain_env_strict() {
+    use super::env_value;
+    assert_eq!(env_value(None), Ok(None));
+    assert_eq!(env_value(Some("")), Ok(None));
+    assert_eq!(env_value(Some(" 0 ")), Ok(Some(false)));
+    assert_eq!(env_value(Some("1")), Ok(Some(true)));
+    for bad in ["off", "false", "on", "true", "2", "yes"] {
+        let e = env_value(Some(bad)).unwrap_err();
+        assert!(e.contains("expected 0") && e.contains(bad), "{e}");
+    }
+}
+
+/// The spec's §4 parser agreement: 1000 random calls through the Hermes
+/// automaton (tokens the mask allows, picked at random, then the shortest
+/// close), each the text of a reply after its `<tool_call>` token: the
+/// server's tools parser makes exactly one call of it, named one of the
+/// offered names, its arguments a JSON object; nothing else but blanks.
+#[test]
+fn parser_agrees_on_random_calls() {
+    use crate::serve::tools::{Piece, hermes_pieces};
+    let (v, sp) = toy_vocab(43, 600);
+    let g = Arc::new(hermes(v.clone()));
+    let mut s = 0x5eed_cafe_f00du64;
+    let (mut toks, mut spelled_in_str) = (0, 0);
+    for walk in 0..1000 {
+        let mut c = Constraint::new(g.clone());
+        assert!(c.accept(sp[0]));
+        let mut bytes = b"<tool_call>".to_vec();
+        let budget = 5 + walk % 150;
+        let mut n = 0;
+        while c.engaged() {
+            if n == budget {
+                c.close_now();
+            }
+            let m = c.mask().unwrap().expect("engaged");
+            let ids: Vec<u32> = m.ids().collect();
+            let id = *pick(&mut s, &ids);
+            assert!(c.accept(id));
+            bytes.extend_from_slice(v.bytes(id));
+            n += 1;
+            assert!(n < budget + 400, "walk {walk}: no close");
+        }
+        toks += n;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let body = &text[11..text.rfind("</tool_call>").unwrap()];
+        spelled_in_str += usize::from(body.contains("</tool_call>"));
+        let pieces = hermes_pieces(&text);
+        let calls: Vec<_> = (pieces.iter())
+            .filter_map(|p| match p {
+                Piece::Call(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "walk {walk}: {text:?} -> {pieces:?}");
+        assert!(NAMES.contains(&calls[0].name.as_str()), "walk {walk}: {:?}", calls[0].name);
+        assert!(
+            matches!(parse_json(&calls[0].args), Some(J::Obj(_))),
+            "walk {walk}: arguments {:?}",
+            calls[0].args
+        );
+        for p in &pieces {
+            if let Piece::Text(t) = p {
+                assert!(t.trim().is_empty(), "walk {walk}: text {t:?} from {text:?}");
+            }
+        }
+    }
+    eprintln!("{toks} tokens; {spelled_in_str} calls spell </tool_call> inside a string");
+}
+
+/// A draft's copy (`Constraint::draft_copy`) takes the same tokens and
+/// reaches the same state, but only the real constraint's tokens and stalls
+/// are counted (a drafted reply would count its guesses twice).
+#[test]
+fn draft_copies_not_counted() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (v, sp) = toy_vocab(47, 30);
+    let g = Arc::new(hermes(v.clone()));
+    let mut c = Constraint::new(g.clone());
+    assert!(c.accept(sp[0]));
+    let t0 = g.counters.tokens.load(Relaxed);
+    let mut d = c.draft_copy();
+    for &b in b"\n{\"name\": \"x\"" {
+        assert!(d.accept(b as u32));
+    }
+    assert_eq!(g.counters.tokens.load(Relaxed), t0, "a draft's tokens");
+    for &b in b"\n{\"name\": \"x\"" {
+        assert!(c.accept(b as u32));
+    }
+    assert_eq!(g.counters.tokens.load(Relaxed), t0 + 13);
+    assert_eq!(c.phase, d.phase);
 }

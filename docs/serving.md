@@ -66,7 +66,8 @@ bound, a long prompt can then wait as long as shorter ones keep arriving, and `s
 default parallel/16 within 2..8, and short ones never wait for a lane; with fifo, all of them,
 default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for the fixed
 budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COST=legacy`.
-`--quiet`
+`--no-constrain` (tool calls not held to the tools offered and to JSON:
+[Tool calling](#tool-calling)), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -199,7 +200,12 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_tool_calls_dropped_total` (tool calls begun but returned as no call: a `<tool_call>` block or
   Llama JSON reply that isn't a JSON object with a string name, as content, or a gpt-oss call whose arguments
   never opened as an object, as reasoning), `axon_tool_calls_invalid_total` (calls returned whose `arguments`
-  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value), and the histograms
+  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value); constrained
+  tool calls' (below): `axon_constraint_tokens_total` (tokens picked inside a held call),
+  `axon_constraint_fallback_total` (held positions decided on the whole logits row, the device's candidates
+  holding too few allowed tokens), `axon_constraint_trigger_rejected_total` (a `<tool_call>` written out in a
+  token that goes on with text no call starts with: left free), `axon_constraint_stalls_total` (held calls
+  closed the shortest way after they stalled) and `axon_constraint_mask_seconds_total`; and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). The scheduler's (#131): `axon_waiting_requests`,
@@ -363,11 +369,50 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   comes later (the first one before the next `<tool_call>`), so a call's own stray
   `</tool_call>` doesn't show in `content`. A block that never becomes a call still comes back
   as content, tags and all, and so does a second stray `</tool_call>`.
+- **Calls are held to the tools offered and to JSON** (constrained decoding, #259), on the
+  Hermes models (Qwen2.5 and Qwen3 templates), by default. From the reply's `<tool_call>` (its
+  token, or the text spelled out; not inside Qwen3's reasoning) to its `</tool_call>`, every
+  token is picked from those that keep the call one of
+  `{"name": NAME, "arguments": OBJECT}`: NAME one of the request's tool names (so a model
+  can't call `apply_patch` when it wasn't offered: #259's codex runs did, 6 times), OBJECT
+  any JSON object, nested at most 64 deep, with no special token (EOS, `<|im_end|>`, a second
+  `<tool_call>`) inside a string. After the call the reply is free again, so it can make
+  more calls or write text. `tool_choice` `required` and named start the reply inside the
+  call (the prompt opened it), held from its first token. What doesn't change: requests
+  without tools, `tool_choice: "none"`, text before a call, and every token of a reply that
+  makes no call. Held calls can't run on for ever (#272, where 13 of 15 malformed calls
+  were runaways that hit `max_tokens`):
+  - **Whitespace** outside strings is one space, or one or two newlines and at most 20
+    spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
+  - **An array keeps its first item's kind** (objects, strings, numbers, booleans, null,
+    arrays). A runaway in #272 wrote an edit object and then `false, false, ...` 1,900
+    times; in the acceptance runs' 5,700 calls no other array mixed kinds.
+  - **A stalled call closes.** When the last 256 tokens of a call are no more than 4
+    distinct tokens (`false, false, ...`, a string of `\n\n\n...`), it is closed the
+    shortest way from there: the string ends, then each open array and object, then
+    `</tool_call>` (`axon_constraint_stalls_total`).
+
+  Valid isn't right: where the model would have written an unescaped quote, the string ends
+  there and the call goes on from it, so the call parses but may not be what was meant (the
+  harness tells the model, which can retry). What it can't write: an array of mixed kinds
+  (`[1, "a"]`), more blank space than llama.cpp allows, or 256 tokens of a few repeated ones
+  (a long run of `0, 0, 0`); per-tool argument schemas are #259's next step (PR C).
+  `max_tokens` can still cut a call short (a call with invalid arguments, as above). The
+  identity changes with it: `NUMERICS_VERSION_EXACT` is 2 (every fingerprint moved), and a
+  tools request's `system_fingerprint` names the grammar
+  ([determinism.md](determinism.md#the-identity-tuple-and-system_fingerprint)).
+  **`--no-constrain`** or **`AXON_CONSTRAIN=0`** turns it off: the server then runs as before
+  it, token for token, and its identity says `no-constrain`. `AXON_CONSTRAIN=1` (or unset) is
+  on; any other value refuses to start. The banner ends with `constrained tool calls
+  (hermes-json <hash>)` when it's on; a Hermes model it can't hold (a vocabulary without
+  every byte as a token, or no `<tool_call>` token) gets a line saying why.
 - **`AXON_TOOL_STREAM=0`** (exactly `0`) turns this off: every call goes out once its block is decided, as
   two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
   text when the reply ends), and a block that isn't a JSON object with a string `"name"`
   (invalid JSON, or cut off mid-call) is returned as `content`, so `arguments` is always
-  valid JSON. The ollama routes always work this way (an ollama call is a whole object).
+  valid JSON. A call whose `</tool_call>` the model left out ends where the next `<tool_call>`
+  begins, if its block is a call up to there (#259). The ollama routes always work this way
+  (an ollama call is a whole object).
 - Qwen3's reasoning still comes as `reasoning_content`. gpt-oss: its calls stream the same
   way once their arguments open with `{` (after nothing but blanks). A call whose arguments
   never do (a number, an array, nothing, other text first) is not a call: its text comes back as `reasoning_content` (it was on the
@@ -396,7 +441,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   gpt-oss: a named choice opens `<|channel|>commentary to=functions.NAME <|constrain|>json
   <|message|>` (the form the model writes calls in) and keeps every tool in the prompt.
   `required` with one tool is that tool's named choice; with several it is a 400, since a
-  prefill can't force one of them (constrained decoding: #116).
+  prefill can't force one of them (constrained decoding of harmony calls: #116).
   Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.

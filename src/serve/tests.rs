@@ -2157,11 +2157,13 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
     }
 }
 
-/// Constrained tool calls (`Opts::constrain`, AXON_CONSTRAIN=1) end to end,
+/// Constrained tool calls (`Opts::constrain`, on by default) end to end,
 /// on the CPU (one request at a time: `sample::generate_constrained`) and
 /// on CUDA (the batch's masked rows, `RowHead::Sample.mask`): a request
-/// without tools gets the same reply and fingerprint from a server with
-/// constraints on or off; a tools request (tool_choice auto) gets its own
+/// without tools gets the same reply from a server with constraints on or
+/// off, and the default fingerprint from the server with them on (off adds
+/// `no-constrain` to the identity: `identity::serve_field`); a tools
+/// request (tool_choice auto) gets its own
 /// `system_fingerprint` (`identity::constrain_field`), and every call it
 /// makes has arguments that parse (but a call cut by `max_tokens`), with no
 /// `<tool_call>` block left in the content of a reply that stopped; on CUDA, tools requests and plain ones
@@ -2210,8 +2212,14 @@ fn serve_constrained_tool_calls() {
         let a = post(off.addr, "/v1/chat/completions", plain.clone()).json();
         let b = post(on.addr, "/v1/chat/completions", plain.clone()).json();
         assert_eq!(a["choices"], b["choices"], "{dev:?}: a plain request");
-        assert_eq!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        assert_ne!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        let ida = call(off.addr, "GET", "/identity", "").json();
+        let idb = call(on.addr, "GET", "/identity", "").json();
+        assert_eq!(ida["serve"], "no-constrain", "{ida}");
+        assert!(idb.get("serve").is_none(), "{idb}");
+        assert_eq!(b["system_fingerprint"], idb["system_fingerprint"]);
         let fp = a["system_fingerprint"].as_str().unwrap().to_string();
+        let fp_on = b["system_fingerprint"].as_str().unwrap().to_string();
         let (mut calls, mut cfps) = (0, Vec::new());
         for body in &tbodies {
             let v0 = post(off.addr, "/v1/chat/completions", body.clone()).json();
@@ -2225,6 +2233,7 @@ fn serve_constrained_tool_calls() {
             let v = r.json();
             let vfp = v["system_fingerprint"].as_str().unwrap().to_string();
             assert_ne!(vfp, fp, "{dev:?}: a constrained reply's fingerprint");
+            assert_ne!(vfp, fp_on, "{dev:?}: a constrained reply's fingerprint");
             cfps.push(vfp);
             let ch = &v["choices"][0];
             let cut = ch["finish_reason"] == "length";
@@ -2260,6 +2269,94 @@ fn serve_constrained_tool_calls() {
             constrained_together_vs_alone(on.addr, &bodies);
         }
     }
+}
+
+/// PR B of the constrained-decoding spec on the test model (CPU): a server
+/// started with no switch holds tool calls (a tools request carries the
+/// constrained fingerprint; AXON_CONSTRAIN set in the test's environment
+/// skips that part); tool_choice required and named start engaged where
+/// the prompt's call text leaves them, so the call names an offered tool
+/// (the named one) and its arguments are a JSON object, sampled hot too;
+/// a tools request whose history has calls but no tools offered is free;
+/// the constraint counters are on /metrics.
+#[test]
+fn serve_constrained_forced_and_default() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([
+        {"type": "function", "function": {"name": "get_weather",
+            "description": "Get the weather in a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}},
+        {"type": "function", "function": {"name": "get_time",
+            "description": "The local time in a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}}]);
+    let user = json!({"role": "user", "content": "What's the weather in Paris?"});
+    let req = |choice: Value, temp: f64, seed: u64| {
+        json!({"messages": [user], "tools": tools, "tool_choice": choice,
+               "temperature": temp, "seed": seed, "max_tokens": 96})
+    };
+    let default_on = std::env::var_os("AXON_CONSTRAIN").is_none();
+    let s = server_with(p, Device::Cpu, |o| {
+        if !default_on {
+            o.constrain = Some(true);
+        }
+    });
+    let a = s.addr;
+    let fp = call(a, "GET", "/identity", "").json()["system_fingerprint"].clone();
+    let named = json!({"type": "function", "function": {"name": "get_time"}});
+    let mut n_calls = 0;
+    for (choice, want) in [(json!("required"), None), (named, Some("get_time"))] {
+        for (temp, seed) in [(0.0, 0), (1.3, 7), (1.3, 8)] {
+            let v = post(a, "/v1/chat/completions", req(choice.clone(), temp, seed)).json();
+            assert_ne!(v["system_fingerprint"], fp, "constrained: {v}");
+            let ch = &v["choices"][0];
+            let calls = ch["message"]["tool_calls"].as_array().unwrap_or_else(|| panic!("{v}"));
+            let cut = ch["finish_reason"] == "length";
+            for (i, c) in calls.iter().enumerate() {
+                let name = c["function"]["name"].as_str().unwrap();
+                assert!(["get_weather", "get_time"].contains(&name), "{v}");
+                if i == 0 && let Some(w) = want {
+                    assert_eq!(name, w, "{v}");
+                }
+                if !(cut && i + 1 == calls.len()) {
+                    let args = c["function"]["arguments"].as_str().unwrap();
+                    let j: Value = serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                    assert!(j.is_object(), "{v}");
+                }
+                n_calls += 1;
+            }
+        }
+    }
+    assert!(n_calls >= 6, "{n_calls} calls");
+    // No tools offered (a history with a call): nothing to hold a call to.
+    let hist = json!({"messages": [user,
+        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "18C"}],
+        "tools": [], "temperature": 0, "max_tokens": 8});
+    let v = post(a, "/v1/chat/completions", hist).json();
+    assert_eq!(v["system_fingerprint"], fp, "{v}");
+    let g = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert!(g["axon_constraint_tokens_total"] >= 6.0, "{g:?}");
+    for k in [
+        "axon_constraint_fallback_total",
+        "axon_constraint_trigger_rejected_total",
+        "axon_constraint_stalls_total",
+        "axon_constraint_mask_seconds_total",
+    ] {
+        assert!(g.contains_key(k), "{k}");
+    }
+    assert!(g["axon_constraint_mask_seconds_total"] > 0.0);
+    if !default_on {
+        return;
+    }
+    // Auto: the same server holds it by default (its own fingerprint).
+    let v = post(a, "/v1/chat/completions", req(json!("auto"), 0.0, 0)).json();
+    assert_ne!(v["system_fingerprint"], fp, "{v}");
 }
 
 /// `batched_vs_solo` for replies that may be tool calls: content,
