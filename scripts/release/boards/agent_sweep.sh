@@ -15,6 +15,7 @@
 set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
+need_axon
 OUT=$D/sweep
 rm -rf "$OUT"; mkdir -p "$OUT"; hw "$OUT/hw.txt"; cat "$OUT/hw.txt"
 CELL=(--kv f16 --rounds 1 --speeds 1 --model "$M" --trace "$TR" --window-s "$WIN" --scale 0.15 --clip 32768)

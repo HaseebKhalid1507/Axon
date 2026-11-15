@@ -17,6 +17,13 @@ M=${AXON_REL_MODEL:-$MD/Qwen2.5-7B-Instruct-Q4_K_M.gguf}
 TR=$HOME/.cache/axon-agent/traces/board-trace-v1.json
 WIN=${AXON_REL_WINDOW:-600}
 if [ -n "$smoke" ]; then M=$MD/qwen2.5-0.5b-q4_k_m.gguf WIN=60; export AXON_KV_PAGES=512; fi
+need_axon() {   # a real run measures only the staged release binary: rc/axon.sha256 is written from the tarball
+  # the workflow checksummed (docs/log/2026-11-14-release-0.1-prep.md, "Release dry run"); a smoke takes any axon
+  [ -n "$smoke" ] && return 0
+  if [ "$AX" != "$D/rc/axon" ] || ! (cd "$D/rc" && sha256sum --quiet -c axon.sha256); then
+    echo "STOP: $AX isn't the staged release binary (rc/axon.sha256)"; exit 1
+  fi
+}
 hw() {   # the host, the GPU and every input's hash, into $1
   { date '+%F %T %Z'; nvidia-smi --query-gpu=name,driver_version,vbios_version,memory.total,power.limit,clocks.max.sm,clocks.max.mem --format=csv
     nproc; grep -m1 'model name' /proc/cpuinfo; uptime; free -m | head -2

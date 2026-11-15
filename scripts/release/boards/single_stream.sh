@@ -8,6 +8,7 @@
 set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
+need_axon
 MODELS=${AXON_REL_SB_MODELS:-0.5B,1.5B,3B,7B,q3-8B}; ROUNDS=${AXON_REL_SB_ROUNDS:-3}
 N=$D/sbnode; rm -rf "$N"; mkdir -p "$N/models" "$N/lib/nvrtc-none" "$N/cache" "$N/bin"
 for f in qwen2.5-0.5b-q4_k_m.gguf qwen2.5-1.5b-instruct-q4_k_m.gguf qwen2.5-3b-instruct-q4_k_m.gguf \

@@ -6,6 +6,7 @@
 set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
+need_axon
 [ -f "$D/sweep/WINNER.env" ] || { echo "STOP: no sweep winner ($D/sweep/WINNER.env)"; exit 1; }
 # shellcheck source=/dev/null  # written by pick.py
 . "$D/sweep/WINNER.env"
