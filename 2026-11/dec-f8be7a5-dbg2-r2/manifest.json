@@ -1,0 +1,29 @@
+{
+ "label": "dec-f8be7a5-dbg2-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1114-191544-09b7",
+   "name": "dec-f8be7a5-fast-dbg-cpu [shard 2/3]",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-14_19:15.txt",
+   "gpu": "CPU only (pod1; GPU hidden)",
+   "driver": "595.91.07",
+   "sha": "f8be7a5",
+   "binary": "axon-test-dbg-f8be7a5",
+   "started": 1794701744.1933289,
+   "ended": 1794701809.4888554,
+   "attempts": 1,
+   "remote_job": "20261115-001549-axon-test-dbg-f8be7a5-113447",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "e435e94d58d036073a5302f2fac025a77abbb7476c011a59c20224ffde8c211e",
+   "log_bytes": 22851
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 19:16:50 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
