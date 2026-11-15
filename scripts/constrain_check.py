@@ -3,9 +3,10 @@
 
     scripts/constrain_check.py run --axon BIN --model M.gguf --bodies DIR --out OUT.json
                                    [--tasks harness_accept.py] [--stress N] [--pins PINS.json [--record]]
-                                   [--port P] [-- extra serve flags]
+                                   [--expect-constraint on|off|any] [--port P] [-- extra serve flags]
     scripts/constrain_check.py diff A.json B.json     the cells' digests of two runs: equal or not
     scripts/constrain_check.py replay --axon BIN --model M.gguf --replays DIR --out OUT.json [--seeds N]
+                                      [--expect-constraint on|off|any]
                                       [--port P] [-- extra serve flags]
 
 Starts `axon serve M` with the acceptance test's flags (scripts/harness_accept.py on feat/eval: --device cuda,
@@ -35,6 +36,17 @@ time (each reply's stalls are /metrics' delta), on the same server flags:
   legit     a request for data that repeats one value (an empty board, a table of zeros): no stall, every call
             valid;
   known-fp  one the rule is known to cut (reported, not judged).
+
+Integrity (11-15: a gate passed on 404s). The captured bodies name the model by the harness's alias
+("qwen2.5-7b"), which a server started on the .gguf doesn't answer (404 model_not_found): every cell, replay and
+batched copy got the same error, the digests of two 404s matched, and "kill switch == main" passed on nothing. So:
+  - a body's "model" is set to the id the server reports (/v1/models), as a harness's --alias would make it;
+  - every request's HTTP status is counted, in every arm (the kill switch and main too): any non-200 is
+    `INTEGRITY FAIL` and exit 2, whatever the verdict says;
+  - --expect-constraint on: the constraint must have run (axon_constraint_tokens_total moved); off: it must not
+    have (the kill switch, main). replay defaults to on;
+  - `diff` refuses runs with a non-200 cell, an integrity failure or different cells (`CELLS-INVALID`, exit 2)
+    instead of calling two errors equal.
 """
 
 import argparse
@@ -91,6 +103,63 @@ def offered(body):
         if t.get("type") == "function":
             names.add(t.get("name") or (t.get("function") or {}).get("name"))
     return names
+
+
+def served_id(port):
+    """The model id the server answers to (/v1/models' first)."""
+    st, raw = req(port, "GET", "/v1/models")
+    if st != 200:
+        sys.exit("constrain_check: /v1/models answered %d: %s" % (st, raw[:300]))
+    return json.loads(raw)["data"][0]["id"]
+
+
+def aim(body, mid):
+    """BODY for this server: the harnesses name the model by their alias ("qwen2.5-7b" in the captured bodies), which
+    a server started on the file refuses (404 model_not_found); the harness's own server has --alias for it."""
+    b = dict(body)
+    if "model" in b:
+        b["model"] = mid
+    return b
+
+
+class Http:
+    """Every request's status (thread-safe), for the integrity check."""
+
+    def __init__(self):
+        self.lock, self.n, self.bad = threading.Lock(), 0, []
+
+    def see(self, what, st, raw):
+        with self.lock:
+            self.n += 1
+            if st != 200:
+                self.bad.append([what, st, raw[:200].decode(errors="replace")])
+
+
+def integrity(res, http, expect):
+    """The run's transport and switch checks, judged in every arm: (its problems, the lines to print)."""
+    probs = []
+    if http.n == 0:
+        probs.append("no request made")
+    if http.bad:
+        by = {}
+        for _w, st, _b in http.bad:
+            by[st] = by.get(st, 0) + 1
+        probs.append("%d of %d requests not 200 %s (first: %s: %s)" % (len(http.bad), http.n, by, http.bad[0][0],
+                                                                      http.bad[0][2]))
+    k = "axon_constraint_tokens_total"
+    tok = res.get("metrics_after", {}).get(k, 0) - res.get("metrics_before", {}).get(k, 0)
+    if expect == "on" and tok <= 0:
+        probs.append("the constraint was to run, but %s +0" % k)
+    if expect == "off" and tok != 0:
+        probs.append("the constraint was to be off, but %s +%d" % (k, tok))
+    res["http"] = {"requests": http.n, "non200": http.bad}
+    res["constraint_tokens"] = tok
+    res["integrity"] = probs
+    lines = ["HTTP %s" % ("all 200 (%d requests)" % http.n if not http.bad else
+                          "NON-200: %d of %d" % (len(http.bad), http.n)),
+             "CONSTRAINT-TOKENS %d (expected %s)" % (tok, expect),
+             "INTEGRITY %s" % ("PASS" if not probs else "FAIL: " + "; ".join(probs))]
+    return probs, lines
 
 
 def cells(bodies):
@@ -214,17 +283,20 @@ def stop(proc):
 
 def run(a):
     proc, port, logf, res = start(a)
-    bad = []
+    bad, http = [], Http()
     try:
         ident = json.loads(req(port, "GET", "/identity")[1])
         res["identity"] = ident
         res["banner"] = [ln.strip() for ln in open(logf, errors="replace") if "constrained tool calls" in ln]
         res["metrics_before"] = metrics(port)
         cs, codex_chat = cells(a.bodies)
+        res["model_id"] = mid = served_id(port)
+        cs = [(name, route, aim(body, mid)) for name, route, body in cs]
         alone, together = {}, {}
         res["cells"] = {}
         for name, route, body in cs:
             st, raw = req(port, "POST", route, body)
+            http.see(name, st, raw)
             rep, judged = reply_of(route, st, raw, offered(body))
             alone[name] = digest(rep)
             res["cells"][name] = dict(digest=alone[name], judged=judged, reply=rep)
@@ -233,6 +305,7 @@ def run(a):
 
         def one(name, route, body):
             st, raw = req(port, "POST", route, body)
+            http.see(name + " (batched)", st, raw)
             outs[name] = digest(reply_of(route, st, raw, offered(body))[0])
         for name, route, body in cs:
             t = threading.Thread(target=one, args=(name, route, body))
@@ -279,6 +352,7 @@ def run(a):
                     b["messages"].append({"role": "user", "content": tasks[(s - 1) % len(tasks)]})
                     b.update(seed=s, max_tokens=1024)
                     st, raw = req(port, "POST", "/v1/chat/completions", b)
+                    http.see("stress seed %d" % s, st, raw)
                     rep, judged = reply_of("/v1/chat/completions", st, raw, names)
                     with lock:
                         reps.append(dict(seed=s, judged=judged, finish=rep.get("finish"), calls=rep.get("calls")))
@@ -297,10 +371,13 @@ def run(a):
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)
+    probs, ilines = integrity(res, http, a.expect_constraint)
+    bad += ["integrity: " + p for p in probs]
     res["bad"] = bad
     json.dump(res, open(a.out, "w"), indent=1)
-    print("fingerprint %s numerics %s banner %s" % (res["identity"]["system_fingerprint"],
-                                                   res["identity"].get("numerics"), res["banner"]))
+    print("fingerprint %s numerics %s model %s banner %s" % (res["identity"]["system_fingerprint"],
+                                                            res["identity"].get("numerics"), res.get("model_id"),
+                                                            res["banner"]))
     for n, c in res["cells"].items():
         print("CELL %-22s %s %s %s" % (n, c["digest"], c["reply"].get("finish"),
                                        ",".join("%s:%s" % j for j in c["judged"]) or "no call"))
@@ -309,8 +386,9 @@ def run(a):
         print("STRESS %s" % json.dumps(res["stress"]["counts"], sort_keys=True))
     print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
                                      for k in res["metrics_after"]}, sort_keys=True))
+    print("\n".join(ilines))
     print("VERDICT %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad[:20])))
-    return 0 if not bad else 1
+    return 2 if probs else 0 if not bad else 1
 
 
 def replay(a):
@@ -324,13 +402,14 @@ def replay(a):
     if not cs:
         sys.exit("constrain_check: no replay in %s for %s" % (a.replays, m))
     proc, port, logf, res = start(a)
-    bad, rows = [], []
+    bad, rows, http = [], [], Http()
     try:
         res["identity"] = json.loads(req(port, "GET", "/identity")[1])
+        res["model_id"] = mid = served_id(port)
         res["metrics_before"] = metrics(port)
         for name, c in cs:
             for mode in ["greedy"] + ["seed%d" % s for s in range(1, a.seeds + 1)]:
-                body = dict(c["body"])
+                body = aim(c["body"], mid)
                 if mode == "greedy":
                     body["temperature"] = 0
                 else:
@@ -341,6 +420,7 @@ def replay(a):
                 m0 = metrics(port)
                 t0 = time.time()
                 st, raw = req(port, "POST", c["route"], body, timeout=3600)
+                http.see("%s %s" % (name, mode), st, raw)
                 m1 = metrics(port)
                 rep, judged = reply_of(c["route"], st, raw, offered(body))
                 stalls = m1.get("axon_constraint_stalls_total", 0) - m0.get("axon_constraint_stalls_total", 0)
@@ -365,18 +445,33 @@ def replay(a):
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)
+    probs, ilines = integrity(res, http, a.expect_constraint)
+    bad += ["integrity: " + p for p in probs]
     res["rows"], res["bad"] = rows, bad
     res["stall_lines"] = [ln.strip() for ln in open(logf, errors="replace") if "stalled after" in ln]
     json.dump(res, open(a.out, "w"), indent=1)
     print("STALL-LINES %d" % len(res["stall_lines"]))
     print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
                                      for k in res["metrics_after"]}, sort_keys=True))
+    print("\n".join(ilines))
     print("VERDICT %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad[:20])))
-    return 0 if not bad else 1
+    return 2 if probs else 0 if not bad else 1
 
 
 def diff(a, b):
     x, y = json.load(open(a)), json.load(open(b))
+    why = []
+    for f, d in ((a, x), (b, y)):
+        non200 = [n for n, c in d["cells"].items() if c["reply"].get("status") not in (None, 200)]
+        if non200:
+            why.append("%s: cells not 200: %s" % (f, ",".join(non200)))
+        if d.get("integrity", ["no integrity record (a run before 11-15's check)"]):
+            why.append("%s: integrity %s" % (f, d.get("integrity", "missing")))
+    if set(x["cells"]) != set(y["cells"]):
+        why.append("different cells: %s vs %s" % (sorted(x["cells"]), sorted(y["cells"])))
+    if why:
+        print("CELLS-INVALID: " + "; ".join(why))
+        return 2
     same = [n for n in x["cells"] if y["cells"].get(n, {}).get("digest") == x["cells"][n]["digest"]]
     differ = [n for n in x["cells"] if n not in same]
     print("same %d: %s" % (len(same), ",".join(same)))
@@ -398,6 +493,7 @@ def main():
     r.add_argument("--pins")
     r.add_argument("--record", action="store_true")
     r.add_argument("--port", type=int, default=0)
+    r.add_argument("--expect-constraint", choices=("on", "off", "any"), default="any")
     r.add_argument("serve", nargs="*")
     d = sp.add_parser("diff")
     d.add_argument("a")
@@ -409,6 +505,7 @@ def main():
     rp.add_argument("--out", required=True)
     rp.add_argument("--seeds", type=int, default=2)
     rp.add_argument("--port", type=int, default=0)
+    rp.add_argument("--expect-constraint", choices=("on", "off", "any"), default="on")
     rp.add_argument("serve", nargs="*")
     a = p.parse_args()
     sys.exit({"run": run, "replay": replay}[a.cmd](a) if a.cmd != "diff" else diff(a.a, a.b))
