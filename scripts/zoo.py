@@ -250,7 +250,9 @@ def llama_side(a, model, ids_list, texts=None):
     env["LD_LIBRARY_PATH"] = os.path.dirname(a.llama_server) + ":" + env.get("LD_LIBRARY_PATH", "")
     log = open(os.path.join(a.work, os.path.basename(model) + ".llama.log"), "w")
     srv = subprocess.Popen([a.llama_server, "-m", model, "--port", str(port), "-c", "4096", "-np", "1",
-                            "--no-warmup", "-ngl", str(getattr(a, "llama_ngl", 0)), "-t", str(a.threads), "--jinja"]
+                            "--no-warmup", "-ngl", str(getattr(a, "llama_ngl", 0)), "-t", str(a.threads)]
+                           # --jinja only for --chat: a template minja can't parse must not cost the logits comparison
+                           + (["--jinja"] if getattr(a, "chat", False) else [])
                            + shlex.split(getattr(a, "llama_args", "") or ""),
                            env=env, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"

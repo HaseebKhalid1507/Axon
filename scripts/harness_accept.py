@@ -15,6 +15,9 @@ gpt-oss's experts on the GPU as far as they fit). Stdlib only, one file (axon-po
                                                   compaction / cold-prompt counts redone from its files
     harness_accept.py selfcheck [--no-sandbox]    every task's check fails before and passes after its reference
                                                   solution; the proxy's parsing against a fake upstream (no model)
+    harness_accept.py capture --harness H --out DIR [--task ID] [--no-sandbox]
+                                                  the request bodies a harness sends (one turn against a stub
+                                                  server, no model): DIR/<harness>-<n>.json, for prompt_diff.py
     harness_accept.py list                        the tasks
 
 Per engine, one server process (restarted only after a crash) sits behind an in-process recording proxy. Per task the
@@ -39,10 +42,16 @@ is counted there, not in the next task. Compactions: each run counts the harness
 session files: `compactions`) and flags cold prompts (>= COLD_MIN uncached tokens: `cold`), those in a compaction's
 window (`cold_cmp`: no engine can reuse a prefix the harness rewrote) and a task's first request (`cold_first`).
 
+The recorder never changes what it measures (11-15): a request whose events the parser can't read is still forwarded
+byte for byte and recorded, flagged `proxy_err` (SUMMARY's `(all)` rows; 0 in a clean run). Codex's own count of the
+calls it refused as unsupported (a tool it didn't offer) comes from its rollouts (`cx_unsupported`, also in `rescore`),
+next to the proxy's `tc_unoffered`.
+
 Safety: every harness, and every check that runs model-written code, runs under bubblewrap (no --no-sandbox): only
 /usr, /etc, /opt, /sys read-only, an empty /home with the run directory bound in, private /tmp and pid namespace, a
 clean environment (scratch HOME / XDG dirs, dummy keys). The network namespace is shared (the harness must reach the
-proxy on 127.0.0.1), so a model could still reach the internet.
+proxy on 127.0.0.1), so a model could still reach the internet, and every service listening on the host's localhost
+(ollama's API, other engines' ports) as well.
 """
 import argparse, ast, csv, datetime, glob, hashlib, http.client, http.server, io, json, os, re, select, shutil, signal
 import socket, socketserver, statistics, subprocess, sys, tempfile, threading, time, urllib.request
@@ -788,13 +797,50 @@ def tool_names(tools):
 
 
 class Rec:
+    """One request's record. The recorder must never change what it measures: the proxy calls it only through
+    safe_event and safe_close, and __init__ catches its own errors, so a parser bug (an event shaped in a way the
+    parser didn't expect) is counted as proxy_err, with its first message, and the bytes keep flowing (11-15: before,
+    any exception but ValueError escaped mid-stream, truncated the harness's response and lost the record)."""
+
     def __init__(self, route, body, label):
         self.d = dict(label, route=route, status=None, ttft_ms=None, total_ms=None, prompt_tokens=None,
                       completion_tokens=None, cached_tokens=None, tc=0, tc_badjson=0, tc_text=0, tc_text_r=0, empty=0,
-                      finish=None, err=None, srv_prompt_n=None, srv_prompt_ms=None, srv_pred_n=None, srv_pred_ms=None)
+                      finish=None, err=None, srv_prompt_n=None, srv_prompt_ms=None, srv_pred_n=None, srv_pred_ms=None,
+                      tool_res=0, tool_res_err=0, proxy_err=0, proxy_err_msg=None)
         self.calls, self.text, self.rtext, self.first = {}, [], [], None
+        self.offered, self.names = set(), {}
+        try:
+            self._parse_body(route, body)
+        except Exception as e:  # noqa: BLE001
+            self.perr(e)
+
+    def perr(self, e):
+        self.d["proxy_err"] += 1
+        if self.d["proxy_err_msg"] is None:
+            self.d["proxy_err_msg"] = ("%s: %s" % (type(e).__name__, e))[:200]
+        print("WARN proxy_err %s/%s/%s: %s: %s" % (self.d.get("engine"), self.d.get("harness"), self.d.get("task"),
+                                                   type(e).__name__, str(e)[:200]), file=sys.stderr, flush=True)
+
+    def safe_event(self, o, t):
+        try:
+            self.event(o, t)
+        except Exception as e:  # noqa: BLE001
+            self.perr(e)
+
+    def safe_close(self, status, t0, t_end, raw_err=None):
+        try:
+            return self.close(status, t0, t_end, raw_err)
+        except Exception as e:  # noqa: BLE001 (a record with what's known, flagged, rather than none)
+            self.perr(e)
+            self.d.update(status=status, total_ms=int((t_end - t0) * 1000))
+            for k, v in (("is_err", int(status >= 400 or self.d["err"] is not None)), ("ctx_overflow", 0), ("held", 0),
+                         ("tc_unoffered", 0)):
+                self.d.setdefault(k, v)
+            return self.d
+
+    def _parse_body(self, route, body):
         b = body if isinstance(body, dict) else {}
-        self.offered, self.names = tool_names(b.get("tools")), {}  # call key -> the name the model called
+        self.offered = tool_names(b.get("tools"))  # names: call key -> the name the model called
         self.d.update(stream=bool(b.get("stream")), n_tools=len(b.get("tools") or []),
                       keys=sorted(b.keys())[:40], temperature=b.get("temperature"), top_p=b.get("top_p"),
                       max_tokens=b.get("max_tokens", b.get("max_completion_tokens", b.get("max_output_tokens"))),
@@ -998,10 +1044,10 @@ class Proxy:
                         rec.d["cut"] = st["cut"]
                         if st["cut"]:  # hung up (or cut at the task's end) before the response began
                             rec.d["err"] = "cut before the response (%s)" % st["cut"]
-                            px.add(rec.close(499, t0, time.time()))
+                            px.add(rec.safe_close(499, t0, time.time()))
                         else:
                             rec.d["err"] = "upstream: %s" % type(e).__name__
-                            px.add(rec.close(599, t0, time.time()))
+                            px.add(rec.safe_close(599, t0, time.time()))
                     try:
                         self.send_error(502, "upstream: %s" % type(e).__name__)
                     except OSError:
@@ -1038,15 +1084,20 @@ class Proxy:
                                 ln = ln[6:].strip()
                             if ln.startswith(b"{") and sse:
                                 try:
-                                    rec.event(json.loads(ln), now)
+                                    o = json.loads(ln)
                                 except ValueError:
-                                    pass
+                                    continue
+                                rec.safe_event(o, now)
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 except (OSError, http.client.HTTPException):
                     # the harness hung up (a write failed), or the upstream was cut (_watch, drain: a chunked read then
                     # ends in IncompleteRead, an HTTPException, which used to escape and lose the record)
                     st["cut"] = st["cut"] or "client"
+                except Exception as e:  # noqa: BLE001 (the proxy's own bug: keep the record, flagged)
+                    if rec is None:
+                        raise
+                    rec.perr(e)
                 c.close()
                 if rec is None:
                     return
@@ -1055,17 +1106,13 @@ class Proxy:
                 tail = buf.strip()
                 if tail.startswith(b"data:"):
                     sse, tail = True, tail[5:].strip()
-                if sse and tail.startswith(b"{"):
+                for x in ([tail] if sse and tail.startswith(b"{") else []) + ([] if sse else [whole]):
                     try:
-                        rec.event(json.loads(tail), t_end)
+                        o = json.loads(x)
                     except ValueError:
-                        pass
-                if not sse:
-                    try:
-                        rec.event(json.loads(whole), t_end)
-                    except ValueError:
-                        pass
-                px.add(rec.close(r.status, t0, t_end, whole if r.status >= 400 else None))
+                        continue
+                    rec.safe_event(o, t_end)
+                px.add(rec.safe_close(r.status, t0, t_end, whole if r.status >= 400 else None))
 
             do_POST = do_GET = do_PUT = do_DELETE = _proxy
 
@@ -1158,8 +1205,8 @@ def http_post(port, path, obj, timeout=600):
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
-    except OSError as e:
-        return None, str(e).encode()
+    except (OSError, http.client.HTTPException) as e:  # a response cut short: IncompleteRead
+        return None, ("%s: %s" % (type(e).__name__, e)).encode()
 
 
 def vram_used():
@@ -1377,6 +1424,39 @@ def jsonl(p):
                 yield o
 
 
+def codex_rollouts(home, ws, t0):
+    """The item lists of codex's rollouts for this task run: those written since t0 whose session_meta cwd is ws."""
+    wss = {ws, os.path.realpath(ws)}
+    for p in glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True):
+        if os.path.getmtime(p) < t0 - 1:
+            continue
+        L = list(jsonl(p))
+        meta = next((o.get("payload") or {} for o in L if o.get("type") == "session_meta"), {})
+        if meta.get("cwd") in wss:
+            yield L
+
+
+def codex_unsupported(h, home, ws, t0):
+    """Codex's own count of the calls it refused as `unsupported call: <name>` (a tool it didn't offer, e.g.
+    apply_patch, #259): the distinct call_ids of its function_call_output items saying so, from this task run's
+    rollouts. The proxy's tc_unoffered is the engine-side view of the same thing. Not set for other harnesses ("-");
+    None if the rollouts can't be read ("?")."""
+    if h != "codex":
+        return "-"
+    try:
+        ids = set()
+        for L in codex_rollouts(home, ws, t0):
+            for o in L:
+                pl = o.get("payload") if isinstance(o.get("payload"), dict) else {}
+                if (o.get("type") == "response_item" and pl.get("type") == "function_call_output"
+                        and isinstance(pl.get("output"), str) and pl["output"].startswith("unsupported call")):
+                    ids.add(pl.get("call_id") or pl.get("id"))
+        return len(ids)
+    except Exception as e:  # noqa: BLE001
+        print("WARN codex_unsupported %s: %s: %s" % (ws, type(e).__name__, e), flush=True)
+        return None
+
+
 def compactions(h, home, ws, t0):
     """Times (epoch s) of the harness's own context compactions in this task run, from its files: pi's session
     entries {"type": "compaction"} (ws/.pi-sessions), codex's rollout items {"type": "compacted"} (the rollouts whose
@@ -1389,13 +1469,8 @@ def compactions(h, home, ws, t0):
             for p in glob.glob(os.path.join(ws, ".pi-sessions", "*.jsonl")):
                 ts += [iso_ts(o.get("timestamp")) for o in jsonl(p) if o.get("type") == "compaction"]
         elif h == "codex":
-            for p in glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True):
-                if os.path.getmtime(p) < t0 - 1:
-                    continue
-                L = list(jsonl(p))
-                meta = next((o.get("payload") or {} for o in L if o.get("type") == "session_meta"), {})
-                if meta.get("cwd") in wss:
-                    ts += [iso_ts(o.get("timestamp")) for o in L if o.get("type") == "compacted"]
+            for L in codex_rollouts(home, ws, t0):
+                ts += [iso_ts(o.get("timestamp")) for o in L if o.get("type") == "compacted"]
         elif h == "opencode":
             db = os.path.join(home, ".local", "share", "opencode", "opencode.db")
             if os.path.exists(db):
@@ -1447,6 +1522,8 @@ def summarize(recs, m0, m1, cts=None):
         malf_cut=sum(1 for r in recs if (r["tc_text"] or r["tc_badjson"]) and
                      (r.get("finish") in ("length", "incomplete") or r.get("cut"))),
         tc_unoffered=(sum(r["tc_unoffered"] for r in recs) if all("tc_unoffered" in r for r in recs) else None),
+        # the recorder's own errors (Rec.safe_*): should be 0; if not, those records are incomplete
+        proxy_err=(sum(r["proxy_err"] for r in recs) if all("proxy_err" in r for r in recs) else None),
         ttft_p50=pct([r["ttft_ms"] for r in okr], 0.5),
         ttft_first=next((r["ttft_ms"] for r in okr if r["ttft_ms"] is not None), None),
         ttft_max=pct([r["ttft_ms"] for r in okr], 1.0),
@@ -1504,10 +1581,13 @@ def cmd_run(a):
             vers[h] = "missing"
             sys.exit("harness_accept: harness %s not runnable" % h)
     me = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:12]
+    # other AXON_* variables inherited from the job's environment reach every Axon arm (arm_env drops only the arms'
+    # own): their names on the start line, so a run is never steered by one nobody logged
+    inh = sorted(k for k in os.environ if k.startswith("AXON_") and k not in ARM_VARS)
     print("ACCEPT start model=%s file=%s engines=%s harness=%s tasks=%d rounds=%d turn_timeout=%ds sandbox=%s script=%s "
-          "bins=%s harness_versions=%s sampler=%s" % (a.model, os.path.basename(mpath), engines, harn, len(tasks),
-                                                      a.rounds, a.turn_timeout, SANDBOX, me, sha, vers,
-                                                      prof.get("sampler", "engine defaults")), flush=True)
+          "bins=%s harness_versions=%s sampler=%s inherited_axon_env=%s" % (
+              a.model, os.path.basename(mpath), engines, harn, len(tasks), a.rounds, a.turn_timeout, SANDBOX, me, sha,
+              vers, prof.get("sampler", "engine defaults"), ",".join(inh) or "none"), flush=True)
     results = []
     for ek in engines:
         eng = Engine(ek, os.path.abspath(bins[ek]), mpath, a.model, prof, out)
@@ -1594,6 +1674,9 @@ def cmd_run(a):
                                wall_s=wall, rc=turns[-1]["rc"], timed_out=any(x["timed_out"] for x in turns),
                                turns=turns, crash=crash, engine_sha=sha[ek])
                     res.update(summarize(recs, m0, m1, cts))
+                    cx = codex_unsupported(h, home, ws, t0)
+                    if cx != "-":
+                        res["cx_unsupported"] = cx
                     if crash:
                         res["crash_log"] = tail(eng.logf, 8)
                     results.append(res)
@@ -1768,10 +1851,10 @@ def print_summary(results):
     for k in sorted(pool):
         rs = pool[k]
         print("%-12s %-14s %-9s %3d/%-2d %5d %-20s   axon /metrics: dropped %s invalid %s | malformed replies cut short %s,"
-              " calls to unoffered tools %s" % (
+              " calls to unoffered tools %s (codex's rollouts: %s) | proxy_err %s" % (
                   k[0], k[1], "(all)", sum(r["ok"] for r in rs), len(rs), sum(malf(r) for r in rs),
                   fmt_rate(*malf_rate(rs)), opt_sum(rs, "dropped"), opt_sum(rs, "invalid"), opt_sum(rs, "malf_cut"),
-                  opt_sum(rs, "tc_unoffered")), flush=True)
+                  opt_sum(rs, "tc_unoffered"), opt_sum(rs, "cx_unsupported"), opt_sum(rs, "proxy_err")), flush=True)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1819,6 +1902,10 @@ def cmd_rescore(a):
                           os.path.join(root, "r%d-%s" % (r.get("round") or 1, r["task"])), t0) if recs else None
         mark_cold(recs, cts)
         x = summarize(recs, {}, {}, cts)
+        cx = codex_unsupported(r["harness"], os.path.join(root, "home"),
+                               os.path.join(root, "r%d-%s" % (r.get("round") or 1, r["task"])), t0)
+        if cx != "-":
+            x["cx_unsupported"] = cx
         for k in ("dropped", "invalid", "refused") + (() if any("cut" in q for q in recs) else ("hup", "cut_end")):
             x.pop(k)  # /metrics deltas stay as recorded; hang-ups weren't recorded before 11-14 ("-", not 0)
         diff = {k: (r.get(k), x[k]) for k in ("requests", "tc", "tc_text", "tc_badjson", "http_err", "ctx_overflow")
@@ -2009,6 +2096,9 @@ def fake_upstream():
             if self.path == "/v1/responses":
                 ev({"type": "response.created", "response": {"id": "r1", "object": "response"}})
                 time.sleep(0.2)
+                if mode == "perr":  # shapes the recorder doesn't expect: a null type, a string item
+                    ev({"type": None, "sequence_number": 1})
+                    ev({"type": "response.output_item.added", "item": "function_call"})
                 ev({"type": "response.output_item.added", "item": {"type": "function_call"}})
                 # badjson: #259's unescaped quote, which Axon streams as a call since #262 (codex's route)
                 args = "{\"cmd\": \"ls\"}" if mode != "badjson" else "{\"cmd\": \"echo \"hi\"\"}"
@@ -2020,6 +2110,8 @@ def fake_upstream():
             else:
                 ev({"choices": [{"delta": {"role": "assistant"}}]})
                 time.sleep(0.2)
+                if mode == "perr":  # a shape the recorder doesn't expect (a string delta), then a normal call
+                    ev({"choices": [{"delta": "oops"}]})
                 if mode == "text_tc":
                     ev({"choices": [{"delta": {"content": "<tool_call>{\"name\": \"bash\", \"arguments\": {\"c\""}}]})
                     ev({"choices": [{"delta": {}, "finish_reason": "stop"}]})
@@ -2139,10 +2231,15 @@ def selfcheck_compactions():
         wr(ws, ".pi-sessions/a.jsonl", "\n".join(json.dumps(o) for o in [
             {"type": "session", "cwd": ws}, {"type": "message"}, {"type": "compaction", "timestamp": iso(t0 + 10)},
             {"type": "message"}, {"type": "compaction", "timestamp": iso(t0 + 20)}]) + "\n")
-        for name, cwd, n in (("rollout-a.jsonl", ws, 1), ("rollout-b.jsonl", other, 2)):
+        # codex refusing calls to tools it didn't offer: 2 calls in this task (one of them seen twice), 1 in another
+        nope = lambda cid: {"type": "response_item", "payload": {"type": "function_call_output", "call_id": cid,
+                                                                  "output": "unsupported call: apply_patch"}}
+        for name, cwd, n, calls in (("rollout-a.jsonl", ws, 1, ["c1", "c2", "c1"]), ("rollout-b.jsonl", other, 2, ["c9"])):
             wr(home, ".codex/sessions/2026/11/14/" + name, "\n".join(json.dumps(o) for o in [
                 {"type": "session_meta", "payload": {"cwd": cwd}}] + [
-                {"type": "compacted", "timestamp": iso(t0 + 5 + i), "payload": {}} for i in range(n)]) + "\n")
+                {"type": "compacted", "timestamp": iso(t0 + 5 + i), "payload": {}} for i in range(n)] + [
+                nope(c) for c in calls] + [{"type": "response_item", "payload": {
+                    "type": "function_call_output", "call_id": "c3", "output": "ok"}}]) + "\n")
         import sqlite3
         os.makedirs(home + "/.local/share/opencode", exist_ok=True)
         c = sqlite3.connect(home + "/.local/share/opencode/opencode.db")
@@ -2161,6 +2258,10 @@ def selfcheck_compactions():
         bad += not ok
         print("compactions per harness          %s  %s (want %s)" % ("OK  " if ok else "FAIL",
               {h: None if v is None else len(v) for h, v in got.items()}, want))
+        cx = tuple(codex_unsupported(h, home, ws, t0) for h in ("codex", "pi"))
+        ok = cx == (2, "-")
+        bad += not ok
+        print("codex's unsupported calls         %s  %s (want (2, '-'))" % ("OK  " if ok else "FAIL", cx))
         os.remove(home + "/.local/share/opencode/opencode.db")
         c = sqlite3.connect(home + "/.local/share/opencode/opencode.db")
         c.execute("create table session (id text)")
@@ -2235,6 +2336,103 @@ def selfcheck_arms():
     return bad
 
 
+def stub_upstream(outdir, tag):
+    """A stand-in server for `capture`: saves every POST body as OUTDIR/<tag>-<n>.json and answers with a one-word
+    final reply (chat completions or the Responses API, streamed or not), so the harness ends its turn."""
+    n = [0]
+    lock = threading.Lock()
+
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, ctype, b):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def do_GET(self):
+            self._send(200, "application/json", json.dumps({"object": "list", "data": [
+                {"id": tag, "object": "model", "owned_by": "stub"}]}).encode())
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            with lock:
+                n[0] += 1
+                k = n[0]
+            with open(os.path.join(outdir, "%s-%d.json" % (tag, k)), "wb") as f:
+                f.write(raw)
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                body = {}
+            stream, resp = bool(body.get("stream")), self.path.split("?")[0].endswith("/responses")
+            if resp:
+                msg = {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                       "content": [{"type": "output_text", "text": "Done.", "annotations": []}]}
+                full = {"id": "r%d" % k, "object": "response", "status": "completed", "model": tag, "output": [msg],
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+                evs = [{"type": "response.created", "response": dict(full, status="in_progress", output=[])},
+                       {"type": "response.output_item.added", "output_index": 0, "item": dict(msg, content=[])},
+                       {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Done."},
+                       {"type": "response.output_item.done", "output_index": 0, "item": msg},
+                       {"type": "response.completed", "response": full}]
+            else:
+                full = {"id": "c%d" % k, "object": "chat.completion", "created": int(time.time()), "model": tag,
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Done."},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+                ch = lambda d, fin=None: {"id": "c%d" % k, "object": "chat.completion.chunk", "created": 0, "model": tag,
+                                          "choices": [{"index": 0, "delta": d, "finish_reason": fin}]}
+                evs = [ch({"role": "assistant", "content": ""}), ch({"content": "Done."}), ch({}, "stop"),
+                       dict(ch({}), choices=[], usage=full["usage"])]
+            if not stream:
+                return self._send(200, "application/json", json.dumps(full).encode())
+            b = b"".join((b"event: %s\n" % e["type"].encode() if resp else b"") + b"data: " + json.dumps(e).encode()
+                         + b"\n\n" for e in evs) + (b"" if resp else b"data: [DONE]\n\n")
+            self._send(200, "text/event-stream", b)
+
+    class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+    srv = S(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, n
+
+
+def cmd_capture(a):
+    """The request bodies a harness sends for a task's first prompt, captured against stub_upstream: what both
+    engines are given, so their renderings can be compared (scripts/examples/harness-repo/prompt_diff.py)."""
+    global SANDBOX
+    SANDBOX = not a.no_sandbox
+    if SANDBOX and not shutil.which("bwrap"):
+        sys.exit("harness_accept: bwrap not found; --no-sandbox to run without")
+    out = os.path.abspath(a.out)
+    os.makedirs(out, exist_ok=True)
+    t = TASK_BY_ID[a.task]
+    for h in a.harness.split(","):
+        root = tempfile.mkdtemp(prefix="ha-capture-%s-" % h)
+        try:
+            srv, n = stub_upstream(out, h)
+            home, ws = os.path.join(root, "home"), os.path.join(root, "r1-" + t["id"])
+            setup_home(h, home, "qwen2.5-7b", srv.server_address[1])
+            build_base(ws, t["base"])
+            git_init(ws)
+            rc, to, secs = run_turn(h, "qwen2.5-7b", root, home, ws, False, t["prompts"][0], a.timeout,
+                                    os.path.join(out, "%s.out" % h))
+            srv.shutdown()
+            ver = subprocess.run([h, "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+            print("CAPTURE %s %s: %d request(s), rc %s%s, %.1f s -> %s/%s-N.json" % (
+                h, ver.splitlines()[-1] if ver else "?", n[0], rc, " (timed out)" if to else "", secs, out, h),
+                flush=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    return 0
+
+
 def cmd_selfcheck(a):
     global SANDBOX
     SANDBOX = not a.no_sandbox and bool(shutil.which("bwrap"))
@@ -2292,7 +2490,13 @@ def cmd_selfcheck(a):
              ("/v1/chat/completions", {"stream": True, "messages": [], "tools": [{"type": "function", "function": {
                  "name": "read"}}]}, dict(status=200, tc=1, tc_unoffered=1)),
              ("/v1/chat/completions", {"stream": True, "messages": [], "tools": [{"type": "function", "function": {
-                 "name": "bash"}}]}, dict(status=200, tc=1, tc_unoffered=0))]
+                 "name": "bash"}}]}, dict(status=200, tc=1, tc_unoffered=0)),
+             # the recorder's own bug must not hurt the stream: the harness still gets every byte ([DONE]), the record
+             # is kept with what follows (the call), and the error is counted
+             ("/v1/chat/completions", {"stream": True, "mode": "perr", "messages": []},
+              dict(status=200, tc=1, proxy_err=1, done=1)),
+             ("/v1/responses", {"stream": True, "mode": "perr", "input": "hi"},
+              dict(status=200, tc=1, proxy_err=2, done=1))]
     for path, body, want in cases:
         st, b = http_post(px.port, path, body, timeout=10)
         r = []
@@ -2301,7 +2505,7 @@ def cmd_selfcheck(a):
             if r:
                 break
             time.sleep(0.05)
-        got = r[0] if r else {}
+        got = dict(r[0], done=int(b.rstrip().endswith(b"[DONE]"))) if r else {}
         ok = st == want["status"] and all(got.get(k) == v for k, v in want.items())
         if (path == "/v1/responses" or body.get("stream")) and want["status"] == 200:
             ok = ok and got.get("ttft_ms") is not None and got["ttft_ms"] >= 150  # the first token, not the first byte
@@ -2340,6 +2544,12 @@ def main():
     rs.add_argument("dir")
     s = sp.add_parser("selfcheck")
     s.add_argument("--no-sandbox", action="store_true")
+    c = sp.add_parser("capture")
+    c.add_argument("--harness", default="opencode,codex,pi")
+    c.add_argument("--task", default="bugfix", choices=sorted(TASK_BY_ID))
+    c.add_argument("--out", required=True)
+    c.add_argument("--timeout", type=int, default=120)
+    c.add_argument("--no-sandbox", action="store_true")
     sp.add_parser("list")
     a = ap.parse_args()
     if a.cmd == "run":
@@ -2350,6 +2560,8 @@ def main():
         return cmd_selfcheck(a)
     if a.cmd == "rescore":
         return cmd_rescore(a)
+    if a.cmd == "capture":
+        return cmd_capture(a)
     for t in TASKS:
         print("%-14s %-11s %-34s %s" % (t["id"], t["base"], t["kind"], t["prompts"][0][:90]))
     return 0

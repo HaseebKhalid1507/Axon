@@ -26,6 +26,7 @@ for f in $Q25 $Q3; do
   want=$(python3 -c "import json,sys; print(next(e['sha256'] for e in json.load(open('$LIST')) if e['file'] == '$f'))")
   got=$( [ -f "$MD/$f.sha256" ] && cut -d' ' -f1 "$MD/$f.sha256" || sha256sum "$MD/$f" | cut -d' ' -f1)
   echo "triage: $f sha256 $got (audit's $want): $([ "$got" = "$want" ] && echo same file || echo DIFFERENT FILE)"
+  [ "$got" = "$want" ] || { echo "triage: $f is not the file the audit measured: stopping"; exit 2; }
   ln -s "$MD/$f" "$W/models/$f"
 done
 cd "$W"
