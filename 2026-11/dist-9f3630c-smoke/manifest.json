@@ -1,0 +1,49 @@
+{
+ "label": "dist-9f3630c-smoke",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1114-193712-c76a",
+   "name": "dist-9f3630c-rel01-agent-smoke",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": null,
+   "hw": "hw-None.txt",
+   "gpu": "?",
+   "driver": "?",
+   "sha": "9f3630c",
+   "binary": "bash",
+   "started": null,
+   "ended": 1794706455.754321,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "bbdcd1beda94406d84a732fb7ca9eb9717a35bda216db817356ceb647996f75a",
+   "log_bytes": 186
+  },
+  {
+   "job": "1114-193712-c413",
+   "name": "dist-9f3630c-rel01-sb-smoke",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": null,
+   "hw": "hw-None.txt",
+   "gpu": "?",
+   "driver": "?",
+   "sha": "9f3630c",
+   "binary": "single_stream.sh",
+   "started": null,
+   "ended": 1794706456.0792968,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "89d568907cac23b712e96a0385535f9e6a409f924c2e355f7a0beb1f1b5f8b04",
+   "log_bytes": 165
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-14 20:34:17 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
