@@ -1,0 +1,29 @@
+{
+ "label": "nightly-9f3630c-fp8",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1115-033659-fb3a",
+   "name": "nightly-9f3630c-fp8",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "9f3630c",
+   "binary": "axon-test-9f3630c",
+   "started": 1794739366.4956205,
+   "ended": 1794740644.3636909,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8a6582d84ec1c6763b1bf1a2833b71eeff84d1e2e3258820151ca0679859e1d4",
+   "log_bytes": 10856
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-15 06:04:06 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
