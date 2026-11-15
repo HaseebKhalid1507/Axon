@@ -145,5 +145,5 @@ If any check fails, delete the draft and the tag, fix the problem on main, and t
   `axon --version` must say so. Until then, install.sh's GitHub path has only run as far as the 404 of a
   missing release. The `latest` redirect to the asset, with `--proto-redir`, only runs once a release is
   published.
-- First release only: delete the "Until v0.1.0 is published, build from source" lines from README.md and
-  docs/usage.md.
+- First release only: `grep -n "pending tag" README.md docs/usage.md docs/START-HERE.md docs/roadmap.md`, and on
+  each line it finds drop "(pending tag)" or ", pending tag" and the "until it is published" sentence.

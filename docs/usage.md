@@ -12,8 +12,8 @@ axon pull qwen2.5-coder-7b        # or axon pull --list
 axon chat qwen2.5-coder-7b --device cuda
 ```
 
-Until v0.1.0 is published there is no release to install (the script says so): build from source, as in the
-[README](../README.md#install).
+v0.1.0 (pending tag) is the first release. Until it is published there is no release to install (the script says
+so): build from source, as in the [README](../README.md#install).
 
 `install.sh` puts `axon` in `~/.local/bin` (`AXON_INSTALL_DIR`) from the latest GitHub release
 (`AXON_VERSION=vX.Y.Z` for another), after checking the tarball's SHA-256 against the release's `.sha256`, and

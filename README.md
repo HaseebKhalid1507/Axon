@@ -29,8 +29,8 @@ Linux x86-64, one command; it puts `axon` in `~/.local/bin` after checking the r
 curl -fsSL https://raw.githubusercontent.com/HaseebKhalid1507/Axon/main/install.sh | sh
 ```
 
-**Until v0.1.0 is published, build from source (below):** there is no release for the script to install yet, and it
-says so.
+**v0.1.0 (pending tag) is the first release it installs.** Until that release is published, the script finds no
+release and says so: build from source (below).
 
 It runs on any x86-64 CPU, and on an NVIDIA GPU with nothing but the driver, **R580 or newer** (CUDA 13): the GPU
 kernels are built in for RTX 20 through RTX 50, A100 and H100. On an older driver, `--device cuda` uses a CUDA 12
@@ -103,8 +103,9 @@ Every flag and its default: [docs/usage.md](docs/usage.md). The `AXON_*` variabl
   OOM-killed. One with under ~48 MiB to spare can still be killed. [More](docs/usage.md#memory-limits)
 - **A library too.** Load, place and run a model in-process from Rust: `axon::load`, `Backend`, `generate`, `serve`.
   Version 0.x, not on crates.io yet. [More](docs/library.md)
-- **Almost no dependencies.** Five crates. No ggml, no BLAS, no CUDA toolkit at build time: the driver and NVRTC
-  load at run time. [More](docs/how-it-works.md)
+- **Almost no dependencies.** Five crates. No ggml, no BLAS, no CUDA toolkit at build time. A release binary carries
+  its GPU kernels precompiled (RTX 20 to RTX 50, A100, H100) and needs only the driver there; a source build loads
+  NVRTC at run time to compile them. [More](docs/how-it-works.md)
 
 ## Works with
 
@@ -163,8 +164,9 @@ Axon's tokens at 128. On an RTX 4090, vLLM-AWQ is 13–24 % ahead at 8–32 requ
 - **Reproducible bits.** By default a reply doesn't change with what it's batched with, how the prompt is chunked
   or whether drafting is on, and its `system_fingerprint` names what produced it. [More](docs/determinism.md)
 - **One binary, a one-second start.** No Python. Once its kernels are cached it starts in 1.0 s, against 42–71 s
-  for vLLM and SGLang on the same H100. The first GPU run compiles them with NVRTC, from a CUDA toolkit for now (a
-  start with only the driver is [planned](docs/roadmap.md#week-1-11-12-to-11-18)).
+  for vLLM and SGLang on the same H100 (10-19). A release binary (v0.1.0, pending tag) carries them precompiled for
+  RTX 20 to RTX 50, A100 and H100, so on those its first GPU run compiles nothing and needs only the driver; a
+  source build compiles them once with NVRTC ([models.md](docs/models.md#nvidia-gpus)).
 - **Measured in the open.** Each board names its commit, hardware and job, and what lost or was dropped is written
   down too: [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
