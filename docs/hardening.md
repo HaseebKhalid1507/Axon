@@ -215,6 +215,9 @@ tests: #181).
 
 ## Model-zoo results (2026-10-18, MEASURED)
 
+The 2026-11-13 compatibility audit runs the same sweep over ollama's 30 most-pulled models, at the quant ollama
+ships, with chat prompts compared too: [log/2026-11-13-compat-audit.md](log/2026-11-13-compat-audit.md).
+
 18 files, 5.7 GB downloaded plus 6 already in `models/`. Axon at this PR merged with main 45d4dce (commit
 0bf1d35, which includes #72's Q2_K/Q3_K/IQ4_NL), CPU, against llama.cpp b11580 (4413a19) CPU, 16 prompts, top-20
 (job 1018-053457-037d). Earlier runs: on main before the fix 1017-171548-0e4e; at this PR before #72

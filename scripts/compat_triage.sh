@@ -3,7 +3,7 @@
 #   LLAMA_CPU / LLAMA_CUDA: a llama-server binary or its build's bin/ directory (two staged files both named
 #   llama-server would collide in axon-podjob's job dir; a directory is passed through as is).
 #
-# The 11-13 compatibility audit's two greedy drifts, bracketed by llama.cpp's own spread (docs/compat-audit-2026-11-13.md):
+# The 11-13 compatibility audit's two greedy drifts, bracketed by llama.cpp's own spread (docs/log/2026-11-13-compat-audit.md):
 # DeepSeek-R1-0528-Qwen3-8B (YaRN factor 4: KL 0.021, 2 flips at 0.20 nats) and Qwen2.5-7B (1 flip at 0.25 nats), with
 # Qwen3-8B as the control (R1's architecture and size, no YaRN). Runs on bella through axon-podjob:
 #   1. zoo.py, Axon CUDA vs llama.cpp CPU as in the audit, the three models (same-machine baseline);

@@ -5,7 +5,7 @@
     scripts/zoo.py run --axon BIN --llama-server BIN --dir D [--models-dir M] [--out zoo.json]
                        [--device cpu] [--only SUBSTR] [--prompts N]
     scripts/zoo.py table zoo.json                the markdown table for docs/hardening.md
-    scripts/zoo.py audit-table LOG|zoo.json...   the compatibility-audit table (docs/compat-audit-2026-11-13.md)
+    scripts/zoo.py audit-table LOG|zoo.json...   the compatibility-audit table (docs/log/2026-11-13-compat-audit.md)
 
   --list FILE (fetch, run): a JSON list of {repo, file, sha256, expect, why, ...} instead of ZOO (the audit's
   scripts/examples/compat-audit/ollama-top30.json); --set golden: the nightly golden-model set (GOLDEN below).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The compatibility audit's chat-prompt check at the token-id level (docs/compat-audit-2026-11-13.md).
+"""The compatibility audit's chat-prompt check at the token-id level (docs/log/2026-11-13-compat-audit.md).
 
     pip install tokenizers   (the one non-stdlib dependency)
     python3 scripts/examples/compat-audit/prompt_check.py JOB_LOG [--cache DIR]

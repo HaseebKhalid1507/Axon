@@ -1,14 +1,23 @@
-# Compatibility audit: ollama's 30 most-pulled models (2026-11-13, MEASURED)
+# Compatibility audit: ollama's 30 most-pulled models (PR #235)
+
+- Date: 2026-11-13 (measured). Branch: feat/eval. Status: open (PR #235). Roadmap item 4
+  ([roadmap.md](../roadmap.md)); the coding-agent half of the PR is
+  [2026-11-13-harness-accept.md](2026-11-13-harness-accept.md); the earlier, smaller zoo sweep is in
+  [hardening.md](../hardening.md#model-zoo-results-2026-10-18-measured).
 
 **Does Axon run what ollama users pull, and does it run it like llama.cpp?** 30 models, one Q4_K_M GGUF each (or the
 quant ollama ships), on one RTX 4090 pod. Axon `3014eeb` (= main 213465a's `src/`) on CUDA, against llama.cpp b11580
 (`4413a19`, the CPU release build) as the reference.
 
-- **17 run, 13 are refused.** Every refusal is clean: exit 2, one line naming the architecture, no panic.
-- **Of the 17 that run:**
+- **13 of 30 chat today, after #246.** That counts the 4 whose chat prompt differed at audit time, fixed by #246
+  since (not re-measured). gemma3 is one of the 13 and runs as a text model only (ollama ships its vision projector),
+  so 12 if vision counts.
+- **17 load; 13 are refused.** Every refusal is clean: exit 2, one line naming the architecture, no panic.
+- **Of the 17 that load:**
   - **8** match llama.cpp end to end: prompt ids equal (Mistral differs by design), greedy within zoo's match rule.
   - **4** run but build a different chat prompt from the GGUF's own template. These are product bugs, filed as #238, #239, #240 and #241, all fixed since by #246 (in main 9f3630c, not re-measured here).
-  - **4** run but refuse `/v1/chat/completions`: plain-text turn markers, #242.
+  - **4** load but refuse `/v1/chat/completions`: plain-text turn markers, #242. llava is one of them; Axon runs
+    only its text model.
   - **1** (Qwen2.5-7B) has one greedy flip outside a near-tie.
 - **Greedy:** no model's logits are far off. The two drifts are not bugs (triage, job `1113-022249-97e7`):
   Qwen2.5-7B matches on one machine, and DeepSeek-R1-0528 (KL 0.021) stays within llama.cpp's own CUDA-vs-CPU spread.
@@ -16,7 +25,7 @@ quant ollama ships), on one RTX 4090 pod. Axon `3014eeb` (= main 213465a's `src/
 
 Job `1113-010532-8176` (gatewatch `eval-09efdf0-compat-audit`, rc 0, 49 min). Pod4 was a secure 4090 at $0.89/h, up
 58 min, **$0.883** (cap $5). Axon ran it alone: the pod was held for the run, then taken down and released by
-`~/.cache/axon-eval/pod4-guard.sh`. Draft PR #235.
+`~/.cache/axon-eval/pod4-guard.sh`.
 
 ## Method
 

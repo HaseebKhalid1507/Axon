@@ -1,11 +1,11 @@
 #!/bin/bash
 # compat_audit.sh ZOO_PY LLAMA_LOGITS_PY LIST AXON LLAMA_TGZ [zoo.py run args...]
-# The compatibility audit as one axon-podjob job (docs/compat-audit-2026-11-13.md): scripts/zoo.py over LIST
+# The compatibility audit as one axon-podjob job (docs/log/2026-11-13-compat-audit.md): scripts/zoo.py over LIST
 # (scripts/examples/compat-audit/ollama-top30.json), downloading each model from Hugging Face just before it runs
 # (sha256 checked) and deleting it after; `expect: refuse` entries are tried on their header first (a sparse file),
 # so a clean refusal costs no download. The reference is llama.cpp's prebuilt CPU llama-server from LLAMA_TGZ
 # (llama-b11580-bin-ubuntu-x64.tar.gz, sha256 de67caf1...: build 11580 = commit 4413a19, the 10-18 zoo's version).
-#   axon-podjob --on POD --models none --max-min 240 --name eval-<sha7>-compat-audit --expect '^ZOO [0-9]+ files' -- \
+#   axon-podjob --on POD --models none --max-min 110 --name eval-<sha7>-compat-audit --expect '^ZOO [0-9]+ files' -- \
 #     scripts/compat_audit.sh scripts/zoo.py scripts/oracle/llama_logits.py scripts/examples/compat-audit/ollama-top30.json \
 #     AXON_BIN llama-b11580-bin-ubuntu-x64.tar.gz --device cuda --chat --fetch-each --delete-after --sparse-first
 # Results: ZOO-RESULT lines on stdout (`zoo.py audit-table LOG` makes the table); work files under
