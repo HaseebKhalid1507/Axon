@@ -1862,7 +1862,7 @@ fn long_cycles_stall() {
         let mut r = seed;
         loop {
             let b: Vec<u32> = (0..n).map(|_| *pick(&mut r, &letters)).collect();
-            if (1..n).all(|p| n % p != 0 || b.chunks(p).any(|c| c != &b[..p])) {
+            if (1..n).all(|p| !n.is_multiple_of(p) || b.chunks(p).any(|c| c != &b[..p])) {
                 return b;
             }
         }
