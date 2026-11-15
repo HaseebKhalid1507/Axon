@@ -21,15 +21,15 @@ standard agent runtime, by making inference cheap and fast ([roadmap](roadmap.md
 now, the datacenter tier among it: [roadmap](roadmap.md#shelved-for-now).
 
 Axon is an LLM inference engine for GGUF models (Qwen2, Qwen3, Llama 3, Gemma 3, and the Qwen3 MoE, gpt-oss and
-DeepSeek V2/V3 / Kimi K2 architectures) and Hugging Face safetensors checkpoints, written from scratch in Rust.
-It runs on the CPU and on NVIDIA GPUs. It doesn't use ggml, BLAS, binding crates, or a CUDA toolkit at
-build time. The CPU path is a GGUF reader, integer dot-product kernels (scalar, AVX2, AVX-VNNI), a
-spinning worker pool and a transformer forward pass. On the GPU, CUDA C++ kernels compiled by NVRTC (ahead
-of time into a release binary's kernel pack, or at run time for a source build) are launched through the
-driver API. Both libraries are loaded with `dlopen`; a release binary runs without NVRTC. The repo holds
-about 121k lines of Rust and 9.9k of CUDA, tests included (`git ls-files` + `wc -l` at `3014eeb`; 904 `#[test]`s
-in `src/`). Single-stream speed is ahead of llama.cpp and ollama in 45 of 45 cells on RunPod RTX 4090 / RTX 5090 /
-H100 SXM (main 7f42c02), and ahead of ollama in 23 of 24 cells on an RTX 4050 laptop
+DeepSeek V2/V3 / Kimi K2 architectures) and Hugging Face safetensors checkpoints, written from scratch in Rust. It
+runs on the CPU and on NVIDIA GPUs. It doesn't use ggml, BLAS, binding crates, or a CUDA toolkit at build time. The
+CPU path is a GGUF reader, integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker pool and a
+transformer forward pass. On the GPU, CUDA C++ kernels compiled by NVRTC (ahead of time into a release binary's
+kernel pack, or at run time for a source build) are launched through the driver API. Both libraries are loaded with
+`dlopen`; a release binary runs without NVRTC. The repo holds about 121k lines of Rust and 9.9k of CUDA, tests
+included (`git ls-files` + `wc -l` at `3014eeb`; 904 `#[test]`s in `src/`). Single-stream speed is ahead of
+llama.cpp and ollama in 45 of 45 cells on RunPod RTX 4090 / RTX 5090 / H100 SXM (main 7f42c02; llama-bench at its
+defaults, `-ub 512`), and ahead of ollama in 23 of 24 cells on an RTX 4050 laptop
 ([benchmarks-gpu.md](benchmarks-gpu.md)). **Serving at datacenter concurrency is behind:** on an H100 SXM (10-19)
 Axon is level with the fastest int4 engines at one stream (+1–3 %, inside one pod's noise) but behind vLLM / SGLang
 (AWQ and FP8 weights) from C = 8 up, 1.8–3.8× at 128 concurrent requests

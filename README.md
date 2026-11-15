@@ -146,10 +146,10 @@ prompt, `tg128` decoding 128 tokens. **Bold** marks where Axon is behind.
 | gpt-oss-20b (MoE) † | pp512 | 265 | 995 | – | **0.27×** |
 | | tg128 | 46.6 | 23.4 | – | 1.99× |
 
-Dense rows: 2026-10-18, llama.cpp `ff5a233`, ollama 0.40.6. Gemma: #35's own run, 10-16, ollama 0.35. MoE rows:
-10-26, llama.cpp `4413a19`, every expert on the GPU; #154 has since brought the 30B's decode to 0.95×. † A laptop
-RTX 5070 Ti, experts on the CPU for both engines, Axon's prompt 486 tokens (#98, 10-18). None of these ran on
-today's main. Method, caveats and every known loss:
+Dense rows: 2026-10-18, llama.cpp `ff5a233` as `llama-bench -ngl 99 -r 1` at its defaults (`-ub 512`), ollama
+0.40.6. Gemma: #35's own run, 10-16, ollama 0.35. MoE rows: 10-26, llama.cpp `4413a19`, every expert on the GPU;
+#154 has since brought the 30B's decode to 0.95×. † A laptop RTX 5070 Ti, experts on the CPU for both engines,
+Axon's prompt 486 tokens (#98, 10-18). None of these ran on today's main. Method, caveats and every known loss:
 [docs/results.md](docs/results.md#known-losses-and-gaps-as-of-3014eeb).
 
 **Serving:** on an H100 SXM (Qwen2.5-7B, 10-19) Axon is level with the fastest int4 engines at one stream (+1–3 %,

@@ -54,9 +54,14 @@ The workflow never checks the GPU side. No runner has a GPU, so the draft's kern
 ## Before the tag
 
 - `Cargo.toml`'s `version` is the tag's version without the `v`. The build refuses a mismatch.
-- CHANGELOG: the Unreleased entries move under `## X.Y.Z (date)`. Release notes: `docs/release-0.1.md` for 0.1.
-  When you put them into the draft, keep the job's "SHA-256 of the tarball: …" and "Built from commit …" lines,
-  each exactly once, and the draft's title: `publish.sh` reads all three and refuses without them.
+- CHANGELOG: the Unreleased entries move under `## [X.Y.Z] - YYYY-MM-DD`, in a docs-only commit before the tag.
+- First release only, in that commit: `grep -rn "pending tag" README.md docs/`, and on each line it finds drop
+  "(pending tag)" or ", pending tag" and the "until it is published" sentence. The tarball ships README.md, so the
+  tagged commit's README must already read as released.
+- Release notes: `docs/release-0.1.md` for 0.1; the draft's notes are that page from "In one sentence" to the end
+  of "Known limits" (not its draft banner, not the maintainer's list), with no `<...>` placeholder left. Keep the
+  job's "SHA-256 of the tarball: …" and "Built from commit …" lines, each exactly once, and the draft's title:
+  `publish.sh` reads all three and refuses without them.
 - main is green (CI and the post-merge suites) at the commit you tag.
 
 ## Checking and publishing the draft
@@ -106,6 +111,12 @@ If `--check` refuses, it says why:
    (`gh run download RUN -n axon-x86_64-linux`) should have the draft's SHA-256. Not "Re-run all jobs" on the
    tag's own run: its release job would refuse, because the draft exists.
 
+**The boards' binary** (when the notes cite boards run on a dry run's binary; 0.1: run 43657907368, `axon`
+SHA-256 `2c19415bf329b30fa2e2805e9a0aa3d17321449b154010fa9241d67f7f31d245`). Extract `axon` from the draft's
+tarball and compare: `mkdir x && tar xzf axon-x86_64-linux.tar.gz -C x && sha256sum x/*/axon`. The tag is a
+docs-only descendant of the candidate, so the bytes should match. If they differ, the board lines in the notes
+say "measured on the candidate `<sha>`, not the release binary" before you publish.
+
 If any check fails, delete the draft and the tag, fix the problem on main, and tag again.
 
 5. **Publish: `scripts/release/publish.sh vX.Y.Z SHA256`**, with the SHA-256 written next to the results above.
@@ -145,5 +156,5 @@ If any check fails, delete the draft and the tag, fix the problem on main, and t
   `axon --version` must say so. Until then, install.sh's GitHub path has only run as far as the 404 of a
   missing release. The `latest` redirect to the asset, with `--proto-redir`, only runs once a release is
   published.
-- First release only: `grep -n "pending tag" README.md docs/usage.md docs/START-HERE.md docs/roadmap.md`, and on
-  each line it finds drop "(pending tag)" or ", pending tag" and the "until it is published" sentence.
+- First release only: `grep -rn "pending tag" README.md docs/` finds nothing (it was dropped before the tag,
+  "Before the tag").

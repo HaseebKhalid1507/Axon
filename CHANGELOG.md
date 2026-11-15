@@ -10,10 +10,11 @@ Nothing yet.
 
 ## [0.1.0] - unreleased
 
-The first version: everything merged to `main` from the start of the project (2026-10-10) through main `9f3630c`
-(PR #269, 2026-11-14). Release notes: [docs/release-0.1.md](docs/release-0.1.md). The tag and the date are the
-maintainer's call. The entries after the first draft come first, newest first; the first draft's (through PR #113,
-main `aecc49d`, 2026-10-20) follow, under "Through #113".
+The first version: everything merged to `main` from the start of the project (2026-10-10) through #270 (2026-11-14);
+the release candidate's binary is main `9f3630c`'s (#269), and #270 changed only docs and scripts. Release notes:
+[docs/release-0.1.md](docs/release-0.1.md). The tag and the date are the maintainer's call. The entries after the
+first draft come first, newest first; the first draft's (through PR #113, main `aecc49d`, 2026-10-20) follow, under
+"Through #113".
 
 ### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)
 - **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages

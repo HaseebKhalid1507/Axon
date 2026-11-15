@@ -109,7 +109,7 @@ At most three at once (Process v2 rule 9), each tied to its metric; week 1's dec
 
 ## Open follow-ups
 
-The live list is `gh issue list` ([issues](https://github.com/HaseebKhalid1507/Axon/issues)). At 11-12:
+The live list is `gh issue list` ([issues](https://github.com/HaseebKhalid1507/Axon/issues)). At 11-14:
 - **Week 1:** #233, #234 (block the tier's flip). Closed: #222 (`--help`, 11-13); #218, #219, #210, #211 (with the
   sharing flip, 11-14).
 - **Agent API:** #116 (`tool_choice: required` with several tools on gpt-oss).
