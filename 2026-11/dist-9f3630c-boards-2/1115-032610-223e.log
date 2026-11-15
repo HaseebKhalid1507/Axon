@@ -1,0 +1,731 @@
+[axon-run 03:26:10] submitted 1115-032610-223e by /home/haseeb/.cache/axon-wt-dist-rel: /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/agent_sweep.sh
+[axon-run 03:26:10] timing job waiting: foreign GPU load 11 % 50 s ago (Xorg 16547 11%), quiet 50 s of the 120 s needed (on bella; > 10 %)
+[axon-run 06:06:20] scope axon-job-1115-032610-223e-1794740780.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20000 MB): an OOM here kills only this job
+[axon-run 06:06:20] job 1115-032610-223e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-032610-223e-1794740780 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/agent_sweep.sh
+2026-11-15 06:06:20 EST
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz]
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 620.70.06, 98.05.31.00.3B, 12227 MiB, [N/A], 3090 MHz, 14001 MHz
+24
+model name	: Intel(R) Core(TM) Ultra 9 275HX
+ 06:06:20 up 1 day,  1:52, 10 users,  load average: 0.60, 4.81, 5.98
+               total        used        free      shared  buff/cache   available
+Mem:           31486        7792        6125         346       18335       23693
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8, scripts tree b8f0278d04f690adcd7d60e0aae4a0dac6ec2d1a dirty: 
+env: AXON_KERNEL_PACK=only AXON_Q_VERBOSE=1 AXON_Q_VRAM_MB=11000 
+axon 0.1.0
+precompiled kernels (built in): NVRTC 13.4, 51.9 MB (compressed fatbins), 106 entries: 14 modules (14 of this build's 14), targets sm_75 sm_80 sm_86 sm_89 sm_90 sm_120 compute_120 sm_90a
+AXON_KERNEL_PACK=only: no NVRTC
+gpu: NVIDIA GeForce RTX 5070 Ti Laptop GPU | sm_120, 46 SMs | 11.6 GiB (10.5 free) | ~672 GB/s | kernels: precompiled sm_120
+2c19415bf329b30fa2e2805e9a0aa3d17321449b154010fa9241d67f7f31d245  /home/haseeb/.cache/axon-dist/rel01/rc/axon
+6a390ccde5f65ebcc4699ae461645c8857aa9d48a80f7d176bd2f5771772e720  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server
+9a249b44c309fe051c3084a9bc5e982cc0b022048439914ad57feae5839a2237  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libllama-server-impl.so
+c8cb0b80378ac0040b7ac77a4bc768f525685b0b27d4aba03f812fcfa4d1e171  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-bench
+9feb5ef9f4f542234cdf176d30c62a5032fdce7ccabe994095497ebe05ecec29  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libggml-cuda.so
+d4ef60b4f8d2fd3edc5894ad971f04211b5bc2dfafaa1f333a72675f8f7d77ff  /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server
+e8ff2fa0ea5b53d1c85c113adb9580a6b98dfdcf3a0046aa97fdb5d67e7de301  /home/haseeb/Projects/llama.cpp/build-cuda/bin/libllama-server-impl.so
+0f206fa85bf9cb39003d4130238dee5147a61315664c449d98d3cf9dbaf5539a  /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-bench
+7fc73b4741871388a623746d9d5a9619b0a37f28f5dc21a2d02ed3d0bcbfeab5  /home/haseeb/Projects/llama.cpp/build-cuda/bin/libggml-cuda.so.0
+65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423  /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+713285ba54487e17035d6757b5e76391b568b45dce776925d699ede3ae3cccdc  /home/haseeb/.cache/axon-agent/traces/board-trace-v1.json
+/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libggml-cuda.so: elf  149 sm_103 149 sm_120a 149 sm_121a 149 sm_86 149 sm_89  ptx  149 sm_75 149 sm_80 149 sm_90 
+/home/haseeb/Projects/llama.cpp/build-cuda/bin/libggml-cuda.so.0: elf  144 sm_120a  ptx  144 sm_120a 
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start axon kv f16: /home/haseeb/.cache/axon-dist/rel01/rc/axon serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18701 --ctx 32768 --parallel 16 --kv f16
+axon ready: --ctx 32768 --parallel 16 --kv f16; paged pool 101248 tokens; tokenization check 512 words = 512 tokens
+[axon-run 06:06:53] FOREIGN_GPU sample max=16% mean=4.8% n=6
+[axon-run 06:07:27] FOREIGN_GPU sample max=14% mean=3.3% n=6
+[axon-run 06:08:00] FOREIGN_GPU sample max=14% mean=5.8% n=6
+[axon-run 06:08:33] FOREIGN_GPU sample max=11% mean=1.8% n=6
+[axon-run 06:09:06] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:09:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:10:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:10:46] FOREIGN_GPU sample max=21% mean=5.8% n=6
+[axon-run 06:11:19] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:11:52] FOREIGN_GPU sample max=11% mean=2.0% n=6 (kitty 41370 1%)
+[axon-run 06:12:25] FOREIGN_GPU sample max=9% mean=3.2% n=6
+[axon-run 06:12:58] FOREIGN_GPU sample max=10% mean=2.2% n=6
+[axon-run 06:13:31] FOREIGN_GPU sample max=1% mean=0.3% n=6
+[axon-run 06:14:05] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 06:14:38] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 06:15:11] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:15:44] FOREIGN_GPU sample max=14% mean=4.3% n=6 (Xorg 16547 12%)
+[axon-run 06:16:17] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:16:50] FOREIGN_GPU sample max=11% mean=2.5% n=6 (Xorg 16547 4%)
+RUN axon kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.8 prime_s=34.8 ttft_new_p50=3.9 ttft_resume_p50=0.307 ttft_turn_p50=0.13 goodput_tok_s=18.96 itl_p99_ms=123.67 warm_per_gb=2.584 reprefill_share=0.0919 reprefill_net_share=0.0915 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=0 prefills_unfed=0 tainted=False (640 s; engine pid 748394, started in 2.1 s)
+ENGINE RESTARTS (one per cell per engine): axon 1 x start 2.1 s [2.1-2.1] + stop 3.2 s [3.2-3.2]; total 5 s of 646 s board wall (0.8%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | axon f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 3.9 |
+| TTFT-new p99 s (max when n < 100) | 11.2 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.307 |
+| TTFT-resume p99 s (max when n < 100) | 14.4 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.298 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 4.82 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 7.11 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.13 |
+|   n turn | 127 |
+| goodput tok/s | 19 |
+| ITL p99 ms | 124 |
+| warm/GB (GPU KV budget) | 2.58 |
+| re-prefill share (clamped) | 0.0919 |
+| re-prefill share (net) | 0.0915 |
+| preempted (axon /slots) | 0 |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 0/1 |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+KV budget 101248 tokens (axon's paged pool): llama-server -np 3 by default
+== arm A0-4413a19-defaults: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server 
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18711 --host 127.0.0.1 --metrics
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+[axon-run 06:17:23] FOREIGN_GPU sample max=14% mean=3.5% n=6 (Xorg 16547 7%)
+[axon-run 06:17:57] FOREIGN_GPU sample max=9% mean=3.2% n=6 (Xorg 16547 9%)
+[axon-run 06:18:30] FOREIGN_GPU sample max=15% mean=2.5% n=6
+[axon-run 06:19:04] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 06:19:37] FOREIGN_GPU sample max=8% mean=1.3% n=6 (Xorg 16547 8%)
+[axon-run 06:20:11] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 06:20:44] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:21:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:21:51] FOREIGN_GPU sample max=9% mean=2.3% n=6 (Xorg 16547 4%)
+[axon-run 06:22:24] FOREIGN_GPU sample max=10% mean=2.3% n=6
+[axon-run 06:22:58] FOREIGN_GPU sample max=7% mean=1.5% n=6 (Xorg 16547 2%)
+[axon-run 06:23:31] FOREIGN_GPU sample max=4% mean=0.8% n=6
+[axon-run 06:24:04] FOREIGN_GPU sample max=9% mean=2.8% n=6
+[axon-run 06:24:38] FOREIGN_GPU sample max=24% mean=7.2% n=6 (Xorg 16547 6%)
+[axon-run 06:25:11] FOREIGN_GPU sample max=4% mean=1.0% n=6
+[axon-run 06:25:44] FOREIGN_GPU sample max=6% mean=2.2% n=6
+[axon-run 06:26:17] FOREIGN_GPU sample max=5% mean=2.8% n=6 (Xorg 16547 4%)
+[axon-run 06:26:50] FOREIGN_GPU sample max=10% mean=3.5% n=6 (Xorg 16547 10%)
+[axon-run 06:27:24] FOREIGN_GPU sample max=18% mean=8.8% n=6 (Xorg 16547 2%)
+[axon-run 06:27:58] FOREIGN_GPU sample max=9% mean=1.8% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=604.8 prime_s=40.8 ttft_new_p50=6.031 ttft_resume_p50=0.846 ttft_turn_p50=0.759 goodput_tok_s=13.07 itl_p99_ms=569.76 warm_per_gb=1.064 reprefill_share=0.0194 reprefill_net_share=0.019 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (647 s; engine pid 787277, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 3.6 s [3.6-3.6]; total 6 s of 654 s board wall (0.9%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 6.03 |
+| TTFT-new p99 s (max when n < 100) | 27.7 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.846 |
+| TTFT-resume p99 s (max when n < 100) | 21.2 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.73 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 11.5 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 20.7 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.759 |
+|   n turn | 127 |
+| goodput tok/s | 13.1 |
+| ITL p99 ms | 570 |
+| warm/GB (GPU KV budget) | 1.06 |
+| re-prefill share (clamped) | 0.0194 |
+| re-prefill share (net) | 0.019 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 605 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A1-b12387-defaults: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server 
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18721 --host 127.0.0.1 --metrics
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 06:28:32] FOREIGN_GPU sample max=9% mean=3.7% n=6 (Xorg 16547 8%)
+[axon-run 06:29:07] FOREIGN_GPU sample max=24% mean=6.7% n=6 (Xorg 16547 10%)
+[axon-run 06:29:41] FOREIGN_GPU sample max=11% mean=3.7% n=6 (Xorg 16547 11%)
+[axon-run 06:30:13] FOREIGN_GPU sample max=9% mean=1.8% n=5
+[axon-run 06:30:47] FOREIGN_GPU sample max=10% mean=2.5% n=6 (Xorg 16547 5%)
+[axon-run 06:31:20] FOREIGN_GPU sample max=6% mean=1.7% n=6
+[axon-run 06:31:53] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:32:27] FOREIGN_GPU sample max=99% mean=16.5% n=6
+[axon-run 06:33:00] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 06:33:33] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 06:34:06] FOREIGN_GPU sample max=21% mean=4.8% n=6
+[axon-run 06:34:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:35:13] FOREIGN_GPU sample max=6% mean=2.0% n=6 (Xorg 16547 3%)
+[axon-run 06:35:46] FOREIGN_GPU sample max=23% mean=7.5% n=6 (Xorg 16547 6%)
+[axon-run 06:36:20] FOREIGN_GPU sample max=15% mean=6.0% n=6 (Xorg 16547 6%)
+[axon-run 06:36:54] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:37:27] FOREIGN_GPU sample max=10% mean=3.5% n=6 (--gpu-p 2503505 2%)
+[axon-run 06:38:00] FOREIGN_GPU sample max=51% mean=9.5% n=6
+[axon-run 06:38:33] FOREIGN_GPU sample max=10% mean=1.8% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=604.0 prime_s=39.7 ttft_new_p50=4.796 ttft_resume_p50=0.393 ttft_turn_p50=0.369 goodput_tok_s=17.72 itl_p99_ms=117.73 warm_per_gb=2.306 reprefill_share=0.0187 reprefill_net_share=0.0183 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (645 s; engine pid 826136, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 3.4 s [3.4-3.4]; total 6 s of 652 s board wall (0.9%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.8 |
+| TTFT-new p99 s (max when n < 100) | 8.14 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.393 |
+| TTFT-resume p99 s (max when n < 100) | 8.58 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.393 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.299 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 8.58 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.369 |
+|   n turn | 127 |
+| goodput tok/s | 17.7 |
+| ITL p99 ms | 118 |
+| warm/GB (GPU KV budget) | 2.31 |
+| re-prefill share (clamped) | 0.0187 |
+| re-prefill share (net) | 0.0183 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A2-noidle: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-args=--no-cache-idle-slots
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18731 --host 127.0.0.1 --metrics --no-cache-idle-slots
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); then --no-cache-idle-slots (the last of a repeated flag wins); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 06:39:06] FOREIGN_GPU sample max=8% mean=2.0% n=6
+[axon-run 06:39:39] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 06:40:13] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 06:40:46] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 06:41:19] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:41:52] FOREIGN_GPU sample max=5% mean=1.7% n=6
+[axon-run 06:42:25] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:42:59] FOREIGN_GPU sample max=5% mean=1.3% n=6
+[axon-run 06:43:32] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:44:05] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 06:44:38] FOREIGN_GPU sample max=12% mean=2.2% n=6
+[axon-run 06:45:11] FOREIGN_GPU sample max=10% mean=3.3% n=6 (Xorg 16547 10%)
+[axon-run 06:45:45] FOREIGN_GPU sample max=3% mean=0.8% n=6
+[axon-run 06:46:18] FOREIGN_GPU sample max=34% mean=9.3% n=6
+[axon-run 06:46:51] FOREIGN_GPU sample max=15% mean=3.2% n=6
+[axon-run 06:47:24] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 06:47:57] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:48:30] FOREIGN_GPU sample max=8% mean=2.3% n=6
+[axon-run 06:49:03] FOREIGN_GPU sample max=14% mean=5.2% n=6
+[axon-run 06:49:36] FOREIGN_GPU sample max=19% mean=3.3% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.4 prime_s=38.9 ttft_new_p50=4.465 ttft_resume_p50=0.391 ttft_turn_p50=0.237 goodput_tok_s=21.61 itl_p99_ms=21.96 warm_per_gb=2.484 reprefill_share=0.0116 reprefill_net_share=0.0112 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (643 s; engine pid 865051, started in 1.1 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 1.1 s [1.1-1.1] + stop 3.2 s [3.2-3.2]; total 4 s of 649 s board wall (0.7%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.46 |
+| TTFT-new p99 s (max when n < 100) | 7 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.391 |
+| TTFT-resume p99 s (max when n < 100) | 5.93 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.41 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.279 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 0.312 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.237 |
+|   n turn | 127 |
+| goodput tok/s | 21.6 |
+| ITL p99 ms | 22 |
+| warm/GB (GPU KV budget) | 2.48 |
+| re-prefill share (clamped) | 0.0116 |
+| re-prefill share (net) | 0.0112 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 603 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A3-noidle-ub2048: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-args=--no-cache-idle-slots -ub 2048
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18741 --host 127.0.0.1 --metrics --no-cache-idle-slots -ub 2048
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); then --no-cache-idle-slots -ub 2048 (the last of a repeated flag wins); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 06:50:10] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:50:43] FOREIGN_GPU sample max=10% mean=2.5% n=6
+[axon-run 06:51:17] FOREIGN_GPU sample max=5% mean=0.8% n=6
+[axon-run 06:51:50] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:52:23] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 06:52:57] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 06:53:30] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:54:03] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:54:36] FOREIGN_GPU sample max=11% mean=3.0% n=6
+[axon-run 06:55:10] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:55:43] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:56:16] FOREIGN_GPU sample max=11% mean=2.5% n=6 (Xorg 16547 4%)
+[axon-run 06:56:50] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 06:57:23] FOREIGN_GPU sample max=34% mean=8.0% n=6
+[axon-run 06:57:56] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 06:58:30] FOREIGN_GPU sample max=19% mean=4.5% n=6 (Xorg 16547 4%)
+[axon-run 06:59:03] FOREIGN_GPU sample max=17% mean=5.3% n=6 (Xorg 16547 15%)
+[axon-run 06:59:36] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 07:00:09] FOREIGN_GPU sample max=20% mean=5.7% n=6 (Xorg 16547 1%)
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.4 prime_s=38.4 ttft_new_p50=4.449 ttft_resume_p50=0.357 ttft_turn_p50=0.273 goodput_tok_s=20.28 itl_p99_ms=59.4 warm_per_gb=1.951 reprefill_share=0.0119 reprefill_net_share=0.0116 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=False (643 s; engine pid 903616, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 3.2 s [3.2-3.2]; total 5 s of 650 s board wall (0.8%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.45 |
+| TTFT-new p99 s (max when n < 100) | 13.1 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.357 |
+| TTFT-resume p99 s (max when n < 100) | 6.75 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.366 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.288 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 0.305 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.273 |
+|   n turn | 127 |
+| goodput tok/s | 20.3 |
+| ITL p99 ms | 59.4 |
+| warm/GB (GPU KV budget) | 1.95 |
+| re-prefill share (clamped) | 0.0119 |
+| re-prefill share (net) | 0.0116 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 603 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 0/1 |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A4-2x-slots: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-parallel 6
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 101248 -np 6 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18751 --host 127.0.0.1 --metrics
+llama ready: -c 101248 -np 6 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 07:00:42] FOREIGN_GPU sample max=11% mean=2.7% n=6 (Xorg 16547 11%)
+[axon-run 07:01:15] FOREIGN_GPU sample max=19% mean=5.7% n=6 (Xorg 16547 15%)
+[axon-run 07:01:48] FOREIGN_GPU sample max=20% mean=5.3% n=6
+[axon-run 07:02:22] FOREIGN_GPU sample max=9% mean=1.7% n=6
+[axon-run 07:02:55] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 07:03:28] FOREIGN_GPU sample max=20% mean=6.5% n=6
+[axon-run 07:04:01] FOREIGN_GPU sample max=13% mean=2.2% n=6
+[axon-run 07:04:34] FOREIGN_GPU sample max=6% mean=1.8% n=6
+[axon-run 07:05:08] FOREIGN_GPU sample max=1% mean=0.3% n=6 (Xorg 16547 1%)
+[axon-run 07:05:41] FOREIGN_GPU sample max=31% mean=8.3% n=6
+[axon-run 07:06:14] FOREIGN_GPU sample max=19% mean=4.0% n=6 (Xorg 16547 19%)
+[axon-run 07:06:47] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 07:07:20] FOREIGN_GPU sample max=11% mean=3.3% n=6 (Xorg 16547 2%)
+[axon-run 07:07:53] FOREIGN_GPU sample max=11% mean=3.0% n=6 (Xorg 16547 11%)
+[axon-run 07:08:27] FOREIGN_GPU sample max=19% mean=3.3% n=6
+[axon-run 07:09:00] FOREIGN_GPU sample max=9% mean=1.8% n=6
+[axon-run 07:09:33] FOREIGN_GPU sample max=11% mean=2.8% n=6 (Xorg 16547 3%)
+[axon-run 07:10:07] FOREIGN_GPU sample max=8% mean=2.3% n=6
+[axon-run 07:10:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:11:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.7 prime_s=39.6 ttft_new_p50=4.667 ttft_resume_p50=0.364 ttft_turn_p50=0.343 goodput_tok_s=19.63 itl_p99_ms=125.3 warm_per_gb=2.411 reprefill_share=0.0193 reprefill_net_share=0.019 out_tokens_short=1 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (644 s; engine pid 942417, started in 1.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 1.2 s [1.2-1.2] + stop 3.2 s [3.2-3.2]; total 4 s of 650 s board wall (0.7%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.67 |
+| TTFT-new p99 s (max when n < 100) | 7.79 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.364 |
+| TTFT-resume p99 s (max when n < 100) | 12.7 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.364 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.284 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 12.7 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.343 |
+|   n turn | 127 |
+| goodput tok/s | 19.6 |
+| ITL p99 ms | 125 |
+| warm/GB (GPU KV budget) | 2.41 |
+| re-prefill share (clamped) | 0.0193 |
+| re-prefill share (net) | 0.019 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 32.7 |
+| replies short of max_tokens | 1 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A5-noidle-cram16g: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-args=--no-cache-idle-slots -cram 16384
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18761 --host 127.0.0.1 --metrics --no-cache-idle-slots -cram 16384
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); then --no-cache-idle-slots -cram 16384 (the last of a repeated flag wins); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 07:11:46] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:12:19] FOREIGN_GPU sample max=11% mean=1.8% n=6
+[axon-run 07:12:52] FOREIGN_GPU sample max=25% mean=7.3% n=6
+[axon-run 07:13:26] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:13:59] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:14:32] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:15:05] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:15:39] FOREIGN_GPU sample max=12% mean=2.2% n=6
+[axon-run 07:16:12] FOREIGN_GPU sample max=23% mean=3.8% n=6 (Xorg 16547 23%)
+[axon-run 07:16:45] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 07:17:18] FOREIGN_GPU sample max=7% mean=2.2% n=6 (Xorg 16547 6%)
+[axon-run 07:17:51] FOREIGN_GPU sample max=10% mean=1.8% n=6 (Xorg 16547 1%)
+[axon-run 07:18:25] FOREIGN_GPU sample max=29% mean=7.7% n=6 (Xorg 16547 7%)
+[axon-run 07:18:58] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 07:19:31] FOREIGN_GPU sample max=5% mean=1.8% n=6 (Xorg 16547 1%)
+[axon-run 07:20:05] FOREIGN_GPU sample max=27% mean=8.5% n=6 (Xorg 16547 5%)
+[axon-run 07:20:38] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 07:21:11] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 07:21:44] FOREIGN_GPU sample max=6% mean=1.0% n=6 (Xorg 16547 6%)
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.8 prime_s=39.0 ttft_new_p50=4.68 ttft_resume_p50=0.427 ttft_turn_p50=0.257 goodput_tok_s=21.25 itl_p99_ms=21.25 warm_per_gb=2.306 reprefill_share=0.0069 reprefill_net_share=0.0065 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (644 s; engine pid 981033, started in 1.1 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 1.1 s [1.1-1.1] + stop 3.6 s [3.6-3.6]; total 5 s of 650 s board wall (0.7%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.68 |
+| TTFT-new p99 s (max when n < 100) | 5.94 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.427 |
+| TTFT-resume p99 s (max when n < 100) | 3.99 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.469 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.272 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 0.301 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.257 |
+|   n turn | 127 |
+| goodput tok/s | 21.2 |
+| ITL p99 ms | 21.2 |
+| warm/GB (GPU KV budget) | 2.31 |
+| re-prefill share (clamped) | 0.0069 |
+| re-prefill share (net) | 0.0065 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A6-cram16g: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-args=-cram 16384
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+[axon-run 07:22:17] FOREIGN_GPU sample max=0% mean=0.0% n=6
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18771 --host 127.0.0.1 --metrics -cram 16384
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); then -cram 16384 (the last of a repeated flag wins); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 07:22:51] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 07:23:24] FOREIGN_GPU sample max=14% mean=2.8% n=6
+[axon-run 07:23:57] FOREIGN_GPU sample max=16% mean=5.2% n=6
+[axon-run 07:24:30] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:25:03] FOREIGN_GPU sample max=23% mean=4.0% n=6
+[axon-run 07:25:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:26:10] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:26:43] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:27:16] FOREIGN_GPU sample max=1% mean=0.3% n=6
+[axon-run 07:27:50] FOREIGN_GPU sample max=9% mean=1.8% n=6
+[axon-run 07:28:23] FOREIGN_GPU sample max=7% mean=1.7% n=6
+[axon-run 07:28:56] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 07:29:30] FOREIGN_GPU sample max=5% mean=1.5% n=6
+[axon-run 07:30:03] FOREIGN_GPU sample max=12% mean=3.2% n=6 (Xorg 16547 7%)
+[axon-run 07:30:37] FOREIGN_GPU sample max=6% mean=1.5% n=6
+[axon-run 07:31:10] FOREIGN_GPU sample max=11% mean=3.7% n=6
+[axon-run 07:31:43] FOREIGN_GPU sample max=15% mean=3.3% n=6
+[axon-run 07:32:16] FOREIGN_GPU sample max=11% mean=4.7% n=6 (Xorg 16547 11%)
+[axon-run 07:32:50] FOREIGN_GPU sample max=1% mean=0.2% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.7 prime_s=39.5 ttft_new_p50=4.475 ttft_resume_p50=0.36 ttft_turn_p50=0.355 goodput_tok_s=20.7 itl_p99_ms=23.33 warm_per_gb=2.306 reprefill_share=0.0072 reprefill_net_share=0.0069 out_tokens_short=1 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (644 s; engine pid 1019827, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 5.3 s [5.3-5.3]; total 7 s of 654 s board wall (1.1%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.47 |
+| TTFT-new p99 s (max when n < 100) | 6.68 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.36 |
+| TTFT-resume p99 s (max when n < 100) | 4.1 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.389 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.29 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 0.155 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.355 |
+|   n turn | 127 |
+| goodput tok/s | 20.7 |
+| ITL p99 ms | 23.3 |
+| warm/GB (GPU KV budget) | 2.31 |
+| re-prefill share (clamped) | 0.0072 |
+| re-prefill share (net) | 0.0069 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 1 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A0-4413a19-defaults-r2: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server 
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18811 --host 127.0.0.1 --metrics
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+[axon-run 07:33:23] FOREIGN_GPU sample max=20% mean=4.5% n=6 (Xorg 16547 20%)
+[axon-run 07:33:56] FOREIGN_GPU sample max=15% mean=3.5% n=6 (Xorg 16547 6%)
+[axon-run 07:34:29] FOREIGN_GPU sample max=16% mean=2.7% n=6
+[axon-run 07:35:03] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 07:35:36] FOREIGN_GPU sample max=7% mean=1.5% n=6 (Xorg 16547 2%)
+[axon-run 07:36:09] FOREIGN_GPU sample max=6% mean=1.7% n=6
+[axon-run 07:36:42] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:37:16] FOREIGN_GPU sample max=7% mean=1.5% n=6 (Xorg 16547 1%)
+[axon-run 07:37:49] FOREIGN_GPU sample max=12% mean=5.3% n=6 (Xorg 16547 12%)
+[axon-run 07:38:22] FOREIGN_GPU sample max=18% mean=7.8% n=6 (Xorg 16547 17%)
+[axon-run 07:38:55] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:39:29] FOREIGN_GPU sample max=16% mean=2.8% n=6
+[axon-run 07:40:02] FOREIGN_GPU sample max=14% mean=3.7% n=6
+[axon-run 07:40:35] FOREIGN_GPU sample max=7% mean=1.8% n=6
+[axon-run 07:41:08] FOREIGN_GPU sample max=11% mean=1.8% n=6
+[axon-run 07:41:42] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 07:42:15] FOREIGN_GPU sample max=10% mean=3.0% n=6 (Xorg 16547 3%)
+[axon-run 07:42:48] FOREIGN_GPU sample max=13% mean=4.7% n=6 (Xorg 16547 6%)
+[axon-run 07:43:21] FOREIGN_GPU sample max=6% mean=1.3% n=6
+[axon-run 07:43:55] FOREIGN_GPU sample max=18% mean=8.0% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=606.4 prime_s=40.0 ttft_new_p50=6.444 ttft_resume_p50=0.798 ttft_turn_p50=0.79 goodput_tok_s=13.7 itl_p99_ms=535.45 warm_per_gb=1.064 reprefill_share=0.019 reprefill_net_share=0.0186 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=False (647 s; engine pid 1058674, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 3.4 s [3.4-3.4]; total 6 s of 655 s board wall (0.9%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 6.44 |
+| TTFT-new p99 s (max when n < 100) | 31.8 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.798 |
+| TTFT-resume p99 s (max when n < 100) | 20.7 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.733 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 8.73 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 18.5 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.79 |
+|   n turn | 127 |
+| goodput tok/s | 13.7 |
+| ITL p99 ms | 535 |
+| warm/GB (GPU KV budget) | 1.06 |
+| re-prefill share (clamped) | 0.019 |
+| re-prefill share (net) | 0.0186 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 32.9 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 606 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 0/1 |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A1-b12387-defaults-r2: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server 
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18821 --host 127.0.0.1 --metrics
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 07:44:28] FOREIGN_GPU sample max=14% mean=3.7% n=6 (Xorg 16547 14%)
+[axon-run 07:45:01] FOREIGN_GPU sample max=26% mean=8.0% n=6 (Xorg 16547 4%)
+[axon-run 07:45:34] FOREIGN_GPU sample max=10% mean=2.3% n=6 (Xorg 16547 1%)
+[axon-run 07:46:08] FOREIGN_GPU sample max=19% mean=3.2% n=6
+[axon-run 07:46:41] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:47:14] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:47:47] FOREIGN_GPU sample max=13% mean=3.2% n=6
+[axon-run 07:48:21] FOREIGN_GPU sample max=9% mean=1.7% n=6
+[axon-run 07:48:54] FOREIGN_GPU sample max=23% mean=4.7% n=6 (Xorg 16547 2%)
+[axon-run 07:49:27] FOREIGN_GPU sample max=12% mean=3.0% n=6 (kitty 19566 6%)
+[axon-run 07:50:00] FOREIGN_GPU sample max=13% mean=5.3% n=6 (Xorg 16547 2%, kitty 1117489 1%)
+[axon-run 07:50:33] FOREIGN_GPU sample max=13% mean=5.2% n=6 (kitty 1117489 2%, Xorg 16547 2%)
+[axon-run 07:51:06] FOREIGN_GPU sample max=6% mean=4.3% n=6 (kitty 1117489 3%, Xorg 16547 3%)
+[axon-run 07:51:40] FOREIGN_GPU sample max=12% mean=7.2% n=6 (Xorg 16547 9%)
+[axon-run 07:52:13] FOREIGN_GPU sample max=16% mean=4.5% n=6 (kitty 1117489 4%, Xorg 16547 1%)
+[axon-run 07:52:46] FOREIGN_GPU sample max=3% mean=1.0% n=6
+[axon-run 07:53:19] FOREIGN_GPU sample max=1% mean=0.3% n=6
+[axon-run 07:53:52] FOREIGN_GPU sample max=12% mean=2.5% n=6
+[axon-run 07:54:26] FOREIGN_GPU sample max=5% mean=1.0% n=6
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.8 prime_s=39.8 ttft_new_p50=4.844 ttft_resume_p50=0.408 ttft_turn_p50=0.349 goodput_tok_s=17.85 itl_p99_ms=166.29 warm_per_gb=2.129 reprefill_share=0.019 reprefill_net_share=0.0186 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (645 s; engine pid 1097715, started in 2.2 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 2.2 s [2.2-2.2] + stop 3.2 s [3.2-3.2]; total 5 s of 651 s board wall (0.8%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.84 |
+| TTFT-new p99 s (max when n < 100) | 8.27 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.408 |
+| TTFT-resume p99 s (max when n < 100) | 8.64 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.408 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.289 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 8.64 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.349 |
+|   n turn | 127 |
+| goodput tok/s | 17.9 |
+| ITL p99 ms | 166 |
+| warm/GB (GPU KV budget) | 2.13 |
+| re-prefill share (clamped) | 0.019 |
+| re-prefill share (net) | 0.0186 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A2-noidle-r2: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-args=--no-cache-idle-slots
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+[axon-run 07:54:59] FOREIGN_GPU sample max=2% mean=0.3% n=6
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18831 --host 127.0.0.1 --metrics --no-cache-idle-slots
+llama ready: -c 98304 -np 3 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); then --no-cache-idle-slots (the last of a repeated flag wins); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 07:55:32] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 07:56:05] FOREIGN_GPU sample max=12% mean=5.3% n=6
+[axon-run 07:56:39] FOREIGN_GPU sample max=9% mean=2.0% n=6
+[axon-run 07:57:12] FOREIGN_GPU sample max=15% mean=4.8% n=6 (Xorg 16547 13%)
+[axon-run 07:57:45] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 07:58:17] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:58:50] FOREIGN_GPU sample max=13% mean=6.5% n=6 (Xorg 16547 13%)
+[axon-run 07:59:23] FOREIGN_GPU sample max=33% mean=14.0% n=6 (Xorg 16547 19%)
+[axon-run 07:59:56] FOREIGN_GPU sample max=24% mean=7.2% n=6 (Xorg 16547 1%)
+[axon-run 08:00:29] FOREIGN_GPU sample max=6% mean=4.7% n=6 (kitty 1117489 4%, Xorg 16547 2%)
+[axon-run 08:01:02] FOREIGN_GPU sample max=14% mean=4.3% n=6 (kitty 1117489 3%)
+[axon-run 08:01:36] FOREIGN_GPU sample max=8% mean=3.7% n=6 (Xorg 16547 2%, kitty 1117489 1%)
+[axon-run 08:02:09] FOREIGN_GPU sample max=6% mean=2.3% n=6
+[axon-run 08:02:42] FOREIGN_GPU sample max=28% mean=14.3% n=6 (Xorg 16547 16%, firefox 1407515 5%, kitty 41370 3%)
+[axon-run 08:03:15] FOREIGN_GPU sample max=12% mean=4.5% n=6 (kitty 19566 6%)
+[axon-run 08:03:48] FOREIGN_GPU sample max=26% mean=9.7% n=6
+[axon-run 08:04:21] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 08:04:55] FOREIGN_GPU sample max=10% mean=2.2% n=6
+[axon-run 08:05:28] FOREIGN_GPU sample max=13% mean=5.5% n=6 (Xorg 16547 4%, kitty 19566 3%)
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=603.8 prime_s=39.0 ttft_new_p50=4.742 ttft_resume_p50=0.381 ttft_turn_p50=0.233 goodput_tok_s=20.89 itl_p99_ms=65.16 warm_per_gb=2.306 reprefill_share=0.0119 reprefill_net_share=0.0116 out_tokens_short=0 prompt_mismatch=0 prompt_checked=174 preempted=None prefills_unfed=None tainted=True (644 s; engine pid 1136784, started in 1.1 s)
+ENGINE RESTARTS (one per cell per engine): llama 1 x start 1.1 s [1.1-1.1] + stop 3.5 s [3.5-3.5]; total 5 s of 650 s board wall (0.7%)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1: r0) |
+|---|---|
+| TTFT-new p50 s | 4.74 |
+| TTFT-new p99 s (max when n < 100) | 6.76 |
+|   n new | 13 |
+| TTFT-resume p50 s | 0.381 |
+| TTFT-resume p99 s (max when n < 100) | 6.03 |
+|   n resume | 34 |
+| resume 30s-2m p50 | 0.39 |
+|   n 30s-2m | 29 |
+| resume 2-10m p50 | 0.339 |
+|   n 2-10m | 4 |
+| resume >10m p50 | 0.334 |
+|   n >10m | 1 |
+| TTFT-turn p50 s | 0.233 |
+|   n turn | 127 |
+| goodput tok/s | 20.9 |
+| ITL p99 ms | 65.2 |
+| warm/GB (GPU KV budget) | 2.31 |
+| re-prefill share (clamped) | 0.0119 |
+| re-prefill share (net) | 0.0116 |
+| preempted (axon /slots) | n/a |
+| output tok/s | 33 |
+| replies short of max_tokens | 0 |
+| prompt counts checked (engine-reported) | 174 |
+| prompt-count mismatches | 0 |
+| wall s | 604 |
+| errors (all kinds) | 0 |
+|   engine aborts mid-stream (latency counted, no goodput) | 0 |
+| tainted runs | 1/1 (r0) |
+| reply md5 stable over rounds | yes |
+BOARD END ok (0 request errors)
+== arm A4-2x-slots-r2: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server --llama-parallel 6
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'sessions': None, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8 agent_replay.py sha256 2799e97ac3edce02
+model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf sha256 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
+start llama kv f16: /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 101248 -np 6 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18851 --host 127.0.0.1 --metrics
+llama ready: -c 101248 -np 6 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); env LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387; tokenization check 512 words = 512 tokens
+[axon-run 08:06:01] FOREIGN_GPU sample max=37% mean=12.3% n=6
+[axon-run 08:06:20] MAX DURATION 120 min (--max-min) reached: stopping the job
+[axon-run 08:06:20] signal 15: stopping the job
+agent_replay: signal 15: stopping 1 engine(s)
+[axon-run 08:06:20] exit 143 after 7200.1s (host bella)
+[axon-run 08:06:23] FOREIGN_GPU max=99% mean=2.8% samples=1298 top: Xorg 16547 99%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

@@ -1,0 +1,120 @@
+[axon-run 03:26:13] submitted 1115-032613-4ff7 by /home/haseeb/.cache/axon-wt-dist-rel: /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/single_stream.sh
+[axon-run 03:26:13] timing job waiting: foreign GPU load 11 % 53 s ago (Xorg 16547 11%), quiet 53 s of the 120 s needed (on bella; > 10 %)
+[axon-run 08:20:50] scope axon-job-1115-032613-4ff7-1794748850.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20679 MB): an OOM here kills only this job
+[axon-run 08:20:50] job 1115-032613-4ff7 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-032613-4ff7-1794748850 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/single_stream.sh
+2026-11-15 08:20:50 EST
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz]
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 620.70.06, 98.05.31.00.3B, 12227 MiB, [N/A], 3090 MHz, 14001 MHz
+24
+model name	: Intel(R) Core(TM) Ultra 9 275HX
+ 08:20:50 up 1 day,  4:06, 11 users,  load average: 3.39, 2.95, 2.68
+               total        used        free      shared  buff/cache   available
+Mem:           31486       13448        4924         581       14098       18037
+harness c24e38c2aaf7d9d272410279d47dc84fe20217c8, scripts tree b8f0278d04f690adcd7d60e0aae4a0dac6ec2d1a dirty: 
+env: AXON_KERNEL_PACK=only AXON_Q_VERBOSE=1 AXON_Q_VRAM_MB=11000 
+axon 0.1.0
+precompiled kernels (built in): NVRTC 13.4, 51.9 MB (compressed fatbins), 106 entries: 14 modules (14 of this build's 14), targets sm_75 sm_80 sm_86 sm_89 sm_90 sm_120 compute_120 sm_90a
+AXON_KERNEL_PACK=only: no NVRTC
+gpu: NVIDIA GeForce RTX 5070 Ti Laptop GPU | sm_120, 46 SMs | 11.6 GiB (10.0 free) | ~672 GB/s | kernels: precompiled sm_120
+2c19415bf329b30fa2e2805e9a0aa3d17321449b154010fa9241d67f7f31d245  /home/haseeb/.cache/axon-dist/rel01/rc/axon
+6a390ccde5f65ebcc4699ae461645c8857aa9d48a80f7d176bd2f5771772e720  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-server
+9a249b44c309fe051c3084a9bc5e982cc0b022048439914ad57feae5839a2237  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libllama-server-impl.so
+c8cb0b80378ac0040b7ac77a4bc768f525685b0b27d4aba03f812fcfa4d1e171  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-bench
+9feb5ef9f4f542234cdf176d30c62a5032fdce7ccabe994095497ebe05ecec29  /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libggml-cuda.so
+d4ef60b4f8d2fd3edc5894ad971f04211b5bc2dfafaa1f333a72675f8f7d77ff  /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server
+e8ff2fa0ea5b53d1c85c113adb9580a6b98dfdcf3a0046aa97fdb5d67e7de301  /home/haseeb/Projects/llama.cpp/build-cuda/bin/libllama-server-impl.so
+0f206fa85bf9cb39003d4130238dee5147a61315664c449d98d3cf9dbaf5539a  /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-bench
+7fc73b4741871388a623746d9d5a9619b0a37f28f5dc21a2d02ed3d0bcbfeab5  /home/haseeb/Projects/llama.cpp/build-cuda/bin/libggml-cuda.so.0
+65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423  /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+713285ba54487e17035d6757b5e76391b568b45dce776925d699ede3ae3cccdc  /home/haseeb/.cache/axon-agent/traces/board-trace-v1.json
+/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/libggml-cuda.so: elf  149 sm_103 149 sm_120a 149 sm_121a 149 sm_86 149 sm_89  ptx  149 sm_75 149 sm_80 149 sm_90 
+/home/haseeb/Projects/llama.cpp/build-cuda/bin/libggml-cuda.so.0: elf  144 sm_120a  ptx  144 sm_120a 
+9c50c62879669bebe162b0985b895f1088fde4ee1dda23c35722a8e97f9feafa  sb_pod.py
+f01385b12094c7ce93c3214733cd3e1dfd80a57d8e412bcde68d880e84276fcc  sb_read.py
+d20cf1ece7b9bda9dd386fdd6e63a2ae7fe0606cda320e4eb54fbcceada8b01b  /home/haseeb/.cache/axon-dist/rel01/sbnode/bin/llama-bench-b12387
+4a2bcc7a59f520bad41ca0b97ce47a5f25e1186655d03ec7294aa4e8f71c8e8f  /home/haseeb/.local/share/axon-devstack/current/pod/board/sb_pod.py
+#!/bin/sh
+LD_LIBRARY_PATH=/home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387 exec /home/haseeb/.cache/axon-dist/llama-b12387/x/llama-b12387/llama-bench "$@"
+74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  qwen2.5-0.5b-q4_k_m.gguf
+6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e  qwen2.5-1.5b-instruct-q4_k_m.gguf
+626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d  qwen2.5-3b-instruct-q4_k_m.gguf
+65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423  Qwen2.5-7B-Instruct-Q4_K_M.gguf
+d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785  Qwen3-8B-Q4_K_M.gguf
+# scoreboard 2026-11-15 08:21 rounds=3 bins=['/home/haseeb/.cache/axon-dist/rel01/rc/axon'] flags=['--llama=llama:/home/haseeb/.cache/axon-dist/rel01/sbnode/bin/llama-bench-b12387', '--llama=llama_4413a19:/home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-bench']
+== 0.5B cooled to 58C | 58.22, 26.31 W, 1462 MHz, 9001 MHz
+  round 0 | 63.12, 37.70 W, 1890 MHz, 14001 MHz | pre-run GPU busy% [8, 8, 8, 7, 7]
+[axon-run 08:21:24] FOREIGN_GPU sample max=55% mean=14.2% n=6
+  round 1 | 63.94, 50.08 W, 2580 MHz, 14001 MHz | pre-run GPU busy% [8, 8, 7, 7, 8, 7, 10, 10, 8]
+  round 2 | 70.91, 110.57 W, 2670 MHz, 14001 MHz | pre-run GPU busy% [7, 10, 10, 8, 6, 8, 10, 9, 7]
+  0.5B    pp560  axon0=  44384.4/44391  llama=  38822.0/39832  llama_ub512=  31829.8/32506  llama_4413a19=  38833.9/40458  llama_4413a19_ub512=  29502.4/29781   | axon0:[44384, 43175, 44391] llama:[37448, 38822, 39832] llama_ub512:[31830, 32506, 27549] llama_4413a19:[40458, 38834, 37662] llama_4413a19_ub512:[28522, 29781, 29502] llama_best_ub:[4096, 4096, 4096] llama_4413a19_best_ub:[4096, 4096, 4096]
+  0.5B    pp2100 axon0=  46732.3/47220  llama=  38020.1/38431  llama_ub512=  36936.1/37181  llama_4413a19=  37811.5/38010  llama_4413a19_ub512=  35987.8/36034   | axon0:[44639, 47220, 46732] llama:[37945, 38020, 38431] llama_ub512:[37181, 36936, 36500] llama_4413a19:[37812, 38010, 37516] llama_4413a19_ub512:[35988, 35919, 36034] llama_best_ub:[4096, 4096, 4096] llama_4413a19_best_ub:[4096, 4096, 4096]
+  0.5B    tg128  axon0=    723.3/734  llama=    627.5/636  llama_ub512=    625.1/627  llama_4413a19=    589.8/595  llama_4413a19_ub512=    574.5/587   | axon0:[708, 723, 734] llama:[628, 636, 623] llama_ub512:[627, 625, 578] llama_4413a19:[573, 595, 590] llama_4413a19_ub512:[573, 587, 574] llama_best_ub:[4096, 4096, 4096] llama_4413a19_best_ub:[512, 4096, 4096]
+== 1.5B cooled to 65C | 65.69, 101.33 W, 2670 MHz, 14001 MHz
+[axon-run 08:21:57] FOREIGN_GPU sample max=18% mean=10.7% n=6 (Xorg 16547 18%)
+  round 0 | 73.66, 110.37 W, 2467 MHz, 11001 MHz | pre-run GPU busy% [8, 10, 9, 7, 8, 7, 9, 9, 6]
+  round 1 | 68.56, 69.73 W, 2520 MHz, 14001 MHz | pre-run GPU busy% [7, 9, 9, 6, 10, 9, 9, 9, 7]
+[axon-run 08:22:30] FOREIGN_GPU sample max=48% mean=21.2% n=6 (Xorg 16547 11%)
+  round 2 | 71.97, 108.20 W, 2625 MHz, 11001 MHz | pre-run GPU busy% [9, 9, 9, 7, 6, 7, 5, 5, 9]
+  1.5B    pp560  axon0=  21524.6/21561  llama=  15093.7/15350  llama_ub512=  15093.7/15267  llama_4413a19=  14314.7/14605  llama_4413a19_ub512=  13357.8/13395   | axon0:[21525, 20993, 21561] llama:[15350, 15094, 14775] llama_ub512:[15267, 15094, 14775] llama_4413a19:[14605, 14315, 14203] llama_4413a19_ub512:[13395, 13214, 13358] llama_best_ub:[4096, 512, 512] llama_4413a19_best_ub:[4096, 4096, 4096]
+  1.5B    pp2100 axon0=  20348.6/20358  llama=  16339.6/16473  llama_ub512=  16219.7/16331  llama_4413a19=  14396.8/14430  llama_4413a19_ub512=  14396.8/14430   | axon0:[20302, 20358, 20349] llama:[16331, 16473, 16340] llama_ub512:[16331, 16191, 16220] llama_4413a19:[14430, 14372, 14397] llama_4413a19_ub512:[14430, 14372, 14397] llama_best_ub:[512, 4096, 4096] llama_4413a19_best_ub:[512, 512, 512]
+  1.5B    tg128  axon0=    335.3/366  llama=    322.1/335  llama_ub512=    318.3/335  llama_4413a19=    303.0/319  llama_4413a19_ub512=    303.0/307   | axon0:[310, 366, 335] llama:[319, 322, 335] llama_ub512:[318, 317, 335] llama_4413a19:[303, 303, 319] llama_4413a19_ub512:[300, 303, 307] llama_best_ub:[4096, 4096, 512] llama_4413a19_best_ub:[4096, 512, 4096]
+== 3B cooled to 71C | 71.97, 101.44 W, 2625 MHz, 11001 MHz
+[axon-run 08:23:03] FOREIGN_GPU sample max=28% mean=14.0% n=6 (Xorg 16547 7%)
+  round 0 | 75.44, 107.87 W, 2385 MHz, 11001 MHz | pre-run GPU busy% [7, 5, 5, 9, 10, 8, 8, 9, 8]
+[axon-run 08:23:36] FOREIGN_GPU sample max=22% mean=11.7% n=6 (Xorg 16547 8%)
+  round 1 | 77.22, 91.92 W, 2400 MHz, 14001 MHz | pre-run GPU busy% [8, 8, 9, 8, 7, 8, 7, 6, 8]
+  round 2 | 82.94, 104.02 W, 2310 MHz, 11001 MHz | pre-run GPU busy% [8, 7, 6, 8, 6, 7, 7, 9, 10]
+  3B      pp560  axon0=  10512.4/10666  llama=   8454.9/8470  llama_ub512=   8454.9/8470  llama_4413a19=   7405.1/7446  llama_4413a19_ub512=   7405.1/7446   | axon0:[10666, 10506, 10512] llama:[8448, 8470, 8455] llama_ub512:[8448, 8470, 8455] llama_4413a19:[7446, 7364, 7405] llama_4413a19_ub512:[7446, 7364, 7405] llama_best_ub:[512, 512, 512] llama_4413a19_best_ub:[512, 512, 512]
+  3B      pp2100 axon0=  10295.4/10408  llama=   8337.5/8377  llama_ub512=   8007.1/8016  llama_4413a19=   7402.7/7422  llama_4413a19_ub512=   7183.8/7229   | axon0:[10408, 10291, 10295] llama:[8377, 8338, 8299] llama_ub512:[8016, 8003, 8007] llama_4413a19:[7397, 7422, 7403] llama_4413a19_ub512:[7229, 7184, 7181] llama_best_ub:[4096, 4096, 4096] llama_4413a19_best_ub:[4096, 4096, 4096]
+  3B      tg128  axon0=    221.6/222  llama=    176.6/177  llama_ub512=    176.6/177  llama_4413a19=    172.5/174  llama_4413a19_ub512=    171.2/172   | axon0:[191, 222, 222] llama:[177, 177, 175] llama_ub512:[177, 177, 172] llama_4413a19:[174, 173, 172] llama_4413a19_ub512:[172, 171, 166] llama_best_ub:[512, 512, 4096] llama_4413a19_best_ub:[4096, 4096, 4096]
+[axon-run 08:24:10] FOREIGN_GPU sample max=23% mean=12.2% n=6 (Xorg 16547 4%, zen-bin 1191223 1%)
+== 7B cooled to 71C | 71.94, 29.63 W, 1477 MHz, 9001 MHz
+[axon-run 08:24:43] FOREIGN_GPU sample max=12% mean=7.5% n=6 (Xorg 16547 6%, kitty 19566 3%)
+  round 0 | 86.81, 98.69 W, 2310 MHz, 9001 MHz | pre-run GPU busy% [7, 7, 9, 10, 10, 7, 10, 9, 8]
+[axon-run 08:25:16] FOREIGN_GPU sample max=30% mean=10.2% n=6 (Xorg 16547 30%)
+  round 1 | 87.12, 114.23 W, 1800 MHz, 11001 MHz | pre-run GPU busy% [7, 10, 9, 8, 3, 3, 2, 2, 5]
+[axon-run 08:25:49] FOREIGN_GPU sample max=16% mean=7.2% n=6 (kitty 19566 16%)
+[axon-run 08:26:22] FOREIGN_GPU sample max=32% mean=15.7% n=6 (zen-bin 1191223 14%)
+  round 2 | 82.41, 72.07 W, 1395 MHz, 11001 MHz | pre-run GPU busy% [3, 2, 2, 5, 6, 9, 6, 6, 7]
+  7B      pp560  axon0=   4863.6/5017  llama=   3882.5/4098  llama_ub512=   3882.5/4098  llama_4413a19=   3811.5/3875  llama_4413a19_ub512=   3811.5/3875   | axon0:[4864, 5017, 4803] llama:[4098, 3882, 3706] llama_ub512:[4098, 3882, 3706] llama_4413a19:[3811, 3647, 3875] llama_4413a19_ub512:[3811, 3647, 3875] llama_best_ub:[512, 512, 512] llama_4413a19_best_ub:[512, 512, 512]
+  7B      pp2100 axon0=   4924.9/5005  llama=   3646.9/3911  llama_ub512=   3646.9/3911  llama_4413a19=   3476.8/3540  llama_4413a19_ub512=   3476.8/3540   | axon0:[4925, 5005, 4359] llama:[3911, 3647, 3364] llama_ub512:[3911, 3647, 3364] llama_4413a19:[3540, 3387, 3477] llama_4413a19_ub512:[3540, 3387, 3477] llama_best_ub:[512, 512, 512] llama_4413a19_best_ub:[512, 512, 512]
+  7B      tg128  axon0=     95.7/98  llama=     84.6/93  llama_ub512=     84.6/91  llama_4413a19=     86.5/90  llama_4413a19_ub512=     85.8/90   | axon0:[96, 98, 91] llama:[84, 93, 85] llama_ub512:[84, 91, 85] llama_4413a19:[84, 90, 87] llama_4413a19_ub512:[78, 90, 86] llama_best_ub:[512, 4096, 512] llama_4413a19_best_ub:[4096, 512, 4096]
+[axon-run 08:26:55] FOREIGN_GPU sample max=22% mean=10.8% n=6 (Xorg 16547 9%, kitty 19566 5%)
+== q3-8B cooled to 72C | 72.75, 24.68 W, 1155 MHz, 9001 MHz
+[axon-run 08:27:31] FOREIGN_GPU sample max=33% mean=10.8% n=6 (Xorg 16547 6%)
+  round 0 | 82.31, 66.13 W, 1102 MHz, 9001 MHz | pre-run GPU busy% [9, 6, 6, 7, 10, 3, 4, 6, 7]
+[axon-run 08:28:01] FOREIGN_GPU sample max=35% mean=20.0% n=5 (Xorg 16547 35%)
+[axon-run 08:28:36] FOREIGN_GPU sample max=24% mean=13.2% n=6
+  round 1 | 83.44, 89.44 W, 1620 MHz, 14001 MHz | pre-run GPU busy% [3, 4, 6, 7, 8, 9, 7, 8, 10]
+[axon-run 08:29:09] FOREIGN_GPU sample max=33% mean=16.0% n=6 (Xorg 16547 16%)
+[axon-run 08:29:42] FOREIGN_GPU sample max=49% mean=20.7% n=6 (Xorg 16547 12%)
+  round 2 | 86.78, 72.96 W, 1635 MHz, 11001 MHz | pre-run GPU busy% [9, 7, 8, 10, 10, 4, 2, 6, 4]
+  q3-8B   pp560  axon0=   4496.5/4559  llama=   2760.4/3619  llama_ub512=   2760.4/3619  llama_4413a19=   2531.4/2732  llama_4413a19_ub512=   2531.4/2732   | axon0:[4559, 4496, 4180] llama:[3619, 2760, 2691] llama_ub512:[3619, 2760, 2691] llama_4413a19:[2732, 2531, 2341] llama_4413a19_ub512:[2732, 2531, 2341] llama_best_ub:[512, 512, 512] llama_4413a19_best_ub:[512, 512, 512]
+  q3-8B   pp2100 axon0=   3580.6/4631  llama=   2561.1/3427  llama_ub512=   2561.1/3427  llama_4413a19=   2376.5/2669  llama_4413a19_ub512=   2376.5/2669   | axon0:[4631, 3534, 3581] llama:[3427, 2561, 2494] llama_ub512:[3427, 2561, 2494] llama_4413a19:[2669, 2376, 2221] llama_4413a19_ub512:[2669, 2376, 2221] llama_best_ub:[512, 512, 512] llama_4413a19_best_ub:[512, 512, 512]
+  q3-8B   tg128  axon0=     76.4/80  llama=     69.1/83  llama_ub512=     69.0/83  llama_4413a19=     70.3/77  llama_4413a19_ub512=     70.3/77   | axon0:[71, 76, 80] llama:[83, 65, 69] llama_ub512:[83, 65, 69] llama_4413a19:[77, 70, 65] llama_4413a19_ub512:[77, 70, 65] llama_best_ub:[512, 512, 4096] llama_4413a19_best_ub:[512, 512, 512]
+SCOREBOARD_DONE
+| model | cell | axon median [min-max] | b12387 best ub | 4413a19 best ub | b12387 ub512 | 4413a19 ub512 | reference | margin | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.5B | pp560 | 44384.4 [43175.4-44390.8] | 38822.0 | 38833.9 | 31829.8 | 29502.4 | llama_4413a19 | +14.3% | AHEAD |
+| 0.5B | pp2100 | 46732.3 [44638.6-47220.0] | 38020.1 | 37811.5 | 36936.1 | 35987.8 | llama | +22.9% | AHEAD |
+| 0.5B | tg128 | 723.3 [707.6-734.1] | 627.5 | 589.8 | 625.1 | 574.5 | llama | +15.3% | AHEAD |
+| 1.5B | pp560 | 21524.6 [20992.7-21560.8] | 15093.7 | 14314.7 | 15093.7 | 13357.8 | llama | +42.6% | AHEAD |
+| 1.5B | pp2100 | 20348.6 [20301.8-20358.5] | 16339.6 | 14396.8 | 16219.7 | 14396.8 | llama | +24.5% | AHEAD |
+| 1.5B | tg128 | 335.3 [310.1-366.4] | 322.1 | 303.0 | 318.3 | 303.0 | llama | +4.1% | PARITY |
+| 3B | pp560 | 10512.4 [10505.9-10665.9] | 8454.9 | 7405.1 | 8454.9 | 7405.1 | llama | +24.3% | AHEAD |
+| 3B | pp2100 | 10295.4 [10290.6-10407.6] | 8337.5 | 7402.7 | 8007.1 | 7183.8 | llama | +23.5% | AHEAD |
+| 3B | tg128 | 221.6 [190.8-221.8] | 176.6 | 172.5 | 176.6 | 171.2 | llama | +25.5% | AHEAD |
+| 7B | pp560 | 4863.6 [4803.0-5016.7] | 3882.5 | 3811.5 | 3882.5 | 3811.5 | llama | +25.3% | AHEAD |
+| 7B | pp2100 | 4924.9 [4359.1-5005.2] | 3646.9 | 3476.8 | 3646.9 | 3476.8 | llama | +35.0% | AHEAD |
+| 7B | tg128 | 95.7 [91.5-97.7] | 84.6 | 86.5 | 84.6 | 85.8 | llama_4413a19 | +10.6% | AHEAD |
+| q3-8B | pp560 | 4496.5 [4180.1-4558.6] | 2760.4 | 2531.4 | 2760.4 | 2531.4 | llama | +62.9% | AHEAD |
+| q3-8B | pp2100 | 3580.6 [3534.4-4631.5] | 2561.1 | 2376.5 | 2561.1 | 2376.5 | llama | +39.8% | AHEAD |
+| q3-8B | tg128 | 76.4 [70.8-80.1] | 69.1 | 70.3 | 69.0 | 70.3 | llama_4413a19 | +8.6% | PARITY |
+COUNTS 15 cells: AHEAD 13, PARITY 2, BEHIND 0, NO_VERDICT 0
+THINNEST AHEAD: 7B tg128 +10.6%, 0.5B pp560 +14.3%, 0.5B tg128 +15.3%
+WORST MARGINS: 1.5B tg128 +4.1% (PARITY), q3-8B tg128 +8.6% (PARITY), 7B tg128 +10.6% (AHEAD)
+BEHIND: none
+SB END ok
+[axon-run 08:29:54] exit 0 after 543.9s (host bella)
+[axon-run 08:29:55] EXPECT ok: output matches /SB END ok/
+[axon-run 08:29:55] FOREIGN_GPU max=55% mean=13.3% samples=96 top: Xorg 16547 41%, zen-bin 1191223 14%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

@@ -1,0 +1,7 @@
+[axon-run 03:26:10] submitted 1115-032610-bbd2 by /home/haseeb/.cache/axon-wt-dist-rel: /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/agent_board.sh
+[axon-run 03:26:13] timing job waiting: foreign GPU load 11 % 50 s ago (Xorg 16547 11%), quiet 50 s of the 120 s needed (on bella; > 10 %)
+[axon-run 08:20:45] scope axon-job-1115-032610-bbd2-1794748845.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20679 MB): an OOM here kills only this job
+[axon-run 08:20:45] job 1115-032610-bbd2 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1115-032610-bbd2-1794748845 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-wt-dist-rel/scripts/release/boards/agent_board.sh
+STOP: no sweep winner (/home/haseeb/.cache/axon-dist/rel01/sweep/WINNER.env)
+[axon-run 08:20:45] exit 1 after 0.1s (host bella)
+[axon-run 08:20:50] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
