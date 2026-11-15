@@ -8,7 +8,8 @@ The rule (pre-registered in docs/log/2026-11-14-release-0.1-prep.md before the s
   2. The winner is the qualifying arm with the lowest TTFT-turn p50 (the stop rule's metric).
   3. Arms within 5 % of that TTFT-turn p50 tie; among them the lowest ITL p99 wins, then the lowest TTFT-new p50.
 Prints a table of every arm, then WINNER; writes SWEEP_DIR/WINNER.env (sourced by agent_board.sh).
-Exit 1 if no arm qualifies. --tainted: print the arms whose run is tainted (agent_sweep.sh reruns them once)."""
+Exit 1 if no arm qualifies. --tainted: print the arms whose run is tainted (agent_sweep.sh reruns them once).
+--smoke (AXON_REL_SMOKE=1, next to other GPU jobs): taint doesn't disqualify; the mechanics only."""
 import glob, json, os, sys
 
 ARMS = {  # prefix -> (llama.cpp build, -np as a multiple of budget//32768 (0 = the board's default), --llama-args)
@@ -48,7 +49,7 @@ def why_not(r):
         bad.append(f"{r['errors']} errors")
     if r.get('prompt_mismatch'):
         bad.append(f"{r['prompt_mismatch']} prompt-count mismatches")
-    if r.get('tainted'):
+    if r.get('tainted') and '--smoke' not in sys.argv:
         bad.append('tainted')
     if ax and r.get('n_turn') != ax.get('n_turn'):
         bad.append(f"n turn {r.get('n_turn')} vs axon's {ax.get('n_turn')}")

@@ -40,7 +40,7 @@ arm A3-noidle-ub2048 new 18740 "--llama-args=--no-cache-idle-slots -ub 2048"
 arm A4-2x-slots new 18750 --llama-parallel $(( 2 * NP ))
 arm A5-noidle-cram16g new 18760 "--llama-args=--no-cache-idle-slots -cram 16384"
 # A tainted arm (foreign GPU load) is run once more at the end; pick.py reads the last clean run of each arm.
-for t in $(python3 "$S/pick.py" "$OUT" --tainted); do
+for t in $([ -z "$smoke" ] && python3 "$S/pick.py" "$OUT" --tainted); do
   case $t in
     A0-*) arm "$t-r2" old 18810 ;; A1-*) arm "$t-r2" new 18820 ;;
     A2-*) arm "$t-r2" new 18830 --llama-args=--no-cache-idle-slots ;;
@@ -49,7 +49,7 @@ for t in $(python3 "$S/pick.py" "$OUT" --tainted); do
     A5-*) arm "$t-r2" new 18860 "--llama-args=--no-cache-idle-slots -cram 16384" ;;
   esac
 done
-python3 "$S/pick.py" "$OUT" > "$OUT/WINNER.txt"; rc=$?
+python3 "$S/pick.py" "$OUT" ${smoke:+--smoke} > "$OUT/WINNER.txt"; rc=$?
 cat "$OUT/WINNER.txt"
 [ $rc = 0 ] || { echo "STOP: no llama-server arm qualified (pick.py rc $rc)"; exit 1; }
 echo "SWEEP END ok"
