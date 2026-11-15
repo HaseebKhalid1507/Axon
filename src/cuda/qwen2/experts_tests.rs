@@ -9,27 +9,27 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use crate::model::deepseek2_tests::{Opt, ds2_fixture};
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
     /// Uniform in [-1, 1).
-    fn f(&mut self) -> f32 {
+    pub(super) fn f(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0
     }
 }
 
 /// Bits of a float, every NaN as one value.
-fn key(v: f32) -> u32 {
+pub(super) fn key(v: f32) -> u32 {
     if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() }
 }
 
 /// Positions where a and b differ in `key`: the count and the first few.
-fn diffs(a: &[f32], b: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
+pub(super) fn diffs(a: &[f32], b: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
     assert_eq!(a.len(), b.len());
     let d: Vec<usize> = (0..a.len()).filter(|&i| key(a[i]) != key(b[i])).collect();
     (
@@ -49,7 +49,7 @@ fn twin_refusals() {
         twin_gemm_ok(cc).unwrap();
     }
     use crate::quant::*;
-    for qt in [Q4_K, Q5_0, Q8_0, Q6_K] {
+    for qt in [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4] {
         twin_type(qt).unwrap();
     }
     for qt in [Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, Q5_K, IQ4_NL, F16, F32] {
@@ -60,18 +60,35 @@ fn twin_refusals() {
 /// The batch sizes of the gate.
 const NBS: [usize; 5] = [1, 6, 48, 510, 1024];
 
+/// gpt-oss's (spec §3 item 3): odd sizes around moe_gemm_mx's 32-token
+/// tiles, and the prefill batch.
+pub(super) const OSS_NBS: [usize; 5] = [1, 7, 48, 129, 1152];
+
 /// Layer l of `m` on the GPU vs `cpu.moe_layer_batch` at every nb of NBS:
 /// nb random hidden states (every third token 8x larger), routed by the CPU's
 /// router; then nb invariance on the largest batch (the decode GEMV, token by
 /// token). Below sm_80 the batched path must refuse, and the GEMV path is
 /// checked against the CPU instead.
 fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
+    check_layer_at(g, ex, cpu, l, what, &NBS)
+}
+
+/// `check_layer` at the batch sizes `nbs` (nb invariance on the largest).
+pub(super) fn check_layer_at(
+    g: &Gpu,
+    ex: &CudaExperts,
+    cpu: &Qwen2,
+    l: usize,
+    what: &str,
+    nbs: &[usize],
+) {
     let mut rng = Rng(0x6d6f_6572_6573_0000 ^ l as u64);
     let (dim, k) = (cpu.dim, ex.k);
     let mma = twin_gemm_ok(g.info().unwrap().cc).is_ok();
     assert_eq!(ex.fused(), crate::vmath::fused(), "one F: the host CPU's");
     let mut used = vec![0usize; ex.n_e];
-    for nb in NBS {
+    let big = *nbs.iter().max().unwrap();
+    for &nb in nbs {
         let h: Vec<f32> = (0..nb * dim)
             .map(|i| rng.f() * if (i / dim) % 3 == 0 { 8.0 } else { 1.0 })
             .collect();
@@ -129,9 +146,9 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
                 "{what} layer {l}: batched path at nb 1 differs: {first:?}"
             );
         }
-        if nb == 1024 && mma {
+        if nb == big && nb > 8 && mma {
             // nb invariance: tokens alone (decode GEMV) == their batch columns.
-            let pick: Vec<usize> = (0..8).chain([511, 512, 1023]).collect();
+            let pick: Vec<usize> = (0..8).chain([nb / 2 - 1, nb / 2, nb - 1]).collect();
             let hp: Vec<f32> = pick
                 .iter()
                 .flat_map(|&t| h[t * dim..(t + 1) * dim].iter().copied())
@@ -150,7 +167,7 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
                     diffs(&alone[j * dim..(j + 1) * dim], &got[t * dim..(t + 1) * dim]);
                 assert_eq!(
                     n, 0,
-                    "{what} layer {l}: token {t} alone != in the batch of 1024: {first:?}"
+                    "{what} layer {l}: token {t} alone != in the batch of {nb}: {first:?}"
                 );
             }
         }

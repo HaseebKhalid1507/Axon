@@ -7,12 +7,19 @@
 //! no host sync and no allocation (`ResBufs`, per cache): graph-capturable.
 //! nb = 1 takes the decode GEMV (`moe_gemv_tw`, any arch); more, the grouped
 //! twin GEMMs (sm_80+). `place` picks the resident layers (`--gpu-experts`).
+//!
+//! gpt-oss's MXFP4 experts have twins of their own in oss.cu (`moe_gemm_mx`,
+//! `moe_gemv_mx`, `moe_gu_mx`; specs/gptoss-gpu-experts.md PR A), with the
+//! expert biases in their epilogues and `swiglu_oai_quant_tw` between, held
+//! in the twin's aligned layout (`Mats::new`). `upload` still refuses expert
+//! biases, so no gpt-oss layer is resident yet (PR B lifts that and
+//! `place_resident`'s refusal); the tests upload them with `upload_any`.
 
 use super::batch::act_stride;
 use super::gemm2_smem;
 use crate::cuda::{Arg, DevBuf, Gpu, Module};
 use crate::gguf::{Model, Tensor};
-use crate::quant::{self, Q4_K, Q5_0, Q8_0};
+use crate::quant::{self, F32, MXFP4, Q4_K, Q5_0, Q8_0};
 
 pub(crate) use super::{twin_gemm_ok, twin_type};
 
@@ -34,6 +41,12 @@ fn refuse_expert_biases(m: &Model, l: usize) -> Result<(), String> {
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
 
+/// oss.cu's MX_BN (tokens per `moe_gemm_mx` tile), MX_THREADS and
+/// MX_SH_BYTES (its dynamic shared memory).
+const MX_BN: usize = 32;
+const MX_THREADS: u32 = 128;
+const MX_SMEM: usize = 46592;
+
 /// moe_res.cu's name for a twin type.
 fn tw_name(qt: u32) -> &'static str {
     match qt {
@@ -45,36 +58,221 @@ fn tw_name(qt: u32) -> &'static str {
 }
 
 /// One of a layer's three expert tensors on the device: n_e matrices of
-/// `rows` x `cols`, back to back.
+/// `rows` x `cols`, back to back. MXFP4 in the twin's layout (oss.cu
+/// `mx_repack`): `buf` holds each block's 16 qs bytes (rows 16-aligned), `e`
+/// the blocks' e8m0 bytes, `es` a row (zero padded); the same values as the
+/// file's 17-byte blocks, so the same bits.
 struct Mats<'g> {
     buf: DevBuf<'g>,
     qt: u32,
     rows: usize,
     cols: usize,
-    /// Bytes per row, per expert.
+    /// Bytes per row of `buf`, per expert.
     rb: usize,
     estride: usize,
+    /// MXFP4: the e8m0 bytes (`es` a row: the blocks rounded up to 16).
+    e: Option<DevBuf<'g>>,
+    es: usize,
 }
 
 impl<'g> Mats<'g> {
-    fn upload(g: &'g Gpu, m: &Model, t: &Tensor, n_e: usize) -> Result<Mats<'g>, String> {
+    fn upload(
+        g: &'g Gpu,
+        km: &Module<'g>,
+        m: &Model,
+        t: &Tensor,
+        n_e: usize,
+    ) -> Result<Mats<'g>, String> {
         let qt = t.qtype.id;
         twin_type(qt).map_err(|e| format!("{}: {e}", t.name))?;
         let (cols, rows) = (t.dims[0] as usize, t.dims[1] as usize);
         if t.dims.len() != 3 || t.dims[2] as usize != n_e {
             return Err(format!("{}: not {n_e} experts ({:?})", t.name, t.dims));
         }
+        Self::new(g, km, m.tensor_data(t), qt, rows, cols, n_e)
+            .map_err(|e| format!("{}: {e}", t.name))
+    }
+
+    /// n_e matrices of `rows` x `cols` of type qt from the file's bytes;
+    /// MXFP4 repacked on the device (`mx_repack`, km: the oss module).
+    fn new(
+        g: &'g Gpu,
+        km: &Module<'g>,
+        data: &[u8],
+        qt: u32,
+        rows: usize,
+        cols: usize,
+        n_e: usize,
+    ) -> Result<Mats<'g>, String> {
         let rb = quant::row_bytes(qt, cols);
-        let data = m.tensor_data(t);
-        assert_eq!(data.len(), rb * rows * n_e, "{}: size", t.name);
+        assert_eq!(data.len(), rb * rows * n_e, "size");
+        if qt != MXFP4 {
+            return Ok(Mats {
+                buf: g.upload(data)?,
+                qt,
+                rows,
+                cols,
+                rb,
+                estride: rb * rows,
+                e: None,
+                es: 0,
+            });
+        }
+        let (nk, nrows) = (cols / 32, rows * n_e);
+        let es = nk.next_multiple_of(16);
+        let raw = g.upload(data)?;
+        let buf = g.alloc(nrows * nk * 16)?;
+        let e = g.alloc(nrows * es)?;
+        e.zero()?;
+        // SAFETY: mx_repack's signature; raw holds nrows rows of nk 17-byte
+        // blocks, buf and e the twin layout's bytes for them.
+        unsafe {
+            g.launch(
+                &km.function("mx_repack")?,
+                ((nrows * nk).div_ceil(256) as u32, 1, 1),
+                (256, 1, 1),
+                0,
+                &[
+                    raw.arg(),
+                    Arg::U64(nrows as u64),
+                    Arg::I32(nk as i32),
+                    Arg::I32(es as i32),
+                    buf.arg(),
+                    e.arg(),
+                ],
+            )?;
+        }
+        g.sync()?;
+        drop(raw);
         Ok(Mats {
-            buf: g.upload(data)?,
+            buf,
             qt,
             rows,
             cols,
-            rb,
-            estride: rb * rows,
+            rb: nk * 16,
+            estride: rows * nk * 16,
+            e: Some(e),
+            es,
         })
+    }
+
+    /// Device bytes.
+    fn bytes(&self) -> usize {
+        self.buf.len() + self.e.as_ref().map_or(0, |e| e.len())
+    }
+
+    /// The MXFP4 twins' weight arguments: qs, e, their strides per expert,
+    /// e bytes per row.
+    fn mx_args(&self) -> [Arg; 5] {
+        let e = self.e.as_ref().expect("MXFP4 matrices");
+        [
+            self.buf.arg(),
+            e.arg(),
+            Arg::U64(self.estride as u64),
+            Arg::U64((self.rows * self.es) as u64),
+            Arg::I32(self.es as i32),
+        ]
+    }
+}
+
+/// `moe_gemm_mx` of `mats` (MXFP4): out row s (ostride floats) = its expert
+/// times act row s (astride bytes) + bias, for the sorted positions of each
+/// expert's run (`off`: n_e + 1 ints, moe_sort's) of np pairs in all.
+///
+/// # Safety
+/// act holds np rows, off moe_sort's offsets of np pairs, out np rows, bias
+/// n_e * mats.rows floats or null; km is the oss module.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_gemm_mx(
+    g: &Gpu,
+    km: &Module,
+    mats: &Mats,
+    act: Arg,
+    astride: usize,
+    off: Arg,
+    n_e: usize,
+    np: usize,
+    out: Arg,
+    ostride: usize,
+    bias: Arg,
+) -> Result<(), String> {
+    let f = km.function("moe_gemm_mx")?;
+    f.set_max_shared(MX_SMEM)?;
+    let [q, e, qs, es, en] = mats.mx_args();
+    // SAFETY: the caller's; moe_gemm_mx's signature.
+    unsafe {
+        g.launch(
+            &f,
+            (
+                (np.div_ceil(MX_BN) + n_e) as u32,
+                mats.rows.div_ceil(64) as u32,
+                1,
+            ),
+            (MX_THREADS, 1, 1),
+            MX_SMEM as u32,
+            &[
+                q,
+                e,
+                qs,
+                es,
+                en,
+                Arg::I32(mats.rows as i32),
+                Arg::I32(mats.cols as i32),
+                act,
+                Arg::U64(astride as u64),
+                off,
+                Arg::I32(n_e as i32),
+                out,
+                Arg::U64(ostride as u64),
+                bias,
+            ],
+        )
+    }
+}
+
+/// `moe_gemv_mx` of `mats` (MXFP4): out[i * ostride + r] = row r of expert
+/// ids[i] times slot i's activations (act + i aslot) + bias, i < k.
+///
+/// # Safety
+/// ids holds k ids in 0..n_e, act k slots' rows (or one, aslot 0), out k
+/// rows, bias n_e * mats.rows floats or null; km is the oss module.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_gemv_mx(
+    g: &Gpu,
+    km: &Module,
+    mats: &Mats,
+    ids: Arg,
+    k: usize,
+    act: Arg,
+    aslot: usize,
+    out: Arg,
+    ostride: usize,
+    bias: Arg,
+) -> Result<(), String> {
+    let [q, e, qs, es, en] = mats.mx_args();
+    // SAFETY: the caller's; moe_gemv_mx's signature.
+    unsafe {
+        g.launch(
+            &km.function("moe_gemv_mx")?,
+            (mats.rows.div_ceil(16) as u32, k as u32, 1),
+            (128, 1, 1),
+            0,
+            &[
+                q,
+                e,
+                qs,
+                es,
+                en,
+                Arg::I32(mats.rows as i32),
+                Arg::I32(mats.cols as i32),
+                ids,
+                act,
+                Arg::U64(aslot as u64),
+                out,
+                Arg::U64(ostride as u64),
+                bias,
+            ],
+        )
     }
 }
 
@@ -89,6 +287,9 @@ pub(crate) struct CudaExperts<'g> {
     gate: Mats<'g>,
     up: Mats<'g>,
     down: Mats<'g>,
+    /// gpt-oss's expert biases (gate, up, down: n_e x rows f32 each), with
+    /// its activation (`swiglu_oai_quant_tw`); None: no biases, SwiGLU.
+    bias: Option<[DevBuf<'g>; 3]>,
     /// The batched path's twin GEMMs: `twin_gemm_ok` of the device.
     mma: Result<(), String>,
     /// F of every swiglu_twin launch of the layer, read once at upload: the
@@ -99,6 +300,7 @@ pub(crate) struct CudaExperts<'g> {
 
 impl<'g> CudaExperts<'g> {
     /// Layer l's experts of `m` (its `ffn_{gate,up,down}_exps`), k per token.
+    /// Expert biases (gpt-oss) are refused (PR B lifts it).
     pub(crate) fn upload(
         g: &'g Gpu,
         km: &'g Module<'g>,
@@ -106,19 +308,33 @@ impl<'g> CudaExperts<'g> {
         l: usize,
         k: usize,
     ) -> Result<CudaExperts<'g>, String> {
-        let t = |s: &str| {
-            let name = format!("blk.{l}.ffn_{s}_exps.weight");
-            m.tensors
-                .iter()
-                .find(|t| t.name == name)
-                .ok_or_else(|| format!("{name}: missing"))
-        };
         refuse_expert_biases(m, l)?;
+        Self::upload_any(g, km, m, l, k)
+    }
+
+    /// `upload` without the refusal: gpt-oss's MXFP4 experts with their
+    /// biases (`ffn_{gate,up,down}_exps.bias`, F32 [rows, n_e]) too, which
+    /// take the oss.cu twins (km: the model's module, the oss module for
+    /// gpt-oss). Biases need MXFP4 experts (only those kernels add them).
+    pub(crate) fn upload_any(
+        g: &'g Gpu,
+        km: &'g Module<'g>,
+        m: &Model,
+        l: usize,
+        k: usize,
+    ) -> Result<CudaExperts<'g>, String> {
+        let find = |s: &str, kind: &str| {
+            let name = format!("blk.{l}.ffn_{s}_exps.{kind}");
+            m.tensors.iter().find(|t| t.name == name)
+        };
+        let t = |s: &str| {
+            find(s, "weight").ok_or_else(|| format!("blk.{l}.ffn_{s}_exps.weight: missing"))
+        };
         let tg = t("gate")?;
         let n_e = tg.dims.get(2).copied().unwrap_or(0) as usize;
-        let gate = Mats::upload(g, m, tg, n_e)?;
-        let up = Mats::upload(g, m, t("up")?, n_e)?;
-        let down = Mats::upload(g, m, t("down")?, n_e)?;
+        let gate = Mats::upload(g, km, m, tg, n_e)?;
+        let up = Mats::upload(g, km, m, t("up")?, n_e)?;
+        let down = Mats::upload(g, km, m, t("down")?, n_e)?;
         let (dim, ffn) = (gate.cols, gate.rows);
         if up.cols != dim || up.rows != ffn || down.cols != ffn || down.rows != dim {
             return Err(format!("layer {l}: expert shapes don't chain"));
@@ -129,6 +345,28 @@ impl<'g> CudaExperts<'g> {
         if !(1..=n_e).contains(&k) {
             return Err(format!("layer {l}: k = {k} of {n_e} experts"));
         }
+        let bias = match [
+            find("gate", "bias"),
+            find("up", "bias"),
+            find("down", "bias"),
+        ] {
+            [None, None, None] => None,
+            [Some(bg), Some(bu), Some(bd)] => {
+                if [gate.qt, up.qt, down.qt] != [MXFP4; 3] {
+                    return Err(format!(
+                        "layer {l}: expert biases with non-MXFP4 experts (only gpt-oss has them)"
+                    ));
+                }
+                let one = |t: &Tensor, rows: usize| -> Result<DevBuf<'g>, String> {
+                    if t.qtype.id != F32 || t.dims[..] != [rows as u64, n_e as u64] {
+                        return Err(format!("{}: not F32 [{rows}, {n_e}]", t.name));
+                    }
+                    g.upload(m.tensor_data(t))
+                };
+                Some([one(bg, ffn)?, one(bu, ffn)?, one(bd, dim)?])
+            }
+            _ => return Err(format!("layer {l}: some expert biases are missing")),
+        };
         Ok(CudaExperts {
             g,
             km,
@@ -139,6 +377,7 @@ impl<'g> CudaExperts<'g> {
             gate,
             up,
             down,
+            bias,
             mma: twin_gemm_ok(g.info()?.cc),
             fused: crate::vmath::fused(),
         })
@@ -157,9 +396,26 @@ impl<'g> CudaExperts<'g> {
         Ok(nb)
     }
 
-    /// The layer's device bytes (its three expert tensors).
+    /// The layer's device bytes (its three expert tensors, and biases).
     pub(crate) fn bytes(&self) -> usize {
-        self.gate.buf.len() + self.up.buf.len() + self.down.buf.len()
+        let b = self
+            .bias
+            .as_ref()
+            .map_or(0, |b| b.iter().map(|x| x.len()).sum());
+        self.gate.bytes() + self.up.bytes() + self.down.bytes() + b
+    }
+
+    /// Expert bias i (0 gate, 1 up, 2 down) as a kernel argument (null: none).
+    fn bias_arg(&self, i: usize) -> Arg {
+        self.bias.as_ref().map_or(Arg::Ptr(0), |b| b[i].arg())
+    }
+
+    /// The activation's quantizing kernel: gpt-oss's (with biases) or SwiGLU.
+    fn act_fn(&self) -> &'static str {
+        match self.bias {
+            Some(_) => "swiglu_oai_quant_tw",
+            None => "swiglu_quant_tw",
+        }
     }
 
     /// The F the layer's swiglu_twin launches pass.
@@ -255,7 +511,11 @@ impl<'g> CudaExperts<'g> {
                     ],
                 )?;
                 let fv = f("moe_gemv_tw")?;
-                let gemv = |mats: &Mats, a: Arg, aslot: usize, out: Arg| {
+                let gemv = |mats: &Mats, a: Arg, aslot: usize, out: Arg, bias: usize| {
+                    if mats.qt == MXFP4 {
+                        let b = self.bias_arg(bias);
+                        return launch_gemv_mx(g, km, mats, ids, k, a, aslot, out, mats.rows, b);
+                    }
                     g.launch(
                         &fv,
                         (mats.rows as u32, k as u32, 1),
@@ -285,7 +545,36 @@ impl<'g> CudaExperts<'g> {
                 let v2 = self.gate.qt == self.up.qt
                     && self.gate.rows.is_multiple_of(2)
                     && self.down.rows.is_multiple_of(2);
-                if v2 {
+                if self.gate.qt == MXFP4 {
+                    // MXFP4 (gate and up of one type, checked at upload):
+                    // moe_gu_mx, gate and up in one launch, each row
+                    // moe_gemv_mx's chain plus its bias.
+                    let ([gq, ge, qs, es, en], [uq, ue, ..]) =
+                        (self.gate.mx_args(), self.up.mx_args());
+                    g.launch(
+                        &f("moe_gu_mx")?,
+                        (self.gate.rows.div_ceil(16) as u32, k as u32, 2),
+                        (128, 1, 1),
+                        0,
+                        &[
+                            gq,
+                            ge,
+                            uq,
+                            ue,
+                            qs,
+                            es,
+                            en,
+                            Arg::I32(self.gate.rows as i32),
+                            Arg::I32(self.gate.cols as i32),
+                            ids,
+                            rb.act.arg(),
+                            rb.gb.arg(),
+                            rb.ub.arg(),
+                            self.bias_arg(0),
+                            self.bias_arg(1),
+                        ],
+                    )?;
+                } else if v2 {
                     let fgu = f("moe_gu_tw")?;
                     g.launch(
                         &fgu,
@@ -307,11 +596,11 @@ impl<'g> CudaExperts<'g> {
                         ],
                     )?;
                 } else {
-                    gemv(&self.gate, rb.act.arg(), 0, rb.gb.arg())?;
-                    gemv(&self.up, rb.act.arg(), 0, rb.ub.arg())?;
+                    gemv(&self.gate, rb.act.arg(), 0, rb.gb.arg(), 0)?;
+                    gemv(&self.up, rb.act.arg(), 0, rb.ub.arg(), 1)?;
                 }
                 g.launch(
-                    &f("swiglu_quant_tw")?,
+                    &f(self.act_fn())?,
                     (ffn.div_ceil(256) as u32, k as u32, 1),
                     (32, 1, 1),
                     0,
@@ -325,7 +614,7 @@ impl<'g> CudaExperts<'g> {
                         Arg::U64(ast2 as u64),
                     ],
                 )?;
-                if v2 {
+                if v2 && self.down.qt != MXFP4 {
                     let d = &self.down;
                     g.launch(
                         &f("moe_gemv2_tw")?,
@@ -347,7 +636,7 @@ impl<'g> CudaExperts<'g> {
                         ],
                     )?;
                 } else {
-                    gemv(&self.down, rb.act2.arg(), ast2, rb.db.arg())?;
+                    gemv(&self.down, rb.act2.arg(), ast2, rb.db.arg(), 2)?;
                 }
                 // y = the weighted sum (moe_sum), or with `add_to` x += it
                 // in the same launch (moe_sum_add: moe_sum's then moe_add's
@@ -421,11 +710,11 @@ impl<'g> CudaExperts<'g> {
                     rb.acts.arg(),
                 ],
             )?;
-            for (mats, out) in [(&self.gate, &rb.gb), (&self.up, &rb.ub)] {
-                self.grouped(mats, &rb.acts, ast, rb, max_tiles, out)?;
+            for (mats, out, b) in [(&self.gate, &rb.gb, 0), (&self.up, &rb.ub, 1)] {
+                self.grouped(mats, &rb.acts, ast, rb, np, max_tiles, out, b)?;
             }
             g.launch(
-                &f("swiglu_quant_tw")?,
+                &f(self.act_fn())?,
                 (ffn.div_ceil(256) as u32, np as u32, 1),
                 (32, 1, 1),
                 0,
@@ -439,7 +728,7 @@ impl<'g> CudaExperts<'g> {
                     Arg::U64(ast2 as u64),
                 ],
             )?;
-            self.grouped(&self.down, &rb.act2, ast2, rb, max_tiles, &rb.db)?;
+            self.grouped(&self.down, &rb.act2, ast2, rb, np, max_tiles, &rb.db, 2)?;
             g.launch(
                 &f("moe_sum")?,
                 (dim.div_ceil(128) as u32, nb as u32, 1),
@@ -458,20 +747,46 @@ impl<'g> CudaExperts<'g> {
     }
 
     /// moe_gemm_tw_* of `mats` over the tile list: out row s (rows floats)
-    /// = its expert times act row s (astride bytes).
+    /// = its expert times act row s (astride bytes); MXFP4: moe_gemm_mx
+    /// over moe_sort's offsets, plus expert bias `bias` (0 gate, 1 up, 2
+    /// down; if the layer has biases).
     ///
     /// # Safety
-    /// act holds every sorted pair's row, rb's tiles / ntiles moe_sort's,
-    /// out np * mats.rows floats.
+    /// act holds every sorted pair's row, rb's tiles / ntiles / off
+    /// moe_sort's of np pairs, out np * mats.rows floats.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn grouped(
         &self,
         mats: &Mats,
         act: &DevBuf,
         astride: usize,
         rb: &ResBufs,
+        np: usize,
         max_tiles: usize,
         out: &DevBuf,
+        bias: usize,
     ) -> Result<(), String> {
+        if mats.qt == MXFP4 {
+            let (o, b) = (rb.off.arg(), self.bias_arg(bias));
+            let (a, n_e, rows) = (act.arg(), self.n_e, mats.rows);
+            // SAFETY: the caller's; km is the model's module, the oss
+            // module for MXFP4 (gpt-oss's alone).
+            return unsafe {
+                launch_gemm_mx(
+                    self.g,
+                    self.km,
+                    mats,
+                    a,
+                    astride,
+                    o,
+                    n_e,
+                    np,
+                    out.arg(),
+                    rows,
+                    b,
+                )
+            };
+        }
         let f = self
             .km
             .function(&format!("moe_gemm_tw_{}", tw_name(mats.qt)))?;
@@ -800,3 +1115,7 @@ pub(crate) fn twin_identity(repack: bool, cpu_fused: bool, twin_fused: bool) -> 
 #[cfg(test)]
 #[path = "experts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "oss_twin_tests.rs"]
+mod oss_twin_tests;

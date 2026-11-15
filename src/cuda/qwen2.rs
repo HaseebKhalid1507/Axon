@@ -39,7 +39,9 @@ use crate::constrain::TokenMask;
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
 use crate::quant::fp8::F8_E4M3;
-use crate::quant::{self, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+use crate::quant::{
+    self, IQ4_NL, MXFP4, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+};
 use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 use std::rc::Rc;
 
@@ -3687,16 +3689,19 @@ pub mod experts;
 // The resident experts' refusals (`experts`).
 /// The weight types the twins cover: the TW chains of decode.cu's
 /// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
-/// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
-/// takes a runtime type, so the host refuses the rest: `twin_type`).
-pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
+/// steps for the first four only (`gemm2_t<..., TW>` static_asserts it;
+/// `gemv_tw` takes a runtime type, so the host refuses the rest:
+/// `twin_type`). MXFP4 (gpt-oss) has twins of its own in oss.cu
+/// (`experts::Mats`, `moe_gemm_mx`, `moe_gemv_mx`), which `CudaExperts`
+/// dispatches to; no gpt-oss layer is placed yet (`place_resident`).
+pub(crate) const TWIN_TYPES: [u32; 5] = [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4];
 
 /// Ok if weight type qt has a GPU twin.
 pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
     match TWIN_TYPES.contains(&qt) {
         true => Ok(()),
         false => Err(format!(
-            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K only)"
+            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K, MXFP4 only)"
         )),
     }
 }
