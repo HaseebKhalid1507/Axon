@@ -393,12 +393,8 @@ fn cuda_experts_oss_fixture_match_cpu() {
     };
     let m = fixture(|_| {});
     let km = Kernels::module_for(&g, &m).unwrap();
+    // (`upload` takes the biases since stage B; it refused them in A.)
     let exs = upload_oss(&g, &km, &m, &[0, 1, 2]);
-    // `upload` still refuses them (PR B lifts it).
-    let e = CudaExperts::upload(&g, &km, &m, 0, 4)
-        .err()
-        .expect("refused");
-    assert!(e.contains("expert biases"), "{e}");
     let cpu = Qwen2::new(&m);
     for (ex, l) in exs.iter().zip([0, 1, 2]) {
         assert!(ex.bias.is_some() && ex.gate.qt == MXFP4 && ex.down.qt == MXFP4);
