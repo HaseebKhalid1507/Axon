@@ -1844,7 +1844,7 @@ fn stalled_call_closes() {
 /// longer than `LOOP_PERIOD` isn't seen, and a varying block isn't a cycle.
 /// Windows smaller than `LOOP_PERIOD` (the serve tests') still see both
 /// rules: the ring holds `LOOP_PERIOD` tokens, the few-ids rule reads its
-/// last `window`.
+/// last `window`, and a cycle is a block written twice at least.
 #[test]
 fn long_cycles_stall() {
     use super::{LOOP_PERIOD, LOOP_WINDOW, STALL_IDS, Stall, Stalled};
@@ -1910,9 +1910,11 @@ fn long_cycles_stall() {
         (108..=128).contains(&fed) && st.is_some_and(|s| s.cycle && s.window == 128),
         "{st:?} after {fed}"
     );
+    // A block longer than half the cycle window: seen once it's written
+    // twice (never on one chance match at a long lag).
     let (st, fed) = run(&g, &block(100, 5), 1000);
     assert!(
-        fed <= 128 && st.is_some_and(|s| s.cycle),
+        (190..=200).contains(&fed) && st.is_some_and(|s| s.cycle),
         "{st:?} after {fed}"
     );
 }

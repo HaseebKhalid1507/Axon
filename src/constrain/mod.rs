@@ -65,7 +65,8 @@ const OPEN: &[u8] = b"<tool_call>";
 
 /// A call stalls, and is then closed the shortest way, when its last
 /// `STALL_WINDOW` tokens are at most `STALL_IDS` distinct ids, or its last
-/// `LOOP_WINDOW` tokens repeat one cycle of at most `LOOP_PERIOD` tokens.
+/// `LOOP_WINDOW` tokens repeat one cycle of at most `LOOP_PERIOD` tokens
+/// (twice at least).
 /// Closing cuts the call's data where it stalled, so the windows are wide:
 /// when in doubt, don't fire (the lead's ruling of 11-15 on shady's review of
 /// #274). In the acceptance runs' 6,333 calls (codex, opencode, pi, axon
@@ -594,7 +595,13 @@ impl Constraint {
             let back = if back >= ring { back - ring } else { back };
             if self.taken >= p && self.recent[back] == id {
                 *r += 1;
-                cycle |= *r as usize + p >= loop_window;
+                // A cycle: the stretch fills the window, its block written
+                // twice at least (with a server's windows, 2048 and 256 at
+                // most, the first implies the second; a test's window
+                // smaller than 2 × LOOP_PERIOD needs it, or one chance
+                // match at a long lag would do).
+                let run = *r as usize;
+                cycle |= run + p >= loop_window && run >= p;
             } else {
                 *r = 0;
             }
