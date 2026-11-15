@@ -183,8 +183,8 @@ flags:
   --no-constrain  serve: sample tool calls unconstrained. By default a Qwen2.5 or Qwen3 tool call
               is held from its <tool_call> to </tool_call>: it names one of the request's tools,
               its arguments are a JSON object, and it can't run on (bounded whitespace, an array's
-              items one kind, a call that repeats a few tokens is closed). AXON_CONSTRAIN=0 turns
-              it off too (docs/serving.md)
+              items one kind; a call that repeats a few tokens for 1024 is closed, its arguments cut
+              there: a stderr line says so). AXON_CONSTRAIN=0 turns it off too (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.

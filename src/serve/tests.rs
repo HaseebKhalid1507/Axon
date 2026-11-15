@@ -74,6 +74,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         cache_ram_alloc: super::tier::Alloc::Thread,
         numerics: Numerics::Exact,
         constrain: None,
+        constrain_stall: None,
     }
 }
 
@@ -2351,10 +2352,13 @@ fn serve_constrained_forced_and_default() {
         "axon_constraint_fallback_total",
         "axon_constraint_trigger_rejected_total",
         "axon_constraint_stalls_total",
+        "axon_constraint_unheld_total",
+        "axon_constraint_mask_cache_clears_total",
         "axon_constraint_mask_seconds_total",
     ] {
         assert!(g.contains_key(k), "{k}");
     }
+    assert!(g["axon_constraint_mask_cache_peak_entries"] > 0.0, "{g:?}");
     assert!(g["axon_constraint_mask_seconds_total"] > 0.0);
     if !default_on {
         return;
@@ -2362,6 +2366,96 @@ fn serve_constrained_forced_and_default() {
     // Auto: the same server holds it by default (its own fingerprint).
     let v = post(a, "/v1/chat/completions", req(json!("auto"), 0.0, 0)).json();
     assert_ne!(v["system_fingerprint"], fp, "{v}");
+}
+
+/// A held call that stalls (shady's review of #274), with the stall
+/// windows small (`Opts::constrain_stall`: 64 tokens of at most 8 ids, 128
+/// of one cycle) so the test model's board of zeros trips them: the call
+/// comes back closed, its arguments a JSON object, and the reply ends after
+/// it (no call after it, finish `tool_calls`, short of `max_tokens`); the
+/// stall is counted. On CUDA, the stalling requests sent together with
+/// plain ones (at once and handing over, drafting) get what each gets
+/// alone.
+#[test]
+fn serve_constrained_stall() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([{"type": "function", "function": {"name": "write_file",
+        "description": "Write a text file",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"]}}}]);
+    let ask = "Write board.txt: an empty 9x9 sudoku board, every cell 0, the cells separated by \
+               spaces, one row a line. Then write the same board to board2.txt.";
+    let req = |choice: Value, temp: f64, seed: u64| {
+        json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+               "tool_choice": choice, "temperature": temp, "seed": seed, "max_tokens": 600})
+    };
+    let bodies = [
+        req(json!("required"), 0.0, 0),
+        req(json!("auto"), 0.0, 0),
+        req(json!("required"), 0.7, 3),
+    ];
+    let stall = crate::constrain::Stall {
+        window: 64,
+        loop_window: 128,
+    };
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for dev in devices {
+        let s = server_with(p, dev, |o| {
+            o.constrain = Some(true);
+            o.constrain_stall = Some(stall);
+            if dev == Device::Cuda {
+                o.parallel = 4;
+                o.max_draft = 3;
+            }
+        });
+        let a = s.addr;
+        let stalls =
+            || prom_parse(&call(a, "GET", "/metrics", "").body)["axon_constraint_stalls_total"];
+        let mut stalled = 0;
+        for body in &bodies {
+            let n0 = stalls();
+            let r = post(a, "/v1/chat/completions", body.clone());
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            eprintln!("{dev:?} stall: {v}");
+            if stalls() == n0 {
+                continue;
+            }
+            assert_eq!(
+                stalls(),
+                n0 + 1.0,
+                "{dev:?}: one stall a reply at most: {v}"
+            );
+            stalled += 1;
+            let ch = &v["choices"][0];
+            assert_eq!(ch["finish_reason"], "tool_calls", "{dev:?}: {v}");
+            assert!(
+                v["usage"]["completion_tokens"].as_u64().unwrap() < 600,
+                "{v}"
+            );
+            let calls = ch["message"]["tool_calls"].as_array().unwrap();
+            let last = calls.last().unwrap();
+            assert_eq!(last["function"]["name"], "write_file", "{v}");
+            let args = last["function"]["arguments"].as_str().unwrap();
+            let j: Value = serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+            assert!(j.is_object(), "{v}");
+            let content = ch["message"]["content"].as_str().unwrap_or("");
+            assert!(!content.contains("<tool_call>"), "{dev:?}: {v}");
+        }
+        assert!(stalled >= 1, "{dev:?}: no reply stalled");
+        if dev == Device::Cuda {
+            let mut all: Vec<Value> = bodies.to_vec();
+            all.extend(batch_bodies(true).into_iter().take(2));
+            constrained_together_vs_alone(a, &all);
+        }
+    }
 }
 
 /// `batched_vs_solo` for replies that may be tool calls: content,

@@ -78,8 +78,11 @@ use std::path::Path;
 /// rule stands for CUDA kernels as for the rest.
 /// 2: constrained tool calls on by default in `axon serve` (#259, the
 /// constrained-decoding spec's PR B): a tools request to a Qwen2.5 or Qwen3
-/// model can get other tokens than under 1 (the maintainer's ruling on the
-/// spec's §6 item 1).
+/// model can get other tokens than under 1. The lead's ruling of 11-15:
+/// the request's own fingerprint already names its grammar
+/// (`constrain_field`), but the server's (`GET /identity`) has no
+/// per-request part and would otherwise read as 1's. PR A (#264, opt-in)
+/// recorded "no bump" as its ruling 1: its default server was 1's.
 pub const NUMERICS_VERSION_EXACT: u32 = 2;
 
 /// Fast mode's own numerics version: the M of `numerics=fast/N.M`, N being
@@ -475,8 +478,8 @@ pub fn serve_field(
 /// request's own as its prompt is). Its tokens follow the grammar wherever
 /// it engages, so its fingerprint isn't an unconstrained request's;
 /// unconstrained requests add nothing. Turning constraints on by default
-/// bumped `NUMERICS_VERSION_EXACT` too (the maintainer's ruling on the
-/// constrained-decoding spec's §6 item 1, at its PR B).
+/// bumped `NUMERICS_VERSION_EXACT` too, for the server's tuple
+/// (`NUMERICS_VERSION_EXACT`'s note: the lead's ruling of 11-15).
 pub fn constrain_field(grammar: &str) -> String {
     format!("constrain {grammar}")
 }

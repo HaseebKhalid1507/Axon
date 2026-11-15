@@ -33,12 +33,15 @@
 //! (`Grammar::hermes`'s name enum) and its arguments are a JSON object.
 //! A held call can't run on (#272): whitespace is bounded as llama.cpp
 //! bounds it and an array keeps its first item's kind (`pda::Style::HELD`),
-//! and a call that stalls (its last 256 tokens no more than 8 distinct
-//! ones, `false, false, ...` or `\n\n\n...` in a string, or its last 512 one
-//! cycle of at most 64 tokens over and over: `STALL_WINDOW`) is closed the
-//! shortest way (`pda::Graph::finisher`). The kill switch is
-//! `--no-constrain` / `AXON_CONSTRAIN=0`. Per-tool argument schemas are the
-//! spec's PR C.
+//! and a call that stalls (its last 1024 tokens no more than 8 distinct
+//! ones, `false, false, ...` or `\n\n\n...` in a string, or its last 2048
+//! one cycle of at most 64 tokens over and over: `STALL_WINDOW`) is closed
+//! the shortest way (`pda::Graph::finisher`), and the reply ends after it.
+//! A stalled call arrives cut off where it stalled, maybe with an invented
+//! last item or member (the shortest one that closes it), so a stall is
+//! logged and counted (`Constraint::stall`, `Counters::stalls`). The kill
+//! switch is `--no-constrain` / `AXON_CONSTRAIN=0`. Per-tool argument
+//! schemas are the spec's PR C.
 
 mod mask;
 #[cfg(test)]
@@ -63,17 +66,69 @@ const OPEN: &[u8] = b"<tool_call>";
 /// A call stalls, and is then closed the shortest way, when its last
 /// `STALL_WINDOW` tokens are at most `STALL_IDS` distinct ids, or its last
 /// `LOOP_WINDOW` tokens repeat one cycle of at most `LOOP_PERIOD` tokens.
-/// In the acceptance runs' 6,333 calls (codex, opencode, pi, axon and
-/// llama-server; split as a byte-level pre-tokenizer splits text, a token
-/// being that piece or less), the 13 runaways trip one rule or both after
-/// 461 to 50,831 pieces (`, false` 1,900 times; whitespace;
-/// `--exclude=*.pyc` over and over; a list of strings in a loop), and no
-/// other call comes near: its longest stretch of at most 8 distinct pieces
-/// is 28, its longest periodic one 119.
-pub const STALL_WINDOW: usize = 256;
+/// Closing cuts the call's data where it stalled, so the windows are wide:
+/// when in doubt, don't fire (the lead's ruling of 11-15 on shady's review of
+/// #274). In the acceptance runs' 6,333 calls (codex, opencode, pi, axon
+/// and llama-server; split as a byte-level pre-tokenizer splits text, a
+/// token being that piece or less), 12 of the 13 runaways trip one rule or
+/// both (their stretches of at most 8 distinct pieces are 1,969 to 50,837
+/// long, or periodic over 3,416: `, false` 1,900 times, whitespace,
+/// `--exclude=*.pyc` over and over, a list of strings in a loop); the 13th,
+/// a 623-piece list loop, ends by itself first. No other call comes near:
+/// at most 28 pieces of 8 distinct ones, 119 periodic. Data of one value
+/// over and over can still trip it: a CSV of 80 identical rows does after
+/// ~1,050 tokens (the PR's table of shady's cases).
+pub const STALL_WINDOW: usize = 1024;
 pub const STALL_IDS: usize = 8;
-pub const LOOP_WINDOW: usize = 512;
+pub const LOOP_WINDOW: usize = 2048;
 pub const LOOP_PERIOD: usize = 64;
+
+/// The stall rules' windows: `STALL_WINDOW` and `LOOP_WINDOW` in a server,
+/// smaller in the serve tests (`serve::Opts::constrain_stall`), so a call
+/// there stalls in a few tokens. `window` is at least `LOOP_PERIOD` (the ring of
+/// recent tokens is what the cycle rule looks back into).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stall {
+    pub window: usize,
+    pub loop_window: usize,
+}
+
+impl Stall {
+    pub const DEFAULT: Stall = Stall {
+        window: STALL_WINDOW,
+        loop_window: LOOP_WINDOW,
+    };
+}
+
+/// A call that stalled (`Constraint::stall`): after how many of its tokens,
+/// and which rule tripped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stalled {
+    pub after: usize,
+    pub cycle: bool,
+    pub window: usize,
+}
+
+impl std::fmt::Display for Stalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = match self.cycle {
+            true => format!(
+                "its last {} repeat one cycle of at most {LOOP_PERIOD}",
+                self.window
+            ),
+            false => format!(
+                "its last {} are at most {STALL_IDS} distinct tokens",
+                self.window
+            ),
+        };
+        write!(
+            f,
+            "a held tool call stalled after {} tokens ({why}): closed the shortest way, so its \
+             arguments are cut there and may end with an invented item; the reply ends after it",
+            self.after
+        )
+    }
+}
 
 /// What the constrained paths count (one per server: `serve::ops::Metrics`
 /// shows them; the logits-row fallbacks are `sample::MASK_FALLBACKS`).
@@ -89,6 +144,14 @@ pub struct Counters {
     pub mask_ns: AtomicU64,
     /// Calls closed the shortest way after they stalled.
     pub stalls: AtomicU64,
+    /// Tools requests left unconstrained: the grammar couldn't hold their
+    /// tools (`Hermes::grammar`) or the call their prompt opened
+    /// (`Constraint::forced`).
+    pub unheld: AtomicU64,
+    /// Mask caches started over (`mask::CACHE_BUDGET` reached).
+    pub cache_clears: AtomicU64,
+    /// The most masks one grammar's cache has held at once.
+    pub cache_peak_entries: AtomicU64,
 }
 
 /// A compiled grammar on one vocabulary, with its mask cache. Built once
@@ -106,31 +169,86 @@ pub struct Grammar {
     /// What the identity calls it: `<name> <hash>`.
     field: String,
     counters: Arc<Counters>,
+    stall: Stall,
 }
 
-/// The Hermes grammar's rules, for the identity's hash (`Grammar::field`):
-/// what the tokens of a constrained reply depend on besides the request.
-/// The names come from the request (as its prompt does), so they aren't in
-/// it. A change to the rules is a new line here.
-fn hermes_desc(open: u32, close: Option<u32>) -> String {
+/// The Hermes grammar's rules that aren't in its graph, for the identity's
+/// hash (`hermes_field`): what the tokens of a constrained reply depend on
+/// besides the request and the graph. A change to them is a new line here.
+fn hermes_desc(open: u32, close: Option<u32>, stall: Stall) -> String {
     format!(
-        "axon-constrain/2\nhermes\nopen={open}\nclose={close:?}\nname=enum(offered)\n\
+        "axon-constrain/3\nhermes\nopen={open}\nclose={close:?}\nname=enum(offered)\n\
          arguments=object\nmax_depth={}\nspace=llama({})\narrays=one-kind\n\
-         stall={}/{},loop={}/{}:shortest-close\n",
+         stall={}/{},loop={}/{}:shortest-close,then-end\n",
         pda::MAX_DEPTH,
         pda::INDENT_MAX,
-        STALL_WINDOW,
+        stall.window,
         STALL_IDS,
-        LOOP_WINDOW,
+        stall.loop_window,
         LOOP_PERIOD
     )
 }
 
-/// The identity field of a grammar described by `desc`.
-fn field_of(desc: &str) -> String {
+/// The identity field of the Hermes grammars on markers (`open`, `close`)
+/// with stall windows `stall` (`Grammar::field`): a hash of `hermes_desc`
+/// and of what the rules compile to (`pda::Graph::canon` of the graph and
+/// of its finisher), built with one placeholder name: the names come from
+/// the request, as its prompt does, so they aren't in it. An edit to
+/// `pda::json`, the finisher's ties or the whitespace unrolling changes
+/// the hash by itself (shady's review of #274).
+fn hermes_field(open: u32, close: Option<u32>, stall: Stall) -> String {
+    let (graph, _) = hermes_graph(close, &[b"x".to_vec()]).expect("one plain name builds");
+    let mut canon = Vec::new();
+    graph.canon(&mut canon);
+    graph.finisher().canon(&mut canon);
     let mut h = Sha256::new();
-    h.update(desc.as_bytes());
+    h.update(hermes_desc(open, close, stall).as_bytes());
+    h.update(&canon);
     format!("hermes-json {}", &h.finish_hex()[..16])
+}
+
+/// The Hermes graph (`Grammar::hermes`) and its start node.
+/// (`<tool_call>` is the trigger, outside it: a call starts after it.)
+fn hermes_graph(close: Option<u32>, names: &[Vec<u8>]) -> Result<(pda::Graph, NodeId), String> {
+    let mut b = Builder::new(Style::HELD);
+    let json = pda::json(&mut b);
+    let h0 = b.node();
+    b.ws_loop(h0);
+    let h1 = b.node();
+    b.bytes(h0, ByteSet::of(b"{"), h1);
+    b.ws_loop(h1);
+    let h2 = b.lit(h1, b"\"name\"");
+    b.ws_loop(h2);
+    let h3 = b.node();
+    b.bytes(h2, ByteSet::of(b":"), h3);
+    b.ws_loop(h3);
+    let h4 = b.node();
+    b.names(h3, names, h4);
+    b.ws_loop(h4);
+    let h5 = b.node();
+    b.bytes(h4, ByteSet::of(b","), h5);
+    b.ws_loop(h5);
+    let h6 = b.lit(h5, b"\"arguments\"");
+    b.ws_loop(h6);
+    let h7 = b.node();
+    b.bytes(h6, ByteSet::of(b":"), h7);
+    b.ws_loop(h7);
+    let h8 = b.node();
+    b.call(h7, json.object, h8);
+    b.ws_loop(h8);
+    let h9 = b.node();
+    b.bytes(h8, ByteSet::of(b"}"), h9);
+    b.ws_loop(h9);
+    let done = b.node();
+    b.set_accept(done);
+    if let Some(c) = close {
+        b.special(h9, c, done);
+    }
+    let spelled = b.lit(h9, b"</tool_call");
+    b.bytes(spelled, ByteSet::of(b">"), done);
+    // Names a JSON string can't hold raw (an escape the trie would have to
+    // tell apart) fail here: the request goes unconstrained.
+    Ok((b.finish()?, h0))
 }
 
 /// The vocabulary checks the Hermes grammar needs: (the `<tool_call>` and
@@ -157,57 +275,48 @@ impl Grammar {
     /// server's startup line) if the vocabulary isn't
     /// `Vocab::byte_complete` (a mask could come up empty), has no
     /// `<tool_call>` special token, or `names` is empty.
+    #[cfg_attr(not(test), allow(dead_code))] // the server's are `Hermes::grammar`'s
     pub fn hermes(vocab: Arc<Vocab>, names: &[Vec<u8>]) -> Result<Grammar, String> {
+        Self::build(vocab, names, Arc::default(), Stall::DEFAULT, None)
+    }
+
+    /// `hermes` with test windows (`Stall`).
+    #[cfg(test)]
+    pub fn hermes_stall(
+        vocab: Arc<Vocab>,
+        names: &[Vec<u8>],
+        stall: Stall,
+    ) -> Result<Grammar, String> {
+        Self::build(vocab, names, Arc::default(), stall, None)
+    }
+
+    /// `hermes` counting into `counters`, with stall windows `stall`, its
+    /// identity field `field` when known (`Hermes::field`: the same for
+    /// any names).
+    fn build(
+        vocab: Arc<Vocab>,
+        names: &[Vec<u8>],
+        counters: Arc<Counters>,
+        stall: Stall,
+        field: Option<&str>,
+    ) -> Result<Grammar, String> {
         let (open, close) = hermes_markers(&vocab)?;
         if names.is_empty() {
             return Err("no tool names to hold a call to".into());
         }
-        let mut b = Builder::new(Style::HELD);
-        let json = pda::json(&mut b);
-        let h0 = b.node();
-        b.ws_loop(h0);
-        let h1 = b.node();
-        b.bytes(h0, ByteSet::of(b"{"), h1);
-        b.ws_loop(h1);
-        let h2 = b.lit(h1, b"\"name\"");
-        b.ws_loop(h2);
-        let h3 = b.node();
-        b.bytes(h2, ByteSet::of(b":"), h3);
-        b.ws_loop(h3);
-        let h4 = b.node();
-        b.names(h3, names, h4);
-        b.ws_loop(h4);
-        let h5 = b.node();
-        b.bytes(h4, ByteSet::of(b","), h5);
-        b.ws_loop(h5);
-        let h6 = b.lit(h5, b"\"arguments\"");
-        b.ws_loop(h6);
-        let h7 = b.node();
-        b.bytes(h6, ByteSet::of(b":"), h7);
-        b.ws_loop(h7);
-        let h8 = b.node();
-        b.call(h7, json.object, h8);
-        b.ws_loop(h8);
-        let h9 = b.node();
-        b.bytes(h8, ByteSet::of(b"}"), h9);
-        b.ws_loop(h9);
-        let done = b.node();
-        b.set_accept(done);
-        if let Some(c) = close {
-            b.special(h9, c, done);
-        }
-        let spelled = b.lit(h9, b"</tool_call");
-        b.bytes(spelled, ByteSet::of(b">"), done);
-        // Names a JSON string can't hold raw (an escape the trie would
-        // have to tell apart) fail here: the request goes unconstrained.
-        let graph = b.finish()?;
+        assert!(stall.window >= LOOP_PERIOD && stall.loop_window <= u32::MAX as usize);
+        let (graph, start) = hermes_graph(close, names)?;
         Ok(Grammar {
-            finish: Masks::new(graph.finisher(), vocab.clone()),
-            masks: Masks::new(graph, vocab),
-            start: h0,
+            finish: Masks::new(graph.finisher(), vocab.clone(), counters.clone()),
+            masks: Masks::new(graph, vocab, counters.clone()),
+            start,
             triggers: vec![open],
-            field: field_of(&hermes_desc(open, close)),
-            counters: Arc::default(),
+            field: match field {
+                Some(f) => f.to_string(),
+                None => hermes_field(open, close, stall),
+            },
+            counters,
+            stall,
         })
     }
 
@@ -243,8 +352,12 @@ pub struct Hermes {
     vocab: Arc<Vocab>,
     field: String,
     counters: Arc<Counters>,
+    stall: Stall,
     /// Most recently used first.
     grammars: Mutex<Vec<KeptGrammar>>,
+    /// Why tools requests were left unconstrained, each logged once
+    /// (`unheld`; at most `UNHELD_LOGGED` of them).
+    unheld: Mutex<Vec<String>>,
 }
 
 /// A grammar `Hermes` keeps, under its names (sorted, each once).
@@ -254,15 +367,35 @@ impl Hermes {
     /// Grammars kept (each with its own mask cache).
     pub const KEEP: usize = 8;
 
-    /// Err (why) as `Grammar::hermes`'s for this vocabulary.
-    pub fn new(vocab: Arc<Vocab>, counters: Arc<Counters>) -> Result<Hermes, String> {
+    /// Reasons for unconstrained tools requests logged (`unheld`).
+    const UNHELD_LOGGED: usize = 32;
+
+    /// Err (why) as `Grammar::hermes`'s for this vocabulary. `stall`: the
+    /// stall rules' windows (`Stall::DEFAULT` but in tests).
+    pub fn new(vocab: Arc<Vocab>, counters: Arc<Counters>, stall: Stall) -> Result<Hermes, String> {
         let (open, close) = hermes_markers(&vocab)?;
+        assert!(stall.window >= LOOP_PERIOD);
         Ok(Hermes {
             vocab,
-            field: field_of(&hermes_desc(open, close)),
+            field: hermes_field(open, close, stall),
             counters,
+            stall,
             grammars: Mutex::new(Vec::new()),
+            unheld: Mutex::new(Vec::new()),
         })
+    }
+
+    /// A tools request left unconstrained, `why` (`grammar`'s or
+    /// `Constraint::forced`'s Err): counted (`Counters::unheld`); true the
+    /// first time `why` is seen (the server logs it then).
+    pub fn unheld(&self, why: &str) -> bool {
+        self.counters.unheld.fetch_add(1, Ordering::Relaxed);
+        let mut v = self.unheld.lock().unwrap_or_else(|p| p.into_inner());
+        if v.len() >= Self::UNHELD_LOGGED || v.iter().any(|w| w == why) {
+            return false;
+        }
+        v.push(why.to_string());
+        true
     }
 
     /// How the identity's `serve` field names its grammars (the same for
@@ -291,8 +424,13 @@ impl Hermes {
         }
         // Built and warmed off the lock (another request may build the
         // same: the first one in is kept).
-        let mut g = Grammar::hermes(self.vocab.clone(), &key)?;
-        g.counters = self.counters.clone();
+        let g = Grammar::build(
+            self.vocab.clone(),
+            &key,
+            self.counters.clone(),
+            self.stall,
+            Some(&self.field),
+        )?;
         let mut call = b"\n{\"name\": \"".to_vec();
         call.extend_from_slice(&key[0]);
         call.extend_from_slice(PREWARM_ARGS);
@@ -334,7 +472,13 @@ impl From<ConstraintError> for std::io::Error {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Phase {
     Free,
-    On { node: NodeId, stack: Vec<NodeId> },
+    On {
+        node: NodeId,
+        stack: Vec<NodeId>,
+    },
+    /// After a stalled call: only the reply's end (`Constraint::with_end`),
+    /// so a model in a loop can't open the next call and stall again.
+    Ended,
 }
 
 /// One request's constraint: a grammar and where the reply is in it. Its
@@ -356,15 +500,21 @@ pub struct Constraint {
     /// Free: the reply's last bytes outside reasoning that may still begin
     /// a spelled `<tool_call>` (fewer than its length).
     tail: Vec<u8>,
-    /// Engaged: the call's last tokens (a ring of at most `STALL_WINDOW`,
-    /// the next write at `at`), how many it has taken, for each period p
-    /// (`runs[p - 1]`) how many tokens in a row equal the one p before, and
-    /// whether it stalled (its states then take `Grammar::finish`'s edges).
+    /// Engaged: the call's last tokens (a ring of at most the grammar's
+    /// `Stall::window`, the next write at `at`), how many it has taken, for
+    /// each period p (`runs[p - 1]`) how many tokens in a row equal the one
+    /// p before, and whether it stalled (its states then take
+    /// `Grammar::finish`'s edges).
     recent: Vec<u32>,
     at: usize,
     taken: usize,
-    runs: [u16; LOOP_PERIOD],
+    runs: [u32; LOOP_PERIOD],
     stalled: bool,
+    /// The reply's stall, once one happened (`stall`).
+    seen: Option<Stalled>,
+    /// The tokens that end the reply (`with_end`): all a reply may take
+    /// after a stalled call.
+    end: Arc<[u32]>,
     /// A draft's copy (`draft_copy`): its tokens and stalls aren't counted
     /// (the real constraint counts the ones it takes).
     shadow: bool,
@@ -386,8 +536,23 @@ impl Constraint {
             taken: 0,
             runs: [0; LOOP_PERIOD],
             stalled: false,
+            seen: None,
+            end: Arc::new([]),
             shadow: false,
         }
+    }
+
+    /// After a stalled call the reply may take only `end` (its stop
+    /// tokens: `serve`'s `Job::stop_ids`), so it ends there. Empty (the
+    /// default): it goes on free, armed for another call.
+    pub fn with_end(mut self, end: &[u32]) -> Constraint {
+        self.end = end.into();
+        self
+    }
+
+    /// The reply's stalled call, if one stalled (the server logs it).
+    pub fn stall(&self) -> Option<Stalled> {
+        self.seen
     }
 
     /// A copy to advance through a draft's guesses (`sample::
@@ -406,27 +571,36 @@ impl Constraint {
         if self.stalled {
             return;
         }
+        let Stall {
+            window: w,
+            loop_window,
+        } = self.g.stall;
         let mut cycle = false;
         for p in 1..=LOOP_PERIOD {
             let r = &mut self.runs[p - 1];
-            if self.taken >= p && self.recent[(self.at + STALL_WINDOW - p) % STALL_WINDOW] == id {
+            if self.taken >= p && self.recent[(self.at + w - p) % w] == id {
                 *r += 1;
-                cycle |= *r as usize + p >= LOOP_WINDOW;
+                cycle |= *r as usize + p >= loop_window;
             } else {
                 *r = 0;
             }
         }
-        if self.recent.len() < STALL_WINDOW {
+        if self.recent.len() < w {
             self.recent.push(id);
         } else {
             self.recent[self.at] = id;
         }
-        self.at = (self.at + 1) % STALL_WINDOW;
+        self.at = (self.at + 1) % w;
         self.taken += 1;
-        if !cycle && (self.recent.len() < STALL_WINDOW || !self.few_ids()) {
+        if !cycle && (self.recent.len() < w || !self.few_ids()) {
             return;
         }
         self.stalled = true;
+        self.seen = Some(Stalled {
+            after: self.taken,
+            cycle,
+            window: if cycle { loop_window } else { w },
+        });
         if !self.shadow {
             self.g.counters.stalls.fetch_add(1, Ordering::Relaxed);
         }
@@ -467,7 +641,7 @@ impl Constraint {
         c.engage(seed);
         match c.phase {
             Phase::On { .. } => Ok(c),
-            Phase::Free => Err(ConstraintError(format!(
+            Phase::Free | Phase::Ended => Err(ConstraintError(format!(
                 "the prefilled call {:?} isn't one the grammar takes",
                 String::from_utf8_lossy(seed)
             ))),
@@ -551,8 +725,13 @@ impl Constraint {
     /// container in JSON's case, and every byte is a token); a request that
     /// hits it fails alone.
     pub fn mask(&mut self) -> Result<Option<TokenMask>, ConstraintError> {
-        let Phase::On { node, stack } = &self.phase else {
-            return Ok(None);
+        let (node, stack) = match &self.phase {
+            Phase::On { node, stack } => (node, stack),
+            Phase::Free => return Ok(None),
+            Phase::Ended => {
+                let n = self.g.masks.vocab.len();
+                return Ok(Some(TokenMask::from_ids(n, &self.end)));
+            }
         };
         let t = std::time::Instant::now();
         let masks = match self.stalled {
@@ -573,9 +752,13 @@ impl Constraint {
     /// Advance by token `id`, just picked. False if the grammar refuses it
     /// (the state is then unchanged): a pick outside the mask.
     pub fn accept(&mut self, id: u32) -> bool {
-        let Phase::On { node, stack } = &mut self.phase else {
-            self.free(id);
-            return true;
+        let (node, stack) = match &mut self.phase {
+            Phase::On { node, stack } => (node, stack),
+            Phase::Free => {
+                self.free(id);
+                return true;
+            }
+            Phase::Ended => return self.end.contains(&id),
         };
         let masks = match self.stalled {
             true => &self.g.finish,
@@ -591,8 +774,12 @@ impl Constraint {
         std::mem::swap(stack, &mut self.buf);
         *node = n;
         if self.g.masks.graph.nodes[n as usize].accept && stack.is_empty() {
-            // Complete: armed again for the next call.
-            self.phase = Phase::Free;
+            // Complete: armed again for the next call; after a stalled one,
+            // only the reply's end.
+            self.phase = match self.stalled && !self.end.is_empty() {
+                true => Phase::Ended,
+                false => Phase::Free,
+            };
         } else {
             self.note(id);
         }
@@ -626,7 +813,7 @@ impl Constraint {
     pub fn in_string(&self) -> bool {
         match &self.phase {
             Phase::On { node, .. } => self.g.masks.graph.nodes[*node as usize].in_str,
-            Phase::Free => false,
+            Phase::Free | Phase::Ended => false,
         }
     }
 

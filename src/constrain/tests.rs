@@ -620,7 +620,7 @@ fn hermes_field() {
     let c = Grammar::hermes(v.clone(), &names(&["only"])).unwrap();
     assert_eq!(a.field(), b.field());
     assert_eq!(a.field(), c.field());
-    let h = super::Hermes::new(v.clone(), Default::default()).unwrap();
+    let h = super::Hermes::new(v.clone(), Default::default(), super::Stall::DEFAULT).unwrap();
     assert_eq!(h.field(), a.field());
     assert!(a.field().starts_with("hermes-json ") && a.field().len() == 12 + 16);
     // No names: refused (a call couldn't name anything).
@@ -854,10 +854,11 @@ fn toy_json_vocab() -> (Arc<Vocab>, Vec<u32>) {
 }
 
 /// Generate with `generate`'s loop (drafting by `mode`, constrained if
-/// `g`), as `sample::tests::run` does for plain sampling.
+/// `g`, the reply's end after a stalled call `stop`, as the server's), as
+/// `sample::tests::run` does for plain sampling.
 #[allow(clippy::too_many_arguments)]
-fn run(
-    net: &Toy,
+fn run<L: Lm<Cache = Vec<u32>>>(
+    net: &L,
     g: Option<&Arc<Grammar>>,
     prompt: &[u32],
     n: usize,
@@ -872,7 +873,7 @@ fn run(
     net.feed_batch(rest, 0, &mut cache);
     let logits = net.forward(last, rest.len(), &mut cache);
     let mut sampler = cfg.map(crate::sample::Sampler::new);
-    let mut con = g.map(|g| Constraint::new(g.clone()));
+    let mut con = g.map(|g| Constraint::new(g.clone()).with_end(stop));
     let mut rng = 0x2545_f491u64 ^ cfg.map_or(0, |c| c.seed);
     let mut lookup = crate::spec::PromptLookup::new();
     let mut draft = |h: &[u32], max: usize| -> Vec<u32> {
@@ -882,7 +883,7 @@ fn run(
             "oracle" => (0..max).map(right).collect(),
             "wrong" => (0..max).map(|i| right(i) ^ 1).collect(),
             "random" => (0..max)
-                .map(|_| (xs(&mut rng) % net.v.len() as u64) as u32)
+                .map(|_| (xs(&mut rng) % net.vocab() as u64) as u32)
                 .collect(),
             _ => {
                 lookup.sync(h);
@@ -1023,6 +1024,177 @@ fn constrained_drafting_matches_plain() {
         engaged_runs > 100 && calls > 30,
         "{engaged_runs} engaged, {calls} calls"
     );
+}
+
+/// A toy model that writes one call and then loops in it: from its prompt
+/// on, `script`'s tokens, then `cycle`'s over and over, each far likelier
+/// than the rest (soft logits from a hash besides, as `Toy`'s), so a
+/// constrained run stalls (`STALL_WINDOW`, `LOOP_WINDOW`) and is closed the
+/// shortest way on what the hash ranks next.
+struct Looper {
+    v: Arc<Vocab>,
+    p0: usize,
+    script: Vec<u32>,
+    cycle: Vec<u32>,
+}
+
+impl Looper {
+    fn logits(&self, t: u32, pos: usize, c: &mut [u32]) -> Vec<f32> {
+        c[pos] = t;
+        let i = pos + 1 - self.p0;
+        let want = match self.script.get(i) {
+            Some(&w) => w,
+            None => self.cycle[(i - self.script.len()) % self.cycle.len()],
+        };
+        let prev = if pos > 0 { c[pos - 1] } else { 5 };
+        (0..self.v.len() as u32)
+            .map(|j| {
+                let mut h = (t.wrapping_mul(2654435761)
+                    ^ (pos as u32).wrapping_mul(40503)
+                    ^ prev.wrapping_mul(97)
+                    ^ j.wrapping_mul(7919))
+                    | 1;
+                h ^= h << 13;
+                h ^= h >> 17;
+                h ^= h << 5;
+                (h % 1000) as f32 / 150.0 + if j == want { 20.0 } else { 0.0 }
+            })
+            .collect()
+    }
+}
+
+impl crate::lm::Sealed for Looper {}
+impl Lm for Looper {
+    type Cache = Vec<u32>;
+    fn vocab(&self) -> usize {
+        self.v.len()
+    }
+    fn new_cache(&self, max_ctx: usize) -> Vec<u32> {
+        vec![u32::MAX; max_ctx]
+    }
+    fn forward(&self, t: u32, pos: usize, c: &mut Vec<u32>) -> Vec<f32> {
+        self.logits(t, pos, c)
+    }
+    fn feed_batch(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) {
+        c[start..start + ts.len()].copy_from_slice(ts);
+    }
+    fn verify_argmax(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) -> Vec<u32> {
+        (0..ts.len())
+            .map(|b| crate::argmax(&self.logits(ts[b], start + b, c)))
+            .collect()
+    }
+}
+
+/// shady's review of #274: drafting past a stall. A call that loops until
+/// it stalls, in an array of numbers (`0, 0, ...`: 3 ids, `STALL_WINDOW`)
+/// and in a string (a cycle of 12 ids: `LOOP_WINDOW`), greedy and sampled:
+/// drafts that are always right, always wrong, random or real prompt lookup
+/// (long and accepted on a loop, across the stall and the masks' switch to
+/// the finisher inside a verify block) give the very tokens undrafted
+/// generation gives. The greedy runs stall by the rule meant, the call they
+/// close parses, and the reply ends after it (the stop token, not the
+/// length).
+#[test]
+fn constrained_drafting_past_a_stall() {
+    use super::{LOOP_WINDOW, STALL_WINDOW};
+    use std::sync::atomic::Ordering::Relaxed;
+    let (v, sp) = toy_json_vocab();
+    let tok = |s: &str| -> u32 {
+        (0..v.len() as u32)
+            .find(|&id| v.bytes(id) == s.as_bytes() && !v.is_special(id))
+            .unwrap_or_else(|| panic!("no token {s:?}"))
+    };
+    let toks = |s: &[&str]| -> Vec<u32> { s.iter().map(|t| tok(t)).collect() };
+    let g = Arc::new(hermes(v.clone()));
+    let prompt = [9u32, 10, 34, 35, 9, 10];
+    let head = [
+        "\n",
+        "{",
+        "\"name\"",
+        ":",
+        " ",
+        "\"",
+        "x",
+        "\"",
+        ",",
+        " ",
+        "\"arguments\"",
+        ":",
+        " ",
+        "{",
+        "\"",
+        "a",
+        "\"",
+        ":",
+        " ",
+    ];
+    let stop = [sp[2]];
+    for (what, open, cycle, cyc_rule, n) in [
+        (
+            "numbers",
+            vec!["["],
+            vec!["0", ",", " "],
+            false,
+            STALL_WINDOW + 200,
+        ),
+        (
+            "string",
+            vec!["\""],
+            vec!["a", "b", "x", "0", "1", "-", ".", "e", "n", " ", ",", ":"],
+            true,
+            LOOP_WINDOW + 200,
+        ),
+    ] {
+        let mut script = vec![sp[0]];
+        script.extend(toks(&head));
+        script.extend(toks(&open));
+        let net = Looper {
+            v: v.clone(),
+            p0: prompt.len(),
+            script,
+            cycle: toks(&cycle),
+        };
+        let mut stalled = 0;
+        for seed in 0..6u64 {
+            let cfg = (seed % 3 != 0).then(|| crate::sample::SampleCfg {
+                temp: [0.8, 1.5, 0.3][seed as usize % 3],
+                top_k: [40, 5, 0][seed as usize % 3],
+                top_p: [0.9, 1.0][seed as usize % 2],
+                min_p: [0.0, 0.05][seed as usize % 2],
+                repeat_penalty: [1.0, 1.1, 1.3][seed as usize % 3],
+                repeat_last_n: [64, 0, 3][seed as usize % 3],
+                seed,
+            });
+            let s0 = g.counters.stalls.load(Relaxed);
+            let plain = run(&net, Some(&g), &prompt, n, &stop, 0, cfg, "", &[]);
+            let ds = g.counters.stalls.load(Relaxed) - s0;
+            let mut c = Constraint::new(g.clone()).with_end(&stop);
+            for &t in &plain.ids {
+                assert!(c.accept(t));
+            }
+            let st = c.stall();
+            assert_eq!(ds, st.is_some() as u64, "{what} seed {seed}");
+            if let Some(st) = st {
+                stalled += 1;
+                assert_eq!(st.cycle, cyc_rule, "{what} seed {seed}: {st}");
+                // Closed, then only the stop token: the reply ended there.
+                assert!(!c.engaged() && plain.ids.len() < n, "{what} seed {seed}");
+                assert_eq!(calls_parse(&g, &v, &plain.ids).0, 1, "{what} seed {seed}");
+            }
+            if cfg.is_none() {
+                assert!(st.is_some(), "{what} seed {seed}: greedy never stalled");
+            }
+            for k in [1, 3, 7] {
+                for mode in ["oracle", "wrong", "random", "lookup"] {
+                    let st = run(&net, Some(&g), &prompt, n, &stop, k, cfg, mode, &plain.ids);
+                    let ctx = format!("{what} seed {seed} k {k} {mode}");
+                    assert_eq!(st.ids, plain.ids, "{ctx}");
+                    assert_eq!(st.decided, plain.decided, "{ctx}");
+                }
+            }
+        }
+        eprintln!("{what}: {stalled} of 6 runs stalled");
+    }
 }
 
 /// The default `verify_cands_masked` (row by row) is `forward_cands_masked`
@@ -1225,7 +1397,7 @@ fn state(c: &Constraint) -> Super {
             node: *node,
             stack: stack.clone(),
         },
-        super::Phase::Free => panic!("free"),
+        super::Phase::Free | super::Phase::Ended => panic!("not engaged"),
     }
 }
 
@@ -1665,6 +1837,145 @@ fn stalled_call_closes() {
     assert_eq!(g.counters.stalls.load(Relaxed), n0 + 3);
 }
 
+/// After a call that stalled, a reply given its end tokens (`with_end`:
+/// the server's stop tokens) may take only those, so a model in a loop
+/// can't open the next call and stall again (shady's review of #274);
+/// without them it goes on free. The stall is reported (`stall`: after how
+/// many tokens, which rule) by the constraint that took it, and counted
+/// once: a draft's copy that stalls reports its own and counts nothing.
+#[test]
+fn stalled_reply_ends() {
+    use super::{STALL_IDS, STALL_WINDOW};
+    use std::sync::atomic::Ordering::Relaxed;
+    let (v, sp) = toy_vocab(29, 50);
+    let g = Arc::new(hermes(v.clone()));
+    let head = b"\n{\"name\": \"x\", \"arguments\": {\"cmd\": \"";
+    let begin = |c: &mut Constraint| {
+        assert!(c.accept(sp[0]));
+        for &b in head {
+            assert!(c.accept(b as u32));
+        }
+    };
+    let end = [sp[2]];
+    for with_end in [true, false] {
+        let mut c = Constraint::new(g.clone());
+        if with_end {
+            c = c.with_end(&end);
+        }
+        begin(&mut c);
+        let n0 = g.counters.stalls.load(Relaxed);
+        let mut d = c.draft_copy();
+        let mut taken = 0;
+        while !c.stalled() {
+            assert_eq!(c.stall(), None);
+            assert!(c.accept(b'z' as u32) && d.accept(b'z' as u32));
+            taken += 1;
+            assert!(taken <= STALL_WINDOW, "never stalled");
+        }
+        let st = c.stall().unwrap();
+        assert!(d.stalled() && d.stall() == Some(st), "the copy's own");
+        assert_eq!(
+            g.counters.stalls.load(Relaxed),
+            n0 + 1,
+            "the copy's not counted"
+        );
+        assert!(!st.cycle && st.window == STALL_WINDOW, "{st:?}");
+        assert_eq!(st.after, head.len() + taken);
+        let line = st.to_string();
+        assert!(
+            line.contains(&format!("after {} tokens", st.after))
+                && line.contains(&format!("at most {STALL_IDS} distinct"))
+                && line.contains("cut")
+                && line.contains("invented"),
+            "{line}"
+        );
+        // Closed the shortest way: `"`, `}`, `}`, `</tool_call>`.
+        for t in [b'"' as u32, b'}' as u32, b'}' as u32, sp[1]] {
+            assert!(c.mask().unwrap().unwrap().allows(t));
+            assert!(c.accept(t));
+        }
+        assert!(!c.engaged() && !c.stalled() && c.stall() == Some(st));
+        if with_end {
+            // Only the end now, whatever comes.
+            let m = c.mask().unwrap().unwrap();
+            assert_eq!(m.ids().collect::<Vec<_>>(), end);
+            assert!(!c.accept(sp[0]) && !c.accept(b'<' as u32) && !c.accept(b'a' as u32));
+            assert!(c.accept(sp[2]) && c.mask().unwrap().unwrap().count() == 1);
+            assert!(!c.engaged() && !c.in_string());
+        } else {
+            // Free: armed for another call, which starts fresh.
+            assert!(c.mask().unwrap().is_none());
+            begin(&mut c);
+            assert!(c.engaged() && !c.stalled());
+        }
+    }
+}
+
+/// The identity's grammar hash covers what the rules compile to
+/// (`hermes_field`: `pda::Graph::canon` of the graph and its finisher), not
+/// only their description (shady's review of #274): another JSON style,
+/// another graph, another canon; the finisher's canon isn't the graph's;
+/// other stall windows, another field.
+#[test]
+fn hermes_field_hashes_the_graph() {
+    use super::{Stall, hermes_field};
+    let canon = |style: pda::Style| {
+        let mut b = Builder::new(style);
+        let j = pda::json(&mut b);
+        let top = b.node();
+        let end = b.node();
+        b.ws_loop(top);
+        b.call(top, j.value, end);
+        b.ws_loop(end);
+        b.set_accept(end);
+        let g = b.finish().unwrap();
+        let (mut a, mut f) = (Vec::new(), Vec::new());
+        g.canon(&mut a);
+        g.finisher().canon(&mut f);
+        (a, f)
+    };
+    let held = canon(pda::Style::HELD);
+    assert_eq!(held, canon(pda::Style::HELD), "canonical: the same twice");
+    assert_ne!(held.0, held.1, "the finisher keeps fewer edges");
+    let free = canon(pda::Style::default());
+    assert_ne!(held.0, free.0, "bounded whitespace, one-kind arrays");
+    let one = pda::Style {
+        one_kind_arrays: false,
+        ..pda::Style::HELD
+    };
+    assert_ne!(held.0, canon(one).0, "one-kind arrays alone");
+    let (v, sp) = toy_vocab(1, 10);
+    let f = hermes_field(sp[0], Some(sp[1]), Stall::DEFAULT);
+    assert_eq!(hermes(v.clone()).field(), f);
+    assert_ne!(f, hermes_field(sp[0], None, Stall::DEFAULT));
+    let small = Stall {
+        window: 64,
+        loop_window: 128,
+    };
+    assert_ne!(f, hermes_field(sp[0], Some(sp[1]), small));
+    let g = Grammar::hermes_stall(v, &names(NAMES), small).unwrap();
+    assert_eq!(g.field(), hermes_field(sp[0], Some(sp[1]), small));
+}
+
+/// A tools request left unconstrained (`Hermes::unheld`) is counted every
+/// time and said once a reason.
+#[test]
+fn unheld_counted_said_once() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (v, _) = toy_vocab(5, 10);
+    let k: Arc<super::Counters> = Default::default();
+    let h = super::Hermes::new(v, k.clone(), super::Stall::DEFAULT).unwrap();
+    assert!(h.unheld("a"));
+    assert!(!h.unheld("a"));
+    assert!(h.unheld("b"));
+    assert_eq!(k.unheld.load(Relaxed), 3);
+    for i in 0..100 {
+        h.unheld(&i.to_string());
+    }
+    assert!(!h.unheld("c"), "at most UNHELD_LOGGED said");
+    assert_eq!(k.unheld.load(Relaxed), 104);
+}
+
 /// Triggers: `<tool_call>` as its token or spelled out, across tokens or
 /// inside one, with the bytes after it in that token taken by the grammar
 /// (refused: left free, counted); suspended inside the reply's reasoning
@@ -1793,7 +2104,7 @@ fn forced_seeds() {
 #[test]
 fn hermes_grammars_kept() {
     let (v, _) = toy_vocab(41, 100);
-    let h = super::Hermes::new(v, Default::default()).unwrap();
+    let h = super::Hermes::new(v, Default::default(), super::Stall::DEFAULT).unwrap();
     let a = h.grammar(&names(&["b", "a", "a"])).unwrap();
     assert!(Arc::ptr_eq(&a, &h.grammar(&names(&["a", "b"])).unwrap()));
     assert!(a.masks.cached() > 20, "warmed: {} masks", a.masks.cached());

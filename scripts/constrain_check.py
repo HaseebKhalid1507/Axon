@@ -5,6 +5,8 @@
                                    [--tasks harness_accept.py] [--stress N] [--pins PINS.json [--record]]
                                    [--port P] [-- extra serve flags]
     scripts/constrain_check.py diff A.json B.json     the cells' digests of two runs: equal or not
+    scripts/constrain_check.py replay --axon BIN --model M.gguf --replays DIR --out OUT.json [--seeds N]
+                                      [--port P] [-- extra serve flags]
 
 Starts `axon serve M` with the acceptance test's flags (scripts/harness_accept.py on feat/eval: --device cuda,
 --ctx 32768, --kv q8, --parallel 4, Qwen2.5's card sampler: temp 0.7, top-k 20, top-p 0.8, min-p 0, repeat
@@ -24,6 +26,15 @@ Every call of every reply is judged: its name one of the request's tools and its
 the token limit cut is reported apart, `cut`), and no `<tool_call>` left in the content. Exit 0 if every call is
 valid and the cells agree (and match their pins), 1 otherwise. The JSON (--out) has every reply and /metrics'
 constraint counters (before and after).
+
+replay (shady's review of #274: the stall rule on the real model): DIR's cells (`{"kind", "what", "model",
+"route", "body"}`; the ones whose "model" isn't M's file name are skipped), each greedy and with seeds 1..N, one at a
+time (each reply's stalls are /metrics' delta), on the same server flags:
+  runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, with
+            every call valid (a stall closes it, or the call ends by itself);
+  legit     a request for data that repeats one value (an empty board, a table of zeros): no stall, every call
+            valid;
+  known-fp  one the rule is known to cut (reported, not judged).
 """
 
 import argparse
@@ -171,7 +182,8 @@ def metrics(port):
     return out
 
 
-def run(a):
+def start(a):
+    """`axon serve` with the acceptance test's flags, up: (process, port, its log's path, the result's start)."""
     port = a.port or free_port()
     argv = [a.axon, "serve", a.model, "--device", "cuda", "--host", "127.0.0.1", "--port", str(port), "--ctx",
             "32768", "--kv", "q8", "--parallel", "4"] + SAMPLER + a.serve
@@ -180,17 +192,30 @@ def run(a):
     proc = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             start_new_session=True)
     res = {"argv": argv, "env": {k: v for k, v in os.environ.items() if k.startswith("AXON_")}}
+    for _ in range(1200):
+        if proc.poll() is not None:
+            sys.exit("constrain_check: the server exited %s: %s" % (proc.poll(), open(logf).read()[-800:]))
+        try:
+            if req(port, "GET", "/health", timeout=5)[0] == 200:
+                break
+        except OSError:
+            pass
+        time.sleep(0.5)
+    return proc, port, logf, res
+
+
+def stop(proc):
+    proc.terminate()
+    try:
+        proc.wait(30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def run(a):
+    proc, port, logf, res = start(a)
     bad = []
     try:
-        for _ in range(1200):
-            if proc.poll() is not None:
-                sys.exit("constrain_check: the server exited %s: %s" % (proc.poll(), open(logf).read()[-800:]))
-            try:
-                if req(port, "GET", "/health", timeout=5)[0] == 200:
-                    break
-            except OSError:
-                pass
-            time.sleep(0.5)
         ident = json.loads(req(port, "GET", "/identity")[1])
         res["identity"] = ident
         res["banner"] = [ln.strip() for ln in open(logf, errors="replace") if "constrained tool calls" in ln]
@@ -271,11 +296,7 @@ def run(a):
             bad += ["stress: %d %s" % (counts[k], k) for k in ("badjson", "unoffered", "text", "http") if counts.get(k)]
         res["metrics_after"] = metrics(port)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop(proc)
     res["bad"] = bad
     json.dump(res, open(a.out, "w"), indent=1)
     print("fingerprint %s numerics %s banner %s" % (res["identity"]["system_fingerprint"],
@@ -286,6 +307,68 @@ def run(a):
     print("batched == alone: %s; pins: %s" % (all(res["batched_equal"].values()), res.get("pins")))
     if "stress" in res:
         print("STRESS %s" % json.dumps(res["stress"]["counts"], sort_keys=True))
+    print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
+                                     for k in res["metrics_after"]}, sort_keys=True))
+    print("VERDICT %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad[:20])))
+    return 0 if not bad else 1
+
+
+def replay(a):
+    m = os.path.basename(a.model)[:-len(".gguf")] if a.model.endswith(".gguf") else os.path.basename(a.model)
+    cs = []
+    for f in sorted(os.listdir(a.replays)):
+        if f.endswith(".json"):
+            c = json.load(open(os.path.join(a.replays, f)))
+            if c.get("model") in (None, m):
+                cs.append((f[:-5], c))
+    if not cs:
+        sys.exit("constrain_check: no replay in %s for %s" % (a.replays, m))
+    proc, port, logf, res = start(a)
+    bad, rows = [], []
+    try:
+        res["identity"] = json.loads(req(port, "GET", "/identity")[1])
+        res["metrics_before"] = metrics(port)
+        for name, c in cs:
+            for mode in ["greedy"] + ["seed%d" % s for s in range(1, a.seeds + 1)]:
+                body = dict(c["body"])
+                if mode == "greedy":
+                    body["temperature"] = 0
+                else:
+                    body["seed"] = int(mode[4:])
+                cap = body.get("max_output_tokens") or body.get("max_completion_tokens") or body.get("max_tokens")
+                if not cap:
+                    cap = body["max_output_tokens"] = 8192
+                m0 = metrics(port)
+                t0 = time.time()
+                st, raw = req(port, "POST", c["route"], body, timeout=3600)
+                m1 = metrics(port)
+                rep, judged = reply_of(c["route"], st, raw, offered(body))
+                stalls = m1.get("axon_constraint_stalls_total", 0) - m0.get("axon_constraint_stalls_total", 0)
+                ran_on = rep.get("finish") in ("length", "incomplete")
+                badj = [j for j, _n in judged if j != "ok"]
+                if c["kind"] == "runaway":
+                    ok = not ran_on and not badj
+                elif c["kind"] == "legit":
+                    ok = not stalls and not badj
+                else:
+                    ok = None
+                row = dict(cell=name, kind=c["kind"], what=c["what"], mode=mode, ok=ok, stalls=stalls,
+                           tokens=rep.get("tokens"), cap=cap, finish=rep.get("finish"), judged=judged,
+                           args_len=[len(x[1] or "") for x in rep.get("calls") or []], s=round(time.time() - t0, 1),
+                           calls=[[n, (x or "")[-160:]] for n, x in rep.get("calls") or []])
+                rows.append(row)
+                print("REPLAY %-34s %-8s %-6s %-4s stalls %d tokens %s/%s finish %s calls %s" % (
+                    name, c["kind"], mode, {True: "ok", False: "FAIL", None: "-"}[ok], stalls, rep.get("tokens"),
+                    cap, rep.get("finish"), ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
+                if ok is False:
+                    bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else (badj or "stalled")))
+        res["metrics_after"] = metrics(port)
+    finally:
+        stop(proc)
+    res["rows"], res["bad"] = rows, bad
+    res["stall_lines"] = [ln.strip() for ln in open(logf, errors="replace") if "stalled after" in ln]
+    json.dump(res, open(a.out, "w"), indent=1)
+    print("STALL-LINES %d" % len(res["stall_lines"]))
     print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
                                      for k in res["metrics_after"]}, sort_keys=True))
     print("VERDICT %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad[:20])))
@@ -319,8 +402,16 @@ def main():
     d = sp.add_parser("diff")
     d.add_argument("a")
     d.add_argument("b")
+    rp = sp.add_parser("replay")
+    rp.add_argument("--axon", required=True)
+    rp.add_argument("--model", required=True)
+    rp.add_argument("--replays", required=True)
+    rp.add_argument("--out", required=True)
+    rp.add_argument("--seeds", type=int, default=2)
+    rp.add_argument("--port", type=int, default=0)
+    rp.add_argument("serve", nargs="*")
     a = p.parse_args()
-    sys.exit(run(a) if a.cmd == "run" else diff(a.a, a.b))
+    sys.exit({"run": run, "replay": replay}[a.cmd](a) if a.cmd != "diff" else diff(a.a, a.b))
 
 
 if __name__ == "__main__":

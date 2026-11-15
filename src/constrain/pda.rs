@@ -214,6 +214,40 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The graph as bytes, canonically: per node in order its flags, then
+    /// its edges in order (kind, byte set, specials, targets), little
+    /// endian. What the identity hashes (`constrain::hermes_field`), so a
+    /// change to what the automaton takes changes the hash with no one
+    /// having to remember to.
+    pub fn canon(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.nodes.len() as u32).to_le_bytes());
+        for nd in &self.nodes {
+            out.push(nd.ret as u8 | (nd.accept as u8) << 1 | (nd.in_str as u8) << 2);
+            out.extend_from_slice(&(nd.edges.len() as u32).to_le_bytes());
+            for e in &nd.edges {
+                match *e {
+                    Edge::Bytes { set, to, opens } => {
+                        out.push(if opens { 1 } else { 0 });
+                        for w in set.0 {
+                            out.extend_from_slice(&w.to_le_bytes());
+                        }
+                        out.extend_from_slice(&to.to_le_bytes());
+                    }
+                    Edge::Special { id, to } => {
+                        out.push(2);
+                        out.extend_from_slice(&id.to_le_bytes());
+                        out.extend_from_slice(&to.to_le_bytes());
+                    }
+                    Edge::Call { sub, ret } => {
+                        out.push(3);
+                        out.extend_from_slice(&sub.to_le_bytes());
+                        out.extend_from_slice(&ret.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether `n`'s sub-grammar can start with `sym`.
     fn starts(&self, n: NodeId, sym: Sym) -> bool {
         match sym {

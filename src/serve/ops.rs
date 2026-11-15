@@ -578,8 +578,29 @@ impl Metrics {
             &mut o,
             "axon_constraint_stalls_total",
             "Constrained tool calls that stalled (repeating a few tokens) and were closed the \
-             shortest way.",
+             shortest way: their arguments cut where they stalled, maybe ending with an invented \
+             item; each also a line on stderr.",
             k.stalls.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_constraint_unheld_total",
+            "Tools requests left unconstrained: the grammar couldn't hold their tools' names or \
+             the call their prompt opened (each reason also a line on stderr, once).",
+            k.unheld.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_constraint_mask_cache_clears_total",
+            "Times a grammar's token-mask cache reached its budget and started over.",
+            k.cache_clears.load(Ordering::Relaxed),
+        );
+        let _ = writeln!(
+            o,
+            "# HELP axon_constraint_mask_cache_peak_entries The most token masks one grammar's \
+             cache has held at once.\n# TYPE axon_constraint_mask_cache_peak_entries gauge\n\
+             axon_constraint_mask_cache_peak_entries {}",
+            k.cache_peak_entries.load(Ordering::Relaxed)
         );
         let _ = writeln!(
             o,

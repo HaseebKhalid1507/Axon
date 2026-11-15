@@ -2312,6 +2312,10 @@ impl<'a, 't> Batch<'a, 't> {
 
     fn finish(&mut self, mut s: Seq<'t>, end: End) {
         self.busy[s.slot] = false;
+        // Said whatever the log level, as a failure is: the call was cut.
+        if let Some(st) = s.job.constraint.as_ref().and_then(|c| c.stall()) {
+            eprintln!("axon serve: #{}: {st}", s.job.id);
+        }
         let decode_ms = s.t1.elapsed().as_secs_f64() * 1e3;
         let finish = match end {
             End::Gone => {

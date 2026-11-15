@@ -18,21 +18,32 @@ measurements behind them.
 - **A held call can't run on** (#272: 13 of the constrained arm's 15 malformed calls were runaways cut by
   `max_tokens`). Whitespace outside strings is bounded as llama.cpp's grammars bound it (one space, or one or two
   newlines then at most 20 spaces or tabs); an array keeps its first item's kind (a pi runaway wrote an edit object,
-  then `false` 1,900 times); and a call whose last 256 tokens are at most 8 distinct ones, or whose last 512 repeat
-  one cycle of at most 64, is closed the shortest way from there (`axon_constraint_stalls_total`). In the acceptance
-  runs' 6,333 calls the 13 runaways trip a stall rule and no other call comes near one (at most 28 pieces of text in
-  a stretch of 8 distinct ones, 119 in a cycle); no array mixed kinds and no whitespace run went past llama.cpp's
-  rule outside the runaways.
+  then `false` 1,900 times); and a call whose last 1,024 tokens are at most 8 distinct ones, or whose last 2,048
+  repeat one cycle of at most 64, is closed the shortest way from there, and the reply ends after it. In the
+  acceptance runs' 6,333 calls 12 of the 13 runaways trip a stall rule (the 13th, a 623-piece list loop, ended by
+  itself) and no other call comes near one (at most 28 pieces of text in a stretch of 8 distinct ones, 119 in a
+  cycle); no array mixed kinds and no whitespace run went past llama.cpp's rule outside the runaways.
+- **A stalled call arrives cut off.** The client gets a well-formed call whose arguments stop where it stalled (a
+  file written short, a command run short), and the close may invent its last piece: one more array item (`true`,
+  `0`, `""`), one more object member (`"": 0`), one more digit. Data of one value over and over can trip it: a CSV
+  of 80 identical rows does after about 1,050 tokens; with greedy decoding a retry stops at the same place
+  (`--no-constrain` writes it). Each stall is a line on stderr whatever the log level (`#N: a held tool call
+  stalled after T tokens ...`) and counts in `axon_constraint_stalls_total`.
 - **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
   its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
   refuses to start (PR A read only `1` as on).
-- **Every fingerprint changes once:** `NUMERICS_VERSION_EXACT` is 2 (`exact/2`, `fast/2.3`), by the numerics rule
-  (what turns a request into tokens changed) and the maintainer's ruling on the spec's §6. No kernel changed: the
-  bits of a request without tools are main's. A fast-mode KV session saved before is restored as tokens, not bytes.
-  A tools request's `system_fingerprint` still names the grammar (`constrain hermes-json <hash>`; the hash is of the
-  grammar's rules, not the request's tool names).
+- **Every fingerprint changes once:** `NUMERICS_VERSION_EXACT` is 2 (`exact/2`, `fast/2.3`), the lead's ruling of
+  11-15. A tools request's own fingerprint was already truthful without it (it names the grammar), but the server's
+  `GET /identity` has no per-request part: without the bump it would read as main's for a server whose tools replies
+  changed. (PR A, opt-in, recorded "no bump" as its ruling 1: its default server was main's.) No kernel changed:
+  the bits of a request without tools are main's. A fast-mode KV session saved before is restored as tokens, not
+  bytes. A tools request's `system_fingerprint` still names the grammar (`constrain hermes-json <hash>`; the hash is
+  of the grammar's rules and of the automaton they compile to, not the request's tool names).
 - **Metrics:** `axon_constraint_tokens_total`, `axon_constraint_fallback_total`,
-  `axon_constraint_trigger_rejected_total`, `axon_constraint_stalls_total`, `axon_constraint_mask_seconds_total`.
+  `axon_constraint_trigger_rejected_total`, `axon_constraint_stalls_total`, `axon_constraint_unheld_total` (tools
+  requests the grammar couldn't hold, left unconstrained; each reason also a stderr line, once),
+  `axon_constraint_mask_cache_clears_total`, `axon_constraint_mask_cache_peak_entries`,
+  `axon_constraint_mask_seconds_total`.
 - **The kill switch's parser** (`AXON_TOOL_STREAM=0`, the ollama routes) ends a call whose `</tool_call>` the model
   left out where the next `<tool_call>` begins (#259 item 2), as the streaming parser already did.
 - Valid isn't right: an unescaped quote still ends its string, and the call parses but may not be what was meant.

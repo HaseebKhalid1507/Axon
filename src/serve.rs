@@ -188,6 +188,10 @@ pub struct Opts {
     /// AXON_CONSTRAIN, `constrain::env`: on unless "0"; `--no-constrain` is
     /// Some(false)).
     pub constrain: Option<bool>,
+    /// Their stall rules' windows (`constrain::Stall`): None the default,
+    /// `Stall::DEFAULT`; no flag sets it (the tests set small ones, so a
+    /// call stalls in a few tokens).
+    pub constrain_stall: Option<crate::constrain::Stall>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -1116,6 +1120,9 @@ impl<'a> Engine<'a> {
                 Ok(())
             },
         );
+        if !handed && let Some(st) = constraint.as_ref().and_then(|c| c.stall()) {
+            eprintln!("axon serve: #{}: {st}", job.id);
+        }
         if handed {
             // Rows 0..hist.len() - 1 are in the cache: all but the token
             // just picked, the batch's first row for it.
@@ -1773,7 +1780,11 @@ fn engine(
             let h = match template.as_ref().map(tools::family) {
                 Some(Some(tools::Family::Qwen25 | tools::Family::Qwen3)) => {
                     let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
-                    crate::constrain::Hermes::new(v, o.metrics.constrain.clone()).map(Arc::new)
+                    let stall = o
+                        .constrain_stall
+                        .unwrap_or(crate::constrain::Stall::DEFAULT);
+                    crate::constrain::Hermes::new(v, o.metrics.constrain.clone(), stall)
+                        .map(Arc::new)
                 }
                 Some(Some(f)) => Err(format!(
                     "the chat template's tool calls are {}; this release holds Hermes calls \
@@ -2609,6 +2620,7 @@ struct EngineOpts {
     cache_ram_alloc: tier::Alloc,
     numerics: Numerics,
     constrain: Option<bool>,
+    constrain_stall: Option<crate::constrain::Stall>,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2766,6 +2778,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         cache_ram_alloc: o.cache_ram_alloc,
         numerics: o.numerics,
         constrain: o.constrain,
+        constrain_stall: o.constrain_stall,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -3375,7 +3388,9 @@ fn run_request(
     // armed until the reply's `<tool_call>` (outside its reasoning), then
     // again after each call. required or named: engaged from the reply's
     // first token, where the prompt's call text left it. No tools offered
-    // (only tool turns in the history), or none chosen: free.
+    // (only tool turns in the history), or none chosen: free. After a call
+    // that stalled, only the reply's stop tokens. One the grammar can't
+    // hold goes free: counted, and each reason said once.
     let constraint = match (&g.tools, &m.constrain) {
         (Some(tr), Some(h)) if parser.is_some() && !tr.tools.is_empty() => {
             let made = h.grammar(&tr.names()).and_then(|gr| match &seed {
@@ -3384,10 +3399,13 @@ fn run_request(
                     .map_err(|e| e.to_string()),
             });
             match made {
-                Ok(c) => Some(c),
+                Ok(c) => Some(c.with_end(&stop_ids)),
                 Err(why) => {
-                    if debug() {
-                        eprintln!("axon serve: request not constrained: {why}");
+                    if h.unheld(&why) || debug() {
+                        eprintln!(
+                            "axon serve: a tools request left unconstrained: {why} (said once a \
+                             reason; axon_constraint_unheld_total counts them)"
+                        );
                     }
                     None
                 }
@@ -3923,6 +3941,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
         constrain: None,
+        constrain_stall: None,
     };
     let mut k = None;
     let key_from;
