@@ -1,0 +1,32 @@
+[axon-run 18:29:52] submitted 1114-182952-f552 by /home/haseeb/.cache/axon-dec: /usr/bin/bash sharekv-cli.sh ./axon-f8be7a5
+[axon-run 18:36:05] job 1114-182952-f552 -> pod1 [RTX 4090 sm_89 secure] (pod t03s4c5oze7f5p): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 3000 --src /home/haseeb/.cache/axon-podjob/sharekv-cli-37a515608661 /usr/bin/bash sharekv-cli.sh ./axon-f8be7a5
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (ba8d12f5071e214d9bda1ce2) + source of /home/haseeb/.cache/axon-podjob/sharekv-cli-37a515608661 (delta vs 6 earlier upload(s) there)
+
+sent 2,354 bytes  received 75 bytes  971.60 bytes/sec
+total size is 12,814,873  speedup is 5,275.78
+
+sent 58 bytes  received 19 bytes  30.80 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261114-233619-bash-39035 on pod1 (GPU, 3000 MB)
+[axon-node 23:36:19] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 23:36:19] run bash (ba8d12f5071e214d9bda1ce2) as /home/haseeb/.cache/axon-podjob/sharekv-cli-37a515608661 on 69a4eeea31b8, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9
+OK   AXON_SHARE_KV=off refused (rc 2): axon: AXON_SHARE_KV="off": expected 0 (shared prefix KV pages off) or 1 (on), or unset or empty for the default (on; off under fast kernels)
+OK   AXON_SHARE_KV=true refused (rc 2): axon: AXON_SHARE_KV="true": expected 0 (shared prefix KV pages off) or 1 (on), or unset or empty for the default (on; off under fast kernels)
+OK   AXON_SHARE_KV=2 refused (rc 2): axon: AXON_SHARE_KV="2": expected 0 (shared prefix KV pages off) or 1 (on), or unset or empty for the default (on; off under fast kernels)
+OK   default: axon serve: shared prefix KV pages on (the default; AXON_SHARE_KV=0 turns them off)
+OK   default --quiet: no share line (0 lines on stderr)
+OK   empty: axon serve: shared prefix KV pages on (the default; AXON_SHARE_KV=0 turns them off)
+OK   0 --quiet: axon serve: shared prefix KV pages off (AXON_SHARE_KV=0)
+OK   ' 0 ' --quiet: axon serve: shared prefix KV pages off (AXON_SHARE_KV=0)
+OK   1 --quiet: axon serve: shared prefix KV pages on (AXON_SHARE_KV=1, as the default; AXON_SHARE_KV=0 turns them off)
+OK   fp8 fast default: axon serve: shared prefix KV pages off (the default under fast kernels: they can give two requests' copies of a block different bytes; AXON_SHARE_KV=1 shares them anyway)
+OK   fp8 fast default --quiet: axon serve: shared prefix KV pages off (the default under fast kernels: they can give two requests' copies of a block different bytes; AXON_SHARE_KV=1 shares them anyway)
+OK   fp8 fast 1 --quiet: axon serve: shared prefix KV pages on under fast kernels (AXON_SHARE_KV=1): a request may read a block's KV as another request's chunking computed it, within fast mode's tolerance; AXON_SHARE_KV=0 turns them off
+OK   fp8 fast 0 --quiet: axon serve: shared prefix KV pages off (AXON_SHARE_KV=0)
+SHAREKV-CLI 0 failed
+[axon-node 23:36:29] exit 0 after 9.6s
+[axon-node 23:36:29] peak RSS 1115 MB (job process tree PSS, 2 s samples x4)
+[axon-run 18:36:31] exit 0 after 25.5s (host pod1)
+[axon-run 18:36:34] EXPECT ok: output matches /^SHAREKV-CLI 0 failed/

@@ -1,0 +1,26 @@
+[axon-run 18:29:50] submitted 1114-182950-96c3 by /home/haseeb/.cache/axon-wt-dec-share: /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-f8be7a5 serve_share share_kv_is_on_by_default serve_paged_pressure serve_solo_leaves_no_waiting
+[axon-run 18:43:39] job 1114-182950-96c3 -> pod1 [RTX 4090 sm_89 secure] (pod t03s4c5oze7f5p): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 1989 --src /home/haseeb/.cache/axon-wt-dec-share /home/haseeb/.cache/axon-dec/bin/axon-test-dbg-f8be7a5 serve_share share_kv_is_on_by_default serve_paged_pressure serve_solo_leaves_no_waiting
+axon-remote: job 20261114-234344-axon-test-dbg-f8be7a5-69570 on pod1 (GPU, 1989 MB)
+[axon-node 23:43:44] GPU slot taken; job wants 1989 MB; nvidia-smi used/total 1/24564 MB; sharing with 20261114-234344-axon-test-f8be7a5-69571 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 23:43:45] run axon-test-dbg-f8be7a5 (d86c336d1b69f4b0de8f1224) as /home/haseeb/.cache/axon-wt-dec-share on 69a4eeea31b8, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 12 tests
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_paged_pressure ... ok
+test serve::tests::serve_share_matches_off ... ok
+test serve::tests::serve_share_off_under_fast_kernels ... ok
+test serve::tests::serve_share_on_under_fast_kernels ... ok
+test serve::tests::serve_share_pressure ... ok
+test serve::tests::serve_share_solo_handover ... ok
+test serve::tests::serve_share_unindex_in_place ... ok
+test serve::tests::serve_solo_leaves_no_waiting ... ok
+test serve::tests::share_kv_is_on_by_default ... ok
+test serve::tests::serve_share_fanout_idle ... ok
+test serve::tests::serve_share_dup_swapped ... ok
+test serve::tests::serve_share_cancel_frees ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 969 filtered out; finished in 33.98s
+
+[axon-node 23:44:19] exit 0 after 34.1s
+[axon-node 23:44:19] peak RSS 1499 MB (job process tree PSS, 2 s samples x16)
+[axon-run 18:44:21] exit 0 after 42.0s (host pod1)
