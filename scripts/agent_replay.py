@@ -715,6 +715,9 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
         # --llama-args: llama-server's own tuning (release 0.1's board: tuned by someone arguing its side), after
         # the defaults above, so a repeated flag (-np, -c, -no-kvu) overrides them: llama.cpp's last one wins.
         cmd += a.llama_args.split()
+        # --llama-env K=V: llama-server's environment only (e.g. the official build's LD_LIBRARY_PATH), so the
+        # other engines never run under it.
+        env.update(dict(x.split('=', 1) for x in (getattr(a, 'llama_env', None) or [])))
     elif kind == 'ollama':
         npar = max(1, axon_tokens // a.clip)
         env.update(OLLAMA_HOST=f'127.0.0.1:{port}', OLLAMA_MODELS=a.ollama_models, OLLAMA_NUM_PARALLEL=str(npar),
@@ -742,6 +745,8 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
                f'(--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true)')
         if a.llama_args.split():
             cfg += f'; then {" ".join(a.llama_args.split())} (the last of a repeated flag wins)'
+        if getattr(a, 'llama_env', None):
+            cfg += f'; env {" ".join(a.llama_env)}'
         model = 'llama'
     else:
         try:
@@ -1358,10 +1363,13 @@ def cmd_board(a):
         # sessions' first prompts at speed 4 from speed 1's leftovers (138,239 tokens, 69 % of the cell's ideal
         # prefill). The order rotates by round (the absolute round: a --round-offset rerun repeats it).
         k = rnd % len(order)
+        # --rotate-engines (release 0.1's board, shady's #270 review): the engine order reverses on odd rounds (ABBA),
+        # so no engine always runs first on a GPU whose clocks drift.
+        eng_order = engines[::-1] if getattr(a, 'rotate_engines', False) and rnd % 2 else engines
         for sp, n in order[k:] + order[:k]:
             cell = cells[sp, n]
             ns = '' if n is None else f' sessions {n}'
-            for kind in engines:
+            for kind in eng_order:
                 port += 1
                 proc = None
                 st = dict(kind=kind, round=rnd, speed=sp, sessions=n)
@@ -1393,9 +1401,11 @@ def cmd_board(a):
                     save_meta()
                     a.speed = sp
                     t = time.time()
+                    g0 = gpu_state()
                     s = run_cell(eng, words, cell, a, kv_gb)
                     s.update(engine=kind, kv=a.kv, round=rnd, speed=sp, config=cfg, kv_tokens=tokens,
-                             engine_pid=proc.pid, engine_start_s=st['start_s'])
+                             engine_pid=proc.pid, engine_start_s=st['start_s'], gpu_before=g0, gpu_after=gpu_state(),
+                             **plan_counts(cell))
                     if n is not None:
                         s['sessions'] = n
                     if s.get('prompt_mismatch'):
@@ -1443,6 +1453,23 @@ def restart_cost(starts, wall):
         out.append(f'{kind} {len(xs)} x start {rng([x["start_s"] for x in xs])} + stop {rng([x["stop_s"] for x in xs])}')
     return (f'ENGINE RESTARTS (one per cell per engine): {"; ".join(out)}; total {tot:.0f} s of {wall:.0f} s board wall '
             f'({tot / max(wall, 1e-9):.1%})')
+
+
+def plan_counts(cell):
+    """The plan's own request and turn counts (what every engine is sent), so a run is judged against the plan and
+    never against another engine's count (release 0.1, shady's #270 review: axon's failures must not veto llama-server)."""
+    reqs = cell['requests']
+    return dict(plan_requests=len(reqs),
+                plan_turn=sum(1 for r in reqs if not r['new'] and (r['gap'] is None or r['gap'] <= 30)))
+
+
+def gpu_state():
+    """The GPU's temperature, clocks, power and P-state now (one line), or None without nvidia-smi."""
+    try:
+        return subprocess.run(['nvidia-smi', '--query-gpu=temperature.gpu,clocks.sm,clocks.mem,power.draw,pstate',
+                               '--format=csv,noheader'], capture_output=True, text=True, timeout=20).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def gpu_name():
@@ -1609,6 +1636,10 @@ def main():
             p.add_argument('--llama-args', default='', help="more llama-server arguments, split on spaces and "
                            "appended after the defaults (a repeated flag overrides them); recorded in the config. "
                            "Give it with '=': --llama-args='--no-cache-idle-slots -ub 2048'")
+            p.add_argument('--llama-env', action='append', metavar='K=V', help='an environment variable for '
+                           'llama-server only (repeatable; recorded in the config), e.g. its own LD_LIBRARY_PATH')
+            p.add_argument('--rotate-engines', action='store_true', help='reverse the engine order on odd rounds '
+                           '(ABBA), so no engine always runs first')
             p.add_argument('--ollama', default='ollama')
             p.add_argument('--ollama-model', default='axon-q7')
             p.add_argument('--ollama-models', help='OLLAMA_MODELS for the board\'s ollama, used as is (default: a '
@@ -1641,6 +1672,8 @@ def main():
     p.add_argument('dirs', nargs='+')
     p.add_argument('--clean-only', action='store_true', help='drop tainted runs (they count as missing rounds)')
     a = ap.parse_args()
+    if a.cmd == 'board' and any('=' not in x[1:] for x in (a.llama_env or [])):
+        ap.error(f'--llama-env takes K=V: {a.llama_env}')
     if a.cmd == 'run':
         cmd_run(a)
     elif a.cmd == 'board':
