@@ -8,6 +8,8 @@ gpt-oss's experts on the GPU as far as they fit). Stdlib only, one file (axon-po
 
     harness_accept.py run --model qwen2.5-7b --engines axon,llama --harness pi --axon-bin AXON --llama-bin LLAMA \
         --out DIR [--tasks all|id,id] [--rounds N] [--turn-timeout S]
+        engine arms (ARMS): axon (main's defaults), axon-constrain (AXON_CONSTRAIN=1, #264; its start line must say
+        so), axon-nostream (AXON_TOOL_STREAM=0, #262's kill switch), llama
     harness_accept.py table LOG_OR_JSONL...       results table + engine-side failure counts (markdown)
     harness_accept.py rescore DIR                 a run made before the 11-14 fixes: per-task attribution and
                                                   compaction / cold-prompt counts redone from its files
@@ -20,8 +22,15 @@ proxy's records give: requests, HTTP errors (message kept, truncated: these are 
 overflows, tool calls parsed, calls that came back as text (`<tool_call>` / JSON call / harmony syntax in content with
 no parsed call: malformed or dropped), argument JSON that doesn't parse, calls the harness rejected (its tool result
 says unknown tool / invalid arguments), TTFT to the first token-bearing event, and wall time. Axon's /metrics deltas
-add `axon_tool_calls_dropped_total` and `axon_prompt_refused_total`. Output: one `RESULT {json}` line per task run on
-stdout (and results.jsonl in --out), ENGINE lines per server start, a SUMMARY table at the end.
+add `axon_tool_calls_dropped_total`, `axon_tool_calls_invalid_total` (#262) and `axon_prompt_refused_total`. Output: one
+`RESULT {json}` line per task run on stdout (and results.jsonl in --out), ENGINE lines per server start, a SUMMARY table
+at the end.
+
+Malformed tool calls (11-14, after #262): since Axon streams a call once its head is out, arguments that go bad come
+back as a call whose arguments don't parse (llama-server's form too), not as text. `malf` per task is the proxy's
+count (calls as text + calls with unparseable arguments), or Axon's dropped + invalid where higher (the two views
+overlap since #262: never added). The rate for #259's 1 % bar is per reply, from the proxy alone (the same on every
+engine): replies with a call as text or an unparseable call / replies with a parsed call or a call as text.
 
 Request lifecycle (11-14): when a harness hangs up, the proxy closes the engine's connection at once, so the engine
 cancels (`hup`); a reply the engine holds back used to keep generating. A task's records are its own requests only:
@@ -59,6 +68,31 @@ MODELS = {
     "qwen2.5-0.5b": dict(file="Qwen2.5-0.5B-Instruct-Q4_0.gguf", moe=False,          # plumbing smoke only
                          sampler=dict(temp=0.7, top_k=20, top_p=0.8, min_p=0.0)),
 }
+
+
+# Engine arms. An Axon arm is the same binary under another environment: #262's kill switch, #264's opt-in. A setting
+# with a start-line trace must show it in the engine's log (`need`), else the arm fails to start: an arm that silently
+# ran the default would be measured under the wrong name. Every arm starts from the job's environment minus the
+# variables the arms set, so the plain `axon` arm is main's defaults whatever the caller exported.
+ARMS = {
+    "axon": dict(kind="axon", env={}),
+    "axon-constrain": dict(kind="axon", env={"AXON_CONSTRAIN": "1"}, need=r", constrained tool calls \(hermes-json"),
+    "axon-nostream": dict(kind="axon", env={"AXON_TOOL_STREAM": "0"}),
+    "llama": dict(kind="llama", env={}),
+}
+ARM_VARS = sorted({k for a in ARMS.values() for k in a["env"]})
+
+
+def arm_env(arm, base=None):
+    env = {k: v for k, v in (os.environ if base is None else base).items() if k not in ARM_VARS}
+    env.update(ARMS[arm]["env"])
+    return env
+
+
+def arm_ok(arm, log):
+    """Whether the engine's log shows the arm's setting took (True for arms without a trace to check)."""
+    need = ARMS[arm].get("need")
+    return need is None or re.search(need, log) is not None
 
 
 def sampler_flags(prof):
@@ -1014,6 +1048,10 @@ class Proxy:
 
         class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
             daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                if not isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+                    super().handle_error(request, client_address)
             allow_reuse_address = True
 
         self.srv = S(("127.0.0.1", 0), H)
@@ -1111,8 +1149,9 @@ def vram_used():
 
 
 class Engine:
-    def __init__(self, kind, binp, model_path, alias, prof, outdir):
-        self.kind, self.bin, self.model, self.alias, self.prof, self.outdir = kind, binp, model_path, alias, prof, outdir
+    def __init__(self, arm, binp, model_path, alias, prof, outdir):
+        self.arm, self.kind = arm, ARMS[arm]["kind"]
+        self.bin, self.model, self.alias, self.prof, self.outdir = binp, model_path, alias, prof, outdir
         self.proc, self.port, self.starts, self.logf, self.argv = None, None, 0, None, None
 
     def variants(self):
@@ -1137,10 +1176,10 @@ class Engine:
         tried = []
         for argv in self.variants():
             self.starts += 1
-            self.logf = os.path.join(self.outdir, "engine-%s-%d.log" % (self.kind, self.starts))
+            self.logf = os.path.join(self.outdir, "engine-%s-%d.log" % (self.arm, self.starts))
             lf = open(self.logf, "w")
             self.proc = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                         start_new_session=True)
+                                         start_new_session=True, env=arm_env(self.arm))
             lf.close()
             ok = False
             for _ in range(600):
@@ -1157,12 +1196,19 @@ class Engine:
                 ok = st == 200
                 if not ok:
                     tried.append("%s: warm-up %s %s" % (" ".join(argv[-4:]), st, b[:120]))
+                elif not arm_ok(self.arm, open(self.logf, errors="replace").read()):
+                    ok = False
+                    tried.append("%s: the log doesn't show %s took (want /%s/): %s" % (
+                        self.arm, ARMS[self.arm]["env"], ARMS[self.arm]["need"], tail(self.logf, 3)))
             else:
                 tried.append("%s: exit %s (%s)" % (" ".join(argv[-4:]), self.proc.poll(), tail(self.logf, 2)))
             if ok:
                 self.argv = argv
+                notes = [ln.strip()[:240] for ln in open(self.logf, errors="replace")
+                         if re.search(r"(?i)constrained tool calls|shared prefix KV", ln)]
                 return dict(ready_s=round(time.time() - t0, 1), argv=" ".join(os.path.basename(x) if i < 1 else x
-                            for i, x in enumerate(argv)), vram=vram_used(), tried=tried)
+                            for i, x in enumerate(argv)), vram=vram_used(), tried=tried,
+                            env=ARMS[self.arm]["env"], notes=notes)
             self.stop()
         raise RuntimeError("engine %s never came up: %s" % (self.kind, " | ".join(tried)[-1500:]))
 
@@ -1193,7 +1239,8 @@ class Engine:
         out = {}
         if st == 200:
             for ln in b.decode("utf-8", "replace").splitlines():
-                m = re.match(r"^(axon_tool_calls_dropped_total|axon_prompt_refused_total|axon_prompt_tokens_total|"
+                m = re.match(r"^(axon_tool_calls_dropped_total|axon_tool_calls_invalid_total|axon_prompt_refused_total|"
+                             r"axon_prompt_tokens_total|"
                              r"axon_prompt_cached_tokens_total|llamacpp:prompt_tokens_total)\s+([0-9.e+]+)", ln)
                 if m:
                     out[m.group(1)] = float(m.group(2))
@@ -1369,7 +1416,10 @@ def summarize(recs, m0, m1, cts=None):
         tc=sum(r["tc"] for r in recs), tc_text=sum(r["tc_text"] for r in recs), tc_text_r=sum(r["tc_text_r"] for r in recs),
         tc_badjson=sum(r["tc_badjson"] for r in recs), tool_res_err=sum(r["tool_res_err"] for r in recs),
         empty=sum(r["empty"] for r in okr), length=sum(1 for r in recs if r["finish"] in ("length", "incomplete")),
-        dropped=md("axon_tool_calls_dropped_total"), refused=md("axon_prompt_refused_total"),
+        dropped=md("axon_tool_calls_dropped_total"), invalid=md("axon_tool_calls_invalid_total"),
+        refused=md("axon_prompt_refused_total"),
+        # per reply: replies with a parsed call, and replies with a call left as text or one whose arguments don't parse
+        tc_req=sum(1 for r in recs if r["tc"] > 0), malf_req=sum(1 for r in recs if r["tc_text"] or r["tc_badjson"]),
         ttft_p50=pct([r["ttft_ms"] for r in okr], 0.5),
         ttft_first=next((r["ttft_ms"] for r in okr if r["ttft_ms"] is not None), None),
         ttft_max=pct([r["ttft_ms"] for r in okr], 1.0),
@@ -1404,11 +1454,15 @@ def cmd_run(a):
     os.makedirs(out, exist_ok=True)
     resf = open(os.path.join(out, "results.jsonl"), "a")
     reqf = open(os.path.join(out, "requests.jsonl"), "a")
-    bins = {"axon": a.axon_bin, "llama": a.llama_bin}
+    for k in engines:
+        if k not in ARMS:
+            sys.exit("harness_accept: unknown engine arm %r (arms: %s)" % (k, ", ".join(ARMS)))
+    kb = {"axon": a.axon_bin, "llama": a.llama_bin}
+    bins = {k: kb[ARMS[k]["kind"]] for k in engines}
     sha = {}
     for k in engines:
         if not bins.get(k) or not os.path.exists(bins[k]):
-            sys.exit("harness_accept: --%s-bin missing" % k)
+            sys.exit("harness_accept: --%s-bin missing" % ARMS[k]["kind"])
         with open(bins[k], "rb") as f:
             sha[k] = hashlib.sha256(f.read()).hexdigest()[:12]
     vers = {}
@@ -1441,7 +1495,8 @@ def cmd_run(a):
                     results.append(r)
                     print("RESULT " + json.dumps(r), flush=True)
             continue
-        print("ENGINE %s up in %ss: %s (vram %s)%s" % (ek, info["ready_s"], info["argv"], info["vram"],
+        print("ENGINE %s up in %ss: %s (vram %s) env %s%s%s" % (ek, info["ready_s"], info["argv"], info["vram"],
+              info["env"] or "{}", (" log: " + " / ".join(info["notes"])) if info["notes"] else "",
               (" tried: " + " | ".join(info["tried"])) if info["tried"] else ""), flush=True)
         px = Proxy(eng.port)
         for h in harn:
@@ -1637,25 +1692,56 @@ def opt_sum(rs, k):
     return str(sum(x for x in v if isinstance(x, int)))
 
 
+def malf(r):
+    """Malformed tool calls in a task row: the proxy's count (calls left as text + calls whose arguments aren't JSON),
+    or Axon's own (/metrics dropped + invalid) where that is higher. Since #262 Axon's dropped counter also counts the
+    Hermes blocks the proxy sees as text, so the two views overlap and aren't added; only Axon's sees a gpt-oss call
+    that went to reasoning. Rows from before #262 (dropped: gpt-oss only, no invalid) give the same sum as before."""
+    px = (r.get("tc_text") or 0) + (r.get("tc_badjson") or 0)
+    return max(px, int(r.get("dropped") or 0) + int(r.get("invalid") or 0))
+
+
+def malf_rate(rs):
+    """(malformed replies, tool-call replies) over task rows, the proxy's view (the same on every engine): a tool-call
+    reply has a parsed call or a call left as text; a malformed one has a call left as text or a call whose arguments
+    don't parse. (None, None) for rows from before the per-reply counts (rescore adds them)."""
+    if not rs or any("tc_req" not in r for r in rs):
+        return None, None
+    return sum(r["malf_req"] for r in rs), sum(r["tc_req"] + (r.get("tc_text") or 0) for r in rs)
+
+
+def fmt_rate(k, n):
+    return "-" if n is None else ("%d / %d (%.1f %%)" % (k, n, 100.0 * k / n) if n else "0 / 0")
+
+
 def print_summary(results):
-    print("SUMMARY (pass / runs; malf = tool calls as text + bad JSON args + axon dropped; hup = responses the client "
+    print("SUMMARY (pass / runs; malf = malformed tool calls: as text or with bad JSON arguments (axon's dropped + invalid "
+          "where higher);\n  mrate = malformed replies / tool-call replies; hup = responses the client "
           "hung up on;\n  cmp = the harness's own context compactions; cold = requests with >= %d uncached prompt "
           "tokens, c_cmp of them in a compaction's window, c_1st a task's first request)" % COLD_MIN)
     cells = {}
     for r in results:
         cells.setdefault((r["model"], r["engine"], r["harness"]), []).append(r)
-    print("%-12s %-6s %-9s %6s %5s %5s %5s %5s %5s %4s %8s %8s | %4s %5s %5s %5s" % (
-        "model", "engine", "harness", "pass", "malf", "ctx", "herr", "crash", "tmo", "hup", "ttft50", "wall50", "cmp",
-        "cold", "c_cmp", "c_1st"))
+    print("%-12s %-14s %-9s %6s %5s %-20s %5s %5s %5s %5s %4s %8s %8s | %4s %5s %5s %5s" % (
+        "model", "engine", "harness", "pass", "malf", "mrate", "ctx", "herr", "crash", "tmo", "hup", "ttft50", "wall50",
+        "cmp", "cold", "c_cmp", "c_1st"))
     for k in sorted(cells):
         rs = cells[k]
-        malf = sum((r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0) for r in rs)
-        print("%-12s %-6s %-9s %3d/%-2d %5d %5d %5d %5d %5d %4s %8s %8s | %4s %5s %5s %5s" % (
-            k[0], k[1], k[2], sum(r["ok"] for r in rs), len(rs), malf, sum(r.get("ctx_overflow") or 0 for r in rs),
+        print("%-12s %-14s %-9s %3d/%-2d %5d %-20s %5d %5d %5d %5d %4s %8s %8s | %4s %5s %5s %5s" % (
+            k[0], k[1], k[2], sum(r["ok"] for r in rs), len(rs), sum(malf(r) for r in rs), fmt_rate(*malf_rate(rs)),
+            sum(r.get("ctx_overflow") or 0 for r in rs),
             sum(r.get("http_err") or 0 for r in rs), sum(bool(r.get("crash")) for r in rs),
             sum(bool(r.get("timed_out")) for r in rs), opt_sum(rs, "hup"), pct([r.get("ttft_p50") for r in rs], 0.5),
             pct([r.get("wall_s") for r in rs], 0.5), opt_sum(rs, "compactions"), opt_sum(rs, "cold"),
             opt_sum(rs, "cold_cmp"), opt_sum(rs, "cold_first")), flush=True)
+    pool = {}
+    for r in results:
+        pool.setdefault((r["model"], r["engine"]), []).append(r)
+    for k in sorted(pool):
+        rs = pool[k]
+        print("%-12s %-14s %-9s %3d/%-2d %5d %-20s   axon /metrics: dropped %s invalid %s" % (
+            k[0], k[1], "(all)", sum(r["ok"] for r in rs), len(rs), sum(malf(r) for r in rs), fmt_rate(*malf_rate(rs)),
+            opt_sum(rs, "dropped"), opt_sum(rs, "invalid")), flush=True)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1703,7 +1789,7 @@ def cmd_rescore(a):
                           os.path.join(root, "r%d-%s" % (r.get("round") or 1, r["task"])), t0) if recs else None
         mark_cold(recs, cts)
         x = summarize(recs, {}, {}, cts)
-        for k in ("dropped", "refused") + (() if any("cut" in q for q in recs) else ("hup", "cut_end")):
+        for k in ("dropped", "invalid", "refused") + (() if any("cut" in q for q in recs) else ("hup", "cut_end")):
             x.pop(k)  # /metrics deltas stay as recorded; hang-ups weren't recorded before 11-14 ("-", not 0)
         diff = {k: (r.get(k), x[k]) for k in ("requests", "tc", "tc_text", "tc_badjson", "http_err", "ctx_overflow")
                 if r.get(k) != x[k]}
@@ -1739,23 +1825,22 @@ def cmd_table(a):
     cells = {}
     for r in rs:
         cells.setdefault((r["model"], r["harness"], r["engine"]), []).append(r)
-    print("| model | harness | engine | tasks passed | malformed / dropped calls | ctx overflows | other HTTP errors | "
-          "crashes | timeouts | client hang-ups | TTFT p50 (ms) | wall p50 (s) | compactions | cold prompts "
-          "(in a compaction window) |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    print("| model | harness | engine | tasks passed | malformed calls (runs) | malformed replies / tool-call replies | "
+          "ctx overflows | other HTTP errors | crashes | timeouts | client hang-ups | TTFT p50 (ms) | wall p50 (s) | "
+          "compactions | cold prompts (in a compaction window) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for k in sorted(cells):
         x = cells[k]
-        malf = sum((r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0) for r in x)
-        print("| %s | %s | %s | %d / %d | %d (%d runs) | %d | %d | %d | %d | %s | %s | %s | %s | %s (%s) |" % (
-            k[0], k[1], k[2], sum(r["ok"] for r in x), len(x), malf,
-            sum(1 for r in x if (r.get("tc_text") or 0) + (r.get("tc_badjson") or 0) + int(r.get("dropped") or 0)),
+        print("| %s | %s | %s | %d / %d | %d (%d runs) | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s (%s) |" % (
+            k[0], k[1], k[2], sum(r["ok"] for r in x), len(x), sum(malf(r) for r in x),
+            sum(1 for r in x if malf(r)), fmt_rate(*malf_rate(x)),
             sum(r.get("ctx_overflow") or 0 for r in x), sum(r.get("http_err") or 0 for r in x),
             sum(bool(r.get("crash")) for r in x), sum(bool(r.get("timed_out")) for r in x), opt_sum(x, "hup"),
             pct([r.get("ttft_p50") for r in x], 0.5), pct([r.get("wall_s") for r in x], 0.5),
             opt_sum(x, "compactions"), opt_sum(x, "cold"), opt_sum(x, "cold_cmp")))
     # per model x engine totals and the majority verdict
-    print("\n| model | engine | passed (all harnesses) | best harness |")
-    print("|---|---|---|---|")
+    print("\n| model | engine | passed (all harnesses) | best harness | malformed replies / tool-call replies (pooled) |")
+    print("|---|---|---|---|---|")
     tot = {}
     for r in rs:
         tot.setdefault((r["model"], r["engine"]), []).append(r)
@@ -1765,7 +1850,8 @@ def cmd_table(a):
         for r in x:
             byh.setdefault(r["harness"], []).append(r["ok"])
         best = max(byh.items(), key=lambda kv: sum(kv[1]) / len(kv[1]))
-        print("| %s | %s | %d / %d | %s %d / %d |" % (k[0], k[1], sum(r["ok"] for r in x), len(x), best[0], sum(best[1]), len(best[1])))
+        print("| %s | %s | %d / %d | %s %d / %d | %s |" % (k[0], k[1], sum(r["ok"] for r in x), len(x), best[0],
+              sum(best[1]), len(best[1]), fmt_rate(*malf_rate(x))))
     # per task
     print("\n| task | " + " | ".join("%s %s" % (m, e) for m, e in sorted(tot)) + " |")
     print("|---" * (len(tot) + 1) + "|")
@@ -1776,12 +1862,14 @@ def cmd_table(a):
             row.append("%d / %d" % (sum(r["ok"] for r in x), len(x)) if x else "-")
         print("| %s | %s |" % (t, " | ".join(row)))
     # engine-side failure counts: runs affected, Axon vs llama-server
-    print("\n| failure (engine-side signal) | runs on axon | runs on llama |")
-    print("|---|---|---|")
+    engs = sorted({r["engine"] for r in rs}, key=lambda e: (e != "axon", e == "llama", e))
+    print("\n| failure (engine-side signal) | " + " | ".join("runs on %s" % e for e in engs) + " |")
+    print("|---" * (len(engs) + 1) + "|")
     kinds = {
         "tool call returned as text (malformed/unparsed)": lambda r: (r.get("tc_text") or 0) > 0,
         "tool call with unparseable JSON arguments": lambda r: (r.get("tc_badjson") or 0) > 0,
         "axon_tool_calls_dropped_total > 0": lambda r: (r.get("dropped") or 0) > 0,
+        "axon_tool_calls_invalid_total > 0": lambda r: (r.get("invalid") or 0) > 0,
         "context overflow (400)": lambda r: (r.get("ctx_overflow") or 0) > 0,
         "other HTTP error": lambda r: (r.get("http_err") or 0) > 0,
         "engine crash": lambda r: bool(r.get("crash")),
@@ -1793,8 +1881,7 @@ def cmd_table(a):
         "harness compacted its context": lambda r: (r.get("compactions") or 0) > 0,
     }
     for name, f in kinds.items():
-        n = {e: sum(1 for r in rs if r["engine"] == e and f(r)) for e in ("axon", "llama")}
-        print("| %s | %d | %d |" % (name, n["axon"], n["llama"]))
+        print("| %s | %s |" % (name, " | ".join(str(sum(1 for r in rs if r["engine"] == e and f(r))) for e in engs)))
     errs = {}
     for r in rs:
         for e in r.get("errors") or []:
@@ -1890,15 +1977,24 @@ def fake_upstream():
                 ev({"type": "response.created", "response": {"id": "r1", "object": "response"}})
                 time.sleep(0.2)
                 ev({"type": "response.output_item.added", "item": {"type": "function_call"}})
+                # badjson: #259's unescaped quote, which Axon streams as a call since #262 (codex's route)
+                args = "{\"cmd\": \"ls\"}" if mode != "badjson" else "{\"cmd\": \"echo \"hi\"\"}"
+                ev({"type": "response.function_call_arguments.delta", "delta": args[:5]})
                 ev({"type": "response.completed", "response": {"object": "response", "status": "completed",
                     "usage": {"input_tokens": 50, "output_tokens": 5}, "output": [
-                        {"type": "function_call", "call_id": "c1", "arguments": "{\"cmd\": \"ls\"}"}]}})
+                        {"type": "function_call", "call_id": "c1", "arguments": args}]}})
             else:
                 ev({"choices": [{"delta": {"role": "assistant"}}]})
                 time.sleep(0.2)
                 if mode == "text_tc":
                     ev({"choices": [{"delta": {"content": "<tool_call>{\"name\": \"bash\", \"arguments\": {\"c\""}}]})
                     ev({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+                elif mode == "two_calls":  # two calls streamed interleaved by index, the second's arguments broken
+                    for i, a in ((0, "{\"c\":"), (1, "{\"d\": \"x"), (0, " 1}"), (1, "\n\"}")):
+                        f = {"arguments": a} if i is None or a[0] != "{" else {"name": "bash", "arguments": a}
+                        ev({"choices": [{"delta": {"tool_calls": [dict({"index": i, "function": f},
+                                                                       **({"id": "c%d" % i} if a[0] == "{" else {}))]}}]})
+                    ev({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
                 elif mode == "held":   # a 25-token tool call sent in one go at the end, with the server's timings
                     ev({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "x", "function": {"name": "bash", "arguments": "{\"c\": 1}"}}]}}]})
                     ev({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
@@ -1985,6 +2081,10 @@ def selfcheck_lifecycle(px):
                                                        "messages": []})
     time.sleep(0.4)
     n, r = px.drain(mA, 1.0), px.take(mA)
+    for _ in range(40):  # the fake upstream polls its socket every 50 ms: give it time to see the close
+        if HOLD_SEEN.get("drain") is not None:
+            break
+        time.sleep(0.05)
     s.close()
     ok = n == 1 and len(r) == 1 and r[0].get("cut") == "drain" and HOLD_SEEN.get("drain") is not None
     bad += not ok
@@ -2054,6 +2154,37 @@ def selfcheck_compactions():
     return bad
 
 
+def selfcheck_arms():
+    """The engine arms' environments and start-line checks, and the malformed-call rules (no engine)."""
+    bad = 0
+    base = {"PATH": "/bin", "AXON_CONSTRAIN": "1", "AXON_TOOL_STREAM": "0", "AXON_VRAM_CAP": "9000"}
+    got = {a: arm_env(a, base) for a in ARMS}
+    want = {"axon": {"PATH": "/bin", "AXON_VRAM_CAP": "9000"},
+            "axon-constrain": {"PATH": "/bin", "AXON_VRAM_CAP": "9000", "AXON_CONSTRAIN": "1"},
+            "axon-nostream": {"PATH": "/bin", "AXON_VRAM_CAP": "9000", "AXON_TOOL_STREAM": "0"},
+            "llama": {"PATH": "/bin", "AXON_VRAM_CAP": "9000"}}
+    ok = got == want
+    bad += not ok
+    print("%-32s %s  %s" % ("arms: environments", "OK  " if ok else "FAIL", got if not ok else "inherited arm vars dropped"))
+    on = "axon serve: Qwen2.5-7B ... q8 KV, ctx 32768, 4 requests at once, constrained tool calls (hermes-json 3f2a91c0)\n"
+    off = "axon serve: constrained tool calls (AXON_CONSTRAIN=1) off: the chat template has no tool-call format\naxon serve: ...\n"
+    res = (arm_ok("axon-constrain", on), arm_ok("axon-constrain", off), arm_ok("axon-constrain", ""),
+           arm_ok("axon", ""), arm_ok("axon-nostream", ""))
+    ok = res == (True, False, False, True, True)
+    bad += not ok
+    print("%-32s %s  %s (want (True, False, False, True, True))" % ("arms: start-line check", "OK  " if ok else "FAIL", res))
+    rows = [dict(tc_text=1, tc_badjson=0, dropped=1, invalid=0, tc_req=3, malf_req=1),   # since #262: dropped = the text block
+            dict(tc_text=0, tc_badjson=2, dropped=0, invalid=2, tc_req=4, malf_req=1),   # two bad calls in one reply
+            dict(tc_text=0, tc_badjson=0, dropped=2, invalid=None, tc_req=5, malf_req=0),  # gpt-oss calls into reasoning
+            dict(tc_text=2, tc_badjson=1, dropped=None, tc_req=6, malf_req=3)]            # llama: no axon counters
+    res = ([malf(r) for r in rows], malf_rate(rows), malf_rate(rows + [dict(tc_text=0)]))
+    ok = res == ([1, 2, 2, 3], (5, 21), (None, None))
+    bad += not ok
+    print("%-32s %s  %s (want ([1, 2, 2, 3], (5, 21), (None, None)))" % ("malformed: count and rate rules",
+                                                                         "OK  " if ok else "FAIL", res))
+    return bad
+
+
 def cmd_selfcheck(a):
     global SANDBOX
     SANDBOX = not a.no_sandbox and bool(shutil.which("bwrap"))
@@ -2096,7 +2227,10 @@ def cmd_selfcheck(a):
              ("/v1/chat/completions", {"stream": True, "mode": "held", "messages": []},
               dict(status=200, tc=1, held=1, cached_tokens=100, srv_prompt_n=1200, srv_prompt_ms=400.0, srv_pred_n=25)),
              ("/v1/chat/completions", {"mode": "ctx", "messages": []}, dict(status=400, ctx_overflow=1)),
-             ("/v1/responses", {"stream": True, "input": "hi"}, dict(status=200, tc=1, prompt_tokens=50))]
+             ("/v1/chat/completions", {"stream": True, "mode": "two_calls", "messages": []},
+              dict(status=200, tc=2, tc_badjson=1, tc_text=0)),
+             ("/v1/responses", {"stream": True, "input": "hi"}, dict(status=200, tc=1, tc_badjson=0, prompt_tokens=50)),
+             ("/v1/responses", {"stream": True, "mode": "badjson", "input": "hi"}, dict(status=200, tc=1, tc_badjson=1))]
     for path, body, want in cases:
         st, b = http_post(px.port, path, body, timeout=10)
         r = []
@@ -2116,6 +2250,7 @@ def cmd_selfcheck(a):
     px.stop()
     up.shutdown()
     bad += selfcheck_compactions()
+    bad += selfcheck_arms()
     print("SELFCHECK %s (%d failures)" % ("PASS" if not bad else "FAIL", bad))
     return 1 if bad else 0
 

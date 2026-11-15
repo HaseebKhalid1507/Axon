@@ -4,7 +4,7 @@
 # this script, harness_accept.py, make_repo.py and both engine binaries as ./name and runs it in the staged dir.
 #   axon-podjob --on bella --vram 10500 --ram 12000 --name eval-<sha7>-accept-<model>-<harness> --expect '^SUMMARY' \
 #     -- scripts/harness_accept.sh scripts/harness_accept.py scripts/examples/harness-repo/make_repo.py \
-#        AXON_BIN LLAMA_SERVER_BIN qwen2.5-7b pi [--tasks all] [--engines axon,llama]
+#        AXON_BIN LLAMA_SERVER_BIN qwen2.5-7b pi [--tasks all] [--engines axon,axon-constrain,llama]
 # Results: RESULT / ENGINE / SUMMARY lines on stdout; the harness outputs, engine logs and workspaces under
 # ${AXON_ACCEPT_OUT:-~/.cache/axon-eval/accept}/<model>-<harness>-<time>/ on the host that ran it.
 #   harness_accept.sh selfcheck PY MAKE_REPO     the script's self-test only (no model, no GPU: jade / --cpu is fine)
