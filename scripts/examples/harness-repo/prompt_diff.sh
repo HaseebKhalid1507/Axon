@@ -3,12 +3,14 @@
 # The prompt each engine builds from the same harness request, as one axon-podjob job (CPU, no GPU):
 # captures codex's first request on this node (`harness_accept.py capture`, if codex is installed), then runs
 # prompt_diff.py over the BODY files given plus codex's. MODEL is a file in ./models; a small model with the run
-# model's chat template is enough (the prompt doesn't depend on the weights). LLAMA_TGZ is llama.cpp's prebuilt CPU
+# model's chat template is enough (the prompt doesn't depend on the weights). Qwen's own qwen2.5-0.5b-q4_k_m.gguf
+# (on jade) has the run model's template but for #248's doubled braces in the tool instruction, which then shows as
+# one more differing line on llama.cpp's side. LLAMA_TGZ is llama.cpp's prebuilt CPU
 # llama-server, llama-b11580-bin-ubuntu-x64.tar.gz (= 4413a19, the acceptance test's llama.cpp).
-#   axon-podjob --on jade --cpu --ram 3000 --models Qwen2.5-0.5B-Instruct-Q4_0.gguf --name eval-<sha7>-prompt-diff \
+#   axon-podjob --on jade --cpu --ram 3000 --models qwen2.5-0.5b-q4_k_m.gguf --name eval-<sha7>-prompt-diff \
 #     --expect '^PROMPT-DIFF DONE' -- scripts/examples/harness-repo/prompt_diff.sh \
 #     scripts/examples/harness-repo/prompt_diff.py scripts/harness_accept.py scripts/examples/harness-repo/make_repo.py \
-#     AXON_BIN llama-b11580-bin-ubuntu-x64.tar.gz Qwen2.5-0.5B-Instruct-Q4_0.gguf pi-1.json opencode-1.json
+#     AXON_BIN llama-b11580-bin-ubuntu-x64.tar.gz qwen2.5-0.5b-q4_k_m.gguf pi.json opencode.json
 set -u
 [ $# -ge 6 ] || { echo "usage: $0 PROMPT_DIFF_PY HARNESS_ACCEPT_PY MAKE_REPO AXON LLAMA_TGZ MODEL [BODY...]"; exit 2; }
 PD=$1; HA=$2; MR=$3; AX=$4; TGZ=$5; MF=$6; shift 6
