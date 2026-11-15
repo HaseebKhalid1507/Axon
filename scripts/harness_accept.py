@@ -772,6 +772,21 @@ ERR_HARNESS = re.compile(r"(?i)(unknown tool|no such tool|tool .{0,40}not found|
 CTX_ERR = re.compile(r"(?i)(context|exceed|too long|n_ctx)")
 
 
+def tool_names(tools):
+    """The tool names a request offers: chat's function.name, the Responses API's name, and those of nested tool lists
+    (codex's namespace tools)."""
+    out = set()
+    for t in tools if isinstance(tools, list) else []:
+        if not isinstance(t, dict):
+            continue
+        f = t.get("function")
+        n = f.get("name") if isinstance(f, dict) else t.get("name")
+        if isinstance(n, str):
+            out.add(n)
+        out |= tool_names(t.get("tools"))
+    return out
+
+
 class Rec:
     def __init__(self, route, body, label):
         self.d = dict(label, route=route, status=None, ttft_ms=None, total_ms=None, prompt_tokens=None,
@@ -779,6 +794,7 @@ class Rec:
                       finish=None, err=None, srv_prompt_n=None, srv_prompt_ms=None, srv_pred_n=None, srv_pred_ms=None)
         self.calls, self.text, self.rtext, self.first = {}, [], [], None
         b = body if isinstance(body, dict) else {}
+        self.offered, self.names = tool_names(b.get("tools")), {}  # call key -> the name the model called
         self.d.update(stream=bool(b.get("stream")), n_tools=len(b.get("tools") or []),
                       keys=sorted(b.keys())[:40], temperature=b.get("temperature"), top_p=b.get("top_p"),
                       max_tokens=b.get("max_tokens", b.get("max_completion_tokens", b.get("max_output_tokens"))),
@@ -809,7 +825,9 @@ class Rec:
             return
         if isinstance(o.get("error"), (dict, str)) and self.d["err"] is None:
             e = o["error"]
-            self.d["err"] = (e.get("code") or e.get("type") or "") + ": " + str(e.get("message"))[:300] if isinstance(e, dict) else str(e)[:300]
+            # llama-server's code is a number (400): str() it (11-15: the + raised, and the record was lost)
+            self.d["err"] = (str(e.get("code") or e.get("type") or "") + ": " + str(e.get("message"))[:300]
+                             if isinstance(e, dict) else str(e)[:300])
         # llama-server's `timings` (Axon emits the same object): the server's own prompt and decode times, so prefill
         # is measured alike on both engines whatever the stream holds back (a reply that opens with a tool call).
         for tm in (o.get("timings"), (o.get("response") or {}).get("timings") if isinstance(o.get("response"), dict)
@@ -838,7 +856,8 @@ class Rec:
                     if not isinstance(it, dict):
                         continue
                     if it.get("type") == "function_call":
-                        self.calls[it.get("call_id") or len(self.calls)] = it.get("arguments") or ""
+                        k = it.get("call_id") or len(self.calls)
+                        self.calls[k], self.names[k] = it.get("arguments") or "", it.get("name")
                     elif it.get("type") == "message":
                         txt += [c.get("text", "") for c in it.get("content") or [] if isinstance(c, dict)]
                 if not self.text:
@@ -863,6 +882,8 @@ class Rec:
                 k = tc.get("index", tc.get("id", i))
                 a = (tc.get("function") or {}).get("arguments")
                 self.calls[k] = self.calls.get(k, "") + (a if isinstance(a, str) else "")
+                if isinstance((tc.get("function") or {}).get("name"), str):
+                    self.names[k] = tc["function"]["name"]
                 self.tok(t)
             if ch.get("finish_reason"):
                 self.d["finish"] = ch["finish_reason"]
@@ -878,6 +899,8 @@ class Rec:
                 bad += 1
         text, rtext = "".join(self.text), "".join(self.rtext)
         n = len(self.calls)
+        # calls to a tool the request didn't offer (codex's apply_patch, #259): only where the request named its tools
+        self.d["tc_unoffered"] = sum(1 for x in self.names.values() if self.offered and x and x not in self.offered)
         self.d.update(status=status, tc=n, tc_badjson=bad, tc_text=int(n == 0 and bool(TEXT_TC.search(text))),
                       tc_text_r=int(n == 0 and bool(TEXT_TC.search(rtext))), empty=int(n == 0 and not text.strip()),
                       ttft_ms=None if self.first is None else int((self.first - t0) * 1000), total_ms=int((t_end - t0) * 1000))
@@ -1420,6 +1443,10 @@ def summarize(recs, m0, m1, cts=None):
         refused=md("axon_prompt_refused_total"),
         # per reply: replies with a parsed call, and replies with a call left as text or one whose arguments don't parse
         tc_req=sum(1 for r in recs if r["tc"] > 0), malf_req=sum(1 for r in recs if r["tc_text"] or r["tc_badjson"]),
+        # of those, cut short: max_tokens, an incomplete response, or a hang-up (a runaway, not a syntax error)
+        malf_cut=sum(1 for r in recs if (r["tc_text"] or r["tc_badjson"]) and
+                     (r.get("finish") in ("length", "incomplete") or r.get("cut"))),
+        tc_unoffered=(sum(r["tc_unoffered"] for r in recs) if all("tc_unoffered" in r for r in recs) else None),
         ttft_p50=pct([r["ttft_ms"] for r in okr], 0.5),
         ttft_first=next((r["ttft_ms"] for r in okr if r["ttft_ms"] is not None), None),
         ttft_max=pct([r["ttft_ms"] for r in okr], 1.0),
@@ -1740,9 +1767,11 @@ def print_summary(results):
         pool.setdefault((r["model"], r["engine"]), []).append(r)
     for k in sorted(pool):
         rs = pool[k]
-        print("%-12s %-14s %-9s %3d/%-2d %5d %-20s   axon /metrics: dropped %s invalid %s" % (
-            k[0], k[1], "(all)", sum(r["ok"] for r in rs), len(rs), sum(malf(r) for r in rs), fmt_rate(*malf_rate(rs)),
-            opt_sum(rs, "dropped"), opt_sum(rs, "invalid")), flush=True)
+        print("%-12s %-14s %-9s %3d/%-2d %5d %-20s   axon /metrics: dropped %s invalid %s | malformed replies cut short %s,"
+              " calls to unoffered tools %s" % (
+                  k[0], k[1], "(all)", sum(r["ok"] for r in rs), len(rs), sum(malf(r) for r in rs),
+                  fmt_rate(*malf_rate(rs)), opt_sum(rs, "dropped"), opt_sum(rs, "invalid"), opt_sum(rs, "malf_cut"),
+                  opt_sum(rs, "tc_unoffered")), flush=True)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1958,8 +1987,11 @@ def fake_upstream():
                 return
             if mode == "slow":
                 time.sleep(body.get("slow_s", 1.5))
-            if mode == "ctx":
-                b = json.dumps({"error": {"code": "context_length_exceeded", "message": "prompt is 40000 tokens"}}).encode()
+            if mode in ("ctx", "err_int"):
+                b = json.dumps({"error": {"code": "context_length_exceeded", "message": "prompt is 40000 tokens"}}
+                               if mode == "ctx" else  # llama-server's shape: a numeric code
+                               {"error": {"code": 400, "message": "Cannot determine type of 'item'",
+                                          "type": "invalid_request_error"}}).encode()
                 self.send_response(400)
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
@@ -1983,7 +2015,8 @@ def fake_upstream():
                 ev({"type": "response.function_call_arguments.delta", "delta": args[:5]})
                 ev({"type": "response.completed", "response": {"object": "response", "status": "completed",
                     "usage": {"input_tokens": 50, "output_tokens": 5}, "output": [
-                        {"type": "function_call", "call_id": "c1", "arguments": args}]}})
+                        {"type": "function_call", "call_id": "c1", "arguments": args,
+                         "name": "apply_patch" if mode == "unoffered" else "exec_command"}]}})
             else:
                 ev({"choices": [{"delta": {"role": "assistant"}}]})
                 time.sleep(0.2)
@@ -2188,6 +2221,17 @@ def selfcheck_arms():
     ok = res == ("125", "?", "-")
     bad += not ok
     print("%-32s %s  %s (want ('125', '?', '-'))" % ("summary: /metrics float deltas", "OK  " if ok else "FAIL", res))
+    base = dict(status=200, tc=1, tc_text=0, tc_text_r=0, tc_badjson=0, tool_res_err=0, empty=0, finish="stop",
+                ttft_ms=10, prompt_tokens=5, cut=None, tc_unoffered=0)
+    recs = [dict(base, tc_badjson=1, finish="length"),               # a runaway call cut by max_tokens
+            dict(base, tc_badjson=1),                                 # a syntax error
+            dict(base, tc=0, tc_text=1, finish=None, cut="client"),   # a text call the client hung up on
+            dict(base, finish="incomplete", tc_unoffered=2)]          # cut short but well-formed: not malformed
+    x, y = summarize(recs, {}, {}), summarize(recs[:1] + [{k: v for k, v in base.items() if k != "tc_unoffered"}], {}, {})
+    res = (x["malf_req"], x["malf_cut"], x["tc_unoffered"], y["tc_unoffered"])
+    ok = res == (3, 2, 2, None)
+    bad += not ok
+    print("%-32s %s  %s (want (3, 2, 2, None))" % ("malformed: cut short, unoffered", "OK  " if ok else "FAIL", res))
     return bad
 
 
@@ -2233,10 +2277,22 @@ def cmd_selfcheck(a):
              ("/v1/chat/completions", {"stream": True, "mode": "held", "messages": []},
               dict(status=200, tc=1, held=1, cached_tokens=100, srv_prompt_n=1200, srv_prompt_ms=400.0, srv_pred_n=25)),
              ("/v1/chat/completions", {"mode": "ctx", "messages": []}, dict(status=400, ctx_overflow=1)),
+             ("/v1/responses", {"mode": "err_int", "input": "hi"}, dict(status=400, is_err=1, ctx_overflow=0)),
              ("/v1/chat/completions", {"stream": True, "mode": "two_calls", "messages": []},
               dict(status=200, tc=2, tc_badjson=1, tc_text=0)),
              ("/v1/responses", {"stream": True, "input": "hi"}, dict(status=200, tc=1, tc_badjson=0, prompt_tokens=50)),
-             ("/v1/responses", {"stream": True, "mode": "badjson", "input": "hi"}, dict(status=200, tc=1, tc_badjson=1))]
+             ("/v1/responses", {"stream": True, "mode": "badjson", "input": "hi"}, dict(status=200, tc=1, tc_badjson=1)),
+             # codex's tools: a function and a namespace holding one; the model calls one of them, then one it lacks
+             ("/v1/responses", {"stream": True, "input": "hi", "tools": [
+                 {"type": "function", "name": "exec_command"}, {"type": "namespace", "tools": [{"name": "x"}]}]},
+              dict(status=200, tc=1, tc_unoffered=0)),
+             ("/v1/responses", {"stream": True, "mode": "unoffered", "input": "hi", "tools": [
+                 {"type": "function", "name": "exec_command"}, {"type": "namespace", "tools": [{"name": "x"}]}]},
+              dict(status=200, tc=1, tc_unoffered=1)),
+             ("/v1/chat/completions", {"stream": True, "messages": [], "tools": [{"type": "function", "function": {
+                 "name": "read"}}]}, dict(status=200, tc=1, tc_unoffered=1)),
+             ("/v1/chat/completions", {"stream": True, "messages": [], "tools": [{"type": "function", "function": {
+                 "name": "bash"}}]}, dict(status=200, tc=1, tc_unoffered=0))]
     for path, body, want in cases:
         st, b = http_post(px.port, path, body, timeout=10)
         r = []
@@ -2247,7 +2303,7 @@ def cmd_selfcheck(a):
             time.sleep(0.05)
         got = r[0] if r else {}
         ok = st == want["status"] and all(got.get(k) == v for k, v in want.items())
-        if path == "/v1/responses" or body.get("stream"):
+        if (path == "/v1/responses" or body.get("stream")) and want["status"] == 200:
             ok = ok and got.get("ttft_ms") is not None and got["ttft_ms"] >= 150  # the first token, not the first byte
         bad += not ok
         print("proxy %-22s %-8s %s  %s" % (path, body.get("mode") or "", "OK  " if ok else "FAIL",
