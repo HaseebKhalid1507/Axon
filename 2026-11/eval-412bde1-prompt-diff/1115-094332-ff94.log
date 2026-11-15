@@ -1,0 +1,65 @@
+[axon-run 09:43:32] submitted 1115-094332-ff94 by /home/haseeb/.cache/axon-wt-eval: /usr/bin/bash prompt_diff.sh ./prompt_diff.py ./harness_accept.py ./make_repo.py ./axon-a6f7f18 ./llama-b11580-bin-ubuntu-x64.tar.gz qwen2.5-0.5b-q4_k_m.gguf ./pi-0.80.3-bugfix.json ./opencode-2.2.6-bugfix.json
+[axon-run 09:43:33] job 1115-094332-ff94 -> jade: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/prompt_diff-de6a5b5948b5 --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash prompt_diff.sh ./prompt_diff.py ./harness_accept.py ./make_repo.py ./axon-a6f7f18 ./llama-b11580-bin-ubuntu-x64.tar.gz qwen2.5-0.5b-q4_k_m.gguf ./pi-0.80.3-bugfix.json ./opencode-2.2.6-bugfix.json --test-threads 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (e704b6f26ea7585dffbd6a19) + source of /home/haseeb/.cache/axon-podjob/prompt_diff-de6a5b5948b5
+
+sent 21,755,195 bytes  received 232 bytes  304,271.71 bytes/sec
+total size is 30,727,525  speedup is 1.41
+
+sent 168 bytes  received 35 bytes  406.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261115-094449-bash-4149519 on jade (CPU-only)
+[axon-node 09:44:49] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 09:44:49] run bash (e704b6f26ea7585dffbd6a19) as /home/haseeb/.cache/axon-podjob/prompt_diff-de6a5b5948b5 on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 09:44:49] memory cap (scope MemoryMax) 2859 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 09:44:49] MemAvailable 4389 MB, load ['1.40', '2.18', '1.30']; nice -n 19 ionice -c3 taskset -c 0-7
+prompt_diff: host jade cpus 8; model qwen2.5-0.5b-q4_k_m.gguf
+CAPTURE codex codex-cli 0.144.5: 1 request(s), rc 0, 6.3 s -> /tmp/tmp.N4aanscxxq/cap/codex-N.json
+body pi-0.80.3-bugfix.json tools 4
+body opencode-2.2.6-bugfix.json tools 12
+body codex-1.json tools 10
+PROMPT-DIFF llama-server version: 0.6.0-dev (build 11580, commit 4413a1924) built with GNU 11.4.0 for Linux x86_64; axon axon-a6f7f18; model qwen2.5-0.5b-q4_k_m.gguf
+PROMPT-DIFF pi-0.80.3-bugfix.json /v1/chat/completions   tools  4 | served prompt tokens: axon 1422, llama 1408 (gap 14)
+    rendered: axon 1422 ids (= served: True), llama.cpp 1408 ids (= served: True), ids DIFFER
+    text diff (- llama.cpp, + axon): 10 lines differ
+      --- llama.cpp
+      +++ axon
+      @@ -40,4 +40,4 @@
+      -{"type": "function", "function": {"name": "read", "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large fi
+      -{"type": "function", "function": {"name": "bash", "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a time
+      -{"type": "function", "function": {"name": "edit", "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitti
+      -{"type": "function", "function": {"name": "write", "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.", "parameters": {"type": "object", "required": ["path", "content"], "properties": {"path": {"type": "str
+      +{"type": "function", "function": {"name": "read", "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large fi
+      +{"type": "function", "function": {"name": "bash", "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a time
+      +{"type": "function", "function": {"name": "edit", "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitti
+      +{"type": "function", "function": {"name": "write", "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.", "parameters": {"type": "object", "required": ["path", "content"], "properties": {"path": {"type": "str
+      @@ -48 +48 @@
+    every edit (llama.cpp -> axon), with its count:
+        4 x insert '' -> ', "strict": false'
+        1 x delete '{' -> ''
+        1 x delete '}' -> ''
+PROMPT-DIFF opencode-2.2.6-bugfix.json /v1/chat/completions   tools 12 | served prompt tokens: axon 5341, llama 5295 (gap 46)
+    rendered: axon 5341 ids (= served: True), llama.cpp 5295 ids (= served: True), ids DIFFER
+    text diff (- llama.cpp, + axon): 26 lines differ
+      --- llama.cpp
+      +++ axon
+      @@ -200,12 +200,12 @@
+      -{"type": "function", "function": {"name": "edit", "description": "Edit the contents of a file by finding and replacing exact text. When editing text from Read output, preserve the exact indentation (tabs or spaces) and omit the line-number prefix, such as `1: `. Never include the prefix in oldStrin
+      -{"type": "function", "function": {"name": "glob", "description": "Search file paths using a glob pattern (examples: \"**/*.ts\", \"src/**/*.tsx\").", "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "Glob pattern to match files against"}, "path": {"type":
+      -{"type": "function", "function": {"name": "grep", "description": "Search file contents using ripgrep's regular expression syntax or literal text matching. Use it to locate specific code, symbols, or text patterns, and narrow searches with `path` or `include`. Returns matching file paths, line numbe
+      -{"type": "function", "function": {"name": "question", "description": "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4
+      -{"type": "function", "function": {"name": "read", "description": "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for refer
+      -{"type": "function", "function": {"name": "shell", "description": "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full resu
+      -{"type": "function", "function": {"name": "skill", "description": "Load a specialized skill's instructions and resources into the current conversation when the task at hand matches its description.\n\nThe skill ID must match an available skill or a skill explicitly referenced by the user.", "parame
+      -{"type": "function", "function": {"name": "subagent", "description": "Spawns an agent in a child session to work on the specified task.\nThe output includes a sessionID you can pass back later to continue that specific conversation with the subagent.\nNew child sessions start with fresh context, so
+      -{"type": "function", "function": {"name": "webfetch", "description": "Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default.\n\nUse a more targeted tool when one is available. This tool is read-only. Large text results may be replaced with a previ
+    every edit (llama.cpp -> axon), with its count:
+       12 x insert '' -> ', "strict": false'
+        1 x delete '{' -> ''
+        1 x delete '}' -> ''
+PROMPT-DIFF codex-1.json       /v1/responses          tools 10 | served prompt tokens: axon 7744, llama 7706 (gap 38)
+PROMPT-DIFF DONE (3 bodies, 0 not measured)
+[axon-node 09:50:55] exit 0 after 365.3s; lowest MemAvailable seen 3287 MB
+[axon-node 09:50:55] peak RSS 1445 MB (job process tree PSS, 2 s samples x180)
+[axon-run 09:50:57] exit 0 after 443.9s (host jade)
+[axon-run 09:50:57] EXPECT ok: output matches /^PROMPT-DIFF DONE/
