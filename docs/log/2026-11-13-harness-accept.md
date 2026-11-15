@@ -1,6 +1,7 @@
 # Coding-agent acceptance test: opencode, codex and pi on Axon and llama-server (PR #235)
 
-- Date: 2026-11-13, measurement fixes 11-14. Branch: feat/eval. Status: open (draft PR #235), runs in progress.
+- Date: 2026-11-13; measurement fixes 11-14; rerun on main 9f3630c (#262, #264, #228) 11-14. Branch: feat/eval.
+  Status: open (PR #235).
 - Script: `scripts/harness_accept.py` (stdlib only), run through `scripts/harness_accept.sh` with axon-podjob.
 
 ## Method
@@ -8,13 +9,17 @@
 - **Tasks and checks:** 14 small coding tasks on a generated repo (`scripts/examples/harness-repo/make_repo.py`),
   each with an automatic check. `selfcheck` shows every check failing on the untouched repo and passing on a
   reference fix.
-- **Harnesses:** opencode 2.2.5, codex 0.166.0 and pi 0.85.1, each under bubblewrap with a scratch HOME.
+- **Harnesses:** opencode 2.2.7, codex 0.169.0 and pi 0.85.1 (every reported run; the job log's `ACCEPT` line
+  records them), each under bubblewrap with a scratch HOME.
 - **Servers:**
   - `axon serve --kv q8 --parallel 4 --ctx 32768`.
   - llama.cpp 4413a19 with `-ngl 999 -fa on --jinja -b 2048 -ub 2048 -kvu --cache-reuse 256 -ctk/-ctv q8_0 -np 4`,
     32k per sequence.
   - Both get the model card's sampler (Qwen2.5: temp 0.7, top-k 20, top-p 0.8, min-p 0, repeat penalty off). No
     harness sends temperature or top_p.
+  - **Arms** (`--engines`, 11-14): `axon` is main's defaults (since the merge: tool calls streamed, #262; shared
+    prefix KV pages on, #228); `axon-constrain` adds `AXON_CONSTRAIN=1` (#264) and fails to start unless its start
+    line names the grammar; `axon-nostream` is #262's kill switch; `llama`. One server at a time, same model file.
 - **Proxy:** each harness talks to the server through a recording proxy. Per request it records TTFT to the first
   token, the server's own prefill timings, tool calls parsed, calls that came back as text, and arguments that aren't
   valid JSON.
@@ -57,17 +62,35 @@ counted under, and whether the engine keeps working after a harness has gone.
   - A mutant without the watcher fails the hang-up checks, and one whose drain doesn't wait fails the outlives check.
   - Job 1114-063505-7685 (jade, CPU, sandboxed): SELFCHECK PASS.
 
-## Qwen2.5-7B, so far
+## Malformed calls after #262 (11-14, commit 335ce25)
 
-Jobs 1113-010041-0dce (codex) and 1113-010041-c777 (pi). Axon binary `axon-3014eeb`, on bella's RTX 5070 Ti Laptop
-(12 GB).
+- **What changed in the engine.** Since #262 Axon streams a call once its head is out, so arguments that go bad
+  come back as a call whose `arguments` don't parse (what llama-server and OpenAI do), not as text. And
+  `axon_tool_calls_dropped_total` now also counts the Hermes blocks returned as text, which the proxy counts too.
+- **The count.** `malf` per task is the proxy's (calls as text + calls whose arguments don't parse), or Axon's own
+  `dropped + invalid` where that is higher. The two views overlap since #262, so they are never added. Runs from
+  before the merge give the same counts as before.
+- **The rate** for #259's 1 % bar comes from the proxy alone, the same on every engine: malformed replies / tool-call
+  replies. A tool-call reply has a parsed call or a call left as text; a malformed one has a call left as text or a
+  call whose arguments don't parse. It's the denominator the 3.1 % below used.
+- **Self-test:** two interleaved streamed calls with one broken; a broken call on `/v1/responses`; the arms'
+  environments (inherited `AXON_CONSTRAIN`/`AXON_TOOL_STREAM` dropped) and start-line check; the count and rate
+  rules on rows shaped like each engine's.
 
-| harness | engine | tasks passed | malformed calls | timeouts | TTFT p50 (ms) | wall p50 (s) | compactions | cold prompts (attributed to a compaction) |
-|---|---|---|---|---|---|---|---|---|
-| codex | axon | 1 / 14 | 9 | 2 | 71 | 8.2 | 4 | 6 (4) |
-| codex | llama | 1 / 14 | 0 | 1 | 111 | 69.3 | 2 | 3 (2) |
-| pi | axon | 4 / 14 | 0 | 3 | 81 | 11.6 | 33 | 30 (30) |
-| pi | llama | 2 / 14 | 1 | 2 | 250 | 19.7 | 8 | 6 (6) |
+## Qwen2.5-7B before the merge (Axon `3014eeb`)
+
+Jobs 1113-010041-0dce (codex), 1113-010041-c777 (pi), 1114-063612-b2e0 (opencode). bella's RTX 5070 Ti Laptop (12 GB).
+
+| harness | engine | tasks passed | malformed calls | malformed replies / tool-call replies | timeouts | TTFT p50 (ms) | wall p50 (s) | compactions | cold prompts (attributed to a compaction) |
+|---|---|---|---|---|---|---|---|---|---|
+| codex | axon | 1 / 14 | 9 | 9 / 255 (3.5 %) | 2 | 71 | 8.2 | 4 | 6 (4) |
+| codex | llama | 1 / 14 | 0 | 0 / 275 | 1 | 111 | 69.3 | 2 | 3 (2) |
+| opencode | axon | 2 / 14 | 4 | 4 / 157 (2.5 %) | 0 | 86 | 20.6 | 3 | 3 (0) |
+| opencode | llama | 3 / 14 | 0 | 0 / 170 | 0 | 135 | 58.4 | 6 | 6 (1) |
+| pi | axon | 4 / 14 | 0 | 0 / 266 | 3 | 81 | 11.6 | 33 | 30 (30) |
+| pi | llama | 2 / 14 | 1 | 1 / 213 (0.5 %) | 2 | 250 | 19.7 | 8 | 6 (6) |
+| **all** | **axon** | **7 / 42** | **13** | **13 / 678 (1.9 %)** | | | | | |
+| **all** | **llama** | **6 / 42** | **1** | **1 / 658 (0.15 %)** | | | | | |
 
 No crashes, context overflows or other HTTP errors on either engine. With 14 tasks and one round, a pass-count gap
 under about ±4 means nothing.
@@ -95,13 +118,16 @@ under about ±4 means nothing.
 
 ## Pending
 
-- opencode on Qwen2.5-7B: job 1114-063612-b2e0, on the fixed script. It replaces 1114-041608-76d5, which never
-  started.
-- Qwen3-8B on all three harnesses, then gpt-oss-20b on 7 tasks (experts on the CPU, slow).
+- Qwen2.5-7B on main 9f3630c (binary `axon-a6f7f18`, the merge's `src/`, identical to main's), arms `axon`,
+  `axon-constrain` and `llama`: codex 1114-192659-82f7, opencode 1114-192700-a2e2, pi 1114-192701-202e. Plumbing
+  pilot (Qwen2.5-0.5B, 2 tasks, all arms and harnesses; not evidence): 1114-192659-4112.
+- Qwen3-8B, `axon` and `llama`, turn timeout 600 s (thinking): 1114-193001-6546, 1114-193002-76dd, 1114-193003-1ff5.
+  The grammar holds Qwen2.5's Hermes calls only, so there is no constrained arm.
+- gpt-oss-20b on 7 tasks (experts on the CPU, slow), after Qwen3-8B.
 
 ## Raw
 
-- Run dirs on bella: `~/.cache/axon-eval/accept/qwen2.5-7b-{codex-1114-041519,pi-1114-051800}`. Each holds
+- Run dirs on bella: `~/.cache/axon-eval/accept/qwen2.5-7b-{codex-1114-041519,pi-1114-051800,opencode-1114-110413}`. Each holds
   results.jsonl, requests.jsonl, results-rescored.jsonl, rescore.txt, the engine logs and the harnesses' session
   files.
 - The job logs are in `~/.cache/axon-run/logs/`.

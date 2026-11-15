@@ -7,10 +7,11 @@ quant ollama ships), on one RTX 4090 pod. Axon `3014eeb` (= main 213465a's `src/
 - **17 run, 13 are refused.** Every refusal is clean: exit 2, one line naming the architecture, no panic.
 - **Of the 17 that run:**
   - **8** match llama.cpp end to end: prompt ids equal (Mistral differs by design), greedy within zoo's match rule.
-  - **4** run but build a different chat prompt from the GGUF's own template. These are product bugs, filed as #238, #239, #240 and #241.
+  - **4** run but build a different chat prompt from the GGUF's own template. These are product bugs, filed as #238, #239, #240 and #241, all fixed since by #246 (in main 9f3630c, not re-measured here).
   - **4** run but refuse `/v1/chat/completions`: plain-text turn markers, #242.
   - **1** (Qwen2.5-7B) has one greedy flip outside a near-tie.
-- **Greedy:** no model's logits are far off. The worst is DeepSeek-R1-0528 (YaRN) at KL 0.021, against at most 0.007 for every model that matches. Its triage is staged but not run (blocked, see the end).
+- **Greedy:** no model's logits are far off. The two drifts are not bugs (triage, job `1113-022249-97e7`):
+  Qwen2.5-7B matches on one machine, and DeepSeek-R1-0528 (KL 0.021) stays within llama.cpp's own CUDA-vs-CPU spread.
 - **Refusals,** ranked by what each fix unlocks, are in roadmap issue #243.
 
 Job `1113-010532-8176` (gatewatch `eval-09efdf0-compat-audit`, rc 0, 49 min). Pod4 was a secure 4090 at $0.89/h, up
@@ -51,9 +52,9 @@ Pulls are ollama's whole-family counts, in millions. "top-1" and "KL" are Axon a
 |---:|---|---|---|---|---|---|---|
 | 1 | llama3.1 8b (121) | bartowski Meta-Llama-3.1-8B-Instruct | llama / Q4_K_M | **runs, matches** | 15/16 (near-tie 0.055), 6.1e-4 | ids equal | |
 | 2 | nomic-embed-text (97.5) | nomic-ai nomic-embed-text-v1.5 | nomic-bert / Q4_K_M | **refused** | | | architecture 'nomic-bert' is not supported (embedding model) |
-| 3 | deepseek-r1 8b (95.0) | unsloth DeepSeek-R1-0528-Qwen3-8B | qwen3 / Q4_K_M | **runs, differs** | 14/16 (gaps 0.205, 0.199), **2.1e-2** | **differs**: no BOS, `</think>` forced, earlier reply without `<｜Assistant｜>` | #238, #240; greedy drift, triage pending (YaRN) |
+| 3 | deepseek-r1 8b (95.0) | unsloth DeepSeek-R1-0528-Qwen3-8B | qwen3 / Q4_K_M | **runs, differs** | 14/16 (gaps 0.205, 0.199), **2.1e-2** | **differs**: no BOS, `</think>` forced, earlier reply without `<｜Assistant｜>` | #238, #240 (fixed, #246); greedy: within llama.cpp's own spread (triage) |
 | 4 | llama3.2 3b (87.6) | bartowski Llama-3.2-3B-Instruct | llama / Q4_K_M | **runs, matches** | 16/16, 1.4e-3 | ids equal | |
-| 5 | qwen2.5 7b (45.6) | bartowski Qwen2.5-7B-Instruct | qwen2 / Q4_K_M | **runs, differs** (greedy) | 15/16 (gap 0.249), 5.7e-3 | ids equal | one flip outside a near-tie; triage pending |
+| 5 | qwen2.5 7b (45.6) | bartowski Qwen2.5-7B-Instruct | qwen2 / Q4_K_M | **runs, differs** (greedy) | 15/16 (gap 0.249), 5.7e-3 | ids equal | one flip outside a near-tie here; matches on one machine (triage) |
 | 6 | qwen3 8b (43.3) | Qwen Qwen3-8B | qwen3 / Q4_K_M | **runs, matches** | 16/16, 3.6e-3 | ids equal | |
 | 7 | gemma3 4b (41.8) | bartowski gemma-3-4b-it | gemma3 / Q4_K_M | **runs, matches** | 16/16, 5.9e-3 | ids equal | text only (ollama ships a vision projector) |
 | 8 | gemma2 9b (37.1) | bartowski gemma-2-9b-it | gemma2 / Q4_K_M | **refused** | | | architecture 'gemma2' is not supported |
@@ -112,7 +113,8 @@ By pulls per unit of work, gemma2 and phi3 come first: 71.7M pulls, both small.
 
 ## Runs, but differs: the product bugs
 
-All four were measured as prompt-token counts and confirmed at the id level by `prompt_check.py`. "GGUF" below means
+All four were fixed by #246 (closed 11-14, in main 9f3630c); what follows is Axon `3014eeb`. All four were measured
+as prompt-token counts and confirmed at the id level by `prompt_check.py`. "GGUF" below means
 llama.cpp's `--jinja` rendering of the file's own template.
 
 - **#238 DeepSeek-R1** (ollama #3, 95M). Axon renders R1 as DeepSeek V3.1's non-thinking mode:
@@ -138,21 +140,26 @@ llama.cpp's `--jinja` rendering of the file's own template.
 
   With a system message, ids are equal.
 
-**The greedy drifts are not filed yet.** Both need llama.cpp's own CUDA-vs-CPU spread as a yardstick before they can
-be called bugs.
-- **DeepSeek-R1-0528:**
-  - KL mean 0.0213 (max 0.077), top-1 14/16. Flips where llama.cpp's top-2 gap is 0.205 ("Dear Sir or Madam,\n\nI
-    am writing to") and 0.199 ("Photosynthesis converts").
-  - The control has the same arch, size and quant mix (Qwen3-8B, F32:145 Q4_K:217 Q6_K:37): KL 0.0036, 16/16.
-  - What differs is that R1 runs YaRN (factor 4, original context 32768, mscale 1.1386), and Axon applies it. So the
-    first suspect is the YaRN path on CUDA.
-- **Qwen2.5-7B:** KL 0.0057 (max 0.0165), within the matching models' band. One flip at a 0.249-nat gap after
-  `import numpy as np\nimport matplotlib.pyplot as plt\n\n`: Axon "def", llama.cpp "#".
-- **The triage:** `scripts/compat_triage.sh` runs it in one bella job:
-  - Axon CUDA vs llama.cpp CPU on the same machine.
-  - R1 with `--rope-scaling none` on both sides.
-  - R1 with Axon on the CPU.
-  - golden.py (#229) on R1, Qwen2.5-7B and Qwen3-8B, with `--llama-server-ref` (llama.cpp CUDA) for the spread.
+**The greedy drifts: neither is a bug.** At audit time each needed llama.cpp's own CUDA-vs-CPU spread as a yardstick.
+- **At audit time (pod, Axon CUDA vs llama.cpp CPU):**
+  - **DeepSeek-R1-0528:** KL mean 0.0213 (max 0.077), top-1 14/16. Flips where llama.cpp's top-2 gap is 0.205 ("Dear
+    Sir or Madam,\n\nI am writing to") and 0.199 ("Photosynthesis converts"). The control has the same arch, size and
+    quant mix (Qwen3-8B, F32:145 Q4_K:217 Q6_K:37): KL 0.0036, 16/16. R1 runs YaRN (factor 4, original context 32768,
+    mscale 1.1386), so that was the first suspect.
+  - **Qwen2.5-7B:** KL 0.0057 (max 0.0165), within the matching models' band. One flip at a 0.249-nat gap after
+    `import numpy as np\nimport matplotlib.pyplot as plt\n\n`: Axon "def", llama.cpp "#".
+- **The triage** (`scripts/compat_triage.sh`, job `1113-022249-97e7` on bella, 7 min; Axon `98a0d8d`, #229's build
+  with `AXON_LOGITS_CHAT`; llama.cpp `4413a19` CPU and CUDA; the same files, sha256-checked):
+  - **Qwen2.5-7B matches on one machine.** zoo, Axon CUDA vs llama.cpp CPU on bella: top-1 16/16, KL 0.0031, verdict
+    match. golden.py passes: KL 0.0019 (limit 0.01), max dlogprob 0.16 (limit 0.37), 0 flips over the swing limit. The
+    pod's flip didn't reproduce.
+  - **R1's drift is the model's, not YaRN's or the CUDA path's.** zoo on bella: KL 0.027. With `--rope-scaling none`
+    on both sides it is still 0.020, and with Axon on the CPU it is 0.034. golden.py, whose limits come from
+    llama.cpp's own CUDA-vs-CPU spread on each model, puts it inside that spread: KL 0.012 (limit 0.032, three times
+    the default because llama.cpp's own spread on R1 is that wide), max dlogprob 0.51 (limit 2.01), 0 flips over the
+    swing limit. Its golden FAIL is the chat DIFF alone, #238 and #240, which #246 fixed.
+  - Qwen3-8B, the control: match (KL 0.0029) and pass (KL 0.0017).
+  - Nothing filed.
 
 **Not bugs:**
 - **Mistral v0.3: differs by design** (chat.rs module doc): Axon emits mistral_common's tokens. This GGUF's older
@@ -171,9 +178,8 @@ qwen2.5-coder 7b, gpt-oss 20b.
 
 llava was left out: Axon runs only its text model. qwen3-coder 30B-A3B (#18) is the only qwen3moe path and the
 coding-agent model, so it's the first alternate, though it needs experts on the CPU on bella. For golden.py (#229),
-three of these will show a chat (b) DIFF from day one:
-- deepseek-r1 until #238 and #240 are fixed;
-- llama3 until #241 is fixed;
+three of these showed a chat (b) DIFF at audit time:
+- deepseek-r1 (#238, #240) and llama3 (#241): fixed by #246;
 - mistral permanently, by design. It needs an expected-diff entry, or zoo-only.
 
 Of the ten, bella lacks DeepSeek-R1-0528-Qwen3-8B, Meta-Llama-3-8B-Instruct and Qwen2.5-Coder-7B-Instruct (14.6 GB);
