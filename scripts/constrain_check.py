@@ -6,7 +6,7 @@
                                    [--expect-constraint on|off|any] [--port P] [-- extra serve flags]
     scripts/constrain_check.py diff A.json B.json     the cells' digests of two runs: equal or not
     scripts/constrain_check.py replay --axon BIN --model M.gguf --replays DIR --out OUT.json [--seeds N]
-                                      [--expect-constraint on|off|any]
+                                      [--expect-constraint on|off|any] [--known-miss CELL:MODE,...]
                                       [--port P] [-- extra serve flags]
     scripts/constrain_check.py cost --axon BIN --model M.gguf --bodies DIR --tasks harness_accept.py
                                     --out OUT.json [--rounds 5] [--n 28] [--conc 1,4] [--max-tokens 512]
@@ -37,7 +37,11 @@ replay (shady's review of #274: the stall rule on the real model): DIR's cells (
 "route", "body"}`; the ones whose "model" isn't M's file name are skipped), each greedy and with seeds 1..N, one at a
 time (each reply's stalls are /metrics' delta), on the same server flags:
   runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, with
-            every call valid (a stall closes it, or the call ends by itself);
+            every call valid (a stall closes it, or the call ends by itself). --known-miss names (cell, mode) pairs
+            the stall rule is known to miss (11-16: 11-pi-edit seeds 1 and 2, a loop that breaks off and starts
+            over; docs/serving.md): such a reply may run on to its limit, its call cut there and nothing else wrong,
+            no stall (reported as a miss, not judged); a listed reply that ends is fine. Any other runaway that
+            runs on still fails, so a stall rule that stopped closing calls can't pass;
   legit     a request for data that repeats one value (an empty board, a table of zeros): no stall, every call
             valid;
   known-fp  one the rule is known to cut (reported, not judged).
@@ -418,6 +422,12 @@ def replay(a):
                 cs.append((f[:-5], c))
     if not cs:
         sys.exit("constrain_check: no replay in %s for %s" % (a.replays, m))
+    a.known_miss = {x for x in ",".join(a.known_miss).split(",") if x}
+    modes = ["greedy"] + ["seed%d" % s for s in range(1, a.seeds + 1)]
+    for x in sorted(a.known_miss):  # a typo must not pass for a miss that never runs
+        cell, _, mode = x.partition(":")
+        if not any(n == cell and c["kind"] == "runaway" for n, c in cs) or mode not in modes:
+            sys.exit("constrain_check: --known-miss %s: no runaway cell %r run as %r here" % (x, cell, mode))
     proc, port, logf, res = start(a)
     bad, rows, http = [], [], Http()
     try:
@@ -425,7 +435,7 @@ def replay(a):
         res["model_id"] = mid = served_id(port)
         res["metrics_before"] = metrics(port)
         for name, c in cs:
-            for mode in ["greedy"] + ["seed%d" % s for s in range(1, a.seeds + 1)]:
+            for mode in modes:
                 body = aim(c["body"], mid)
                 if mode == "greedy":
                     body["temperature"] = 0
@@ -443,22 +453,27 @@ def replay(a):
                 stalls = m1.get("axon_constraint_stalls_total", 0) - m0.get("axon_constraint_stalls_total", 0)
                 ran_on = rep.get("finish") in ("length", "incomplete")
                 badj = [j for j, _n in judged if j != "ok"]
+                miss = None
                 if c["kind"] == "runaway":
                     ok = not ran_on and not badj
+                    if not ok and "%s:%s" % (name, mode) in a.known_miss and ran_on and not stalls \
+                            and badj and all(j == "cut" for j in badj):
+                        ok, miss = None, "known-miss"
                 elif c["kind"] == "legit":
                     ok = not stalls and not badj
                 else:
                     ok = None
-                row = dict(cell=name, kind=c["kind"], what=c["what"], mode=mode, ok=ok, stalls=stalls,
+                row = dict(cell=name, kind=c["kind"], what=c["what"], mode=mode, ok=ok, miss=miss, stalls=stalls,
                            tokens=rep.get("tokens"), cap=cap, finish=rep.get("finish"), judged=judged,
                            args_len=[len(x[1] or "") for x in rep.get("calls") or []], s=round(time.time() - t0, 1),
                            calls=[[n, (x or "")[-160:]] for n, x in rep.get("calls") or []])
                 if ok is not True:  # a failure or a known false positive: the whole reply, to see why
                     row["reply"] = {"content": rep.get("content"), "calls": rep.get("calls")}
                 rows.append(row)
+                verdict = "miss" if miss else {True: "ok", False: "FAIL", None: "-"}[ok]
                 print("REPLAY %-34s %-8s %-6s %-4s stalls %d tokens %s/%s finish %s calls %s" % (
-                    name, c["kind"], mode, {True: "ok", False: "FAIL", None: "-"}[ok], stalls, rep.get("tokens"),
-                    cap, rep.get("finish"), ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
+                    name, c["kind"], mode, verdict, stalls, rep.get("tokens"), cap, rep.get("finish"),
+                    ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
                 if ok is False:
                     bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else (badj or "stalled")))
         res["metrics_after"] = metrics(port)
@@ -470,6 +485,10 @@ def replay(a):
     res["stall_lines"] = [ln.strip() for ln in open(logf, errors="replace") if "stalled after" in ln]
     json.dump(res, open(a.out, "w"), indent=1)
     print("STALL-LINES %d" % len(res["stall_lines"]))
+    for x in sorted(a.known_miss):
+        r = [r for r in rows if "%s:%s" % (r["cell"], r["mode"]) == x]
+        print("KNOWN-MISS %s: %s" % (x, "ran on (to %s/%s tokens), not judged" % (r[0]["tokens"], r[0]["cap"])
+                                      if r and r[0]["miss"] else "ended (%s)" % (r[0]["finish"] if r else "not run")))
     print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
                                      for k in res["metrics_after"]}, sort_keys=True))
     print("\n".join(ilines))
@@ -695,6 +714,8 @@ def main():
     rp.add_argument("--port", type=int, default=0)
     rp.add_argument("--expect-constraint", choices=("on", "off", "any"), default="on")
     rp.add_argument("--parallel", type=int, default=4)
+    rp.add_argument("--known-miss", action="append", default=[],
+                    help="CELL:MODE[,...]: a runaway reply the stall rule is known to miss (may run on, cut)")
     rp.add_argument("serve", nargs="*")
     c = sp.add_parser("cost")
     c.add_argument("--axon", required=True)

@@ -418,6 +418,18 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     `["$qty", 250]`, `[1.5, null, 2.0]`), and a call whose last 1,024 tokens were at most 8
     distinct ones was cut (it caught one runaway more, and cut 400 dice rolls); both are
     gone. When in doubt the rule doesn't fire.
+    **What it misses: a loop that breaks off and starts over.** Replayed with seeds 1 and 2,
+    one of the 13 (Qwen2.5-7B, a pi `edit`) repeats `'convert_to_all_except', ` (6 tokens)
+    up to 284 times in a string, ends the string, writes `"newText"` again in the same
+    object (JSON allows a repeated key), copies the line's first 65 to 91 tokens and loops
+    again. No stretch repeats one block for 2,048 tokens (1,711 at most), so the call runs
+    on to `max_tokens` and arrives cut (`finish_reason` `length`), as it would without the
+    constraint; with greedy decoding it stalls (after 2,158 tokens). The few-ids rule caught
+    it at 1,024 tokens (not at 2,048), but cut 15 of the 74 legit cases. A looser cycle rule
+    would have to fire when 90 % of 2,048 tokens equal the token a block back (seed 2's loop
+    reaches 91 %), and that cuts sparse data: a 40×30 tile map with 10 % walls, a 60×20
+    one-hot CSV, a 24×24 0/1 mask. So the miss stays; the harness bar counts such a call as
+    malformed.
 
   Valid isn't right: where the model would have written an unescaped quote, the string ends
   there and the call goes on from it, so the call parses but may not be what was meant (the

@@ -31,7 +31,9 @@ measurements behind them.
   matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a line on
   stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block of P
   tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the closing off
-  alone (a call in a loop runs to `max_tokens`, still held to a name and JSON).
+  alone (a call in a loop runs to `max_tokens`, still held to a name and JSON). Known miss: a loop that breaks
+  off and starts over (a key written again, the loop again), so that no 2,048 tokens repeat one block, runs to
+  `max_tokens` as it did before (Qwen2.5-7B, a pi `edit` replayed: 2 of 3 seeds); catching it cut legit data.
 - **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
   its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
   refuses to start (PR A read only `1` as on).
