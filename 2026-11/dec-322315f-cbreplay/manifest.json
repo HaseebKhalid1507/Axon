@@ -1,0 +1,29 @@
+{
+ "label": "dec-322315f-cbreplay",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1116-050251-3035",
+   "name": "dec-322315f-cbreplay",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "322315f",
+   "binary": "bash",
+   "started": 1794823439.3984916,
+   "ended": 1794824406.9066436,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "da67d85b38edfdbe5712201517010624438caa55df85bb2e050b3829153e83cc",
+   "log_bytes": 9555
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-16 05:20:08 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

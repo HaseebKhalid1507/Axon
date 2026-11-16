@@ -1,0 +1,77 @@
+[axon-run 05:02:51] submitted 1116-050251-3035 by /home/haseeb/.cache/axon-dec: /usr/bin/bash cbreplay.sh ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/out-322315f-replay /home/haseeb/.cache/axon-dec/cb/replays ./replay-Qwen2.5-7B-Instruct-Q4_K_M.json
+[axon-run 05:03:59] scope axon-job-1116-050251-3035-1794823439.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14436 MB): an OOM here kills only this job
+[axon-run 05:03:59] job 1116-050251-3035 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1116-050251-3035-1794823439 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash cbreplay.sh ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/out-322315f-replay /home/haseeb/.cache/axon-dec/cb/replays ./replay-Qwen2.5-7B-Instruct-Q4_K_M.json
+axon-q 05:03:59 start slot 16-23: /usr/bin/bash cbreplay.sh ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/out-322315f-replay /home/haseeb/.cache/axon-dec/cb/replays ./replay-Qwen2.5-7B-Instruct-Q4_K_M.json
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 620.70.06
+REPLAY 01-codex-exec-command              runaway  greedy ok   stalls 0 tokens 284/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 01-codex-exec-command              runaway  seed1  ok   stalls 0 tokens 138/8192 finish completed calls ok:update_plan
+REPLAY 01-codex-exec-command              runaway  seed2  ok   stalls 1 tokens 2212/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 02-codex-apply-patch               runaway  greedy ok   stalls 0 tokens 371/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 02-codex-apply-patch               runaway  seed1  ok   stalls 0 tokens 219/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 02-codex-apply-patch               runaway  seed2  ok   stalls 0 tokens 212/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 03-pi-edit                         runaway  greedy ok   stalls 0 tokens 369/4096 finish tool_calls calls ok:edit,ok:edit
+REPLAY 03-pi-edit                         runaway  seed1  ok   stalls 0 tokens 333/4096 finish tool_calls calls ok:edit
+REPLAY 03-pi-edit                         runaway  seed2  ok   stalls 0 tokens 369/4096 finish tool_calls calls ok:edit,ok:edit
+REPLAY 04-pi-edit                         runaway  greedy ok   stalls 0 tokens 109/4096 finish tool_calls calls ok:edit
+REPLAY 04-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2222/4096 finish tool_calls calls ok:edit
+REPLAY 04-pi-edit                         runaway  seed2  ok   stalls 0 tokens 300/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 05-pi-edit                         runaway  greedy ok   stalls 1 tokens 2344/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 05-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2499/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 05-pi-edit                         runaway  seed2  ok   stalls 0 tokens 139/4096 finish tool_calls calls ok:edit
+REPLAY 06-pi-edit                         runaway  greedy ok   stalls 1 tokens 2363/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 06-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2352/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 06-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2404/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 07-pi-edit                         runaway  greedy ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 07-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2358/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 07-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 08-pi-edit                         runaway  greedy ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 08-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2358/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 08-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 09-pi-edit                         runaway  greedy ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 09-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 09-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2357/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 10-pi-edit                         runaway  greedy ok   stalls 0 tokens 736/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit,ok:write,ok:bash
+REPLAY 10-pi-edit                         runaway  seed1  ok   stalls 0 tokens 217/4096 finish tool_calls calls ok:edit
+REPLAY 10-pi-edit                         runaway  seed2  ok   stalls 0 tokens 718/4096 finish tool_calls calls ok:bash
+REPLAY 11-pi-edit                         runaway  greedy ok   stalls 1 tokens 2158/4096 finish tool_calls calls ok:edit
+REPLAY 11-pi-edit                         runaway  seed1  miss stalls 0 tokens 4096/4096 finish length calls cut:edit
+REPLAY 11-pi-edit                         runaway  seed2  miss stalls 0 tokens 4096/4096 finish length calls cut:edit
+REPLAY 12-pi-edit                         runaway  greedy ok   stalls 1 tokens 3925/4096 finish tool_calls calls ok:edit
+REPLAY 12-pi-edit                         runaway  seed1  ok   stalls 0 tokens 55/4096 finish tool_calls calls ok:read
+REPLAY 12-pi-edit                         runaway  seed2  ok   stalls 0 tokens 2059/4096 finish tool_calls calls ok:edit
+REPLAY 13-board-of-zeros                  legit    greedy ok   stalls 0 tokens 383/4096 finish tool_calls calls ok:write
+REPLAY 13-board-of-zeros                  legit    seed1  ok   stalls 0 tokens 375/4096 finish tool_calls calls ok:write
+REPLAY 13-board-of-zeros                  legit    seed2  ok   stalls 0 tokens 373/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    greedy ok   stalls 0 tokens 809/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    seed1  ok   stalls 0 tokens 808/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    seed2  ok   stalls 0 tokens 761/4096 finish tool_calls calls ok:write
+REPLAY 15-html-table-of-empty-cells       legit    greedy ok   stalls 0 tokens 612/4096 finish tool_calls calls ok:write
+REPLAY 15-html-table-of-empty-cells       legit    seed1  ok   stalls 0 tokens 612/4096 finish tool_calls calls ok:write
+REPLAY 15-html-table-of-empty-cells       legit    seed2  ok   stalls 0 tokens 596/4096 finish tool_calls calls ok:write
+REPLAY 16-csv-of-80-identical-rows        known-fp greedy -    stalls 1 tokens 2079/4096 finish tool_calls calls ok:write
+REPLAY 16-csv-of-80-identical-rows        known-fp seed1  -    stalls 1 tokens 2079/4096 finish tool_calls calls ok:write
+REPLAY 16-csv-of-80-identical-rows        known-fp seed2  -    stalls 1 tokens 2079/4096 finish tool_calls calls ok:write
+STALL-LINES 21
+KNOWN-MISS 11-pi-edit:seed1: ran on (to 4096/4096 tokens), not judged
+KNOWN-MISS 11-pi-edit:seed2: ran on (to 4096/4096 tokens), not judged
+METRICS {"axon_constraint_fallback_total": 6248.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 108.0, "axon_constraint_mask_seconds_total": 0.29588, "axon_constraint_stalls_total": 21.0, "axon_constraint_tokens_total": 67182.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (48 requests)
+CONSTRAINT-TOKENS 67182 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== replay Qwen2.5-7B-Instruct-Q4_K_M (runaways end but the known misses, legit data doesn't stall; all 200, constraint on): PASS
+REPLAY 00-pi-edit                         runaway  greedy ok   stalls 0 tokens 105/4096 finish tool_calls calls ok:edit
+REPLAY 00-pi-edit                         runaway  seed1  ok   stalls 0 tokens 118/4096 finish tool_calls calls ok:edit
+REPLAY 00-pi-edit                         runaway  seed2  ok   stalls 0 tokens 107/4096 finish tool_calls calls ok:edit
+STALL-LINES 0
+METRICS {"axon_constraint_fallback_total": 26.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 95.0, "axon_constraint_mask_seconds_total": 0.000405, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 327.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (3 requests)
+CONSTRAINT-TOKENS 327 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== replay Qwen2.5-0.5B-Instruct-Q4_0 (runaways end but the known misses, legit data doesn't stall; all 200, constraint on): PASS
+REPLAY-SAME 48 of 48 rows equal 7b6f's (the known misses: equal)
+== replay == 7b6f's, row for row: PASS
+CBREPLAY PASS
+[axon-run 05:20:06] exit 0 after 967.3s (host bella)
+[axon-run 05:20:06] EXPECT ok: output matches /^CBREPLAY PASS/
