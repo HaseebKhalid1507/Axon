@@ -485,10 +485,16 @@ fn masks_match_naive() {
     }
     assert!(states > 3000, "{states} states");
     assert!(deep_seen > 0, "no deep tokens met");
-    // At most MAX_DEPTH frames (the arguments object's included): the
-    // scripted walk reaches the cap, and the masks there match too.
+    // The scripted walk reaches the cap (a container opens with at most
+    // MAX_DEPTH frames, the arguments object's included), and the masks
+    // there match too. A value inside the deepest container is one frame
+    // more (its call's): a dive met that at 0932813, once arrays took any
+    // item again (the kind lock's walks happened not to).
     assert!(capped, "the scripted walk never met the cap");
-    assert_eq!(max_stack, MAX_DEPTH, "deepest stack");
+    assert!(
+        (MAX_DEPTH..=MAX_DEPTH + 1).contains(&max_stack),
+        "deepest stack {max_stack}"
+    );
 }
 
 /// The Hermes grammar refuses each of the 8 malformed calls of #259 at the
