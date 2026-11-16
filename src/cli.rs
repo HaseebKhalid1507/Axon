@@ -182,9 +182,10 @@ flags:
               56 KiB). Off on a CPU/GPU split, several GPUs and MoE models (docs/serving.md)
   --no-constrain  serve: sample tool calls unconstrained. By default a Qwen2.5 or Qwen3 tool call
               is held from its <tool_call> to </tool_call>: it names one of the request's tools,
-              its arguments are a JSON object, and it can't run on (bounded whitespace, an array's
-              items one kind; a call that repeats a few tokens for 1024 is closed, its arguments cut
-              there: a stderr line says so). AXON_CONSTRAIN=0 turns it off too (docs/serving.md)
+              its arguments are a JSON object, and it can't run on (bounded whitespace; a call whose
+              last 2048 tokens repeat one block of at most 256 tokens is closed, its arguments cut
+              there: a stderr line says so, and AXON_CONSTRAIN_STALL=0 turns that alone off).
+              AXON_CONSTRAIN=0 turns it all off too (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
@@ -2063,7 +2064,8 @@ mod tests {
             "--kv T gen, chat, serve:",
             "--no-think chat, serve:",
             "--no-constrain serve: sample tool calls unconstrained.",
-            "AXON_CONSTRAIN=0 turns it off too",
+            "AXON_CONSTRAIN=0 turns it all off too",
+            "AXON_CONSTRAIN_STALL=0 turns that alone off",
             "sampling flags (gen, chat, serve;",
             "(default 1.1, serve 1; 1 = off)",
         ] {

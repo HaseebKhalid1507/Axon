@@ -26,9 +26,9 @@ const ROOM_FAR: i32 = 32;
 /// Bytes of cached masks a grammar keeps at most; past it the cache starts
 /// over (a Hermes call meets a few dozen to a few hundred entries, ~19 KB
 /// each at a 152k vocabulary; deep nesting near the depth cap more). A
-/// server keeps at most `Hermes::KEEP` grammars: 128 MiB at worst. How
-/// full they get is on /metrics (`Counters::cache_peak_entries`,
-/// `cache_clears`).
+/// server keeps at most `Hermes::KEEP` grammars, each with two caches (its
+/// masks and its finisher's): 256 MiB at worst. How full they get is on
+/// /metrics (`Counters::cache_peak_entries`, `cache_clears`).
 const CACHE_BUDGET: usize = 16 << 20;
 
 /// A set of token ids out of a vocabulary.

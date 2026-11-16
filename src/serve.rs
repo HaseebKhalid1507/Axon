@@ -188,10 +188,15 @@ pub struct Opts {
     /// AXON_CONSTRAIN, `constrain::env`: on unless "0"; `--no-constrain` is
     /// Some(false)).
     pub constrain: Option<bool>,
-    /// Their stall rules' windows (`constrain::Stall`): None the default,
+    /// Their stall rule's window (`constrain::Stall`): None the default,
     /// `Stall::DEFAULT`; no flag sets it (the tests set small ones, so a
     /// call stalls in a few tokens).
     pub constrain_stall: Option<crate::constrain::Stall>,
+    /// Closing a held call that stalls, on or off (None:
+    /// AXON_CONSTRAIN_STALL, `constrain::stall_env`: on unless "0"). Off,
+    /// a call in a loop runs to `max_tokens`; its name and JSON are still
+    /// held.
+    pub constrain_closer: Option<bool>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -1293,6 +1298,16 @@ fn engine(
             Err(why) => refuse!(why),
         },
     };
+    // Closing stalled calls: `Opts::constrain_closer`, else
+    // AXON_CONSTRAIN_STALL, read as strictly.
+    let closer_set = match o.constrain_closer {
+        Some(b) => ShareSet::Opts(b),
+        None => match crate::constrain::stall_env() {
+            Ok(Some(b)) => ShareSet::Env(b),
+            Ok(None) => ShareSet::Default,
+            Err(why) => refuse!(why),
+        },
+    };
     let rope = crate::rope::RopeArgs {
         ctx: o.ctx,
         ..o.rope.clone()
@@ -1780,9 +1795,24 @@ fn engine(
             let h = match template.as_ref().map(tools::family) {
                 Some(Some(tools::Family::Qwen25 | tools::Family::Qwen3)) => {
                     let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
-                    let stall = o
-                        .constrain_stall
-                        .unwrap_or(crate::constrain::Stall::DEFAULT);
+                    // Off: a line says so, as the kill switch's does.
+                    let stall = match closer_set.value() {
+                        Some(false) => {
+                            eprintln!(
+                                "axon serve: stalled tool calls aren't closed ({}): a held \
+                                 call in a loop runs to max_tokens",
+                                match closer_set {
+                                    ShareSet::Env(_) => "AXON_CONSTRAIN_STALL=0",
+                                    _ => "Opts::constrain_closer",
+                                }
+                            );
+                            None
+                        }
+                        _ => Some(
+                            o.constrain_stall
+                                .unwrap_or(crate::constrain::Stall::DEFAULT),
+                        ),
+                    };
                     crate::constrain::Hermes::new(v, o.metrics.constrain.clone(), stall)
                         .map(Arc::new)
                 }
@@ -2621,6 +2651,7 @@ struct EngineOpts {
     numerics: Numerics,
     constrain: Option<bool>,
     constrain_stall: Option<crate::constrain::Stall>,
+    constrain_closer: Option<bool>,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2779,6 +2810,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         numerics: o.numerics,
         constrain: o.constrain,
         constrain_stall: o.constrain_stall,
+        constrain_closer: o.constrain_closer,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -3942,6 +3974,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         numerics: Numerics::Exact,
         constrain: None,
         constrain_stall: None,
+        constrain_closer: None,
     };
     let mut k = None;
     let key_from;

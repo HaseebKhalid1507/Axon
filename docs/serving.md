@@ -389,39 +389,42 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   were runaways that hit `max_tokens`):
   - **Whitespace** outside strings is one space, or one or two newlines and at most 20
     spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
-  - **An array keeps its first item's kind** (objects, strings, numbers, booleans, null,
-    arrays). A runaway in #272 wrote an edit object and then `false, false, ...` 1,900
-    times; in the acceptance runs' calls no other array mixed kinds.
-  - **A stalled call is cut off.** When the last 1,024 tokens of a call are no more than 8
-    distinct tokens (`false, false, ...`, a string of `\n\n\n...`), or its last 2,048 repeat
-    one cycle of at most 256 tokens (`--exclude=*.pyc --exclude=*.pyc ...`, a list in a
-    loop, a 72-token block of code 53 times), it is closed the shortest way from there: the string ends, then each open array
-    and object, then `</tool_call>`, and the reply ends after it (only its stop token is
-    allowed), so a model in a loop can't open the next call and stall again. **The client
-    gets a well-formed call whose arguments are cut where it stalled:** a file written
-    short, a command run short. The close can also invent its last piece: after a `,` an
-    array needs one more item and gets the shortest one (`true` in a boolean array, `0` in
-    a number array, `""` in a string array), an object one more member (`"": 0`), a number
-    one more digit. Each stall is a line on stderr, whatever the log level (`axon serve:
-    #12: a held tool call stalled after 1031 tokens (...): closed the shortest way, so its
-    arguments are cut there and may end with an invented item; the reply ends after it`),
-    and counts in `axon_constraint_stalls_total`. In the acceptance runs' 6,333 calls 12
-    of the 13 runaways trip a rule (their stretches are 1,969 to 50,837 tokens' worth of
-    text); the 13th, a 623-piece list loop, ended by itself first. The other calls stay far
-    from both (at most 28 in a stretch of 8 distinct pieces, 383 in a cycle). Data of one
-    value over and over can still trip it: a CSV of 80 identical rows does after about
-    1,050 tokens, a 32×32 matrix of zeros after about 1,040. The windows were 256 and 512 until shady's review of #274 found that
-    those cut real data (a 9×9 board of zeros, a C table of 256 zeros, `[true, ...]` ×200);
-    when in doubt the rule doesn't fire.
+  - **A stalled call is cut off.** When the last 2,048 tokens of a call repeat one block of
+    at most 256 tokens (`false, false, ...`, a string of `\n\n\n...`, `--exclude=*.pyc
+    --exclude=*.pyc ...`, a list in a loop, a 72-token block of code 53 times), it is closed
+    the shortest way from there: the string ends, then each open array and object, then
+    `</tool_call>`, and the reply ends after it (only its stop token is allowed), so a model
+    in a loop can't open the next call and stall again. **The client gets a well-formed
+    call whose arguments are cut where it stalled:** a file written short, a command run
+    short. The close can also invent its last piece: after a `,` an array needs one more
+    item and gets one digit (a number is the shortest JSON value), an object one more
+    member (`"": 0`), a number one more digit. Each stall is a line on stderr, whatever the
+    log level (`axon serve: #12: a held tool call stalled after 2077 tokens (its last 2048
+    repeat one block of 72 tokens): closed the shortest way, so its arguments are cut there
+    and may end with an invented item; the reply ends after it (AXON_CONSTRAIN_STALL=0 turns
+    this off)`), and counts in `axon_constraint_stalls_total`. In the acceptance runs' 6,333
+    calls 11 of the 13 runaways trip it (their loops are 2,144 to 50,831 tokens' worth of
+    text); the other two, a `, false` loop and a list loop, ended by themselves first, after
+    1,963 and 623. The other calls stay far from it (383 at most in a block repeated). Data
+    that repeats one block 8 times or more trips it: 256 identical `<div class="cell"></div>`
+    lines after about 2,085 tokens (205 cells written, the closing tags lost), 100 identical
+    log lines after about 2,070, a 32×32 matrix of zeros after about 2,070, 150 identical
+    JSON objects after about 2,060. Data that doesn't repeat a block isn't cut, however few
+    tokens it uses (400 dice rolls, a 30×20 tile map of 4 tile ids, a 2,048-bit string).
+    **`AXON_CONSTRAIN_STALL=0`** turns the closing off alone: a call in a loop then runs to
+    `max_tokens`, its name and JSON still held (the grammar's hash in the fingerprint says
+    `stall=off`). Until Fable's review of #274 two more rules held a call: an array kept its
+    first item's kind (it rewrote real arguments without a trace: `[["Alice", 30]]`,
+    `["$qty", 250]`, `[1.5, null, 2.0]`), and a call whose last 1,024 tokens were at most 8
+    distinct ones was cut (it caught one runaway more, and cut 400 dice rolls); both are
+    gone. When in doubt the rule doesn't fire.
 
   Valid isn't right: where the model would have written an unescaped quote, the string ends
   there and the call goes on from it, so the call parses but may not be what was meant (the
-  harness tells the model, which can retry). What it can't write whole: an array of mixed
-  kinds (`[1, "a"]`), more blank space than llama.cpp allows, more than 1,024 tokens of a
-  few repeated ones (`0, 1, 0, 1, ...` past ~340 items), or more than 2,048 tokens of one
-  block written over and over (the call is cut, above); with greedy decoding a retry stops
-  at the same place, so such a file can't be written through a held call
-  (`--no-constrain` can). Per-tool argument schemas are #259's next step (PR C).
+  harness tells the model, which can retry). What it can't write whole: more blank space than
+  llama.cpp allows, or more than 2,048 tokens of one block written over and over (the call is
+  cut, above); with greedy decoding a retry stops at the same place, so such a file can't be
+  written through a held call (`AXON_CONSTRAIN_STALL=0` or `--no-constrain` can). Per-tool argument schemas are #259's next step (PR C).
   `max_tokens` can still cut a call short (a call with invalid arguments, as above). The
   identity changes with it: `NUMERICS_VERSION_EXACT` is 2 (every fingerprint moved), and a
   tools request's `system_fingerprint` names the grammar

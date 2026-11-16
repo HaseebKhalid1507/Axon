@@ -20,13 +20,15 @@
 //!
 //! The JSON library comes in two styles (`Style`). `Style::default()` is
 //! RFC 8259's JSON (the oracle tests). `Style::HELD`, what a held tool call
-//! gets, keeps a model from running on inside a call (#272): whitespace
-//! between JSON tokens bounded as llama.cpp's grammars bound it
+//! gets, keeps a model from running on in whitespace inside a call (#272):
+//! whitespace between JSON tokens bounded as llama.cpp's grammars bound it
 //! (`Space::Bounded`: a whitespace position is unrolled into a few copies of
 //! its node, one per count of what was taken, `Builder::expand_spaces`, so
 //! the automaton stays a plain graph and a mask is still a function of the
-//! node), and an array's items all of its first item's kind (no
-//! `[{...}, false, false, ...]`).
+//! node). An array's items are any values, as in JSON: `[["Alice", 30]]`,
+//! `["$qty", 250]` and `[1.5, null, 2.0]` are arguments real tools take
+//! (Fable's review of #274; an array's item kind from the tool's schema is
+//! the spec's PR C).
 //!
 //! `Graph::finisher` is a graph's shortest way out: from any state, only
 //! the symbols on a shortest path to the grammar's end. A constraint
@@ -64,19 +66,12 @@ pub const INDENT_MAX: usize = 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Style {
     pub space: Space,
-    /// An array's items are all of its first item's kind: string, number,
-    /// boolean, null, object or array. In the acceptance runs' calls (5.7k
-    /// across codex, opencode and pi, constrained or not, llama-server's
-    /// too) no array mixed kinds but the 7 runaways of #272, which wrote
-    /// `false` after `{...}` 1900 times.
-    pub one_kind_arrays: bool,
 }
 
 impl Style {
     /// A held tool call's (module doc).
     pub const HELD: Style = Style {
         space: Space::Bounded,
-        one_kind_arrays: true,
     };
 }
 
@@ -799,31 +794,18 @@ pub fn json(b: &mut Builder) -> Json {
 
     let array = b.node();
     let a_open = b.node();
+    let a_after = b.node();
+    let a_val = b.node();
     let a_end = b.node();
     b.opens(array, ByteSet::of(b"["), a_open);
     b.ws_loop(a_open);
     b.bytes(a_open, ByteSet::of(b"]"), a_end);
-    // The items: any value each, or (`Style::one_kind_arrays`) the first's
-    // kind after it: an `a_after`/`a_val` pair per kind, entered from
-    // `a_open` by the first item's first byte.
-    let boolean = b.node();
-    b.merge(boolean, lits[0]);
-    b.merge(boolean, lits[1]);
-    let kinds: Vec<NodeId> = if b.style.one_kind_arrays {
-        vec![string, number, object, array, boolean, lits[2]]
-    } else {
-        vec![value]
-    };
-    for k in kinds {
-        let a_after = b.node();
-        let a_val = b.node();
-        b.call(a_open, k, a_after);
-        b.ws_loop(a_after);
-        b.bytes(a_after, ByteSet::of(b","), a_val);
-        b.bytes(a_after, ByteSet::of(b"]"), a_end);
-        b.ws_loop(a_val);
-        b.call(a_val, k, a_after);
-    }
+    b.call(a_open, value, a_after);
+    b.ws_loop(a_after);
+    b.bytes(a_after, ByteSet::of(b","), a_val);
+    b.bytes(a_after, ByteSet::of(b"]"), a_end);
+    b.ws_loop(a_val);
+    b.call(a_val, value, a_after);
     b.set_ret(a_end);
 
     // A value: each kind's first byte straight into its body (tail calls:

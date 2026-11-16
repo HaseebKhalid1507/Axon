@@ -8,6 +8,11 @@
     scripts/constrain_check.py replay --axon BIN --model M.gguf --replays DIR --out OUT.json [--seeds N]
                                       [--expect-constraint on|off|any]
                                       [--port P] [-- extra serve flags]
+    scripts/constrain_check.py cost --axon BIN --model M.gguf --bodies DIR --tasks harness_accept.py
+                                    --out OUT.json [--rounds 5] [--n 28] [--conc 1,4] [--max-tokens 512]
+                                    [-- extra serve flags]
+    (run, replay, cost: --parallel N, default 4: the acceptance test's; 1 for a model that serves one request at
+    a time, a mixture of experts)
 
 Starts `axon serve M` with the acceptance test's flags (scripts/harness_accept.py on feat/eval: --device cuda,
 --ctx 32768, --kv q8, --parallel 4, Qwen2.5's card sampler: temp 0.7, top-k 20, top-p 0.8, min-p 0, repeat
@@ -36,6 +41,18 @@ time (each reply's stalls are /metrics' delta), on the same server flags:
   legit     a request for data that repeats one value (an empty board, a table of zeros): no stall, every call
             valid;
   known-fp  one the rule is known to cut (reported, not judged).
+
+cost (Fable's review of #274, the lead's ruling of 11-16: the constraint's end-to-end cost with the harnesses'
+sampler, against the spec's bars): the candidate's server with constrained tool calls (`on`, its default) and with
+--no-constrain (`off`, main's paths), a fresh server each, ROUNDS rounds, the arms' order alternating (on off, off
+on, ...). Each server: 4 untimed requests, then at each concurrency C the same N streamed chat requests, the
+coding agents' tools (codex's, opencode's and pi's in turn: DIR's captured bodies, system prompt and tools) with the
+acceptance test's task prompts (--tasks), seeds 1..N, max_tokens --max-tokens, Qwen2.5's card sampler (the server's
+flags, as `run`'s). Per (arm, C, round): decode tok/s, the median of the requests' server `timings`
+(predicted_per_second); TTFT, the median of the client's time to the first token (content, reasoning or a call);
+ITL p99 over every gap between token chunks of every request; the constraint's tokens and fallbacks (/metrics).
+Per (arm, C): the median over rounds. Bars (the spec's, measured sampled): on/off decode tok/s >= 0.98, TTFT
+p50 <= 1.02, ITL p99 <= 1.03, at every C. Prints COST PASS or COST FAIL; exit 0 / 1.
 
 Integrity (11-15: a gate passed on 404s). The captured bodies name the model by the harness's alias
 ("qwen2.5-7b"), which a server started on the .gguf doesn't answer (404 model_not_found): every cell, replay and
@@ -255,7 +272,7 @@ def start(a):
     """`axon serve` with the acceptance test's flags, up: (process, port, its log's path, the result's start)."""
     port = a.port or free_port()
     argv = [a.axon, "serve", a.model, "--device", "cuda", "--host", "127.0.0.1", "--port", str(port), "--ctx",
-            "32768", "--kv", "q8", "--parallel", "4"] + SAMPLER + a.serve
+            "32768", "--kv", "q8", "--parallel", str(a.parallel)] + SAMPLER + a.serve
     logf = a.out + ".server.log"
     lf = open(logf, "w")
     proc = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -460,6 +477,174 @@ def replay(a):
     return 2 if probs else 0 if not bad else 1
 
 
+def cost_bodies(a):
+    """The cost workload: N chat requests, the agents' system prompts and tools in turn, the tasks' prompts."""
+    _cells, codex_chat = cells(a.bodies)
+    bases = [codex_chat]
+    for prefix in ("opencode-", "pi-"):
+        b = load(a.bodies, prefix)
+        bases.append(dict(messages=[m for m in b["messages"] if m.get("role") == "system"], tools=b["tools"]))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(a.tasks)))
+    ha = __import__(os.path.basename(a.tasks)[:-3])
+    tasks = [t["prompts"][0] for t in ha.TASKS]
+    out = []
+    for i in range(a.n):
+        b = json.loads(json.dumps(bases[i % len(bases)]))
+        b["messages"].append({"role": "user", "content": tasks[i % len(tasks)]})
+        b.update(seed=i + 1, max_tokens=a.max_tokens)
+        out.append(b)
+    return out
+
+
+def streamed(port, body, timeout=900):
+    """One streamed chat request: (status, time to the first token chunk, the gaps between token chunks, the final
+    usage chunk's usage and timings, finish)."""
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    body = dict(body, stream=True, stream_options={"include_usage": True})
+    t0 = time.perf_counter()
+    c.request("POST", "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+    r = c.getresponse()
+    if r.status != 200:
+        raw = r.read()
+        c.close()
+        return r.status, None, [], None, None, raw[:200]
+    times, usage, timings, finish, buf = [], None, None, None, b""
+    while True:
+        chunk = r.read1(65536)
+        if not chunk:
+            break
+        now = time.perf_counter()
+        buf += chunk
+        while b"\n\n" in buf:
+            ev, buf = buf.split(b"\n\n", 1)
+            for line in ev.split(b"\n"):
+                if not line.startswith(b"data: ") or line[6:] == b"[DONE]":
+                    continue
+                d = json.loads(line[6:])
+                if d.get("usage"):
+                    usage, timings = d["usage"], d.get("timings")
+                for ch in d.get("choices") or []:
+                    dl = ch.get("delta") or {}
+                    if dl.get("content") or dl.get("reasoning_content") or dl.get("tool_calls"):
+                        times.append(now)
+                    finish = ch.get("finish_reason") or finish
+    c.close()
+    ttft = (times[0] - t0) * 1e3 if times else None
+    gaps = [(y - x) * 1e3 for x, y in zip(times, times[1:])]
+    return 200, ttft, gaps, usage, timings, finish
+
+
+def pct(v, q):
+    v = sorted(x for x in v if x is not None)
+    return v[min(len(v) - 1, int(q * len(v)))] if v else None
+
+
+def med(v):
+    v = sorted(x for x in v if x is not None)
+    if not v:
+        return None
+    return v[len(v) // 2] if len(v) % 2 else (v[len(v) // 2 - 1] + v[len(v) // 2]) / 2
+
+
+def cost(a):
+    bodies = cost_bodies(a)
+    concs = [int(x) for x in a.conc.split(",")]
+    res = {"rounds": [], "args": vars(a)}
+    http_ = Http()
+    serve0 = list(a.serve)
+    for rnd in range(a.rounds):
+        order = ("on", "off") if rnd % 2 == 0 else ("off", "on")
+        for arm in order:
+            a.serve = serve0 + (["--no-constrain"] if arm == "off" else [])
+            a.out = "%s.r%d-%s" % (a.out0, rnd, arm)
+            proc, port, logf, info = start(a)
+            try:
+                mid = served_id(port)
+                fp = json.loads(req(port, "GET", "/identity")[1]).get("system_fingerprint")
+                for b in bodies[:4]:
+                    st, *_ = streamed(port, aim(dict(b, seed=1000 + b["seed"]), mid))
+                    http_.see("warm %s r%d" % (arm, rnd), st, b"")
+                for conc in concs:
+                    m0 = metrics(port)
+                    rows, lock, queue = [], threading.Lock(), list(range(len(bodies)))
+                    t0 = time.perf_counter()
+
+                    def worker():
+                        while True:
+                            with lock:
+                                if not queue:
+                                    return
+                                i = queue.pop(0)
+                            st, ttft, gaps, usage, timings, finish = streamed(port, aim(bodies[i], mid))
+                            http_.see("%s c%d r%d #%d" % (arm, conc, rnd, i), st, b"" if st == 200 else finish)
+                            with lock:
+                                rows.append(dict(i=i, st=st, ttft=ttft, gaps=gaps, finish=finish,
+                                                 tokens=(usage or {}).get("completion_tokens"),
+                                                 tps=(timings or {}).get("predicted_per_second"),
+                                                 prompt_ms=(timings or {}).get("prompt_ms")))
+                    ws = [threading.Thread(target=worker) for _ in range(conc)]
+                    for w in ws:
+                        w.start()
+                    for w in ws:
+                        w.join()
+                    wall = time.perf_counter() - t0
+                    m1 = metrics(port)
+                    d = {k: m1.get(k, 0) - m0.get(k, 0) for k in m1}
+                    cell = dict(round=rnd, arm=arm, conc=conc, fp=fp, wall_s=round(wall, 2),
+                                decode_tps=med([r["tps"] for r in rows]),
+                                ttft_ms=med([r["ttft"] for r in rows]),
+                                ttft_srv_ms=med([r["prompt_ms"] for r in rows]),
+                                itl_p99_ms=pct([g for r in rows for g in r["gaps"]], 0.99),
+                                itl_p50_ms=pct([g for r in rows for g in r["gaps"]], 0.5),
+                                tokens=sum(r["tokens"] or 0 for r in rows),
+                                finish={f: sum(1 for r in rows if r["finish"] == f) for f in {r["finish"] for r in rows}},
+                                constraint_tokens=d.get("axon_constraint_tokens_total", 0),
+                                fallbacks=d.get("axon_constraint_fallback_total", 0),
+                                stalls=d.get("axon_constraint_stalls_total", 0))
+                    cell["agg_tps"] = round(cell["tokens"] / wall, 2)
+                    res["rounds"].append(cell)
+                    print("COST-CELL " + json.dumps(cell, sort_keys=True), flush=True)
+            finally:
+                stop(proc)
+    a.serve = serve0
+    bad, lines = [], []
+    bars = (("decode_tps", 0.98, ">="), ("ttft_ms", 1.02, "<="), ("itl_p99_ms", 1.03, "<="))
+    for conc in concs:
+        agg = {}
+        for arm in ("on", "off"):
+            cs = [c for c in res["rounds"] if c["arm"] == arm and c["conc"] == conc]
+            agg[arm] = {k: med([c[k] for c in cs]) for k in ("decode_tps", "ttft_ms", "ttft_srv_ms", "itl_p99_ms",
+                                                              "itl_p50_ms", "agg_tps")}
+            agg[arm]["constraint_tokens"] = sum(c["constraint_tokens"] for c in cs)
+            agg[arm]["fallbacks"] = sum(c["fallbacks"] for c in cs)
+            agg[arm]["per_round"] = {k: [c[k] for c in cs] for k in ("decode_tps", "ttft_ms", "itl_p99_ms")}
+        on, off = agg["on"], agg["off"]
+        fb = on["fallbacks"] / on["constraint_tokens"] if on["constraint_tokens"] else None
+        lines.append("C=%d fallbacks %d of %d constrained tokens (%s)" % (
+            conc, on["fallbacks"], on["constraint_tokens"], "-" if fb is None else "%.1f %%" % (100 * fb)))
+        for k, bar, way in bars:
+            r = on[k] / off[k] if on[k] and off[k] else None
+            ok = r is not None and (r >= bar if way == ">=" else r <= bar)
+            lines.append("C=%d %-11s on %9.2f off %9.2f on/off %s (bar %s %.2f) %s   per round on %s off %s" % (
+                conc, k, on[k] or 0, off[k] or 0, "-" if r is None else "%.4f" % r, way, bar,
+                "PASS" if ok else "FAIL", on["per_round"][k], off["per_round"][k]))
+            if not ok:
+                bad.append("C=%d %s %s" % (conc, k, "-" if r is None else "%.4f" % r))
+        res.setdefault("summary", {})[str(conc)] = agg
+    if http_.bad:
+        bad.append("non-200: %s" % http_.bad[:5])
+    # The switch did what each arm says: the constraint ran in every `on` cell and in no `off` one.
+    wrong = ["r%d %s C=%d: %d constrained tokens" % (c["round"], c["arm"], c["conc"], c["constraint_tokens"])
+             for c in res["rounds"] if (c["arm"] == "on") != (c["constraint_tokens"] > 0)]
+    if wrong:
+        bad.append("integrity: " + "; ".join(wrong[:5]))
+    res["bad"] = bad
+    json.dump(res, open(a.out0, "w"), indent=1)
+    print("\n".join(lines))
+    print("COST %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad)))
+    return 0 if not bad else 1
+
+
 def diff(a, b):
     x, y = json.load(open(a)), json.load(open(b))
     why = []
@@ -496,6 +681,7 @@ def main():
     r.add_argument("--record", action="store_true")
     r.add_argument("--port", type=int, default=0)
     r.add_argument("--expect-constraint", choices=("on", "off", "any"), default="any")
+    r.add_argument("--parallel", type=int, default=4)
     r.add_argument("serve", nargs="*")
     d = sp.add_parser("diff")
     d.add_argument("a")
@@ -508,9 +694,23 @@ def main():
     rp.add_argument("--seeds", type=int, default=2)
     rp.add_argument("--port", type=int, default=0)
     rp.add_argument("--expect-constraint", choices=("on", "off", "any"), default="on")
+    rp.add_argument("--parallel", type=int, default=4)
     rp.add_argument("serve", nargs="*")
+    c = sp.add_parser("cost")
+    c.add_argument("--axon", required=True)
+    c.add_argument("--model", required=True)
+    c.add_argument("--bodies", required=True)
+    c.add_argument("--tasks", required=True)
+    c.add_argument("--out", required=True, dest="out0")
+    c.add_argument("--rounds", type=int, default=5)
+    c.add_argument("--n", type=int, default=28)
+    c.add_argument("--conc", default="1,4")
+    c.add_argument("--max-tokens", type=int, default=512)
+    c.add_argument("--port", type=int, default=0)
+    c.add_argument("--parallel", type=int, default=4)
+    c.add_argument("serve", nargs="*")
     a = p.parse_args()
-    sys.exit({"run": run, "replay": replay}[a.cmd](a) if a.cmd != "diff" else diff(a.a, a.b))
+    sys.exit({"run": run, "replay": replay, "cost": cost}[a.cmd](a) if a.cmd != "diff" else diff(a.a, a.b))
 
 
 if __name__ == "__main__":

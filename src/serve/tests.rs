@@ -75,6 +75,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         numerics: Numerics::Exact,
         constrain: None,
         constrain_stall: None,
+        constrain_closer: None,
     }
 }
 
@@ -2369,13 +2370,15 @@ fn serve_constrained_forced_and_default() {
 }
 
 /// A held call that stalls (shady's review of #274), with the stall
-/// windows small (`Opts::constrain_stall`: 64 tokens of at most 8 ids, 128
-/// of one cycle) so the test model's board of zeros trips them: the call
-/// comes back closed, its arguments a JSON object, and the reply ends after
-/// it (no call after it, finish `tool_calls`, short of `max_tokens`); the
-/// stall is counted. On CUDA, the stalling requests sent together with
-/// plain ones (at once and handing over, drafting) get what each gets
-/// alone.
+/// window small (`Opts::constrain_stall`: 64 tokens repeating one block)
+/// so the test model's board of zeros trips it: the call comes back
+/// closed, its arguments a JSON object, and the reply ends after it (no
+/// call after it, finish `tool_calls`, short of `max_tokens`); the stall is
+/// counted. On CUDA, the stalling requests sent together with plain ones
+/// (at once and handing over, drafting) get what each gets alone. On the
+/// CPU, with the closer off (`Opts::constrain_closer`, as
+/// AXON_CONSTRAIN_STALL=0) a reply that stalled doesn't, and its
+/// fingerprint names another grammar.
 #[test]
 fn serve_constrained_stall() {
     let Some(p) = crate::testutil::model_path() else {
@@ -2398,10 +2401,7 @@ fn serve_constrained_stall() {
         req(json!("auto"), 0.0, 0),
         req(json!("required"), 0.7, 3),
     ];
-    let stall = crate::constrain::Stall {
-        window: 64,
-        loop_window: 128,
-    };
+    let stall = crate::constrain::Stall { window: 64 };
     let mut devices = vec![Device::Cpu];
     if crate::testutil::gpu().is_some() {
         devices.push(Device::Cuda);
@@ -2419,6 +2419,7 @@ fn serve_constrained_stall() {
         let stalls =
             || prom_parse(&call(a, "GET", "/metrics", "").body)["axon_constraint_stalls_total"];
         let mut stalled = 0;
+        let mut first_stalled = None;
         for body in &bodies {
             let n0 = stalls();
             let r = post(a, "/v1/chat/completions", body.clone());
@@ -2428,6 +2429,7 @@ fn serve_constrained_stall() {
             if stalls() == n0 {
                 continue;
             }
+            first_stalled.get_or_insert_with(|| (body.clone(), v.clone()));
             assert_eq!(
                 stalls(),
                 n0 + 1.0,
@@ -2454,6 +2456,27 @@ fn serve_constrained_stall() {
             let mut all: Vec<Value> = bodies.to_vec();
             all.extend(batch_bodies(true).into_iter().take(2));
             constrained_together_vs_alone(a, &all);
+        }
+        if dev == Device::Cpu {
+            drop(s);
+            let (body, on) = first_stalled.unwrap();
+            let s = server_with(p, dev, |o| {
+                o.constrain = Some(true);
+                o.constrain_stall = Some(stall);
+                o.constrain_closer = Some(false);
+            });
+            let r = post(s.addr, "/v1/chat/completions", body);
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
+            assert_eq!(m["axon_constraint_stalls_total"], 0.0, "closer off: {v}");
+            assert!(m["axon_constraint_tokens_total"] > 0.0, "still held: {v}");
+            assert_ne!(v["system_fingerprint"], on["system_fingerprint"], "{v}");
+            assert!(
+                v["usage"]["completion_tokens"].as_u64()
+                    > on["usage"]["completion_tokens"].as_u64(),
+                "closer off: the call runs on past where it stalled: {v}"
+            );
         }
     }
 }

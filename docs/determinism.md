@@ -66,11 +66,11 @@ and the token's position, never on the batch. The tests that hold this in place:
 steps, drafted == undrafted, the device's logits-row fallback == the host's reference),
 `split_backends_constrained_contract` (the pipeline's and the CPU/GPU split's batched routes),
 `masks_match_naive` and `finisher_closes_from_anywhere`. A held call's stall guard (a call
-whose last 1,024 tokens are at most 8 distinct ones, or whose last 2,048 repeat one cycle, is
-closed the shortest way, and the reply ends after it) reads only the call's own tokens, so it
-too is a function of the tokens so far: `constrained_drafting_past_a_stall` (drafts across the
-stall, in a verify block, == undrafted, both rules) and `serve_constrained_stall` (stalling
-requests batched == alone, small windows) check it.
+whose last 2,048 tokens repeat one block of at most 256 is closed the shortest way, and the
+reply ends after it) reads only the call's own tokens, so it too is a function of the tokens
+so far: `constrained_drafting_past_a_stall` (drafts across the stall, in a verify block, ==
+undrafted) and `serve_constrained_stall` (stalling requests batched == alone, a small window)
+check it. `AXON_CONSTRAIN_STALL=0` turns it off, and the grammar's hash says so.
 
 ## What is NOT guaranteed
 
