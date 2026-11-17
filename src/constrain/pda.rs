@@ -17,6 +17,22 @@
 //! and the mask walk's virtual stack (mask.rs: the live stack's top known,
 //! everything below it unknown) run the very same transitions: that is
 //! what makes a cached mask equal the token-by-token check.
+//!
+//! The JSON library comes in two styles (`Style`). `Style::default()` is
+//! RFC 8259's JSON (the oracle tests). `Style::HELD`, what a held tool call
+//! gets, keeps a model from running on in whitespace inside a call (#272):
+//! whitespace between JSON tokens bounded as llama.cpp's grammars bound it
+//! (`Space::Bounded`: a whitespace position is unrolled into a few copies of
+//! its node, one per count of what was taken, `Builder::expand_spaces`, so
+//! the automaton stays a plain graph and a mask is still a function of the
+//! node). An array's items are any values, as in JSON: `[["Alice", 30]]`,
+//! `["$qty", 250]` and `[1.5, null, 2.0]` are arguments real tools take
+//! (Fable's review of #274; an array's item kind from the tool's schema is
+//! the spec's PR C).
+//!
+//! `Graph::finisher` is a graph's shortest way out: from any state, only
+//! the symbols on a shortest path to the grammar's end. A constraint
+//! switches to it to close a call that has stalled (mod.rs).
 
 /// A grammar position.
 pub type NodeId = u32;
@@ -27,6 +43,37 @@ pub type NodeId = u32;
 /// does). `tools::Reader` refuses nesting past 128, so every call the
 /// automaton lets through parses.
 pub const MAX_DEPTH: usize = 64;
+
+/// Whitespace between JSON tokens (`Builder::ws_loop`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Space {
+    /// Any run of JSON whitespace (space, tab, LF, CR), as RFC 8259 has it.
+    #[default]
+    Free,
+    /// llama.cpp's `space` rule (common/json-schema-to-grammar.cpp,
+    /// `SPACE_RULE` at 4413a19: `| " " | "\n"{1,2} [ \t]{0,20}`): nothing,
+    /// one space, or one or two newlines then at most `INDENT_MAX` spaces or
+    /// tabs. A valid call written on one line or pretty-printed fits; a
+    /// model can't run on in whitespace inside a call (#272: 25k tokens of
+    /// it until codex gave up).
+    Bounded,
+}
+
+/// `Space::Bounded`: at most this many spaces or tabs after the newlines.
+pub const INDENT_MAX: usize = 20;
+
+/// How a grammar's JSON is held (`Builder::new`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Style {
+    pub space: Space,
+}
+
+impl Style {
+    /// A held tool call's (module doc).
+    pub const HELD: Style = Style {
+        space: Space::Bounded,
+    };
+}
 
 /// A set of bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -162,6 +209,40 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The graph as bytes, canonically: per node in order its flags, then
+    /// its edges in order (kind, byte set, specials, targets), little
+    /// endian. What the identity hashes (`constrain::hermes_field`), so a
+    /// change to what the automaton takes changes the hash with no one
+    /// having to remember to.
+    pub fn canon(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.nodes.len() as u32).to_le_bytes());
+        for nd in &self.nodes {
+            out.push(nd.ret as u8 | (nd.accept as u8) << 1 | (nd.in_str as u8) << 2);
+            out.extend_from_slice(&(nd.edges.len() as u32).to_le_bytes());
+            for e in &nd.edges {
+                match *e {
+                    Edge::Bytes { set, to, opens } => {
+                        out.push(if opens { 1 } else { 0 });
+                        for w in set.0 {
+                            out.extend_from_slice(&w.to_le_bytes());
+                        }
+                        out.extend_from_slice(&to.to_le_bytes());
+                    }
+                    Edge::Special { id, to } => {
+                        out.push(2);
+                        out.extend_from_slice(&id.to_le_bytes());
+                        out.extend_from_slice(&to.to_le_bytes());
+                    }
+                    Edge::Call { sub, ret } => {
+                        out.push(3);
+                        out.extend_from_slice(&sub.to_le_bytes());
+                        out.extend_from_slice(&ret.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether `n`'s sub-grammar can start with `sym`.
     fn starts(&self, n: NodeId, sym: Sym) -> bool {
         match sym {
@@ -247,10 +328,70 @@ impl Graph {
     }
 }
 
+impl Graph {
+    /// The shortest way out of this graph: the same nodes (so a state here
+    /// is a state there), each keeping only the edges on a shortest path to
+    /// where its sub-grammar ends (bytes and specials count one each; a
+    /// call, its sub-grammar's shortest plus its return node's), and a node
+    /// that may return or accept keeping none (it returns, or the input
+    /// ends). From any state it takes only what closes the open strings,
+    /// containers and frame soonest: no whitespace, no new member, a value
+    /// position the shortest value (a digit). Never None: every node of a
+    /// finished graph can finish.
+    pub fn finisher(&self) -> Graph {
+        const INF: u64 = u64::MAX / 4;
+        let n = self.nodes.len();
+        let cost = |d: &[u64], e: &Edge| match *e {
+            Edge::Bytes { to, .. } | Edge::Special { to, .. } => 1 + d[to as usize],
+            Edge::Call { sub, ret } => d[sub as usize] + d[ret as usize],
+        };
+        let mut d = vec![INF; n];
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                let nd = &self.nodes[i];
+                let mut best = if nd.ret || nd.accept { 0 } else { INF };
+                for e in &nd.edges {
+                    best = best.min(cost(&d, e));
+                }
+                if best < d[i] {
+                    d[i] = best;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let nodes = (self.nodes.iter().enumerate())
+            .map(|(i, nd)| Node {
+                edges: match nd.ret || nd.accept {
+                    true => Vec::new(),
+                    false => (nd.edges.iter())
+                        .filter(|e| cost(&d, e) == d[i])
+                        .cloned()
+                        .collect(),
+                },
+                ..nd.clone()
+            })
+            .collect();
+        Builder {
+            nodes,
+            ..Builder::default()
+        }
+        .finish()
+        .expect("a subgraph of a finished graph, every node keeping a shortest way out")
+    }
+}
+
 /// Builds a `Graph`.
 #[derive(Default)]
 pub struct Builder {
     nodes: Vec<Node>,
+    style: Style,
+    /// `Space::Bounded`: whitespace positions not yet unrolled
+    /// (`expand_spaces`).
+    spaces: Vec<NodeId>,
 }
 
 /// JSON whitespace.
@@ -259,6 +400,14 @@ pub fn ws() -> ByteSet {
 }
 
 impl Builder {
+    /// A builder whose JSON (`json`, `ws_loop`) is `style`'s.
+    pub fn new(style: Style) -> Builder {
+        Builder {
+            style,
+            ..Builder::default()
+        }
+    }
+
     pub fn node(&mut self) -> NodeId {
         self.nodes.push(Node::default());
         (self.nodes.len() - 1) as NodeId
@@ -318,9 +467,78 @@ impl Builder {
         self.nodes[n as usize].in_str = true;
     }
 
-    /// Whitespace loops at `n`.
+    /// Whitespace at `n`, as the builder's `Space` has it: a loop (`Free`),
+    /// or (`Bounded`) unrolled by `expand_spaces` once `n`'s other edges are
+    /// all in.
     pub fn ws_loop(&mut self, n: NodeId) {
-        self.bytes(n, ws(), n);
+        match self.style.space {
+            Space::Free => self.bytes(n, ws(), n),
+            Space::Bounded => self.spaces.push(n),
+        }
+    }
+
+    /// Unroll the bounded whitespace positions so far (`Space::Bounded`):
+    /// each node `n` gets 2 + `INDENT_MAX` + 1 copies (its edges and flags,
+    /// so a copy takes what `n` takes), reached by whitespace: one space
+    /// (then nothing more), a newline, a second newline, then the k-th space
+    /// or tab. Call it when every such node's other edges are in (`finish`
+    /// does, for any left).
+    pub fn expand_spaces(&mut self) {
+        let st = ByteSet::of(b" \t");
+        for n in std::mem::take(&mut self.spaces) {
+            let proto = self.nodes[n as usize].clone();
+            let mut copy = || {
+                self.nodes.push(proto.clone());
+                (self.nodes.len() - 1) as NodeId
+            };
+            let one = copy();
+            let nl1 = copy();
+            let nl2 = copy();
+            let ind: Vec<NodeId> = (0..INDENT_MAX).map(|_| copy()).collect();
+            self.bytes(n, ByteSet::of(b" "), one);
+            self.bytes(n, ByteSet::of(b"\n"), nl1);
+            self.bytes(nl1, ByteSet::of(b"\n"), nl2);
+            self.bytes(nl1, st, ind[0]);
+            self.bytes(nl2, st, ind[0]);
+            for k in 1..INDENT_MAX {
+                self.bytes(ind[k - 1], st, ind[k]);
+            }
+        }
+    }
+
+    /// A JSON string that is one of `names` (each its string literal's
+    /// body, as escaped in the text the model saw: `"` and `\` not taken
+    /// raw), from `from` (taking its opening quote) to `to` (after its
+    /// closing one). A trie, so names sharing a prefix share its nodes, and
+    /// every node's alternatives start with different bytes. Its nodes are
+    /// string nodes (`Node::in_str`). Duplicates count once; no names:
+    /// nothing is taken (the caller's grammar must not need it).
+    pub fn names(&mut self, from: NodeId, names: &[Vec<u8>], to: NodeId) {
+        let quote = ByteSet::of(b"\"");
+        let root = self.node();
+        self.set_in_str(root);
+        self.bytes(from, quote, root);
+        let mut kids: std::collections::HashMap<(NodeId, u8), NodeId> = Default::default();
+        let mut ends: Vec<NodeId> = Vec::new();
+        for name in names {
+            let mut at = root;
+            for &b in name {
+                at = match kids.get(&(at, b)) {
+                    Some(&x) => x,
+                    None => {
+                        let x = self.node();
+                        self.set_in_str(x);
+                        self.bytes(at, ByteSet::of(&[b]), x);
+                        kids.insert((at, b), x);
+                        x
+                    }
+                };
+            }
+            if !ends.contains(&at) {
+                self.bytes(at, quote, to);
+                ends.push(at);
+            }
+        }
     }
 
     /// A chain taking `lit` byte by byte from `from`; its end node.
@@ -335,7 +553,8 @@ impl Builder {
     }
 
     /// The graph, checked (module doc): Err names the first problem.
-    pub fn finish(self) -> Result<Graph, String> {
+    pub fn finish(mut self) -> Result<Graph, String> {
+        self.expand_spaces();
         let nodes = self.nodes;
         let n = nodes.len();
         for (i, nd) in nodes.iter().enumerate() {
@@ -469,11 +688,11 @@ pub struct Json {
     /// Any value (PR C: json_object's top; the tests' oracle).
     #[cfg_attr(not(test), allow(dead_code))]
     pub value: NodeId,
-    pub string: NodeId,
     pub object: NodeId,
 }
 
-/// Add the JSON library to `b`.
+/// Add the JSON library to `b`, its whitespace the builder's `Space`
+/// (unrolled before it returns: its nodes are all in).
 pub fn json(b: &mut Builder) -> Json {
     let quote = ByteSet::of(b"\"");
     let digit = ByteSet::range(b'0', b'9');
@@ -597,9 +816,6 @@ pub fn json(b: &mut Builder) -> Json {
     for l in lits {
         b.merge(value, l);
     }
-    Json {
-        value,
-        string,
-        object,
-    }
+    b.expand_spaces();
+    Json { value, object }
 }

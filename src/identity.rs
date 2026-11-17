@@ -76,7 +76,14 @@ use std::path::Path;
 /// sessions also see a GPU kernel's source or options change without it
 /// (the module's hash, `cuda::numerics_tag`); fingerprints don't, so the
 /// rule stands for CUDA kernels as for the rest.
-pub const NUMERICS_VERSION_EXACT: u32 = 1;
+/// 2: constrained tool calls on by default in `axon serve` (#259, the
+/// constrained-decoding spec's PR B): a tools request to a Qwen2.5 or Qwen3
+/// model can get other tokens than under 1. The lead's ruling of 11-15:
+/// the request's own fingerprint already names its grammar
+/// (`constrain_field`), but the server's (`GET /identity`) has no
+/// per-request part and would otherwise read as 1's. PR A (#264, opt-in)
+/// recorded "no bump" as its ruling 1: its default server was 1's.
+pub const NUMERICS_VERSION_EXACT: u32 = 2;
 
 /// Fast mode's own numerics version: the M of `numerics=fast/N.M`, N being
 /// `NUMERICS_VERSION_EXACT` (docs/design/determinism-modes.md §4.3). RULE:
@@ -427,14 +434,16 @@ fn gpu(n: &crate::cuda::qwen2::CudaQwen2) -> (String, bool) {
 
 /// The server's settings that change a request's output when it leaves
 /// them out: --no-think (the prompt's rendering), --think-inline (where the
-/// reasoning goes), and its default sampling flags. None when all are the
-/// defaults, so default fingerprints carry no `serve` field. (A request's
-/// own params, seed and `max_tokens` are its own; without `max_tokens` a
-/// reply runs to the context or --max-tokens, which bound its length, not
-/// its tokens.)
+/// reasoning goes), constrained tool calls turned off (`--no-constrain`,
+/// AXON_CONSTRAIN=0: a tools request's tokens are free again), and its
+/// default sampling flags. None when all are the defaults, so default
+/// fingerprints carry no `serve` field. (A request's own params, seed and
+/// `max_tokens` are its own; without `max_tokens` a reply runs to the
+/// context or --max-tokens, which bound its length, not its tokens.)
 pub fn serve_field(
     no_think: bool,
     think_inline: bool,
+    no_constrain: bool,
     s: &crate::sample::SampleArgs,
 ) -> Option<String> {
     let mut v = Vec::new();
@@ -443,6 +452,9 @@ pub fn serve_field(
     }
     if think_inline {
         v.push("think-inline".to_string());
+    }
+    if no_constrain {
+        v.push("no-constrain".to_string());
     }
     let mut f = |name: &str, x: Option<String>| {
         if let Some(x) = x {
@@ -462,10 +474,12 @@ pub fn serve_field(
 /// A constrained request's part of the `serve` field
 /// (`Identity::with_serve_extra`): `constrain` and its grammar
 /// (`constrain::Grammar::field`: the format and a hash of what it was
-/// built from). Its tokens follow the grammar wherever it engages, so its
-/// fingerprint isn't an unconstrained request's; unconstrained requests
-/// add nothing, and their bits never change, so no numerics bump (the
-/// maintainer's ruling on the constrained-decoding spec's §6 item 1).
+/// built from: its rules, not the request's tool names, which are the
+/// request's own as its prompt is). Its tokens follow the grammar wherever
+/// it engages, so its fingerprint isn't an unconstrained request's;
+/// unconstrained requests add nothing. Turning constraints on by default
+/// bumped `NUMERICS_VERSION_EXACT` too, for the server's tuple
+/// (`NUMERICS_VERSION_EXACT`'s note: the lead's ruling of 11-15).
 pub fn constrain_field(grammar: &str) -> String {
     format!("constrain {grammar}")
 }
@@ -864,15 +878,16 @@ mod tests {
         assert!(a.fingerprint().starts_with("fp_"));
         // Pinned: a change here means every deployed fingerprint changed,
         // which needs a NUMERICS_VERSION_* or SCHEME reason (2026-10-29: the
-        // numerics mode, `numerics=1` -> `numerics=exact/1`, ADR M1).
+        // numerics mode, `numerics=1` -> `numerics=exact/1`, ADR M1;
+        // 2026-11-15: exact/2, constrained tool calls on by default).
         assert_eq!(
             a.canonical(),
-            "axon-identity/1\nnumerics=exact/1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=exact/2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         // Golden (Python's hashlib over the line above; `numerics=1` was
-        // fp_e43c8e0d7c77ef03).
-        assert_eq!(a.fingerprint(), "fp_1e9019e52a04cc54");
+        // fp_e43c8e0d7c77ef03, `exact/1` fp_1e9019e52a04cc54).
+        assert_eq!(a.fingerprint(), "fp_577ddf7656be6e5c");
         let g = Some("sm_120");
         let variants = [
             Identity::new("aa", "Q4_K:1", "cuda", g, None, "q8"),
@@ -890,11 +905,11 @@ mod tests {
             seen.push(f);
         }
         let mut n = base();
-        n.fields[0].1 = "exact/2".into();
+        n.fields[0].1 = "exact/3".into();
         assert_ne!(n.fingerprint(), a.fingerprint(), "numerics version");
         let j = a.json();
         assert_eq!(j["system_fingerprint"], a.fingerprint());
-        assert_eq!(j["numerics"], "exact/1");
+        assert_eq!(j["numerics"], "exact/2");
         assert_eq!(j["kv"], "f16");
     }
 
@@ -909,18 +924,19 @@ mod tests {
         let f = base().with_numerics(Numerics::Fast);
         assert_eq!(
             f.canonical(),
-            "axon-identity/1\nnumerics=fast/1.3\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=fast/2.3\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         assert_eq!(
             f.fingerprint(),
-            "fp_1c52be76f68d4895",
-            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767, fast/1.2 fp_c9b871192100d614)"
+            "fp_2342ada2d0ad4f71",
+            "golden (hashlib; fast/1.1 was fp_bea740cf61d9d767, fast/1.2 fp_c9b871192100d614, \
+             fast/1.3 fp_1c52be76f68d4895)"
         );
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
-        assert_eq!(f.json()["numerics"], "fast/1.3");
-        assert!(f.line().contains("numerics fast/1.3"), "{}", f.line());
+        assert_eq!(f.json()["numerics"], "fast/2.3");
+        assert!(f.line().contains("numerics fast/2.3"), "{}", f.line());
         // Back to exact: the same tuple as never fast.
         assert_eq!(f.with_numerics(Numerics::Exact), e);
         // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's
@@ -1057,19 +1073,38 @@ mod tests {
         .collect();
         assert!(fps[0] != fps[1] && fps[1] != fps[2] && fps[0] != fps[2]);
         use crate::sample::SampleArgs;
-        assert_eq!(serve_field(false, false, &SampleArgs::default()), None);
+        assert_eq!(
+            serve_field(false, false, false, &SampleArgs::default()),
+            None
+        );
         let s = SampleArgs {
             temp: Some(0.7),
             seed: Some(5),
             ..SampleArgs::default()
         };
         assert_eq!(
-            serve_field(true, false, &s).as_deref(),
+            serve_field(true, false, false, &s).as_deref(),
             Some("no-think, temp 0.7, seed 5")
+        );
+        // The kill switch of constrained tool calls: its own field, after
+        // the think settings, before the sampling flags.
+        assert_eq!(
+            serve_field(false, true, true, &s).as_deref(),
+            Some("think-inline, no-constrain, temp 0.7, seed 5")
+        );
+        assert_eq!(
+            serve_field(false, false, true, &SampleArgs::default()).as_deref(),
+            Some("no-constrain")
         );
         let plain = base("sm_89");
         assert_eq!(plain.clone().with_serve(None), plain);
-        let srv = plain.clone().with_serve(serve_field(true, false, &s));
+        let off = plain
+            .clone()
+            .with_serve(serve_field(false, false, true, &SampleArgs::default()));
+        assert_ne!(off.fingerprint(), plain.fingerprint());
+        let srv = plain
+            .clone()
+            .with_serve(serve_field(true, false, false, &s));
         assert_ne!(srv.fingerprint(), plain.fingerprint());
         assert!(
             srv.canonical()

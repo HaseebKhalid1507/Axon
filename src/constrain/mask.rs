@@ -13,18 +13,23 @@
 //! that many) elsewhere: a token opening more containers than that is deep.
 //! Special tokens are symbols, checked one by one the same way.
 
+use super::Counters;
 use super::pda::{Graph, MAX_DEPTH, NodeId, Pop, Stack, Step, Sym};
 use super::vocab::Vocab;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// `room` at or past this is one cache key (module doc).
 const ROOM_FAR: i32 = 32;
 
 /// Bytes of cached masks a grammar keeps at most; past it the cache starts
-/// over (a free-JSON grammar holds a few dozen entries, ~19 KB each at a
-/// 152k vocabulary).
-const CACHE_BUDGET: usize = 64 << 20;
+/// over (a Hermes call meets a few dozen to a few hundred entries, ~19 KB
+/// each at a 152k vocabulary; deep nesting near the depth cap more). A
+/// server keeps at most `Hermes::KEEP` grammars, each with two caches (its
+/// masks and its finisher's): 256 MiB at worst. How full they get is on
+/// /metrics (`Counters::cache_peak_entries`, `cache_clears`).
+const CACHE_BUDGET: usize = 16 << 20;
 
 /// A set of token ids out of a vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +140,8 @@ pub struct Masks {
     pub graph: Graph,
     pub vocab: Arc<Vocab>,
     cache: Mutex<(HashMap<Key, Arc<Entry>>, usize)>,
+    /// Its fill and clears go here (the server's).
+    counters: Arc<Counters>,
 }
 
 /// The arena stack of a walk: `cells[i]` = (frame, the cell below). Cell 0
@@ -184,11 +191,12 @@ impl Stack for Walk<'_> {
 }
 
 impl Masks {
-    pub fn new(graph: Graph, vocab: Arc<Vocab>) -> Masks {
+    pub fn new(graph: Graph, vocab: Arc<Vocab>, counters: Arc<Counters>) -> Masks {
         Masks {
             graph,
             vocab,
             cache: Mutex::new((HashMap::new(), 0)),
+            counters,
         }
     }
 
@@ -210,9 +218,14 @@ impl Masks {
         if c.1 + size > CACHE_BUDGET {
             c.0.clear();
             c.1 = 0;
+            self.counters.cache_clears.fetch_add(1, Ordering::Relaxed);
         }
         c.1 += size;
         c.0.insert(key, e.clone());
+        let n = c.0.len() as u64;
+        self.counters
+            .cache_peak_entries
+            .fetch_max(n, Ordering::Relaxed);
         e
     }
 

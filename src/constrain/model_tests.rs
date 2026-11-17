@@ -415,6 +415,10 @@ fn restrictive<M: Lm>(net: &M, prompt: &[u32], n: usize, label: &str) -> usize {
     n
 }
 
+/// The tools the prompts offer (`SYSTEM`'s), and two more: the names a
+/// constrained call may take.
+const TOOLS: &[&str] = &["exec_command", "apply_patch", "read_file"];
+
 /// The grammar on the model's vocabulary.
 fn grammar(m: &Model, net_vocab: usize) -> (&'static Tokenizer, Arc<Grammar>) {
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(m)));
@@ -422,7 +426,7 @@ fn grammar(m: &Model, net_vocab: usize) -> (&'static Tokenizer, Arc<Grammar>) {
     assert!(v.byte_complete(), "a Qwen2.5 vocabulary is byte-complete");
     (
         tok,
-        Arc::new(Grammar::hermes(v).expect("Qwen2.5 has <tool_call>")),
+        Arc::new(Grammar::hermes(v, &super::tests::names(TOOLS)).expect("Qwen2.5 has <tool_call>")),
     )
 }
 
@@ -672,7 +676,7 @@ fn real_vocab_masks() {
     let n = logits_n(&m);
     let v = Arc::new(Vocab::new(&tok, n));
     assert!(v.byte_complete());
-    let g = Arc::new(Grammar::hermes(v.clone()).unwrap());
+    let g = Arc::new(Grammar::hermes(v.clone(), &super::tests::names(TOOLS)).unwrap());
     let open = tok.special_id("<tool_call>").unwrap();
     let close = tok.special_id("</tool_call>").unwrap();
     let call = "\n{\"name\": \"exec_command\", \"arguments\": {\"cmd\": \"sed -i 's/raise \
@@ -746,12 +750,17 @@ fn mask_cost_real() {
 
 /// What a constrained token costs a decode step on CUDA, end to end: along
 /// one constrained greedy reply (engaged from its first token, until the
-/// call closes or 64 tokens), each position run three ways on three caches
-/// fed the same tokens (the constrained step's picks): the greedy step
-/// (`forward_argmax`), a sampled step (`forward_cands`, k 40) and the
-/// constrained step (`Constraint::mask`, `forward_cands_masked` with
-/// `GREEDY_SPEC`: the device's CAND_MAX best, the allowed kept, then
-/// `accept`). Every round must pick the same tokens. Medians per token over
+/// call closes or 64 tokens), each position run four ways on four caches
+/// fed the same tokens (the constrained greedy step's picks): the greedy
+/// step (`forward_argmax`), a sampled step with the card's top-k
+/// (`forward_cands`, k 20: Qwen2.5's card, the harnesses' sampler), and
+/// both constrained (`Constraint::mask`, `forward_cands_masked` with
+/// `GREEDY_SPEC`, and with k 20, then `accept`). A sampled masked step
+/// needs min(20, allowed) allowed tokens among the device's CAND_MAX best,
+/// else it reads the row back (a fallback): Fable's review of #274 found
+/// 10-17 % of sampled constrained tokens falling back in cbcheck, where the
+/// greedy step has next to none, so both are timed and their fallbacks
+/// counted. Every round must pick the same tokens. Medians per token over
 /// 10 rounds. `--ignored --nocapture` to see.
 #[test]
 #[ignore]
@@ -763,21 +772,22 @@ fn constrained_step_cost_cuda() {
         return;
     };
     use crate::cuda::qwen2::CudaQwen2;
+    use std::sync::atomic::Ordering::Relaxed;
     let km = crate::cuda::Kernels::module(&gpu).unwrap();
     let ctx = 1024;
     let net = CudaQwen2::new(&gpu, &km, &m, ctx).unwrap();
     let (tok, g) = grammar(&m, net.vocab());
     let (prompt, after) = prompts(tok)[1].clone();
-    let k40 = CandSpec {
-        k: 40,
+    let k20 = CandSpec {
+        k: 20,
         penalty: 1.0,
         last_n: 64,
     };
-    let f0 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
-    let (mut ta, mut ts, mut tm) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut ta, mut ts, mut tm, mut tk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut fb_greedy, mut fb_k20) = (0, 0);
     let mut first: Option<Vec<u32>> = None;
     for _ in 0..10 {
-        let mut cs: Vec<_> = (0..3).map(|_| net.new_cache(ctx)).collect();
+        let mut cs: Vec<_> = (0..4).map(|_| net.new_cache(ctx)).collect();
         let (&last, rest) = prompt.split_last().unwrap();
         for c in cs.iter_mut() {
             net.feed_batch(rest, 0, c);
@@ -791,17 +801,30 @@ fn constrained_step_cost_cuda() {
             let t0 = std::time::Instant::now();
             std::hint::black_box(net.forward_argmax(t, pos, &mut cs[0]));
             let t1 = std::time::Instant::now();
-            std::hint::black_box(net.forward_cands(t, pos, &mut cs[1], &k40, &hist));
+            std::hint::black_box(net.forward_cands(t, pos, &mut cs[1], &k20, &hist));
             let t2 = std::time::Instant::now();
             let mask = con.mask().unwrap().unwrap();
+            let t3 = std::time::Instant::now();
+            let f0 = sample::MASK_FALLBACKS.load(Relaxed);
             let c =
                 net.forward_cands_masked(t, pos, &mut cs[2], &sample::GREEDY_SPEC, &hist, &mask);
+            let t4 = std::time::Instant::now();
+            let f1 = sample::MASK_FALLBACKS.load(Relaxed);
+            std::hint::black_box(net.forward_cands_masked(t, pos, &mut cs[3], &k20, &hist, &mask));
+            let t5 = std::time::Instant::now();
+            let f2 = sample::MASK_FALLBACKS.load(Relaxed);
             let next = c[0].id;
             assert!(con.accept(next));
-            let t3 = std::time::Instant::now();
-            ta.push((t1 - t0).as_secs_f64() * 1e3);
-            ts.push((t2 - t1).as_secs_f64() * 1e3);
-            tm.push((t3 - t2).as_secs_f64() * 1e3);
+            let t6 = std::time::Instant::now();
+            fb_greedy += f1 - f0;
+            fb_k20 += f2 - f1;
+            // Each constrained step: the mask, its pass, the accept.
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+            let host = ms(t3 - t2) + ms(t6 - t5);
+            ta.push(ms(t1 - t0));
+            ts.push(ms(t2 - t1));
+            tm.push(host + ms(t4 - t3));
+            tk.push(host + ms(t5 - t4));
             ids.push(next);
             hist.push(next);
             t = next;
@@ -812,25 +835,28 @@ fn constrained_step_cost_cuda() {
         }
     }
     let ids = first.unwrap();
-    let f1 = sample::MASK_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
     let med = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v[v.len() / 2]
     };
-    let (a, s, c) = (med(&mut ta), med(&mut ts), med(&mut tm));
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (a, s, c, k) = (med(&mut ta), med(&mut ts), med(&mut tm), med(&mut tk));
+    let n = 10 * ids.len();
     eprintln!("constrained greedy reply: {:?}", tok.decode(&ids));
     eprintln!(
-        "constrained step cost ({}, {} params, {} engaged tokens x 10): greedy {a:.3} ms, sampled \
-         k40 {s:.3} ms ({:+.1}%), constrained {c:.3} ms ({:+.1}% vs greedy, {:+.1}% vs sampled); \
-         fallbacks {} of {}",
+        "constrained step cost ({}, {} params, {} engaged tokens x 10), medians: greedy {a:.3} ms, \
+         constrained greedy {c:.3} ms ({:+.1}%), fallbacks {fb_greedy} of {n}; sampled k20 {s:.3} ms, \
+         constrained k20 {k:.3} ms ({:+.1}%), fallbacks {fb_k20} of {n} ({:.1}%); means: constrained \
+         k20 {:.3} ms vs sampled k20 {:.3} ms ({:+.1}%)",
         std::env::var("AXON_CONSTRAIN_TEST_MODEL")
             .unwrap_or_else(|_| crate::testutil::MODEL.into()),
         m.total_params(),
         ids.len(),
-        100.0 * (s - a) / a,
         100.0 * (c - a) / a,
-        100.0 * (c - s) / s,
-        f1 - f0,
-        10 * ids.len()
+        100.0 * (k - s) / s,
+        100.0 * fb_k20 as f64 / n as f64,
+        mean(&tk),
+        mean(&ts),
+        100.0 * (mean(&tk) - mean(&ts)) / mean(&ts),
     );
 }

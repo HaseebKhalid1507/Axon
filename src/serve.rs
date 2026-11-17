@@ -185,8 +185,18 @@ pub struct Opts {
     /// whole server's (every slot's cache is one mode's), in its identity.
     pub numerics: Numerics,
     /// Constrained tool calls (`crate::constrain`) on or off (None:
-    /// AXON_CONSTRAIN, off unless "1": opt-in until the spec's PR B).
+    /// AXON_CONSTRAIN, `constrain::env`: on unless "0"; `--no-constrain` is
+    /// Some(false)).
     pub constrain: Option<bool>,
+    /// Their stall rule's window (`constrain::Stall`): None the default,
+    /// `Stall::DEFAULT`; no flag sets it (the tests set small ones, so a
+    /// call stalls in a few tokens).
+    pub constrain_stall: Option<crate::constrain::Stall>,
+    /// Ending the reply at a held call that stalls (the call cut off
+    /// there), on or off (None: AXON_CONSTRAIN_STALL, `constrain::
+    /// stall_env`: on unless "0"). Off, a call in a loop runs to
+    /// `max_tokens`; its name and JSON are still held.
+    pub constrain_closer: Option<bool>,
 }
 
 /// What `axon serve --datacenter` implies (the ADR's §4.5 bundle): today
@@ -884,6 +894,20 @@ fn tool_stream_env() -> bool {
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
+/// A reply's finish: `stop` when a stop token or string ended it, else
+/// `length` (its token limit cut it). A reply the stall rule ended
+/// (`Constraint::cut`) is cut too: its call is cut off unclosed, so it
+/// finishes `length`, as a call `max_tokens` cut does. Then Responses marks
+/// it `incomplete` and ollama's `done_reason` is "length", and a client that
+/// refuses a cut call refuses it: pi runs a call it repaired unless the
+/// finish is `length` (Fable's review of #274, the lead's ruling of 11-17).
+fn finish_reason(stopped: bool, constraint: Option<&crate::constrain::Constraint>) -> &'static str {
+    match stopped && !constraint.is_some_and(|c| c.cut()) {
+        true => "stop",
+        false => "length",
+    }
+}
+
 fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
         tok,
@@ -1115,6 +1139,9 @@ impl<'a> Engine<'a> {
                 Ok(())
             },
         );
+        if !handed && let Some(st) = constraint.as_ref().and_then(|c| c.stall()) {
+            eprintln!("axon serve: #{}: {st}", job.id);
+        }
         if handed {
             // Rows 0..hist.len() - 1 are in the cache: all but the token
             // just picked, the batch's first row for it.
@@ -1167,7 +1194,7 @@ impl<'a> Engine<'a> {
         if !content.is_empty() || !reasoning.is_empty() {
             let _ = job.tx.send(Event::Text { content, reasoning });
         }
-        let finish = if hit || by_stop_id { "stop" } else { "length" };
+        let finish = finish_reason(hit || by_stop_id, constraint.as_ref());
         let usage = Usage {
             prompt_tokens: p.len(),
             cached_tokens: reuse,
@@ -1215,9 +1242,12 @@ struct Loaded {
     /// The GGUF's architecture and parameter count (ollama.rs: /api/show).
     arch: String,
     params: u64,
-    /// Constrained tool calls (`Opts::constrain`): the Hermes grammar on
-    /// this vocabulary, for a Qwen2.5-family template (PR A of the spec).
-    constrain: Option<Arc<crate::constrain::Grammar>>,
+    /// Constrained tool calls (`Opts::constrain`): the Hermes grammars on
+    /// this vocabulary, for a Qwen2.5 or Qwen3 template.
+    constrain: Option<Arc<crate::constrain::Hermes>>,
+    /// Constrained tool calls turned off by `--no-constrain` or
+    /// AXON_CONSTRAIN=0 on a Hermes model (the identity says `no-constrain`).
+    no_constrain: bool,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -1271,6 +1301,26 @@ fn engine(
                 }
             }
         }
+    };
+    // Constrained tool calls: `Opts::constrain`, else AXON_CONSTRAIN, read
+    // strictly, as AXON_SHARE_KV.
+    let constrain_set = match o.constrain {
+        Some(b) => ShareSet::Opts(b),
+        None => match crate::constrain::env() {
+            Ok(Some(b)) => ShareSet::Env(b),
+            Ok(None) => ShareSet::Default,
+            Err(why) => refuse!(why),
+        },
+    };
+    // Closing stalled calls: `Opts::constrain_closer`, else
+    // AXON_CONSTRAIN_STALL, read as strictly.
+    let closer_set = match o.constrain_closer {
+        Some(b) => ShareSet::Opts(b),
+        None => match crate::constrain::stall_env() {
+            Ok(Some(b)) => ShareSet::Env(b),
+            Ok(None) => ShareSet::Default,
+            Err(why) => refuse!(why),
+        },
     };
     let rope = crate::rope::RopeArgs {
         ctx: o.ctx,
@@ -1730,36 +1780,78 @@ fn engine(
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
-    // Constrained tool calls (`Opts::constrain`): the Hermes grammar on this
-    // vocabulary (its automaton tables: ~0.1 s at 152k tokens), built once.
-    // On, the banner names it; asked for but refused, one line says why,
-    // even under --quiet (an operator who set AXON_CONSTRAIN=1 must be able
-    // to tell it's off).
-    let constrain = o.constrain.then(|| {
-        let g = match template.as_ref().map(tools::family) {
-            Some(Some(tools::Family::Qwen25)) => {
-                let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
-                crate::constrain::Grammar::hermes(v).map(Arc::new)
+    // Constrained tool calls (`Opts::constrain`, on by default): the Hermes
+    // grammars on this vocabulary (its trie: ~0.1 s at 152k tokens, here;
+    // a grammar per set of tool names, on a request's thread). On, the
+    // banner names it. Off by the switch: a line says so (AXON_CONSTRAIN=0
+    // even under --quiet). Refused: a line says why, even under --quiet
+    // when AXON_CONSTRAIN=1 asked for it (an operator who set it must be
+    // able to tell it's off), and not for a template whose calls aren't
+    // Hermes (the default holds Hermes calls only).
+    let hermes_family = matches!(
+        template.as_ref().map(tools::family),
+        Some(Some(tools::Family::Qwen25 | tools::Family::Qwen3))
+    );
+    let constrain = match constrain_set.value() {
+        Some(false) => {
+            if o.log || matches!(constrain_set, ShareSet::Env(_)) {
+                eprintln!(
+                    "axon serve: constrained tool calls off ({})",
+                    match constrain_set {
+                        ShareSet::Env(_) => "AXON_CONSTRAIN=0",
+                        _ => "--no-constrain",
+                    }
+                );
             }
-            Some(Some(f)) => Err(format!(
-                "the chat template's tool calls are {}; this release holds Qwen2.5's \
-                 Hermes calls only",
-                match f {
-                    tools::Family::Qwen3 => "Qwen3's (Hermes after <think>)",
-                    tools::Family::Llama31 => "Llama 3.1's",
-                    tools::Family::Harmony => "gpt-oss's (Harmony)",
-                    tools::Family::Qwen25 => unreachable!(),
+            None
+        }
+        _ => {
+            let h = match template.as_ref().map(tools::family) {
+                Some(Some(tools::Family::Qwen25 | tools::Family::Qwen3)) => {
+                    let v = Arc::new(crate::constrain::Vocab::new(tok, net.vocab()));
+                    // Off: a line says so, as the kill switch's does.
+                    let stall = match closer_set.value() {
+                        Some(false) => {
+                            eprintln!(
+                                "axon serve: stalled tool calls aren't cut off ({}): a held \
+                                 call in a loop runs to max_tokens",
+                                match closer_set {
+                                    ShareSet::Env(_) => "AXON_CONSTRAIN_STALL=0",
+                                    _ => "Opts::constrain_closer",
+                                }
+                            );
+                            None
+                        }
+                        _ => Some(
+                            o.constrain_stall
+                                .unwrap_or(crate::constrain::Stall::DEFAULT),
+                        ),
+                    };
+                    crate::constrain::Hermes::new(v, o.metrics.constrain.clone(), stall)
+                        .map(Arc::new)
                 }
-            )),
-            Some(None) => Err("the chat template has no tool-call format".into()),
-            None => Err("the model has no chat template".into()),
-        };
-        g.map_err(|why| {
-            eprintln!("axon serve: constrained tool calls (AXON_CONSTRAIN=1) off: {why}")
-        })
-        .ok()
-    });
-    let constrain = constrain.flatten();
+                Some(Some(f)) => Err(format!(
+                    "the chat template's tool calls are {}; this release holds Hermes calls \
+                     (Qwen2.5, Qwen3) only",
+                    match f {
+                        tools::Family::Llama31 => "Llama 3.1's",
+                        tools::Family::Harmony => "gpt-oss's (Harmony)",
+                        tools::Family::Qwen25 | tools::Family::Qwen3 => unreachable!(),
+                    }
+                )),
+                Some(None) => Err("the chat template has no tool-call format".into()),
+                None => Err("the model has no chat template".into()),
+            };
+            h.map_err(|why| {
+                let asked = matches!(constrain_set, ShareSet::Env(true));
+                if asked || (o.log && hermes_family) {
+                    let by = if asked { " (AXON_CONSTRAIN=1)" } else { "" };
+                    eprintln!("axon serve: constrained tool calls{by} off: {why}")
+                }
+            })
+            .ok()
+        }
+    };
     let banner = banner
         + tier_note.as_deref().unwrap_or("")
         + &(constrain.as_ref())
@@ -1786,6 +1878,9 @@ fn engine(
             arch: model.arch.clone(),
             params: model.total_params(),
             constrain,
+            // Only where it changes tokens: a model whose calls the default
+            // holds (a Llama or gpt-oss server's identity doesn't move).
+            no_constrain: constrain_set.value() == Some(false) && hermes_family,
         }))
         .is_err()
     {
@@ -2144,8 +2239,10 @@ pub(crate) fn is_refused(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
-/// What decides shared prefix KV pages (`share_on`): `Opts::share`,
-/// AXON_SHARE_KV (`share_env`), or neither (the default).
+/// What decides one of the server's switches: its `Opts` field, its
+/// variable, or neither (the default). Shared prefix KV pages (`share_on`:
+/// `Opts::share`, AXON_SHARE_KV) and constrained tool calls
+/// (`Opts::constrain`, AXON_CONSTRAIN).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShareSet {
     Default,
@@ -2566,7 +2663,9 @@ struct EngineOpts {
     cache_ram: tier::CacheRam,
     cache_ram_alloc: tier::Alloc,
     numerics: Numerics,
-    constrain: bool,
+    constrain: Option<bool>,
+    constrain_stall: Option<crate::constrain::Stall>,
+    constrain_closer: Option<bool>,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2723,7 +2822,9 @@ pub fn start(o: Opts) -> io::Result<Server> {
         cache_ram: o.cache_ram,
         cache_ram_alloc: o.cache_ram_alloc,
         numerics: o.numerics,
-        constrain: o.constrain.unwrap_or_else(crate::constrain::env_on),
+        constrain: o.constrain,
+        constrain_stall: o.constrain_stall,
+        constrain_closer: o.constrain_closer,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -2810,7 +2911,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         );
         return Err(io::Error::new(io::ErrorKind::InvalidInput, Refused(why)));
     }
-    let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
+    let serve = crate::identity::serve_field(o.no_think, o.think_inline, l.no_constrain, &o.sample);
     l.identity = l.identity.with_serve(serve);
     if o.log {
         // A pulled model's name, then its file.
@@ -3270,6 +3371,8 @@ fn run_request(
     }
     let mut parser = None;
     let mut channels = None;
+    // A call the prompt opened (tool_choice required or named): its text.
+    let mut seed = None;
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
@@ -3301,6 +3404,7 @@ fn run_request(
                 Some(tr) => match tools::render(t, m.tok, tr, no_think) {
                     Ok(r) => {
                         parser = r.parser;
+                        seed = r.seed;
                         // Harmony: calls are told apart by channel. With
                         // --think-inline the raw reply is the content.
                         let mut stop = t.stop().to_vec();
@@ -3325,11 +3429,34 @@ fn run_request(
         // As `axon gen`: BOS if the model adds one, its end-of-generation set.
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
-    // Constrained tool calls (`Opts::constrain`; the spec's PR A): Hermes
-    // with tool_choice auto, armed until the reply's `<tool_call>`.
+    // Constrained tool calls (`Opts::constrain`): a Hermes call held to the
+    // request's tools (their names) and JSON arguments. tool_choice auto:
+    // armed until the reply's `<tool_call>` (outside its reasoning), then
+    // again after each call. required or named: engaged from the reply's
+    // first token, where the prompt's call text left it. No tools offered
+    // (only tool turns in the history), or none chosen: free. A call that
+    // stalls ends the reply there (only its stop tokens), the call cut off
+    // unclosed: the parser returns it as a call cut mid-arguments. One the grammar can't
+    // hold goes free: counted, and each reason said once.
     let constraint = match (&g.tools, &m.constrain) {
-        (Some(tr), Some(gr)) if parser.is_some() && tr.choice == tools::Choice::Auto => {
-            Some(crate::constrain::Constraint::new(gr.clone()))
+        (Some(tr), Some(h)) if parser.is_some() && !tr.tools.is_empty() => {
+            let made = h.grammar(&tr.names()).and_then(|gr| match &seed {
+                None => Ok(crate::constrain::Constraint::new(gr).with_think(think)),
+                Some(s) => crate::constrain::Constraint::forced(gr, s.as_bytes())
+                    .map_err(|e| e.to_string()),
+            });
+            match made {
+                Ok(c) => Some(c.with_end(&stop_ids)),
+                Err(why) => {
+                    if h.unheld(&why) || debug() {
+                        eprintln!(
+                            "axon serve: a tools request left unconstrained: {why} (said once a \
+                             reason; axon_constraint_unheld_total counts them)"
+                        );
+                    }
+                    None
+                }
+            }
         }
         _ => None,
     };
@@ -3785,14 +3912,20 @@ pub(crate) const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] 
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
      [--step-ms MS] [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N] \
      [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto|off] \
-     [--numerics exact|fast] [--datacenter] [--no-think] [--think-inline] [--quiet] [sampling flags] \
-     [rope flags] (axon serve --help: what each does)";
+     [--numerics exact|fast] [--datacenter] [--no-constrain] [--no-think] [--think-inline] [--quiet] \
+     [sampling flags] [rope flags] (axon serve --help: what each does)";
 
 /// `serve`'s flags without a value, as `run` parses them. With
 /// `VALUE_FLAGS`, `--cors [ORIGIN]` and the sampling and rope flags
 /// (`SampleArgs::is_flag`, `rope::FLAGS`), every flag it takes: the help
 /// lists each one (cli.rs, `serve_help_lists_every_flag`).
-pub(crate) const SWITCHES: &[&str] = &["--no-think", "--think-inline", "--quiet", "--datacenter"];
+pub(crate) const SWITCHES: &[&str] = &[
+    "--no-think",
+    "--think-inline",
+    "--quiet",
+    "--datacenter",
+    "--no-constrain",
+];
 
 /// `serve`'s flags that take a value, as `run` parses them.
 pub(crate) const VALUE_FLAGS: &[&str] = &[
@@ -3909,6 +4042,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cache_ram_alloc: tier::Alloc::from_env(),
         numerics: Numerics::Exact,
         constrain: None,
+        constrain_stall: None,
+        constrain_closer: None,
     };
     let mut k = None;
     let key_from;
@@ -3922,6 +4057,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
                     "--no-think" => o.no_think = true,
                     "--think-inline" => o.think_inline = true,
                     "--datacenter" => datacenter = true,
+                    "--no-constrain" => o.constrain = Some(false),
                     _ => o.log = false,
                 }
                 i += 1;
