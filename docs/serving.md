@@ -66,7 +66,8 @@ bound, a long prompt can then wait as long as shorter ones keep arriving, and `s
 default parallel/16 within 2..8, and short ones never wait for a lane; with fifo, all of them,
 default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for the fixed
 budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COST=legacy`.
-`--quiet`
+`--no-constrain` (tool calls not held to the tools offered and to JSON:
+[Tool calling](#tool-calling)), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -199,7 +200,18 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_tool_calls_dropped_total` (tool calls begun but returned as no call: a `<tool_call>` block or
   Llama JSON reply that isn't a JSON object with a string name, as content, or a gpt-oss call whose arguments
   never opened as an object, as reasoning), `axon_tool_calls_invalid_total` (calls returned whose `arguments`
-  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value), and the histograms
+  aren't a JSON object: a streamed call cut off or gone bad, #260, or a non-object value); constrained
+  tool calls' (below): `axon_constraint_tokens_total` (tokens picked inside a held call),
+  `axon_constraint_fallback_total` (held positions decided on the whole logits row, the device's candidates
+  holding too few allowed tokens), `axon_constraint_trigger_rejected_total` (a `<tool_call>` written out in a
+  token that goes on with text no call starts with: left free), `axon_constraint_stalls_total` (held calls
+  that stalled: the reply ended there with finish `length`, the call cut off and counted as invalid or dropped,
+  each also a stderr line),
+  `axon_constraint_unheld_total` (tools requests left unconstrained: the grammar couldn't hold their tools'
+  names or the call their prompt opened; each reason also a stderr line, once),
+  `axon_constraint_mask_cache_clears_total` and the gauge `axon_constraint_mask_cache_peak_entries` (how full
+  the grammars' token-mask caches get: 16 MiB each, started over when full) and
+  `axon_constraint_mask_seconds_total`; and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). The scheduler's (#131): `axon_waiting_requests`,
@@ -363,11 +375,106 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   comes later (the first one before the next `<tool_call>`), so a call's own stray
   `</tool_call>` doesn't show in `content`. A block that never becomes a call still comes back
   as content, tags and all, and so does a second stray `</tool_call>`.
+- **Calls are held to the tools offered and to JSON** (constrained decoding, #259), on the
+  Hermes models (Qwen2.5 and Qwen3 templates), by default. From the reply's `<tool_call>` (its
+  token, or the text spelled out; not inside Qwen3's reasoning) to its `</tool_call>`, every
+  token is picked from those that keep the call one of
+  `{"name": NAME, "arguments": OBJECT}`: NAME one of the request's tool names (so a model
+  can't call `apply_patch` when it wasn't offered: #259's codex runs did, 6 times), OBJECT
+  any JSON object, nested at most 64 deep, with no special token (EOS, `<|im_end|>`, a second
+  `<tool_call>`) inside a string. After the call the reply is free again, so it can make
+  more calls or write text. `tool_choice` `required` and named start the reply inside the
+  call (the prompt opened it), held from its first token. What doesn't change: requests
+  without tools, `tool_choice: "none"`, text before a call, and every token of a reply that
+  makes no call. Held calls can't run on for ever (#272, where 13 of 15 malformed calls
+  were runaways that hit `max_tokens`):
+  - **Whitespace** outside strings is one space, or one or two newlines and at most 20
+    spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
+  - **A call the stall rule stops ends its reply cut off, as `max_tokens` cuts one.** When
+    the last 2,048 tokens of a call repeat one block of at most 256 tokens (`false, false,
+    ...`, a string of `\n\n\n...`, `--exclude=*.pyc --exclude=*.pyc ...`, a list in a loop,
+    a 72-token block of code 53 times), the reply ends right there (only its stop token is
+    allowed), so a model in a loop can't open the next call and stall again. The call is left
+    as written, cut off unclosed, and the reply is what main sends for a call `max_tokens`
+    cut off mid-arguments: `finish_reason` `length` (on `/v1/responses` the response and the
+    call's item are `incomplete`, reason `max_output_tokens`; ollama's `done_reason` is
+    `length`). With calls streamed (the default) it is a call whose `arguments` aren't JSON
+    (`axon_tool_calls_invalid_total`); decided whole (`AXON_TOOL_STREAM=0`, ollama's API) its
+    block is content and no client sees a call (`axon_tool_calls_dropped_total`).
+    What a client does with it is the client's: one that parses `arguments` strictly
+    (`JSON.parse`, as the OpenAI SDKs do) can't run it, and pi refuses a call in a reply that
+    ended `length` (0.85.1: "the response hit the output token limit"). pi before 1.3.0
+    repairs a cut-off call's JSON (it closes the open string and containers) and runs it
+    when the finish is anything else (from 1.3.0 it fails such a call: pi #10897), which is
+    why a stalled reply says `length` (Fable's review of #274, the lead's ruling of 11-17).
+    opencode (2.2.7) refuses a call in a reply that ended `length` too ("The tool call was
+    not executed because the output token limit (stop reason: length) was reached") and
+    goes on with the turn; that was seen on `max_tokens` cuts, not yet on a stall. codex
+    ends its turn on an `incomplete` response ("Incomplete response returned"), as it does
+    when a reply hits the token limit. A client that repairs
+    cut-off JSON and ignores `length` would still run what was written; for such a client
+    set `AXON_TOOL_STREAM=0`. Until the lead's ruling of 11-17 the call was closed the
+    shortest way, a well-formed call that harnesses applied: a pi run's model dropped a
+    string's closing quote (`rows)}]}}` for `rows)"}]}}`), so it wrote on inside the string,
+    where neither a newline nor `</tool_call>` is allowed, for 2,100 tokens until the rule
+    fired; the closed `edit` wrote them into the file, and each next turn copied them and
+    stalled again. Each stall is a line on stderr, whatever the log level (`axon serve: #12:
+    a held tool call stalled after 2077 tokens (its last 2048 repeat one block of 72 tokens):
+    the reply ends there, finish `length`, the call cut off unclosed as max_tokens cuts one
+    (its arguments aren't JSON); AXON_CONSTRAIN_STALL=0 turns this off`), and counts in
+    `axon_constraint_stalls_total`. In the acceptance runs' 6,333
+    calls 11 of the 13 runaways trip it (their loops are 2,144 to 50,831 tokens' worth of
+    text); the other two, a `, false` loop and a list loop, ended by themselves first, after
+    1,963 and 623. The other calls stay far from it (383 at most in a block repeated). Data
+    that fills 2,048 tokens with one repeated block (8 or more times over for a 256-token
+    block, more for a shorter one) trips it: 256 identical `<div class="cell"></div>`
+    lines after about 2,085 tokens (cut after 205 cells), 100 identical
+    log lines after about 2,070, a 32×32 matrix of zeros after about 2,070, 150 identical
+    JSON objects after about 2,060. Data that doesn't repeat a block isn't cut, however few
+    tokens it uses (400 dice rolls, a 30×20 tile map of 4 tile ids, a 2,048-bit string).
+    **`AXON_CONSTRAIN_STALL=0`** turns the rule off alone: a call in a loop then runs to
+    `max_tokens`, its name and JSON still held (the grammar's hash in the fingerprint says
+    `stall=off`). Until Fable's review of #274 two more rules held a call: an array kept its
+    first item's kind (it rewrote real arguments without a trace: `[["Alice", 30]]`,
+    `["$qty", 250]`, `[1.5, null, 2.0]`), and a call whose last 1,024 tokens were at most 8
+    distinct ones was cut (it caught one runaway more, and cut 400 dice rolls); both are
+    gone. When in doubt the rule doesn't fire.
+    **What it misses: a loop that breaks off and starts over.** Replayed with seeds 1 and 2,
+    one of the 13 (Qwen2.5-7B, a pi `edit`) repeats `'convert_to_all_except', ` (6 tokens)
+    up to 284 times in a string, ends the string, writes `"newText"` again in the same
+    object (JSON allows a repeated key), copies the line's first 65 to 91 tokens and loops
+    again. No stretch repeats one block for 2,048 tokens (1,711 at most), so the call runs
+    on to `max_tokens` and arrives cut (`finish_reason` `length`), as it would without the
+    constraint; with greedy decoding it stalls (after 2,158 tokens). The few-ids rule caught
+    it at 1,024 tokens (not at 2,048), but cut 15 of the 74 legit cases. A looser cycle rule
+    would have to fire when 90 % of 2,048 tokens equal the token a block back (seed 2's loop
+    reaches 91 %), and that cuts sparse data: a 40×30 tile map with 10 % walls, a 60×20
+    one-hot CSV, a 24×24 0/1 mask. So the miss stays; the harness bar counts such a call as
+    malformed. The gate that replays those runaways on the real models, with its inputs, is
+    `scripts/constrain/cbcheck.sh` ([scripts/constrain/README.md](../scripts/constrain/README.md)).
+
+  Valid isn't right: where the model would have written an unescaped quote, the string ends
+  there and the call goes on from it, so the call parses but may not be what was meant (the
+  harness tells the model, which can retry). What it can't write whole: more blank space than
+  llama.cpp allows, or more than 2,048 tokens of one block written over and over (the reply
+  ends there, above); with greedy decoding a retry stops at the same place, so such a file can't be
+  written through a held call (`AXON_CONSTRAIN_STALL=0` or `--no-constrain` can). Per-tool argument schemas are #259's next step (PR C).
+  `max_tokens` can still cut a call short (a call with invalid arguments, as above). The
+  identity changes with it: `NUMERICS_VERSION_EXACT` is 2 (every fingerprint moved), and a
+  tools request's `system_fingerprint` names the grammar
+  ([determinism.md](determinism.md#the-identity-tuple-and-system_fingerprint)).
+  **`--no-constrain`** or **`AXON_CONSTRAIN=0`** turns it off: the server then runs as before
+  it, token for token, and its identity says `no-constrain`. `AXON_CONSTRAIN=1` (or unset) is
+  on; any other value refuses to start. The banner ends with `constrained tool calls
+  (hermes-json <hash>)` when it's on; a Hermes model it can't hold (a vocabulary without
+  every byte as a token, or no `<tool_call>` token) gets a line saying why.
 - **`AXON_TOOL_STREAM=0`** (exactly `0`) turns this off: every call goes out once its block is decided, as
   two chunks (id and name, then all of `function.arguments`; on `/v1/responses`, after the
   text when the reply ends), and a block that isn't a JSON object with a string `"name"`
   (invalid JSON, or cut off mid-call) is returned as `content`, so `arguments` is always
-  valid JSON. The ollama routes always work this way (an ollama call is a whole object).
+  valid JSON. A call whose `</tool_call>` the model left out ends where the next `<tool_call>`
+  begins, if its block is a call up to there (#259). The ollama routes always work this way
+  (an ollama call is a whole object).
 - Qwen3's reasoning still comes as `reasoning_content`. gpt-oss: its calls stream the same
   way once their arguments open with `{` (after nothing but blanks). A call whose arguments
   never do (a number, an array, nothing, other text first) is not a call: its text comes back as `reasoning_content` (it was on the
@@ -396,7 +503,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   gpt-oss: a named choice opens `<|channel|>commentary to=functions.NAME <|constrain|>json
   <|message|>` (the form the model writes calls in) and keeps every tool in the prompt.
   `required` with one tool is that tool's named choice; with several it is a 400, since a
-  prefill can't force one of them (constrained decoding: #116).
+  prefill can't force one of them (constrained decoding of harmony calls: #116).
   Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.

@@ -20,7 +20,10 @@ identical across routes for the same messages (`serve_apis_match_chat_completion
 | every route above | OPTIONS | serve.rs: 204 with `Allow`; with `--cors`, a CORS preflight's headers too |
 
 Chat completions and completions: the field table is the module doc of `src/serve/api.rs`;
-tool calling is in [serving.md](serving.md#tool-calling).
+tool calling is in [serving.md](serving.md#tool-calling). A tools request to a Qwen2.5 or
+Qwen3 model is constrained the same way on every route that takes tools (chat completions,
+Responses, ollama's `/api/chat`): a call names one of the request's tools and its arguments
+are a JSON object (`--no-constrain` turns it off).
 
 ## `POST /v1/responses`
 

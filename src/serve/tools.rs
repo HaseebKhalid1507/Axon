@@ -51,7 +51,9 @@
 //! - Hermes: text outside `<tool_call>...</tool_call>` is content. Anything
 //!   that may be the start of `<tool_call>` is held back until decided, so
 //!   no part of a block leaks into `content`. Whitespace that only separates
-//!   content from calls is dropped.
+//!   content from calls is dropped. A `<tool_call>` inside a block whose text
+//!   so far is a call ends that block (a call) and opens the next (#259:
+//!   the model's close left out between two calls).
 //! - Llama: a reply whose first non-blank character is `{` is held whole and
 //!   decided at the end. Any other reply streams as content.
 //! - Harmony: the engine splits the reply by channel (`chat::Channels`, told
@@ -496,6 +498,19 @@ pub struct ToolReq {
 }
 
 impl ToolReq {
+    /// The rendered tools' names, each as the prompt shows it: its JSON
+    /// string literal's body (`J::dumps`'s escaping, quotes off), what a
+    /// constrained call's name must be (`constrain::Grammar::hermes`).
+    pub fn names(&self) -> Vec<Vec<u8>> {
+        (self.tools.iter())
+            .filter_map(|t| t.get("function").and_then(|f| f.get("name")))
+            .filter_map(|n| {
+                let lit = n.dumps().into_bytes();
+                (lit.len() >= 2 && n.str().is_some()).then(|| lit[1..lit.len() - 1].to_vec())
+            })
+            .collect()
+    }
+
     /// Bytes of text in the prompt besides the messages' content (for the
     /// up-front size check).
     pub fn extra_bytes(&self) -> usize {
@@ -862,6 +877,10 @@ pub struct Rendered {
     /// Harmony: the reply's channel splitter, telling calls apart, in the
     /// state the prompt leaves it (a call it opened, for tool_choice).
     pub channels: Option<chat::Channels>,
+    /// Hermes, `tool_choice` required or named: the call's text the prompt
+    /// ends with after `<tool_call>` (the reply starts inside the call; a
+    /// constrained reply starts engaged there: `constrain::Constraint::forced`).
+    pub seed: Option<String>,
 }
 
 /// The prompt for a tool request, as the model's template renders it.
@@ -918,6 +937,10 @@ pub fn render(
         k.text(seed);
     }
     let no_reasoning = thinks && forced.is_some();
+    let seed = forced
+        .as_ref()
+        .filter(|_| kind == Kind::Hermes)
+        .map(|s| format!("\n{s}"));
     let parser = match (&r.choice, forced) {
         (Choice::None, _) => None,
         (_, Some(seed)) => Some(Parser::forced(kind, &seed)),
@@ -928,6 +951,7 @@ pub fn render(
         parser,
         no_reasoning,
         channels: None,
+        seed,
     })
 }
 
@@ -1390,6 +1414,7 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
         parser: channels.as_ref().map(|_| Parser::new_harmony()),
         no_reasoning: false,
         channels,
+        seed: None,
     })
 }
 
@@ -1709,6 +1734,18 @@ pub struct Parser {
     hargs: String,
 }
 
+/// A Hermes reply's pieces as the server's parser makes them (stream mode,
+/// no metrics): the constrained-decoding tests check that every call the
+/// grammar takes is one call here (`constrain` tests).
+#[cfg(test)]
+pub(crate) fn hermes_pieces(reply: &str) -> Vec<Piece> {
+    let mut p = Parser::new(Kind::Hermes);
+    p.configure(true, None);
+    let mut out = p.push(reply);
+    out.extend(p.finish());
+    out
+}
+
 impl Parser {
     fn new(kind: Kind) -> Parser {
         Parser {
@@ -1879,7 +1916,23 @@ impl Parser {
     fn hermes(&mut self, out: &mut Vec<Piece>) {
         loop {
             if self.inside {
-                let Some(at) = self.buf[self.scan..].find(CLOSE).map(|a| a + self.scan) else {
+                let close = self.buf[self.scan..].find(CLOSE).map(|a| a + self.scan);
+                // A `<tool_call>` before the block's close ends the block
+                // there if the block so far is a call (#259 item 2: a valid
+                // object, then the next call's tag with no `</tool_call>`
+                // between); else it is the block's text, as before.
+                let end = close.unwrap_or(self.buf.len());
+                let split = (self.buf[self.scan..end].match_indices(OPEN))
+                    .map(|(a, _)| a + self.scan)
+                    .find(|&a| call_of(&self.buf[..a]).is_some());
+                if let Some(a) = split {
+                    let body = self.buf[..a].to_string();
+                    self.buf.drain(..a + OPEN.len());
+                    self.scan = 0;
+                    self.block(&body, false, out);
+                    continue;
+                }
+                let Some(at) = close else {
                     // The next search starts where a `</tool_call>` could still begin.
                     let mut w = self.buf.len().saturating_sub(CLOSE.len() - 1);
                     while !self.buf.is_char_boundary(w) {
