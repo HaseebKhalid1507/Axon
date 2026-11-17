@@ -52,7 +52,8 @@ fn twin_refusals() {
     for cc in [(6, 1), (7, 5), (8, 9), (12, 0)] {
         twin_gemm_ok_for(cc, crate::quant::MXFP4).unwrap();
     }
-    assert!(twin_gemm_ok_for((6, 0), crate::quant::MXFP4).is_err());
+    let e = twin_gemm_ok_for((6, 0), crate::quant::MXFP4).unwrap_err();
+    assert!(e.contains("sm_61") && !e.contains("sm_80"), "{e}");
     assert!(twin_gemm_ok_for((7, 5), crate::quant::Q4_K).is_err());
     use crate::quant::*;
     for qt in [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4] {
@@ -426,15 +427,15 @@ fn fixture_plus(extra: &[(String, Vec<u64>)]) -> Model {
 }
 
 /// Expert biases need MXFP4 experts (only oss.cu's twins add them; stage B
-/// lifted the refusal of biases as such): `upload` refuses them on the Q8_0
-/// fixture's layer 1, all three (gpt-oss's shapes, [rows, n_e]: "non-MXFP4")
-/// or one ("missing"), naming the layer; layer 2, without, uploads.
+/// lifted the refusal of biases as such), and `LayerPlan` refuses them from
+/// the metadata, before any upload (#122's order): on the Q8_0 fixture's
+/// layer 1, all three (gpt-oss's shapes, [rows, n_e]: "non-MXFP4") or one
+/// ("missing"), naming the layer; layer 2, without, plans the file's bytes
+/// (the r8 types upload as they are, nothing staged). No GPU needed; with
+/// one, `CudaExperts::upload` refuses the same and layer 2 holds its plan.
 #[test]
 fn expert_biases_need_mxfp4() {
     use crate::model::deepseek2_tests::FX;
-    let Some(g) = crate::testutil::gpu() else {
-        return;
-    };
     let all: Vec<(String, Vec<u64>)> = [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)]
         .iter()
         .map(|&(p, rows)| {
@@ -442,13 +443,41 @@ fn expert_biases_need_mxfp4() {
             (name, vec![rows as u64, FX.n_exp as u64])
         })
         .collect();
+    let g = crate::testutil::gpu();
     for (set, why) in [(&all[..], "non-MXFP4"), (&all[..1], "missing")] {
         let m = fixture_plus(set);
-        let km = Kernels::module_for(&g, &m).unwrap();
-        let e = CudaExperts::upload(&g, &km, &m, 1, FX.k_exp)
-            .err()
-            .expect("refused");
+        let e = LayerPlan::new(&m, 1, FX.k_exp).err().expect("refused");
         assert!(e.contains("layer 1") && e.contains(why), "{e}");
-        CudaExperts::upload(&g, &km, &m, 2, FX.k_exp).unwrap();
+        let p = LayerPlan::new(&m, 2, FX.k_exp).unwrap();
+        let file: u64 = (m.tensors.iter())
+            .filter(|t| t.name.starts_with("blk.2.ffn_") && t.name.ends_with("_exps.weight"))
+            .map(|t| t.n_bytes)
+            .sum();
+        assert_eq!((p.bytes as u64, p.transient), (file, 0));
+        if let Some(g) = &g {
+            let km = Kernels::module_for(g, &m).unwrap();
+            let e = CudaExperts::upload(g, &km, &m, 1, FX.k_exp)
+                .err()
+                .expect("refused");
+            assert!(e.contains("layer 1") && e.contains(why), "{e}");
+            let ex = CudaExperts::upload(g, &km, &m, 2, FX.k_exp).unwrap();
+            assert_eq!(ex.bytes(), p.bytes);
+        }
+    }
+}
+
+/// experts.rs's copies of oss.cu's `moe_gemm_mx` launch shape are the
+/// source's: MX_BN and MX_THREADS as defined there, MX_SMEM the value its
+/// static_assert holds MX_SH_BYTES to (NVRTC refuses the module if that
+/// moves). No GPU needed.
+#[test]
+fn mx_consts_are_oss_cu() {
+    let src = include_str!("../oss.cu");
+    for line in [
+        format!("#define MX_BN {MX_BN}\n"),
+        format!("#define MX_THREADS {MX_THREADS}\n"),
+        format!("static_assert(MX_SH_BYTES == {MX_SMEM}, "),
+    ] {
+        assert_eq!(src.matches(&line).count(), 1, "oss.cu: {line:?}");
     }
 }

@@ -259,11 +259,13 @@ extern "C" __global__ void mx_repack(const u8* __restrict__ src, u64 nrows, int 
 #define MX_SH_X (MX_SH_RAWE + MX_BM * MX_KB)
 #define MX_SH_XD (MX_SH_X + 2 * MX_BN * MX_KB * 32)
 #define MX_SH_BYTES (MX_SH_XD + 2 * MX_KB * MX_BN * 4)
+// experts.rs's MX_SMEM, the launch's dynamic shared memory (and its MX_BN,
+// MX_THREADS: experts_tests.rs `mx_consts_are_oss_cu` reads them here).
+static_assert(MX_SH_BYTES == 46592, "experts.rs MX_SMEM is 46592");
 
 // 16 (or 4) bytes global -> shared, zero-filled unless ok (src is then
 // `base`, any valid global address: not read): cp.async on sm_80+, a plain
-// copy below (the sm_61 path is out of PR A's scope, but the oss module must
-// compile on every arch it loads on).
+// copy below (sm_61 to sm_75 run it: MXFP4's twins need dp4a only).
 __device__ __forceinline__ void mx_cp16(void* dst, const void* src, const void* base, bool ok) {
 #if __CUDA_ARCH__ >= 800
     cp16q(dst, ok ? src : base, ok);

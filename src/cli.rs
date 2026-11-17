@@ -1082,6 +1082,9 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         let mut last = Vec::new();
         for (k, ids) in seqs.iter().enumerate() {
             if k > 0 {
+                // The old cache goes first: one cache at a time, as a MoE
+                // net's `--gpu-experts auto` plans (a second may not fit).
+                drop(cache);
                 cache = net.new_cache(cache_ctx);
             }
             println!("prompt ids ({}): {:?}", ids.len(), ids);
@@ -1101,6 +1104,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             }
             for (p, &t) in ids.iter().enumerate().skip(first) {
                 if each && p > first {
+                    drop(cache);
                     cache = net.new_cache(cache_ctx);
                     last = net.prefill_logits(&ids[..=p], 0, &mut cache);
                 } else if !batched || p > first {

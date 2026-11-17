@@ -29,7 +29,9 @@ pub(crate) use super::{twin_gemm_ok_for, twin_type};
 const MOE_BN: usize = 64;
 
 /// oss.cu's MX_BN (tokens per `moe_gemm_mx` tile), MX_THREADS and
-/// MX_SH_BYTES (its dynamic shared memory).
+/// MX_SH_BYTES (its dynamic shared memory). Tied to the source: oss.cu
+/// static_asserts MX_SH_BYTES == 46592, and `mx_consts_are_oss_cu`
+/// (experts_tests.rs) reads all three there.
 const MX_BN: usize = 32;
 const MX_THREADS: u32 = 128;
 const MX_SMEM: usize = 46592;
@@ -62,7 +64,109 @@ struct Mats<'g> {
     es: usize,
 }
 
+/// Device bytes of n_e matrices of `rows` x `cols` of type qt as `Mats`
+/// holds them, and what the upload holds besides at its peak: the file's
+/// bytes (nothing besides); MXFP4 the twin's layout (a row's blocks' 16 qs
+/// bytes, then `es` e8m0 bytes a row: 1,536 a row of 2,880 values where the
+/// file has 1,530), repacked from one expert's file rows at a time.
+fn mats_bytes(qt: u32, rows: usize, cols: usize, n_e: usize) -> (usize, usize) {
+    let rb = quant::row_bytes(qt, cols);
+    if qt != MXFP4 {
+        return (rb * rows * n_e, 0);
+    }
+    let nk = cols / 32;
+    (rows * n_e * (nk * 16 + nk.next_multiple_of(16)), rb * rows)
+}
+
+/// Layer l's routed experts as `CudaExperts::upload` holds them, read from
+/// the model's metadata alone: names, types and shapes, nothing uploaded
+/// (#122's order: every refusal comes before a byte goes up). Err as
+/// `upload`'s: a tensor missing, of a type without twins or not n_e
+/// experts; shapes that don't chain; gate and up of different types; k out
+/// of range; expert biases that aren't all three, aren't F32 [rows, n_e], or
+/// come with non-MXFP4 experts (only oss.cu's twins add them).
+pub(crate) struct LayerPlan<'m> {
+    /// gate, up, down (`ffn_{gate,up,down}_exps.weight`).
+    w: [&'m Tensor; 3],
+    /// Their biases (gpt-oss).
+    bias: Option<[&'m Tensor; 3]>,
+    n_e: usize,
+    /// Device bytes once uploaded, `CudaExperts::bytes`: the three tensors
+    /// in their device layout (`mats_bytes`) and the biases. `place` plans
+    /// with these.
+    pub(crate) bytes: usize,
+    /// What the upload holds besides at its peak (MXFP4: one expert's file
+    /// rows, staged for `mx_repack`; 0 for the r8 types).
+    pub(crate) transient: usize,
+}
+
+impl<'m> LayerPlan<'m> {
+    pub(crate) fn new(m: &'m Model, l: usize, k: usize) -> Result<LayerPlan<'m>, String> {
+        let find = |s: &str, kind: &str| {
+            let name = format!("blk.{l}.ffn_{s}_exps.{kind}");
+            m.tensors.iter().find(|t| t.name == name)
+        };
+        let t = |s: &str| {
+            find(s, "weight").ok_or_else(|| format!("blk.{l}.ffn_{s}_exps.weight: missing"))
+        };
+        let w = [t("gate")?, t("up")?, t("down")?];
+        let n_e = w[0].dims.get(2).copied().unwrap_or(0) as usize;
+        let (mut bytes, mut transient) = (0, 0);
+        for t in w {
+            twin_type(t.qtype.id).map_err(|e| format!("{}: {e}", t.name))?;
+            if t.dims.len() != 3 || t.dims[2] as usize != n_e {
+                return Err(format!("{}: not {n_e} experts ({:?})", t.name, t.dims));
+            }
+            let (b, x) = mats_bytes(t.qtype.id, t.dims[1] as usize, t.dims[0] as usize, n_e);
+            bytes += b;
+            transient = transient.max(x);
+        }
+        // (cols, rows) of each.
+        let [(dim, ffn), up, down] = w.map(|t| (t.dims[0] as usize, t.dims[1] as usize));
+        if up != (dim, ffn) || down != (ffn, dim) {
+            return Err(format!("layer {l}: expert shapes don't chain"));
+        }
+        let qt = w.map(|t| t.qtype.id);
+        if qt[0] != qt[1] {
+            return Err(format!("layer {l}: gate and up of different types"));
+        }
+        if !(1..=n_e).contains(&k) {
+            return Err(format!("layer {l}: k = {k} of {n_e} experts"));
+        }
+        let bias = match [
+            find("gate", "bias"),
+            find("up", "bias"),
+            find("down", "bias"),
+        ] {
+            [None, None, None] => None,
+            [Some(bg), Some(bu), Some(bd)] => {
+                if qt != [MXFP4; 3] {
+                    return Err(format!(
+                        "layer {l}: expert biases with non-MXFP4 experts (only gpt-oss has them)"
+                    ));
+                }
+                for (t, rows) in [(bg, ffn), (bu, ffn), (bd, dim)] {
+                    if t.qtype.id != F32 || t.dims[..] != [rows as u64, n_e as u64] {
+                        return Err(format!("{}: not F32 [{rows}, {n_e}]", t.name));
+                    }
+                    bytes += 4 * rows * n_e;
+                }
+                Some([bg, bu, bd])
+            }
+            _ => return Err(format!("layer {l}: some expert biases are missing")),
+        };
+        Ok(LayerPlan {
+            w,
+            bias,
+            n_e,
+            bytes,
+            transient,
+        })
+    }
+}
+
 impl<'g> Mats<'g> {
+    /// Tensor t of n_e experts (`LayerPlan` checked its type and shape).
     fn upload(
         g: &'g Gpu,
         km: &Module<'g>,
@@ -71,17 +175,16 @@ impl<'g> Mats<'g> {
         n_e: usize,
     ) -> Result<Mats<'g>, String> {
         let qt = t.qtype.id;
-        twin_type(qt).map_err(|e| format!("{}: {e}", t.name))?;
         let (cols, rows) = (t.dims[0] as usize, t.dims[1] as usize);
-        if t.dims.len() != 3 || t.dims[2] as usize != n_e {
-            return Err(format!("{}: not {n_e} experts ({:?})", t.name, t.dims));
-        }
-        Self::new(g, km, m.tensor_data(t), qt, rows, cols, n_e)
-            .map_err(|e| format!("{}: {e}", t.name))
+        let data = m.tensor_data(t);
+        let rb = quant::row_bytes(qt, cols);
+        assert_eq!(data.len(), rb * rows * n_e, "{}: size", t.name);
+        Self::new(g, km, data, qt, rows, cols, n_e).map_err(|e| format!("{}: {e}", t.name))
     }
 
     /// n_e matrices of `rows` x `cols` of type qt from the file's bytes;
-    /// MXFP4 repacked on the device (`mx_repack`, km: the oss module).
+    /// MXFP4 repacked on the device (`mx_repack`, km: the oss module), one
+    /// expert's rows at a time (`mats_bytes`' transient).
     fn new(
         g: &'g Gpu,
         km: &Module<'g>,
@@ -107,27 +210,36 @@ impl<'g> Mats<'g> {
         }
         let (nk, nrows) = (cols / 32, rows * n_e);
         let es = nk.next_multiple_of(16);
-        let raw = g.upload(data)?;
         let buf = g.alloc(nrows * nk * 16)?;
         let e = g.alloc(nrows * es)?;
         e.zero()?;
-        // SAFETY: mx_repack's signature; raw holds nrows rows of nk 17-byte
-        // blocks, buf and e the twin layout's bytes for them.
-        unsafe {
-            g.launch(
-                &km.function("mx_repack")?,
-                ((nrows * nk).div_ceil(256) as u32, 1, 1),
-                (256, 1, 1),
-                0,
-                &[
-                    raw.arg(),
-                    Arg::U64(nrows as u64),
-                    Arg::I32(nk as i32),
-                    Arg::I32(es as i32),
-                    buf.arg(),
-                    e.arg(),
-                ],
-            )?;
+        // One expert's file rows at a time through one staging buffer:
+        // `write` is ordered on the stream after the last expert's
+        // mx_repack and waits for it, so no row is overwritten while read.
+        let per = rb * rows;
+        let raw = g.alloc(per)?;
+        let f = km.function("mx_repack")?;
+        for x in 0..n_e {
+            raw.write(&data[x * per..(x + 1) * per])?;
+            // SAFETY: mx_repack's signature; raw holds rows rows of nk
+            // 17-byte blocks (expert x's), buf and e expert x's rows of the
+            // twin layout (x < n_e: in bounds).
+            unsafe {
+                g.launch(
+                    &f,
+                    ((rows * nk).div_ceil(256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        raw.arg(),
+                        Arg::U64(rows as u64),
+                        Arg::I32(nk as i32),
+                        Arg::I32(es as i32),
+                        buf.arg_at(x * rows * nk * 16),
+                        e.arg_at(x * rows * es),
+                    ],
+                )?;
+            }
         }
         g.sync()?;
         drop(raw);
@@ -278,7 +390,7 @@ pub(crate) struct CudaExperts<'g> {
     /// its activation (`swiglu_oai_quant_tw`); None: no biases, SwiGLU.
     bias: Option<[DevBuf<'g>; 3]>,
     /// The batched path's twin GEMMs: `twin_gemm_ok_for` of the device and
-    /// the type.
+    /// each of the three types.
     mma: Result<(), String>,
     /// F of every swiglu_twin launch of the layer, read once at upload: the
     /// host CPU's `vmath::fused()`, the F its `moe_layer_batch` runs with.
@@ -291,7 +403,8 @@ impl<'g> CudaExperts<'g> {
     /// with gpt-oss's expert biases (`ffn_{gate,up,down}_exps.bias`, F32
     /// [rows, n_e]) if the layer has them; MXFP4 experts take the oss.cu
     /// twins (km: the model's module, the oss module for gpt-oss). Biases
-    /// need MXFP4 experts (only those kernels add them).
+    /// need MXFP4 experts (only those kernels add them). Every refusal is
+    /// `LayerPlan`'s, before anything is uploaded.
     pub(crate) fn upload(
         g: &'g Gpu,
         km: &'g Module<'g>,
@@ -299,51 +412,23 @@ impl<'g> CudaExperts<'g> {
         l: usize,
         k: usize,
     ) -> Result<CudaExperts<'g>, String> {
-        let find = |s: &str, kind: &str| {
-            let name = format!("blk.{l}.ffn_{s}_exps.{kind}");
-            m.tensors.iter().find(|t| t.name == name)
-        };
-        let t = |s: &str| {
-            find(s, "weight").ok_or_else(|| format!("blk.{l}.ffn_{s}_exps.weight: missing"))
-        };
-        let tg = t("gate")?;
-        let n_e = tg.dims.get(2).copied().unwrap_or(0) as usize;
-        let gate = Mats::upload(g, km, m, tg, n_e)?;
-        let up = Mats::upload(g, km, m, t("up")?, n_e)?;
-        let down = Mats::upload(g, km, m, t("down")?, n_e)?;
+        let p = LayerPlan::new(m, l, k)?;
+        let n_e = p.n_e;
+        let gate = Mats::upload(g, km, m, p.w[0], n_e)?;
+        let up = Mats::upload(g, km, m, p.w[1], n_e)?;
+        let down = Mats::upload(g, km, m, p.w[2], n_e)?;
         let (dim, ffn) = (gate.cols, gate.rows);
-        if up.cols != dim || up.rows != ffn || down.cols != ffn || down.rows != dim {
-            return Err(format!("layer {l}: expert shapes don't chain"));
-        }
-        if gate.qt != up.qt {
-            return Err(format!("layer {l}: gate and up of different types"));
-        }
-        if !(1..=n_e).contains(&k) {
-            return Err(format!("layer {l}: k = {k} of {n_e} experts"));
-        }
-        let bias = match [
-            find("gate", "bias"),
-            find("up", "bias"),
-            find("down", "bias"),
-        ] {
-            [None, None, None] => None,
-            [Some(bg), Some(bu), Some(bd)] => {
-                if [gate.qt, up.qt, down.qt] != [MXFP4; 3] {
-                    return Err(format!(
-                        "layer {l}: expert biases with non-MXFP4 experts (only gpt-oss has them)"
-                    ));
-                }
-                let one = |t: &Tensor, rows: usize| -> Result<DevBuf<'g>, String> {
-                    if t.qtype.id != F32 || t.dims[..] != [rows as u64, n_e as u64] {
-                        return Err(format!("{}: not F32 [{rows}, {n_e}]", t.name));
-                    }
-                    g.upload(m.tensor_data(t))
-                };
-                Some([one(bg, ffn)?, one(bu, ffn)?, one(bd, dim)?])
+        let bias = match p.bias {
+            None => None,
+            Some([bg, bu, bd]) => {
+                let one = |t: &Tensor| g.upload(m.tensor_data(t));
+                Some([one(bg)?, one(bu)?, one(bd)?])
             }
-            _ => return Err(format!("layer {l}: some expert biases are missing")),
         };
-        let mma = twin_gemm_ok_for(g.info()?.cc, gate.qt);
+        let cc = g.info()?.cc;
+        let mma = [gate.qt, up.qt, down.qt]
+            .into_iter()
+            .try_for_each(|q| twin_gemm_ok_for(cc, q));
         Ok(CudaExperts {
             g,
             km,
@@ -409,7 +494,9 @@ impl<'g> CudaExperts<'g> {
     /// Enqueue the layer's experts of nb tokens: h at `h` (nb x dim f32,
     /// token major), each token's k ids (i32, rank order) at `ids` and
     /// weights (f32) at `w`; y (nb x dim f32, token major) at `y`. nb = 1:
-    /// the decode GEMV; more: the grouped twin GEMMs (refused below sm_80).
+    /// the decode GEMV; more: the grouped twin GEMMs (refused where
+    /// `twin_gemm_ok_for` refuses a type: the r8 types below sm_80, MXFP4
+    /// below sm_61).
     /// No sync, no allocation: capturable.
     ///
     /// # Safety

@@ -3693,7 +3693,11 @@ pub mod experts;
 /// `gemv_tw` takes a runtime type, so the host refuses the rest:
 /// `twin_type`). MXFP4 (gpt-oss) has twins of its own in oss.cu
 /// (`experts::Mats`, `moe_gemm_mx`, `moe_gemv_mx`), which `CudaExperts`
-/// dispatches to; no gpt-oss layer is placed yet (`place_resident`).
+/// dispatches to, in the oss module only (`mx_repack` is nowhere else).
+/// That is safe because the loader admits MXFP4 experts for gpt-oss alone
+/// (model.rs: `oss && EXPERT_TYPES`; deepseek2's `SUPPORTED_TYPES` has no
+/// MXFP4): another architecture's MXFP4 experts would need the oss module
+/// loaded for it first, or `mx_repack` isn't found.
 pub(crate) const TWIN_TYPES: [u32; 5] = [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4];
 
 /// Ok if weight type qt has a GPU twin.
@@ -3721,13 +3725,18 @@ pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
     }
 }
 
-/// `twin_gemm_ok` for the twins of weight type qt: MXFP4's batched kernel
-/// (`moe_gemm_mx`, oss.cu: dp4a, cp.async only where it exists) runs on
-/// sm_61+; the r8 types' need tensor cores (sm_80+).
+/// `twin_gemm_ok` for the twins of weight type qt: MXFP4's (`moe_gemm_mx`
+/// and the decode GEMV `moe_gemv_mx`, oss.cu: dp4a, cp.async only where it
+/// exists) run on sm_61+; the r8 types' batched kernels need tensor cores
+/// (sm_80+).
 pub(crate) fn twin_gemm_ok_for(cc: (u32, u32), qt: u32) -> Result<(), String> {
-    match qt == MXFP4 && cc >= (6, 1) {
-        true => Ok(()),
-        false => twin_gemm_ok(cc),
+    match (qt == MXFP4, cc >= (6, 1)) {
+        (true, true) => Ok(()),
+        (true, false) => Err(format!(
+            "MXFP4's twins need sm_61+ (dp4a); this GPU is sm_{}{}",
+            cc.0, cc.1
+        )),
+        (false, _) => twin_gemm_ok(cc),
     }
 }
 

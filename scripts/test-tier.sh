@@ -60,8 +60,11 @@ if [ "$tier" = fast ]; then
         echo "test-tier: no merge base with ${TIER_BASE:-origin/main}" >&2
         exit 2
     }
-    if { git -C "$root" diff --name-only "$base" && git -C "$root" ls-files --others --exclude-standard; } |
-        grep -qE '^src/cuda/([^/]+\.cu|mod\.rs|ffi\.rs)$'; then
+    # Listed first, then matched: `list | grep -q` under pipefail fails when grep quits at its first match
+    # and the writer dies of SIGPIPE (an untracked file listed after the match did that on bella: kernels
+    # changed, yet the NVRTC builds were skipped; #271's review).
+    changed=$(git -C "$root" diff --name-only "$base" && git -C "$root" ls-files --others --exclude-standard)
+    if grep -qE '^src/cuda/([^/]+\.cu|mod\.rs|ffi\.rs)$' <<<"$changed"; then
         kernels=1
     fi
     while read -r t; do

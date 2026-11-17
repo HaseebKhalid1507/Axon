@@ -10,15 +10,20 @@ measurements behind them.
 - **`--gpu-experts N|auto` now covers gpt-oss** (`--device cuda`; default 0, so nothing changes without it). The
   experts of N layers (auto: as many as fit after the context's cache) stay on the GPU and run the MXFP4 twins
   below, with the same bits as the CPU (decode == batched prefill == verify at every placement; the generated text
-  is one md5 across placements). On bella (RTX 5070 Ti Laptop, 12 GB), auto keeps 15 of 24 layers at ctx 32768
+  is one md5 across placements). On bella (RTX 5070 Ti Laptop, 12 GB), auto kept 15 of 24 layers at ctx 32768
   and 18 at ctx 8192: prompt ×1.8–2.4 / ×3.1–3.3 and decode ×1.7–1.9 / ×2.0–2.2 vs experts on the CPU. bella
   runs from a busy desktop, so the log marks these TAINTED; a clean rerun is pending.
+- **Placement plans the bytes the GPU holds.** `--gpu-experts` budgets each layer at its device size: gpt-oss's
+  MXFP4 rows in the twins' layout (1,536 bytes a row where the file has 1,530) plus its expert biases, 2.6 MiB a
+  layer more than the file's bytes. The upload repacks one expert at a time, so it stages about 4 MiB rather than
+  a whole 134 MiB tensor next to what is placed. A layer the GPU can't take is refused from its metadata before
+  anything is uploaded. Other MoE models plan and place as before.
 - **`AXON_MOE_PROFILE=1` covers prefill too.** Every batched pass of a model with experts on the CPU now prints
   the per-layer columns (GPU segment, copy down, CPU experts, copy up), the pass's wall time and the experts' share.
   Before, it printed decode steps only. Nothing changes without the variable.
 - **MXFP4 twins in the gpt-oss kernel module** (`moe_gemm_mx`, `moe_gemv_mx`, `moe_gu_mx`, `swiglu_oai`): gpt-oss's
-  experts on the GPU with the CPU's exact bits. Tested against the CPU at every batch size; 26.4 T MAC/s on an RTX
-  4090. The log has stage 0's measurements (llama.cpp's 4090 denominator: pp512 12,171; bella's PCIe and VRAM
+  experts on the GPU with the CPU's exact bits. Tested against the CPU at batch sizes 1, 7, 48, 129 and 1152;
+  26.4 T MAC/s on an RTX 4090. The log has stage 0's measurements (llama.cpp's 4090 denominator: pp512 12,171; bella's PCIe and VRAM
   rows) and the projected 4090 ratio (0.54×, derived).
 
 ### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)

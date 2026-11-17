@@ -29,9 +29,22 @@ fn net<'m, 'g>(
     MoeQwen3::new_with(g, km, mm, m, ctx, CacheKv::F16, false, true, want).unwrap()
 }
 
+/// The resident experts' device bytes are what placement planned with
+/// (spec R4): `LayerPlan`'s, layer by layer.
+fn assert_planned(net: &MoeQwen3, m: &Model, what: &str) -> usize {
+    let k = net.gpu.moe.expect("MoE").k;
+    let plan: usize = (net.resident_layers().iter())
+        .map(|&l| experts::LayerPlan::new(m, l, k).unwrap().bytes)
+        .sum();
+    let held = net.res.as_ref().map_or(0, |r| r.bytes());
+    assert_eq!(held, plan, "{what}: device bytes vs the plan");
+    held
+}
+
 /// The fixture: N(0), N(1), every layer and auto give the same logits bits,
 /// fed in odd passes and decoded, plus a greedy continuation; verify picks
-/// decode's argmax; the resident layers' host bytes are released.
+/// decode's argmax; the resident layers' host bytes are released; their
+/// device bytes are the plan's.
 #[test]
 fn oss_resident_fixture_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -63,6 +76,7 @@ fn oss_resident_fixture_bits() {
         };
         assert_eq!(r.len(), expect, "{want:?}: {d}");
         assert_released(&m, &r, &format!("{want:?}"));
+        assert_planned(&net, &m, &format!("{want:?}"));
         let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
         assert!(tr.iter().flatten().all(|v| v.is_finite()));
         check_verify(&net, &ids, &tr, &format!("oss fixture {want:?}"));
@@ -164,7 +178,10 @@ fn oss_resident_repack_and_fused() {
 /// The real model (AXON_TEST_GPTOSS), loaded afresh per placement: none,
 /// 6 layers, auto. Bits equal to N(0) over a ~120-token prompt fed in passes
 /// and decoded one by one, plus 24 generated tokens; verify picks decode's
-/// argmax; with every placement the contract.
+/// argmax; with every placement the contract. A layer's plan is 425,779,200
+/// device bytes (3 x 32 experts x 2,880 rows of 1,536 B in the twin layout,
+/// where the file has 1,530; plus 3 x 32 x 2,880 f32 biases) and stages one
+/// expert's 2,880 file rows (4,406,400 B); what's resident holds the plan.
 #[test]
 fn oss_resident_model_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -186,6 +203,8 @@ fn oss_resident_model_bits() {
     let mut base: Option<Vec<Vec<u32>>> = None;
     for want in [GpuExperts::N(0), GpuExperts::N(6), GpuExperts::Auto] {
         let m = crate::gguf::load(p).unwrap();
+        let plan = experts::LayerPlan::new(&m, 0, 4).unwrap();
+        assert_eq!((plan.bytes, plan.transient), (425_779_200, 4_406_400));
         let net = net(g, &km, &mm, &m, 1024, want);
         // (auto leaves one ctx-1024 cache + RESIDENT_HEADROOM: the test's
         // caches are smaller, at most two alive at once.)
@@ -196,6 +215,8 @@ fn oss_resident_model_bits() {
             GpuExperts::N(k) => assert_eq!(r.len(), k, "{want:?}: {d}"),
             GpuExperts::Auto => assert!(!r.is_empty(), "auto: {d}"),
         }
+        let held = assert_planned(&net, &m, &format!("gpt-oss {want:?}"));
+        assert_eq!(held, r.len() * 425_779_200, "{want:?}");
         let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
         check_verify(&net, &ids, &tr, &format!("gpt-oss {want:?}"));
         let b = bits(&tr);
