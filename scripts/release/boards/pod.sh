@@ -49,6 +49,8 @@ PC=${AXON_REL_CACHE:-$HOME/axon-node/cache/axon-rel01}
 mkdir -p "$PC/dl" || die "can't make $PC"
 get() {   # URL FILE SHA256: into $PC/dl, resumed, checked
   local t
+  # already here and checked (a run that stopped after its fetch): no second download
+  [ -f "$PC/dl/$2" ] && [ "$(sha256sum < "$PC/dl/$2" | cut -d' ' -f1)" = "$3" ] && return 0
   for t in 1 2 3; do
     curl -fsSL --retry 5 --connect-timeout 30 -C - -o "$PC/dl/$2" "$1" \
       && [ "$(sha256sum < "$PC/dl/$2" | cut -d' ' -f1)" = "$3" ] && return 0
@@ -77,18 +79,32 @@ setup() {   # once per pod (a marker per input set); under flock: two jobs never
     rm -rf "$PC/cuda-12.8.1"; mkdir -p "$PC/cuda-12.8.1/lib"
     for x in "$CU_RT" "$CU_BL"; do
       read -r f h <<< "$x"; get "$R/$f" "${f##*/}" "$h" || die "fetch ${f##*/}"
-      # only the runtime libraries, flat; regular files and same-dir symlinks only (tarfile, no xz binary needed)
+      # only the runtime libraries, flat; regular files, and symlinks to a runtime library in the same directory
+      # (relative; NVIDIA's archives write libcublas.so.12 -> ./libcublas.so.12.8.4.1, cudart's without the ./);
+      # absolute or escaping links refused (tarfile, no xz binary needed)
       python3 - "$PC/dl/${f##*/}" "$PC/cuda-12.8.1/lib" <<'PY' || die "unpack ${f##*/}"
 import os, re, sys, tarfile
 want = re.compile(r'^lib(cudart|cublas|cublasLt)\.so\.12(\.[0-9.]+)?$')
+
+
+def same_dir(link):
+    """The link's target if it names a runtime library in the link's own directory, else None."""
+    if not link or os.path.isabs(link):
+        return None
+    n = os.path.normpath(link)
+    return n if '/' not in n and n not in ('.', '..') and want.match(n) else None
+
+
 n = 0
 with tarfile.open(sys.argv[1]) as t:
     for m in t.getmembers():
         b = os.path.basename(m.name)
         if '/lib/' not in m.name or not want.match(b):
             continue
-        if not (m.isfile() or (m.issym() and '/' not in m.linkname and want.match(m.linkname))):
-            sys.exit(f'refused: {m.name}')
+        if m.issym() and same_dir(m.linkname):
+            m.linkname = same_dir(m.linkname)
+        elif not m.isfile():
+            sys.exit(f'refused: {m.name} (type {m.type!r}, link {m.linkname!r})')
         m.name = b
         t.extract(m, sys.argv[2], filter='data')
         n += 1
