@@ -9,13 +9,30 @@
 > is `1a1d751` plus docs and scripts. **Main has since merged #274** (`29fd8f8`, 2026-11-17: tool calls constrained by
 > default in `axon serve`, a `src/` change), so a tag on main's tip builds another `axon`. Two ways, the maintainer's
 > call:
-> - **Tag this PR's head** (its `src/` is `1a1d751`'s): the release is the measured binary, and #274 waits for the
->   next release. Before #270 merges, #274's CHANGELOG entry has to move back under `Unreleased`: merged as is, it
->   lands under `[0.1.0]`.
-> - **Tag main's tip after #270 merges:** 0.1.0 has #274. The board lines then say "measured on the candidate
->   `9f3630c`, not the release binary" (releasing.md, "The boards' binary"), and "What's new" gains #274. The boards
->   didn't exercise #274: their requests carry no tools, and #274 changes what a request with tools gets (and
->   nothing under `src/cuda/`) ([log](log/2026-11-14-release-0.1-prep.md#results)).
+>
+> - **Option 1: tag this PR's head** (its `src/` is `1a1d751`'s). The release is the measured binary; #274 waits for
+>   the next release. In this order:
+>   1. the date commit on this branch (the maintainer's list below, first item);
+>   2. tag it;
+>   3. merge #270 with a merge commit, not a squash or a rebase, so the tagged commit is in main's history;
+>   4. move #274's CHANGELOG entry back under `Unreleased`, in the merge (merged locally) or in the next commit on
+>      main. A merge as is puts it under `[0.1.0]`, silently: git merges the two without a conflict.
+>
+>   It can't be done the other way round: moving the entry before the merge means merging main into this branch,
+>   which brings in #274's `src/`. releasing.md's "main is green at the commit you tag" reads here as: green at
+>   `1a1d751` (CI, Nightly and the release dry run passed there), whose `src/` the tag carries.
+> - **Option 2: tag main's tip after #270 merges.** 0.1.0 then has #274, and this page needs four edits before the
+>   tag, because #274 makes constrained tool calls default-on, on Qwen3 too:
+>   1. the board lines say "measured on the candidate `9f3630c`, not the release binary" (releasing.md, "The
+>      boards' binary");
+>   2. "What it is": the constrained tool calls line says on by default in `axon serve`, on Qwen2.5 and Qwen3
+>      (`--no-constrain` or `AXON_CONSTRAIN=0` turns it off; #264, #274);
+>   3. "Known limits": constrained decoding covers Hermes tool calls on Qwen2.5 and Qwen3, on by default;
+>   4. CHANGELOG.md: #274's entry stays under `[0.1.0]` (where the merge puts it), and the section's intro says the
+>      release binary is main's tip, with #274, not `9f3630c`'s.
+>
+>   The boards didn't exercise #274: their requests carry no tools, and #274 changes what a request with tools gets
+>   (and nothing under `src/cuda/`) ([log](log/2026-11-14-release-0.1-prep.md#results)).
 
 ## In one sentence
 
@@ -130,8 +147,9 @@ boards on `9f3630c` are below them.
 - **The boards on `9f3630c`'s binary (`2c19415b…`), RunPod secure RTX 4090, 24 GB, driver 595.112.07
   (2026-11-17)**. Run with its kernel pack only (NVRTC refused) and the sm_89 cubins loaded; roadmap week 1, item 7.
   The rules were written down before any board ran ([log](log/2026-11-14-release-0.1-prep.md): the protocol,
-  amendments 2 and 3, every table). The boards moved off bella before any board there gave a valid result, because
-  its desktop's GPU load tainted the runs; that data was set aside unread. No run on the pod was tainted.
+  amendments 2 and 3, every table, and every job's log). The boards moved off bella before any board there gave a
+  valid result, because its desktop's GPU load tainted the runs. That data was set aside: not read under the rule,
+  though its sweep numbers were seen (amendment 2; the log compares them with these). No run on the pod was tainted.
   - *Single stream* (job `1117-122831-e30e`): axon vs llama-bench, upstream's official build of llama.cpp master
     (b12387, 2026-11-14) and `4413a19` (the weekly pod board's sm_89 build). The protocol is the weekly pod board's,
     with the run order rotated by round. Each cell is read against the faster build at its best ubatch (`-ub 512` or
@@ -149,10 +167,13 @@ boards on `9f3630c` are below them.
       each). The pick, the lowest turn TTFT p50, was b12387 with `--no-cache-idle-slots -ub 2048`: 0.133 s. At the
       board's defaults it was 0.951 s (`4413a19`) and 1.01 s (b12387).
     - **The board:** axon vs that pick, 3 rounds, every run clean, the engine order alternating. **Axon leads on turn
-      TTFT by R = 2.35×** (median turn TTFT p50 0.06 vs 0.141 s; the rounds' ratios 2.09–2.35). ITL p99 10.79 vs
-      13.91 ms (medians).
-    - **llama-server's KV:** it ran with 262,144 KV tokens, not 338,432. With `-ub 2048` its compute buffer didn't
-      fit beside the full budget on 24 GB, and the board's start rule cut the budget by 15 %.
+      TTFT by R = 2.35×**: the ratio of the medians, as the rule was written (turn TTFT p50 0.06 vs 0.141 s). The
+      rounds' ratios were 2.09, 2.20 and 2.35 (median 2.20); both medians fall in the third round, which ran on a
+      second pod instance, so R is that round's ratio, the highest. ITL p99 10.79 vs 13.91 ms (medians).
+    - **llama-server's KV: 8 slots instead of 10** (262,144 tokens; −20 % against the 327,680 of the board's defaults).
+      With `-ub 2048` its compute buffer didn't fit beside 10 slots' KV on 24 GB, and the board's start rule cut the
+      budget by 15 %, which leaves 8; 9 would likely have fit. The cut doesn't carry R: in the sweep, the two
+      no-idle-slot arms with 10 slots weren't faster (0.145 and 0.137 s vs 0.133 s).
     - **At 4× speed** (reported, not read; it overloads both): R = 2.66×, ITL p99 79.12 vs 541.6 ms.
     - **Against 10-27's 8.7× (llama-server at its defaults):** the defaults save and clear every idle slot. In the
       sweep, turning that off alone (`--no-cache-idle-slots`) took llama-server from 1.01 to 0.145 s.

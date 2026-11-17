@@ -20,19 +20,22 @@ For the four weeks from 2026-11-12: **the best local backend for coding agents (
 Linux then Windows, installed with one command on a machine with only the GPU driver.**
 
 Why this target (MEASURED unless marked):
-- Agent traffic is Axon's one clear edge, on one replay: bella, Qwen2.5-7B f16, against llama-server: turn TTFT p50
-  0.122 vs 1.06 s, ITL p99 119 vs 611 ms ([log](log/2026-10-27-agent-replay.md); the trace scaled to 0.15× and clipped
-  at 32k, llama-server set up by Axon's side, and it re-prefilled less: 1.9 vs 10.3 %). With the RAM tier an evicted
-  25k session resumes in 0.141 s vs a 2.713 s re-prefill (#201, RTX 4090); shared pages: eight subagents' TTFT 0.591× (#211).
-  On the release candidate (RTX 4090, 11-17), against llama-server's best of seven configurations: R = 2.35× on turn
-  TTFT ([release-0.1.md](release-0.1.md#numbers-honestly)).
-- Single stream is parity, not a lead: 7B decode 186 vs 181 tok/s and prefill 1.13× llama.cpp on a 4090 (10-18,
+- Agent traffic is Axon's one clear edge: **2.35× on turn TTFT** (p50 0.06 vs 0.141 s; ITL p99 10.79 vs 13.91 ms)
+  against llama-server's best of seven configurations, on the release candidate's binary (RunPod RTX 4090,
+  Qwen2.5-7B f16, the agent replay's trace, 11-17; [release-0.1.md](release-0.1.md#numbers-honestly)). That R is the
+  ratio of the medians, as pre-registered; the rounds' ratios were 2.09–2.35 (median 2.20), the highest from the
+  third round, on a second pod instance. The 10-27 replay's 8.7× (bella, 0.122 vs 1.06 s) was mostly llama-server's
+  default of saving and clearing idle slots ([log](log/2026-10-27-agent-replay.md)). With the RAM tier an evicted 25k
+  session resumes in 0.141 s vs a 2.713 s re-prefill (#201, RTX 4090); shared pages: eight subagents' TTFT 0.591×
+  (#211).
+- Single stream was parity on 10-18 (7B decode 186 vs 181 tok/s, +3 %; prefill 1.13× llama.cpp; RTX 4090,
   [results.md](results.md)). On the release candidate (RTX 4090, 11-17): ahead in all 15 cells, decode still thin
   (7B +2.4 %, Qwen3 8B +2.8 %).
 - Between that and a user: no release binary and NVRTC from a CUDA toolkit for the GPU, both closed since (#227,
   #230: v0.1.0, pending tag, needs only the driver); gpt-oss-20b prefills at 0.27× llama.cpp (265 vs 995 tok/s, bella,
-  #98); no constrained JSON (`response_format` is a 400, #116; tool calls opt-in, #264); paged KV, the RAM tier and
-  sharing are off for MoE ([serving.md](serving.md)).
+  #98); no constrained JSON (`response_format` is a 400, #116; Hermes tool calls are held to the offered tools: #264
+  opt-in, on by default since #274, after 0.1.0's candidate); paged KV, the RAM tier and sharing are off for MoE
+  ([serving.md](serving.md)).
 
 ## Shelved for now
 
