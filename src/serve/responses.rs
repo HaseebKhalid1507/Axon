@@ -17,7 +17,8 @@
 //!   (`reasoning_content`, `content`, `tool_calls`), which is what this
 //!   module answers with, in that order, so a reply sent back as input
 //!   renders as the chat-completions history would.
-//! - `function_call_output` is a `tool` message.
+//! - `function_call_output` is a `tool` message: the call it answers is its
+//!   `call_id`, else it needs a `name` (codex's own items, its goal: #273).
 //!
 //! Tools: `function` tools become chat tools (`{"type": "function",
 //! "function": {name, description, parameters, strict}}`). Other tool types
