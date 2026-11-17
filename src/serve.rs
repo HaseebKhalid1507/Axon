@@ -4020,7 +4020,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 o.parallel = whole(true);
                 o.parallel_set = true;
             }
-            _ => k = Some(whole(false)),
+            "--draft" => k = Some(whole(false)),
+            // The guard above let only VALUE_FLAGS through: a flag added
+            // there needs its arm here (it is not --draft by default).
+            _ => unreachable!("{f} is in VALUE_FLAGS with no value arm"),
         }
         i += 2;
     }

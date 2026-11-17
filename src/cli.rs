@@ -113,7 +113,8 @@ flags:
               ollama does; serve: for the requests that don't set enable_thinking)
   --think-inline  serve: leave the reply's <think> block in `content` (default: the reasoning
               comes apart, as `reasoning_content`)
-  --quiet     serve: no per-request line on stderr
+  --quiet     serve: no startup banner, notes or per-request lines on stderr; warnings still
+              print
   --ctx N     chat, serve, gen: the context in tokens, which means something different in each.
               chat: the conversation's (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
@@ -123,8 +124,8 @@ flags:
               context if the whole model fits on the GPU(s) with it, else the longest that does
               if at least 4096; on the CPU, as much of it as fits in free RAM, at least 8192; a
               CPU/GPU split, at most 8192; a shorter one is said on stderr); an explicit N is
-              never shortened. With paged KV (the default) it is a slot's cap, not memory set
-              aside for it: the slots share one pool of pages (--parallel);
+              never shortened. With paged KV (the GPU's default) it is a slot's cap, not memory
+              set aside for it: the slots share one pool of pages (--parallel);
               gen: place the model and size its cache for N tokens, as chat would (default: the
               prompt and -n), to see a long context's speed (it may split the model)
   --forget-to F  chat: when the conversation outgrows --ctx, forget the oldest exchanges until
@@ -275,7 +276,7 @@ models (docs/models.md):
         model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
         the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted
         at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+;
-        experimental, parked: docs/models.md)";
+        experimental, parked: docs/roadmap.md)";
 
 /// `axon --help`'s text (`axon serve --help` prints it too).
 pub(crate) fn help() -> String {
@@ -2162,9 +2163,12 @@ mod tests {
             let Some((_, text)) = e else {
                 panic!("--help has no entry for serve's {f}");
             };
+            // Its label: the commands before the first ':' ("chat, serve:"),
+            // not "server" somewhere in the text.
+            let label = text.split(':').next().unwrap();
             assert!(
-                text.contains("serve"),
-                "{f}'s entry doesn't say serve: {text}"
+                label.split([' ', ',']).any(|w| w == "serve"),
+                "{f}'s entry isn't labelled serve: {text}"
             );
         }
         let flat = usage.split_whitespace().collect::<Vec<_>>().join(" ");

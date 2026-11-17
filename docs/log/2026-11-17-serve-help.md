@@ -25,17 +25,27 @@
 - **Item 5, `--ctx`:** it now opens "chat, serve, gen: the context in tokens, which means something different in each",
   then one clause each:
   - chat: the conversation's;
-  - serve: each request's, the most one slot holds. With paged KV (the default) it is a slot's cap, not memory set
-    aside, and the slots share one pool of pages;
+  - serve: each request's, the most one slot holds. With paged KV (the GPU's default) it is a slot's cap, not memory
+    set aside, and the slots share one pool of pages;
   - gen: as before.
 - **Items 3 and 4, the footer:** deepseek2 "MLA GGUFs" (legacy non-MLA V2 files are refused: docs/models.md). Native FP8
-  with `--numerics fast` "experimental, parked: docs/models.md".
+  with `--numerics fast` "experimental, parked: docs/roadmap.md" (roadmap.md says parked; models.md says it fails its
+  bars on bella).
+- `--quiet`'s entry and docs/serving.md say what it hides: the startup banner, its notes (api key, `--datacenter`) and
+  the per-request lines. Warnings (no paged pool, one request at a time, constrained tool calls off) still print.
 - The serve synopsis in `--help` gains `[rope flags]`. serve takes them; the rope entry already says so.
 - **For the test, no behaviour change:**
   - `serve::run`'s parser reads its switches and value flags from two consts, `SWITCHES` and `VALUE_FLAGS`: the same 4
     and 25 flags, in the same order, as match guards instead of literal arms.
   - `SampleArgs::is_flag` reads `sample::FLAGS` (the same 7).
   - `OLD_FLAGS` (`--prefill-ms`) is `cfg(test)`.
+- **The value match has no default arm** (shady's SHOULD): `--draft` has its own arm, and a flag in `VALUE_FLAGS`
+  with no arm is `unreachable!`. On main the last arm was `_ => --draft`, so a value flag added to the list without an
+  arm would silently set the draft length. No test drives each value flag through `run` (it loads a model), so the
+  panic is the guard; with the help test, a flag added to the list needs an entry and an arm.
+- `serve_help_lists_every_flag` checks each entry's label, the text before its first `:` ("gen, chat, serve"), for
+  the word `serve`, where it checked the whole entry ("server" matched).
+- CHANGELOG entry.
 
 ## Why
 #252, from shady's review of #225. A help that exits 2 is a usage error to every script and wrapper that probes it. A

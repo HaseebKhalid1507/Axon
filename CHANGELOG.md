@@ -6,6 +6,16 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `axon serve --help` exits 0, and serve's help states every flag it takes (#280, closes #252)
+- **`axon serve -h` / `--help` prints the help and exits 0** wherever it is among serve's arguments, before the model
+  is resolved, so a name that isn't pulled yet doesn't stop it. It was a usage error (exit 2).
+- **serve's usage line and `--help` are current.** The usage line drops `--prefill-ms` (still taken, as `--step-ms`'s
+  old name) and names the scheduling and rope flags. `--help` gains entries for nine serve flags it didn't list
+  (`--host`, `--port`, `--alias`, `--max-tokens`, `--cors`, `--max-conns`, `--max-queue`, `--think-inline`,
+  `--quiet`) and for `AXON_SHARE_KV` and `AXON_KV_RAM_ALLOC`. `--ctx` says what it means for chat, serve and gen,
+  and the model list says deepseek2 needs MLA GGUFs and native FP8 is experimental and parked. A test fails when a
+  flag in serve's parser lists has no entry, or the help names one serve doesn't take.
+
 ### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)
 - **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages
   off, `1` on (under fast kernels too), unset or empty is the default (on; off under fast kernels). Any other
