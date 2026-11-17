@@ -6,6 +6,12 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `/v1/responses`: codex's goal item is a tool message, not a 400 (#278, closes #273)
+- **A `function_call_output` item with no `call_id` but a non-empty `name` is accepted** as a tool message with no
+  `tool_call_id`. codex 0.169 sends one of its own after the model calls its `create_goal` tool (`"name":
+  "goal_objective"`, no `call_id`), and Axon answered it 400, which ended codex's turn. An item with neither is still
+  a 400, whose message now names both fields; an item with a `call_id` is read exactly as before.
+
 ### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)
 - **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages
   off, `1` on (under fast kernels too), unset or empty is the default (on; off under fast kernels). Any other

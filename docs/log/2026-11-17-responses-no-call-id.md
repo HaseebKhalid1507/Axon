@@ -54,8 +54,9 @@ changed `responses.rs`, and the e2e script had the bug the review found (below).
 | targeted, debug-assertion build at c559c64: `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
 | release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | 1117-100032-edd3, -14b5, -1565 (group 9c4a) |
 | debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-100307-343e, -26e6, -d5bb (group 1ec3) |
-| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PENDING | 1117-100614-67b4 |
-| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, with codex's wire request (jade, CPU, 3 models) | PENDING | submitted when the wire check is done (gatewatch `eval-43efbb3-e2e`) |
+| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PASS (before the version pin): request 2 carries `name` `goal_objective` and no `call_id` | 1117-100614-67b4 |
+| the same, with codex's version pinned to 0.169.0 (shady's 9/10 round); its capture is what W1 replays | PENDING | 1117-104504-ed9d |
+| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-43efbb3-e2e`) |
 | mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | 1117-101610-fcdd |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
 
@@ -83,10 +84,11 @@ call, its output, then the goal item.
 
 **Codex over the wire** (`codex_wire.py` / `codex_wire.sh`; the review's SHOULD 3). The unit test's item comes from
 codex's rollout, which is codex's own serialization, not the request body. So `codex exec` (0.169.0, bella's, the
-version of the runs) runs a write-tests prompt against a stub Responses server. The stub answers the first request
-that offers `create_goal` with a call to it, and every later request with "Done.". The check passes if a later
-request carries a `function_call_output` with a non-empty `name` and no `call_id`. That request is kept as it went
-over the wire and replayed in the e2e (W1). No model, no GPU.
+version of the runs; any other version is WIRE FAIL) runs a write-tests prompt against a stub Responses server. The stub answers the first request
+that offers `create_goal` with a call to it, and every later request with "Done.". The check passes if a saved
+request carries a `function_call_output` with a non-empty `name` and no `call_id` (only codex can send one: the stub's
+replies never hold one). That request is kept as it went over the wire (`goal-request.json`) and replayed in the e2e
+(W1). No model, no GPU.
 
 **e2e differential** (`resp_e2e.py` / `resp_e2e.sh`, in the eval scratch dir; sha256 in the PR body). It starts
 `axon serve` from main 1a1d751 and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
@@ -103,8 +105,15 @@ requests, 40 tokens:
   calls.
 - **B4.** The goal stored (`store: true`), then continued by `previous_response_id`: 200 twice on the candidate.
 - **C.** The goal item without its `name` is a 400 on both.
-- **W1, codex's wire request** (from the wire check), on Qwen2.5-0.5B only, with only `stream` turned off and
-  `max_output_tokens` set to 16. Main must answer 400, naming `call_id`, and the candidate 200.
+- **W1, codex's wire request** (from the wire check), on Qwen2.5-0.5B only. W1 sends `goal-request.json`'s bytes
+  with two values spliced in: `stream` `true` becomes `false` in place, and `"max_output_tokens":16,` goes after the
+  opening brace. Every other byte is codex's, and the script asserts the result parses to the file's request with just
+  those two fields changed. (Until shady's 9/10 round it re-serialized the parsed request: the same request, but not
+  codex's bytes.) Main must answer 400, naming `call_id`, and the candidate 200.
+- **W1 is required.** `resp_e2e.py` exits 2 without `--wire`, and its last line says whether W1 ran: `RESP-E2E PASS
+  (0 failures, W1 OK)`, else FAIL with `W1 FAIL` or `W1 NOT RUN`. `resp_e2e.sh` refuses to start without the request,
+  and `after_wire.sh` submits the e2e only after a WIRE PASS, with an `--expect` that needs `W1 OK`. Before, a failed
+  wire check meant an e2e without W1 that could still read PASS.
 
 **Mutants** (sources at bella `~/.cache/axon-eval/mut/M*.rs`, each a copy of 43efbb3's `responses.rs` with one hunk
 changed; release test builds, `serve::responses::`):
@@ -127,6 +136,13 @@ shady 8/10 SHIP-AFTER-FIXES on 16a5d7a ([comment 6951583424](https://github.com/
 - **SHOULD 2, fixed.** A null `call_id` with a name is now tested; it kills the mutant without `| Some(J::Null)` (M5).
 - **SHOULD 3, done.** Codex over the wire, above.
 - **NITs.** No `tool_call_id` (above); the stored-goal continuation (B4); the mutants published (above).
+
+shady 9/10 SHIP on 2349d37 ([comment 6952843291](https://github.com/HaseebKhalid1507/Axon/pull/278#issuecomment-6952843291)),
+scripts and docs only, the code still 43efbb3 (its queued suites and mutants kept):
+- **SHOULD, fixed.** The e2e gate needs W1 (above). 1117-103536-0b4d, submitted with W1 but by the old scripts, was
+  dropped while queued.
+- **NITs.** W1 sends codex's bytes (above). `codex_wire.py` pins codex 0.169.0, so the wire check runs again (ed9d),
+  and its docstring says it scans every request. CHANGELOG entry.
 
 ## Results
 PENDING: the gates above (gatewatch `eval-43efbb3-gates`). Not a
