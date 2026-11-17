@@ -1,0 +1,86 @@
+[axon-run 07:31:29] submitted 1117-073129-903c by /home/haseeb/.cache/axon-cbtrace-jobs: /usr/bin/bash tracerun.sh ./axon-trace2 qwen2.5-1.5b-instruct-q4_k_m.gguf ./bodies-a2.jsonl /home/haseeb/axon-node/cache/cbtrace/15b-req2 ./traceclient.py --device cuda --tool-choice required
+[axon-run 07:31:32] job 1117-073129-903c -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 2600 --src /home/haseeb/.cache/axon-podjob/tracerun-f5e1c7a77f6d /usr/bin/bash tracerun.sh ./axon-trace2 qwen2.5-1.5b-instruct-q4_k_m.gguf ./bodies-a2.jsonl /home/haseeb/axon-node/cache/cbtrace/15b-req2 ./traceclient.py --device cuda --tool-choice required
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (d277587df2a1c4f414176544) + source of /home/haseeb/.cache/axon-podjob/tracerun-f5e1c7a77f6d
+
+sent 4,060,032 bytes  received 152 bytes  2,706,789.33 bytes/sec
+total size is 14,383,175  speedup is 3.54
+
+sent 168 bytes  received 35 bytes  81.20 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-073142-bash-1210523 on jade (GPU, 2600 MB)
+[axon-node 07:31:43] GPU lock taken; job wants 2600 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 54
+[axon-node 07:31:43] run bash (d277587df2a1c4f414176544) as /home/haseeb/.cache/axon-podjob/tracerun-f5e1c7a77f6d on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 07:31:43] memory cap (scope MemoryMax) 2866 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 07:31:43] MemAvailable 4412 MB, load ['4.71', '5.56', '4.25']; nice -n 19 ionice -c3 taskset -c 0-7
+8
+               total        used        free      shared  buff/cache   available
+Mem:               7           3           1           0           3           4
+ARGV ./axon-trace2 serve models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device cuda --host 127.0.0.1 --port 47375 --ctx 16384 --alias qwen2.5-7b --temp 0.7 --top-k 20 --top-p 0.8 --min-p 0.0 --repeat-penalty 1.0
+UP after 31.5s
+REQ   1/129 prb-r1-write-tests-t04                   200   99.3s finish tool_calls tc 1
+REQ   2/129 prb-r1-write-tests-t05                   200   29.8s finish tool_calls tc 1
+REQ   3/129 prb-r1-write-tests-t06                   200   30.9s finish tool_calls tc 1
+REQ   4/129 prb-r2-answer-t00                        200    3.7s finish tool_calls tc 1
+REQ   5/129 prb-r2-answer-t01                        200   10.0s finish tool_calls tc 2
+REQ   6/129 prb-r2-answer-t02                        200   11.6s finish tool_calls tc 1
+REQ   7/129 prb-r2-cli-bug-t00                       200    3.2s finish tool_calls tc 1
+REQ   8/129 prb-r2-cli-bug-t01                       200   10.0s finish tool_calls tc 1
+REQ   9/129 prb-r2-cli-bug-t02                       200   11.7s finish tool_calls tc 1
+REQ  10/129 prb-r2-cli-bug-t03                       200    8.0s finish tool_calls tc 1
+REQ  11/129 prb-r2-cli-bug-t04                       200    5.1s finish tool_calls tc 1
+REQ  12/129 prb-r2-cli-bug-t05                       200    7.3s finish tool_calls tc 1
+REQ  13/129 prb-r2-cli-bug-t06                       200   12.3s finish tool_calls tc 1
+REQ  14/129 prb-r2-cli-bug-t07                       200   12.0s finish tool_calls tc 1
+REQ  15/129 prb-r2-cli-bug-t08                       200   12.8s finish tool_calls tc 1
+REQ  16/129 prb-r2-cli-bug-t09                       200   11.2s finish tool_calls tc 1
+REQ  17/129 prb-r2-cli-bug-t10                       200   11.6s finish tool_calls tc 1
+REQ  18/129 prb-r2-cli-bug-t11                       200   14.8s finish tool_calls tc 2
+REQ  19/129 prb-r2-cli-bug-t12                       200   12.7s finish tool_calls tc 1
+REQ  20/129 prb-r2-cli-bug-t13                       200   12.9s finish tool_calls tc 1
+REQ  21/129 prb-r2-cli-bug-t14                       200   11.8s finish tool_calls tc 1
+REQ  22/129 prb-r2-cli-bug-t15                       200   11.9s finish tool_calls tc 1
+REQ  23/129 prb-r2-cli-bug-t16                       200   15.3s finish tool_calls tc 2
+REQ  24/129 prb-r2-cli-bug-t17                       200   12.2s finish tool_calls tc 1
+REQ  25/129 prb-r2-cli-bug-t18                       200   11.6s finish tool_calls tc 1
+REQ  26/129 prb-r2-cli-bug-t19                       200   11.8s finish tool_calls tc 1
+REQ  27/129 prb-r2-pyproject-t00                     200    7.5s finish tool_calls tc 1
+REQ  28/129 prb-r2-typehints-t00                     200    8.9s finish tool_calls tc 4
+REQ  29/129 prb-r2-typehints-t01                     200    4.8s finish tool_calls tc 1
+REQ  30/129 prb-r2-typehints-t02                     200   24.1s finish tool_calls tc 1
+REQ  31/129 prb-r2-typehints-t03                     200   19.4s finish tool_calls tc 2
+REQ  32/129 prb-r2-typehints-t04                     200    6.5s finish tool_calls tc 1
+REQ  33/129 prb-r2-typehints-t05                     200    4.7s finish tool_calls tc 1
+REQ  34/129 prb-r2-typehints-t06                     200    4.9s finish tool_calls tc 1
+REQ  35/129 prb-r2-typehints-t07                     200    3.3s finish tool_calls tc 1
+REQ  36/129 prb-r2-typehints-t08                     200    3.1s finish tool_calls tc 1
+REQ  37/129 prb-r2-typehints-t09                     200   17.0s finish tool_calls tc 1
+REQ  38/129 prb-r2-typehints-t10                     200   17.1s finish tool_calls tc 1
+REQ  39/129 prb-r2-typehints-t11                     200    3.0s finish tool_calls tc 1
+REQ  40/129 prb-r2-typehints-t12                     200    7.7s finish tool_calls tc 1
+REQ  41/129 prb-r2-typehints-t13                     200    4.6s finish tool_calls tc 1
+REQ  42/129 prb-r2-typehints-t14                     200   20.7s finish tool_calls tc 2
+REQ  43/129 prb-r2-typehints-t15                     200   46.2s finish length tc 1
+REQ  44/129 prb-r2-typehints-t16                     200    3.8s finish tool_calls tc 1
+REQ  45/129 prb-r2-typehints-t17                     200   18.0s finish tool_calls tc 1
+REQ  46/129 prb-r2-typehints-t18                     200    3.7s finish tool_calls tc 1
+REQ  47/129 off-r1-align-t00                         200   34.7s finish length tc 1
+REQ  48/129 off-r1-align-t01                         200    5.6s finish tool_calls tc 1
+REQ  49/129 off-r1-bugfix-t00                        200    2.1s finish tool_calls tc 1
+REQ  50/129 off-r1-bugfix-t01                        200    9.9s finish tool_calls tc 1
+REQ  51/129 off-r1-cli-bug-t00                       200    3.3s finish tool_calls tc 1
+REQ  52/129 off-r1-cli-bug-t01                       200   10.7s finish tool_calls tc 1
+REQ  53/129 off-r1-delete-cmd-t00                    200    6.6s finish tool_calls tc 1
+REQ  54/129 off-r1-delete-cmd-t01                    200   11.3s finish tool_calls tc 1
+REQ  55/129 off-r1-exception-t00                     200    8.6s finish tool_calls tc 1
+REQ  56/129 off-r1-exception-t01                     200   10.7s finish tool_calls tc 1
+REQ  57/129 off-r1-feature-csv-t00                   200   33.1s finish tool_calls tc 5
+REQ  58/129 off-r1-feature-csv-t01                   200   22.5s finish tool_calls tc 1
+REQ  59/129 off-r1-filter-resume-t00                 200    2.1s finish tool_calls tc 1
+REQ  60/129 off-r1-filter-resume-t01                 200   21.4s finish tool_calls tc 2
+REQ  61/129 off-r1-pyproject-t00                     200    7.7s finish tool_calls tc 1
+REQ  62/129 off-r1-rename-t00                        200   36.6s finish length tc 1
+[axon-run 07:47:05] signal 15: stopping the job
+
+axon-remote: signal 15, killing remote job 20261117-073142-bash-1210523
+[axon-run 07:47:10] exit 130 after 938.8s (host jade)

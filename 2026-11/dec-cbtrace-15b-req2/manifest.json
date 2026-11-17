@@ -1,0 +1,29 @@
+{
+ "label": "dec-cbtrace-15b-req2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1117-073129-903c",
+   "name": "cbtrace-15b-gpu-req2",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "NVIDIA GeForce GTX 1050",
+   "driver": "580.159.04",
+   "sha": null,
+   "binary": "bash",
+   "started": 1794918689.7088795,
+   "ended": 1794919633.4921148,
+   "attempts": 1,
+   "remote_job": "20261117-073142-bash-1210523",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ea3d2e1116d9ac64d6966c016e8d9f48cf6110adb8eca8b272166c65c9dc3b46",
+   "log_bytes": 7600
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 07:47:15 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
