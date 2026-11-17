@@ -24,15 +24,18 @@ measurements behind them.
   llama.cpp's rule outside the runaways. An array's items are any values, as in JSON (Fable's review dropped a
   lock to the first item's kind, which rewrote real arguments such as `[["Alice", 30]]` without a trace), and a
   rule that cut a call of at most 8 distinct tokens over 1,024 is gone too (it cut 400 dice rolls).
-- **A call the stall rule closes is not delivered as a call.** The reply ends where it stalled and the call is left
-  cut off, so the server returns it as it returns any call cut off mid-arguments (`max_tokens` without the
-  constraint): with calls streamed (the default) a call whose `arguments` aren't JSON (`axon_tool_calls_invalid_total`,
-  `finish_reason` `tool_calls`), decided whole (`AXON_TOOL_STREAM=0`, ollama) content (`axon_tool_calls_dropped_total`).
-  The harness rejects it and tells the model, and nothing is written. Until the lead's ruling of 11-17 the rule closed
-  the call the shortest way, a well-formed call that a harness applied: in a pi run a model dropped a string's
-  closing quote, wrote on inside the string until the rule fired, and the closed `edit` wrote that text into the
-  file; each next turn copied it and stalled again. Data that repeats one block 8 times or more can trip
-  it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines or a 32×32
+- **A call the stall rule stops ends its reply cut off, as `max_tokens` cuts one.** The reply ends where it stalled,
+  the call left cut off unclosed, and the server returns it as main returns a call `max_tokens` cut off
+  mid-arguments: `finish_reason` `length` (`/v1/responses`: `incomplete`, the call's item too; ollama: `done_reason`
+  `length`); with calls streamed (the default) a call whose `arguments` aren't JSON (`axon_tool_calls_invalid_total`),
+  decided whole (`AXON_TOOL_STREAM=0`, ollama) content (`axon_tool_calls_dropped_total`). A client that parses
+  arguments strictly can't run it, and pi refuses a call in a reply that ended `length`; pi repairs and runs a cut-off
+  call otherwise, so the finish says `length` (Fable's review). codex ends its turn on an `incomplete` response. A
+  client that repairs cut-off JSON and ignores `length` would still run it: `AXON_TOOL_STREAM=0` for it. Until the
+  lead's ruling of 11-17 the rule closed the call the shortest way, a well-formed call that a harness applied: in a pi
+  run a model dropped a string's closing quote, wrote on inside the string until the rule fired, and the closed
+  `edit` wrote that text into the file; each next turn copied it and stalled again. Data that fills 2,048 tokens with
+  one repeated block (8 or more times over for a 256-token block) can trip it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines or a 32×32
   matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a line on
   stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block of P
   tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the rule off

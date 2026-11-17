@@ -578,9 +578,9 @@ impl Metrics {
             &mut o,
             "axon_constraint_stalls_total",
             "Constrained tool calls that stalled (2048 tokens repeating one block): the reply \
-             ended there, the call cut off unclosed, returned as a call cut mid-arguments (counted \
-             in axon_tool_calls_invalid_total or _dropped_total, never a usable call); each also a \
-             line on stderr.",
+             ended there with finish length, the call cut off unclosed as max_tokens cuts one \
+             (its arguments not JSON: counted in axon_tool_calls_invalid_total, or \
+             _dropped_total with calls decided whole); each also a line on stderr.",
             k.stalls.load(Ordering::Relaxed),
         );
         counter(

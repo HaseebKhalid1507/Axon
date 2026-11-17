@@ -1858,7 +1858,7 @@ fn stalled_call_closes() {
     for _ in 0..3 * LOOP_WINDOW {
         assert!(c.accept(tok("\\n")));
     }
-    assert!(c.engaged() && !c.stalled() && c.stall().is_none());
+    assert!(c.engaged() && !c.stalled() && c.stall().is_none() && !c.cut());
     assert_eq!(off.counters.stalls.load(Relaxed), 0);
     assert!(c.mask().unwrap().unwrap().allows(tok("\\n")));
 }
@@ -1991,14 +1991,19 @@ fn stalled_reply_ends() {
         );
         assert!(st.period == 1 && st.window == LOOP_WINDOW, "{st:?}");
         assert_eq!(st.after, head.len() + taken);
+        // Cut (the reply ends, finish `length`) only with end tokens.
+        assert_eq!((st.cut, c.cut(), d.cut()), (with_end, with_end, with_end));
         let line = st.to_string();
+        let then = match with_end {
+            true => "the reply ends there, finish `length`, the call cut off unclosed",
+            false => "the call is closed the shortest way",
+        };
         assert!(
             line.contains(&format!("after {} tokens", st.after))
                 && line.contains(&format!(
                     "its last {LOOP_WINDOW} repeat one block of 1 token)"
                 ))
-                && line.contains("the reply ends there")
-                && line.contains("isn't delivered as a usable call")
+                && line.contains(then)
                 && line.contains("AXON_CONSTRAIN_STALL=0"),
             "{line}"
         );

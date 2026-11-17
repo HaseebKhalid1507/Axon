@@ -205,7 +205,8 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_constraint_fallback_total` (held positions decided on the whole logits row, the device's candidates
   holding too few allowed tokens), `axon_constraint_trigger_rejected_total` (a `<tool_call>` written out in a
   token that goes on with text no call starts with: left free), `axon_constraint_stalls_total` (held calls
-  that stalled: the reply ended there, the call cut off and counted as invalid or dropped, each also a stderr line),
+  that stalled: the reply ended there with finish `length`, the call cut off and counted as invalid or dropped,
+  each also a stderr line),
   `axon_constraint_unheld_total` (tools requests left unconstrained: the grammar couldn't hold their tools'
   names or the call their prompt opened; each reason also a stderr line, once),
   `axon_constraint_mask_cache_clears_total` and the gauge `axon_constraint_mask_cache_peak_entries` (how full
@@ -389,30 +390,40 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   were runaways that hit `max_tokens`):
   - **Whitespace** outside strings is one space, or one or two newlines and at most 20
     spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
-  - **A call the stall rule closes is not delivered as a call.** When the last 2,048 tokens
-    of a call repeat one block of at most 256 tokens (`false, false, ...`, a string of
-    `\n\n\n...`, `--exclude=*.pyc --exclude=*.pyc ...`, a list in a loop, a 72-token block of
-    code 53 times), the reply ends right there (only its stop token is allowed), so a model
-    in a loop can't open the next call and stall again. The call is left as written, cut
-    off, and goes where any call cut off mid-arguments goes (`max_tokens` without the
-    constraint): with calls streamed (the default) it is a call whose `arguments` aren't
-    JSON (`axon_tool_calls_invalid_total`, `finish_reason` `tool_calls`); decided whole
-    (`AXON_TOOL_STREAM=0`, ollama's API) its block is content (`axon_tool_calls_dropped_total`).
-    The harness rejects it and tells the model, which can retry; nothing is written. Until
-    the lead's ruling of 11-17 the call was closed the shortest way, a well-formed call that
-    harnesses applied: a pi run's model dropped a string's closing quote (`rows)}]}}` for
-    `rows)"}]}}`), so it wrote on inside the string, where neither a newline nor
-    `</tool_call>` is allowed, for 2,100 tokens until the rule fired; the closed `edit` wrote
-    them into the file, and each next turn copied them and stalled again. Each stall is a
-    line on stderr, whatever the log level (`axon serve: #12: a held tool call stalled after
-    2077 tokens (its last 2048 repeat one block of 72 tokens): the reply ends there, the call
-    cut off unclosed, so it isn't delivered as a usable call (its arguments aren't JSON, as a
-    call cut off by max_tokens; AXON_CONSTRAIN_STALL=0 turns this off)`), and counts in
+  - **A call the stall rule stops ends its reply cut off, as `max_tokens` cuts one.** When
+    the last 2,048 tokens of a call repeat one block of at most 256 tokens (`false, false,
+    ...`, a string of `\n\n\n...`, `--exclude=*.pyc --exclude=*.pyc ...`, a list in a loop,
+    a 72-token block of code 53 times), the reply ends right there (only its stop token is
+    allowed), so a model in a loop can't open the next call and stall again. The call is left
+    as written, cut off unclosed, and the reply is what main sends for a call `max_tokens`
+    cut off mid-arguments: `finish_reason` `length` (on `/v1/responses` the response and the
+    call's item are `incomplete`, reason `max_output_tokens`; ollama's `done_reason` is
+    `length`). With calls streamed (the default) it is a call whose `arguments` aren't JSON
+    (`axon_tool_calls_invalid_total`); decided whole (`AXON_TOOL_STREAM=0`, ollama's API) its
+    block is content and no client sees a call (`axon_tool_calls_dropped_total`).
+    What a client does with it is the client's: one that parses `arguments` strictly
+    (`JSON.parse`, as the OpenAI SDKs do) can't run it, and pi refuses a call in a reply that
+    ended `length` (0.85.1: "the response hit the output token limit"). pi repairs a cut-off
+    call's JSON (it closes the open string and containers) and runs it when the finish is
+    anything else, which is why a stalled reply says `length` (Fable's review of #274, the
+    lead's ruling of 11-17). codex ends its turn on an `incomplete` response ("Incomplete
+    response returned"), as it does when a reply hits the token limit. A client that repairs
+    cut-off JSON and ignores `length` would still run what was written; for such a client
+    set `AXON_TOOL_STREAM=0`. Until the lead's ruling of 11-17 the call was closed the
+    shortest way, a well-formed call that harnesses applied: a pi run's model dropped a
+    string's closing quote (`rows)}]}}` for `rows)"}]}}`), so it wrote on inside the string,
+    where neither a newline nor `</tool_call>` is allowed, for 2,100 tokens until the rule
+    fired; the closed `edit` wrote them into the file, and each next turn copied them and
+    stalled again. Each stall is a line on stderr, whatever the log level (`axon serve: #12:
+    a held tool call stalled after 2077 tokens (its last 2048 repeat one block of 72 tokens):
+    the reply ends there, finish `length`, the call cut off unclosed as max_tokens cuts one
+    (its arguments aren't JSON); AXON_CONSTRAIN_STALL=0 turns this off`), and counts in
     `axon_constraint_stalls_total`. In the acceptance runs' 6,333
     calls 11 of the 13 runaways trip it (their loops are 2,144 to 50,831 tokens' worth of
     text); the other two, a `, false` loop and a list loop, ended by themselves first, after
     1,963 and 623. The other calls stay far from it (383 at most in a block repeated). Data
-    that repeats one block 8 times or more trips it: 256 identical `<div class="cell"></div>`
+    that fills 2,048 tokens with one repeated block (8 or more times over for a 256-token
+    block, more for a shorter one) trips it: 256 identical `<div class="cell"></div>`
     lines after about 2,085 tokens (cut after 205 cells), 100 identical
     log lines after about 2,070, a 32×32 matrix of zeros after about 2,070, 150 identical
     JSON objects after about 2,060. Data that doesn't repeat a block isn't cut, however few
@@ -435,7 +446,8 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     would have to fire when 90 % of 2,048 tokens equal the token a block back (seed 2's loop
     reaches 91 %), and that cuts sparse data: a 40×30 tile map with 10 % walls, a 60×20
     one-hot CSV, a 24×24 0/1 mask. So the miss stays; the harness bar counts such a call as
-    malformed.
+    malformed. The gate that replays those runaways on the real models, with its inputs, is
+    `scripts/constrain/cbcheck.sh` ([scripts/constrain/README.md](../scripts/constrain/README.md)).
 
   Valid isn't right: where the model would have written an unescaped quote, the string ends
   there and the call goes on from it, so the call parses but may not be what was meant (the

@@ -36,10 +36,12 @@
 //! tokens one block of at most 256 over and over: `, false, false, ...`,
 //! `\n\n\n...` in a string, `--exclude=*.pyc --exclude=*.pyc ...`:
 //! `LOOP_WINDOW`) ends the reply right there (`Constraint::with_end`), the
-//! call left as written: cut off and unclosed, so it is never delivered as
-//! a usable call. The server's tools parser returns it as it returns any
-//! call cut off mid-arguments (`max_tokens` on a call without the
-//! constraint): its arguments aren't JSON. Closing it the shortest way
+//! call left as written: cut off and unclosed. The server returns it as it
+//! returns a call `max_tokens` cut off mid-arguments: its arguments aren't
+//! JSON, and the reply finishes `length` (`Constraint::cut`; Responses:
+//! `incomplete`), so a client that refuses a cut call refuses it (pi runs
+//! a repaired call unless the finish is `length`: Fable's review of #274,
+//! the lead's ruling of 11-17). Closing it the shortest way
 //! instead (`pda::Graph::finisher`, as #274 first did) made a valid-looking
 //! call that a harness applied: a model that dropped a string's closing
 //! quote wrote on inside the string until the rule fired, and the closed
@@ -81,8 +83,9 @@ const OPEN: &[u8] = b"<tool_call>";
 /// `--exclude=*.pyc` over and over, a list of strings in a loop); the other
 /// two, a `, false` loop of 1,963 pieces and a list loop of 623, ended by
 /// themselves first. No other call comes near: 383 pieces periodic at most
-/// (119 with periods up to 64). Data that repeats one block 8 times or more
-/// trips it: 256 identical `<div class="cell"></div>` lines after ~2,085
+/// (119 with periods up to 64). Data that fills 2,048 tokens with one
+/// repeated block (8 or more times over for a 256-token block, more for a
+/// shorter one) trips it: 256 identical `<div class="cell"></div>` lines after ~2,085
 /// tokens, a 32×32 matrix of zeros after ~2,070 (the PR's table of shady's
 /// and Fable's cases).
 ///
@@ -116,24 +119,32 @@ impl Stall {
 }
 
 /// A call that stalled (`Constraint::stall`): after how many of its tokens,
-/// the block it repeated (its length: the stretch's smallest period) and
-/// the window it filled.
+/// the block it repeated (its length: the stretch's smallest period), the
+/// window it filled, and whether that ended the reply with the call cut off
+/// (`cut`: a constraint `with_end`, the server's) or closed the call the
+/// shortest way (no end tokens).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stalled {
     pub after: usize,
     pub period: usize,
     pub window: usize,
+    pub cut: bool,
 }
 
 impl std::fmt::Display for Stalled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = if self.period == 1 { "" } else { "s" };
+        let then = match self.cut {
+            true => {
+                "the reply ends there, finish `length`, the call cut off unclosed as max_tokens \
+                 cuts one (its arguments aren't JSON)"
+            }
+            false => "the call is closed the shortest way",
+        };
         write!(
             f,
             "a held tool call stalled after {} tokens (its last {} repeat one block of {} \
-             token{s}): the reply ends there, the call cut off unclosed, so it isn't delivered as a \
-             usable call (its arguments aren't JSON, as a call cut off by max_tokens; \
-             AXON_CONSTRAIN_STALL=0 turns this off)",
+             token{s}): {then}; AXON_CONSTRAIN_STALL=0 turns this off",
             self.after, self.window, self.period
         )
     }
@@ -569,10 +580,11 @@ impl Constraint {
 
     /// When a call stalls the reply may then take only `end` (its stop
     /// tokens: `serve`'s `Job::stop_ids`), so it ends right there, the call
-    /// cut off unclosed where it stalled (never a usable call: the tools
-    /// parser returns it as a call cut mid-arguments). Empty (the default):
-    /// the call is closed the shortest way (`Grammar::finish`), and the
-    /// reply goes on free, armed for another call.
+    /// cut off unclosed where it stalled (`cut`: the tools parser returns
+    /// it as a call cut mid-arguments, and the reply finishes `length`).
+    /// Empty (the default): the call is closed the shortest way
+    /// (`Grammar::finish`), and the reply goes on free, armed for another
+    /// call.
     pub fn with_end(mut self, end: &[u32]) -> Constraint {
         self.end = end.into();
         self
@@ -581,6 +593,13 @@ impl Constraint {
     /// The reply's stalled call, if one stalled (the server logs it).
     pub fn stall(&self) -> Option<Stalled> {
         self.seen
+    }
+
+    /// The stall rule ended the reply (a stall `with_end`): its call is cut
+    /// off unclosed, as `max_tokens` cuts one, so the reply finishes as one
+    /// the token limit cut (`serve::finish_reason`: `length`).
+    pub fn cut(&self) -> bool {
+        self.seen.is_some_and(|s| s.cut)
     }
 
     /// A copy to advance through a draft's guesses (`sample::
@@ -647,6 +666,7 @@ impl Constraint {
             after: self.taken,
             period,
             window,
+            cut: !self.end.is_empty(),
         });
         if !self.shadow {
             self.g.counters.stalls.fetch_add(1, Ordering::Relaxed);

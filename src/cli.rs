@@ -183,9 +183,9 @@ flags:
   --no-constrain  serve: sample tool calls unconstrained. By default a Qwen2.5 or Qwen3 tool call
               is held from its <tool_call> to </tool_call>: it names one of the request's tools,
               its arguments are a JSON object, and it can't run on (bounded whitespace; a call whose
-              last 2048 tokens repeat one block of at most 256 tokens ends the reply there, cut off
-              and never a usable call: a stderr line says so, and AXON_CONSTRAIN_STALL=0 turns that
-              alone off).
+              last 2048 tokens repeat one block of at most 256 tokens ends the reply there with
+              finish length, the call cut off unclosed as max_tokens cuts one: a stderr line says
+              so, and AXON_CONSTRAIN_STALL=0 turns that alone off).
               AXON_CONSTRAIN=0 turns it all off too (docs/serving.md)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
@@ -2067,6 +2067,7 @@ mod tests {
             "--no-constrain serve: sample tool calls unconstrained.",
             "AXON_CONSTRAIN=0 turns it all off too",
             "AXON_CONSTRAIN_STALL=0 turns that alone off",
+            "ends the reply there with finish length, the call cut off unclosed",
             "sampling flags (gen, chat, serve;",
             "(default 1.1, serve 1; 1 = off)",
         ] {

@@ -2328,7 +2328,7 @@ impl<'a, 't> Batch<'a, 't> {
                 }
                 return;
             }
-            End::Stop => "stop",
+            End::Stop => super::finish_reason(true, s.job.constraint.as_ref()),
             End::Length => "length",
             End::Failed(e) => {
                 eprintln!("axon serve: #{} failed: {e}", s.job.id);

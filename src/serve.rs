@@ -894,6 +894,20 @@ fn tool_stream_env() -> bool {
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
+/// A reply's finish: `stop` when a stop token or string ended it, else
+/// `length` (its token limit cut it). A reply the stall rule ended
+/// (`Constraint::cut`) is cut too: its call is cut off unclosed, so it
+/// finishes `length`, as a call `max_tokens` cut does. Then Responses marks
+/// it `incomplete` and ollama's `done_reason` is "length", and a client that
+/// refuses a cut call refuses it: pi runs a call it repaired unless the
+/// finish is `length` (Fable's review of #274, the lead's ruling of 11-17).
+fn finish_reason(stopped: bool, constraint: Option<&crate::constrain::Constraint>) -> &'static str {
+    match stopped && !constraint.is_some_and(|c| c.cut()) {
+        true => "stop",
+        false => "length",
+    }
+}
+
 fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
         tok,
@@ -1180,7 +1194,7 @@ impl<'a> Engine<'a> {
         if !content.is_empty() || !reasoning.is_empty() {
             let _ = job.tx.send(Event::Text { content, reasoning });
         }
-        let finish = if hit || by_stop_id { "stop" } else { "length" };
+        let finish = finish_reason(hit || by_stop_id, constraint.as_ref());
         let usage = Usage {
             prompt_tokens: p.len(),
             cached_tokens: reuse,

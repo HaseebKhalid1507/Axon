@@ -2372,13 +2372,17 @@ fn serve_constrained_forced_and_default() {
 /// A held call that stalls (shady's review of #274), with the stall
 /// window small (`Opts::constrain_stall`: 64 tokens repeating one block)
 /// so the test model's board of zeros trips it: the reply ends there, short
-/// of `max_tokens`, and the call is never delivered as a usable call (the
-/// lead's ruling of 11-17: a call the rule closed was applied by a
-/// harness). It goes where main sends a call cut off mid-arguments: with
-/// calls streamed (#260, the default) the reply's last call, its arguments
-/// not JSON (`axon_tool_calls_invalid_total`, finish `tool_calls`); decided
+/// of `max_tokens`, its call cut off unclosed (the lead's ruling of 11-17:
+/// a call the rule closed was applied by a harness). It goes where main
+/// sends a call `max_tokens` cut off mid-arguments, finish `length` (pi
+/// runs a call it repaired unless the finish is `length`: Fable's review,
+/// ruled 11-17): with calls streamed (#260, the default) the reply's last
+/// call, its arguments not JSON (`axon_tool_calls_invalid_total`); decided
 /// whole (AXON_TOOL_STREAM=0) no call at all, its block content
-/// (`axon_tool_calls_dropped_total`). The stall is counted. On CUDA, the
+/// (`axon_tool_calls_dropped_total`). On the CPU the same reply streamed
+/// (SSE), on /v1/responses (whole and streamed: `incomplete`, the call's
+/// item too) and on ollama's /api/chat (`done_reason` "length") says so
+/// too. The stall is counted. On CUDA, the
 /// stalling requests sent together with plain ones (at once and handing
 /// over, drafting) get what each gets alone. On the CPU, with the closer
 /// off (`Opts::constrain_closer`, as AXON_CONSTRAIN_STALL=0) a reply that
@@ -2454,7 +2458,7 @@ fn serve_constrained_stall() {
             );
             stalled += 1;
             let ch = &v["choices"][0];
-            assert_eq!(ch["finish_reason"], "tool_calls", "{dev:?}: {v}");
+            assert_eq!(ch["finish_reason"], "length", "{dev:?}: cut: {v}");
             assert!(
                 v["usage"]["completion_tokens"].as_u64().unwrap() < 600,
                 "{v}"
@@ -2465,7 +2469,11 @@ fn serve_constrained_stall() {
             let calls = ch["message"]["tool_calls"].as_array().unwrap();
             let last = calls.last().unwrap();
             assert_eq!(last["function"]["name"], "write_file", "{v}");
-            assert_eq!(usable(&v).1, 1, "{dev:?}: the stalled call is usable: {v}");
+            assert_eq!(
+                usable(&v).1,
+                1,
+                "{dev:?}: the stalled call must not parse: {v}"
+            );
             let args = last["function"]["arguments"].as_str().unwrap();
             assert!(serde_json::from_str::<Value>(args).is_err(), "{v}");
             assert!(args.starts_with('{'), "{v}");
@@ -2484,8 +2492,108 @@ fn serve_constrained_stall() {
             constrained_together_vs_alone(a, &all);
         }
         if dev == Device::Cpu {
+            let (body, on) = first_stalled.clone().unwrap();
+            let cut = on["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["function"]["arguments"]
+                .clone();
+            // Streamed (SSE): the same cut call, finish `length`.
+            let mut sb = body.clone();
+            sb["stream"] = json!(true);
+            let n0 = stalls();
+            let ev = post(a, "/v1/chat/completions", sb).events();
+            assert_eq!(stalls(), n0 + 1.0, "streamed: {ev:?}");
+            let (mut finish, mut at, mut args) = (Value::Null, Value::Null, String::new());
+            for e in ev.iter().filter(|e| *e != "[DONE]") {
+                let v: Value = serde_json::from_str(e).unwrap();
+                let c = &v["choices"][0];
+                if !c["finish_reason"].is_null() {
+                    finish = c["finish_reason"].clone();
+                }
+                for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                    if tc["index"] != at {
+                        at = tc["index"].clone();
+                        args.clear();
+                    }
+                    args.push_str(tc["function"]["arguments"].as_str().unwrap_or(""));
+                }
+            }
+            assert_eq!(finish, "length", "streamed: {ev:?}");
+            assert_eq!(json!(args), cut, "streamed: the same cut call");
+            // The first seed (1 to 12) whose reply on `path` stalls: the
+            // routes below render their prompts their own way, so they
+            // sample other replies (the same seed every run).
+            let first_stall = |path: &str, body: &dyn Fn(u64) -> Value| -> (u64, Value) {
+                for seed in 1..=12 {
+                    let n0 = stalls();
+                    let r = post(a, path, body(seed));
+                    assert_eq!(r.status, 200, "{}", r.body);
+                    if stalls() > n0 {
+                        assert_eq!(stalls(), n0 + 1.0, "{path} seed {seed}: {}", r.body);
+                        return (seed, r.json());
+                    }
+                }
+                panic!("{path}: no reply stalled, seeds 1 to 12");
+            };
+            // /v1/responses, whole and streamed: `incomplete`, as a reply
+            // max_output_tokens cut, and so is the cut call's item.
+            let rtools = json!([{"type": "function", "name": "write_file",
+                "description": "Write a text file",
+                "parameters": tools[0]["function"]["parameters"]}]);
+            let rb = |seed: u64, stream: bool| {
+                json!({"input": ask, "tools": rtools, "tool_choice": "required",
+                       "temperature": 0.7, "seed": seed, "max_output_tokens": 600,
+                       "stream": stream})
+            };
+            let (seed, whole) = first_stall("/v1/responses", &|seed| rb(seed, false));
+            eprintln!("responses stall, seed {seed}: {whole}");
+            let n0 = stalls();
+            let streamed = responses_stream(&post(a, "/v1/responses", rb(seed, true))).3;
+            assert_eq!(
+                stalls(),
+                n0 + 1.0,
+                "responses streamed, seed {seed}: {streamed}"
+            );
+            for resp in [&whole, &streamed] {
+                assert_eq!(
+                    resp["status"], "incomplete",
+                    "responses seed {seed}: {resp}"
+                );
+                assert_eq!(
+                    resp["incomplete_details"]["reason"], "max_output_tokens",
+                    "{resp}"
+                );
+                assert!(
+                    resp["usage"]["output_tokens"].as_u64().unwrap() < 600,
+                    "{resp}"
+                );
+                let last = resp["output"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["type"], "function_call", "{resp}");
+                assert_eq!(last["status"], "incomplete", "{resp}");
+                let args = last["arguments"].as_str().unwrap();
+                assert!(serde_json::from_str::<Value>(args).is_err(), "{resp}");
+            }
+            let shape = |r: &Value| -> Vec<Value> {
+                let items = r["output"].as_array().unwrap();
+                items
+                    .iter()
+                    .map(|i| json!([i["type"], i["status"], i["arguments"]]))
+                    .collect()
+            };
+            assert_eq!(shape(&streamed), shape(&whole), "streamed == whole");
+            // ollama's /api/chat (no tool_choice: auto; calls decided whole,
+            // so the cut block is content): `done_reason` "length".
+            let (seed, o) = first_stall("/api/chat", &|seed| {
+                json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+                       "stream": false,
+                       "options": {"temperature": 0.7, "seed": seed, "num_predict": 600}})
+            });
+            eprintln!("ollama stall, seed {seed}: {o}");
+            assert_eq!(o["done_reason"], "length", "ollama seed {seed}: {o}");
+            assert!(o["eval_count"].as_u64().unwrap() < 600, "{o}");
             drop(s);
-            let (body, on) = first_stalled.unwrap();
             // Calls decided whole (AXON_TOOL_STREAM=0): the same tokens, and
             // the stalled call is no call: its block is content, counted as
             // dropped, as main returns a block cut off mid-call.
@@ -2497,6 +2605,10 @@ fn serve_constrained_stall() {
             let v = post(s.addr, "/v1/chat/completions", body.clone()).json();
             let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
             assert_eq!(m["axon_constraint_stalls_total"], 1.0, "whole: {v}");
+            assert_eq!(
+                v["choices"][0]["finish_reason"], "length",
+                "whole: cut: {v}"
+            );
             assert_eq!(m["axon_tool_calls_dropped_total"], 1.0, "whole: {v}");
             assert_eq!(m["axon_tool_calls_invalid_total"], 0.0, "whole: {v}");
             assert_eq!(
