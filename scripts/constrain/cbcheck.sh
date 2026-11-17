@@ -19,8 +19,8 @@
 #  first stall windows, as the requests that led to them, each cell's `orig` naming the call; plus data that repeats
 #  one value)
 #  on the cand default, greedy and seeds 1, 2: a runaway's reply ends before its token limit with every call valid; a
-#  legit cell doesn't stall; the known false positive is reported. Qwen2.5-7B Q4_K_M, and Qwen2.5-0.5B-Instruct
-#  Q4_0 for the one 0.5B runaway.
+#  legit cell doesn't stall while its call holds the size it asks for (a stall past it is a runaway caught,
+#  `overran`: 14-c on sm_89, 11-17). Qwen2.5-7B Q4_K_M, and Qwen2.5-0.5B-Instruct Q4_0 for the one 0.5B runaway.
 # Integrity (11-15, after a8e1 passed "kill switch == main" on 404s: the captured bodies' model "qwen2.5-7b" isn't a
 # name the server answers): constrain_check.py now aims every body at the server's model id, and every run, every arm
 # (cand, --no-constrain, AXON_CONSTRAIN=0, main, replay), must print INTEGRITY PASS: every request 200, and the

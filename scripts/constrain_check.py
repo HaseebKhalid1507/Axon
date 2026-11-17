@@ -34,7 +34,7 @@ valid and the cells agree (and match their pins), 1 otherwise. The JSON (--out) 
 constraint counters (before and after).
 
 replay (shady's review of #274: the stall rule on the real model): DIR's cells (`{"kind", "what", "model",
-"route", "body"}`; the ones whose "model" isn't M's file name are skipped), each greedy and with seeds 1..N, one at a
+"route", "body"}`, and a legit cell's `"want"`; the ones whose "model" isn't M's file name are skipped), each greedy and with seeds 1..N, one at a
 time (each reply's stalls are /metrics' delta), on the same server flags:
   runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, every
             call valid but a stalled one (the call ends by itself, or it stalls: the reply ends there and the call,
@@ -47,9 +47,17 @@ time (each reply's stalls are /metrics' delta), on the same server flags:
             over; docs/serving.md): such a reply may run on to its limit, its call cut there and nothing else wrong,
             no stall (reported as a miss, not judged); a listed reply that ends is fine. Any other runaway that
             runs on still fails, so a stall rule that stopped closing calls can't pass;
-  legit     a request for data that repeats one value (an empty board, a table of zeros): no stall, every call
-            valid;
-  known-fp  one the rule is known to cut (reported, not judged).
+  legit     a request for data that repeats one value (an empty board, a table of zeros), of a size it names (the
+            cell's `want`: {"unit": a regex, "n": N}, e.g. 256 zeros): every call valid, and no stall while the
+            call holds the size asked for. A stall after the call held more than N units (counted in its arguments,
+            JSON escapes undone) ran past the request: the rule caught a real runaway, not legit data. That row
+            passes, printed `overran U/N` (11-17, #274's 7f0e and 899c: on sm_89, 14-c's greedy reply writes 683
+            zeros on one line for the 256 asked and stalls; with --no-constrain the same text runs on to
+            max_tokens, so the mask changed nothing). A stall at N or fewer cut the data asked for: a failure. A
+            stall that can't be counted (no `want`) fails. A reply that runs on to its limit fails, as before;
+  known-fp  one the rule is known to cut (reported, not judged). No cell now: 16-csv was one under the few-ids rule
+            (1,024 tokens of at most 8 ids), dropped in Fable's review (0932813); under the 2,048-token rule it
+            stalls at 120 rows of the 80 asked (sm_89 and sm_120), so it is `legit` with a `want` since 11-17.
 
 cost (Fable's review of #274, the lead's ruling of 11-16: the constraint's end-to-end cost with the harnesses'
 sampler, against the spec's bars): the candidate's server with constrained tool calls (`on`, its default) and with
@@ -80,6 +88,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -425,6 +434,22 @@ def run(a):
     return 2 if probs else 0 if not bad else 1
 
 
+def unescape(s):
+    """A call's arguments (JSON text, maybe cut off mid-string) with JSON's escapes undone, best effort: for counting
+    a legit cell's units in the file it writes (a `\\n0` is a line break and a zero)."""
+    return re.sub(r'\\(u[0-9a-fA-F]{4}|.)', lambda m: chr(int(m.group(1)[1:], 16)) if len(m.group(1)) == 5 else
+                  {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(m.group(1), m.group(1)), s)
+
+
+def overran(c, rep):
+    """A legit cell's reply: (units of `want` in its last call's arguments, N asked), or None (no `want`, no call)."""
+    w = c.get("want")
+    calls = rep.get("calls") or []
+    if not w or not calls:
+        return None
+    return len(re.findall(w["unit"], unescape(calls[-1][1] or ""))), w["n"]
+
+
 def replay(a):
     m = os.path.basename(a.model)[:-len(".gguf")] if a.model.endswith(".gguf") else os.path.basename(a.model)
     cs = []
@@ -483,25 +508,35 @@ def replay(a):
                             and badj and all(j == "cut" for j in badj):
                         ok, miss = None, "known-miss"
                 elif c["kind"] == "legit":
-                    ok = not stalls and not badj
+                    # A stall past the size asked for (`want`) caught a real runaway: passes, `overran`. One at or
+                    # under it cut legit data (11-17: 14-c overruns on sm_89, the same text unconstrained).
+                    un = overran(c, rep) if stalls else None
+                    over = bool(un and un[0] > un[1] and stalls == 1 and cut and judged and judged[-1][0] == "stalled")
+                    ok = (not stalls or over) and not badj and not usable_stall and not uncut_stall
+                    if over:
+                        miss = "overran %d/%d" % un
                 else:
                     ok = None
                 row = dict(cell=name, kind=c["kind"], what=c["what"], mode=mode, ok=ok, miss=miss, stalls=stalls,
                            tokens=rep.get("tokens"), cap=cap, finish=rep.get("finish"), judged=judged,
                            args_len=[len(x[1] or "") for x in rep.get("calls") or []], s=round(time.time() - t0, 1),
                            calls=[[n, (x or "")[-160:]] for n, x in rep.get("calls") or []])
-                if ok is not True:  # a failure or a known false positive: the whole reply, to see why
+                if ok is not True or stalls:  # a failure, a known false positive or a stall: the whole reply
                     row["reply"] = {"content": rep.get("content"), "calls": rep.get("calls")}
                 rows.append(row)
-                verdict = "miss" if miss else {True: "ok", False: "FAIL", None: "-"}[ok]
-                print("REPLAY %-34s %-8s %-6s %-4s stalls %d tokens %s/%s finish %s calls %s" % (
+                verdict = "miss" if miss == "known-miss" else {True: "ok", False: "FAIL", None: "-"}[ok]
+                un = overran(c, rep) if c["kind"] == "legit" and stalls else None
+                print("REPLAY %-34s %-8s %-6s %-4s stalls %d tokens %s/%s finish %s calls %s%s" % (
                     name, c["kind"], mode, verdict, stalls, rep.get("tokens"), cap, rep.get("finish"),
-                    ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
+                    ",".join("%s:%s" % j for j in judged) or "none",
+                    " %s" % miss if miss and miss != "known-miss" else
+                    " units %d/%d" % un if un else ""), flush=True)
                 if ok is False:
                     bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else badj or (
                         "a stalled call delivered as a usable one" if usable_stall else
                         "a stalled reply that finished %s, not length/incomplete" % rep.get("finish")
-                        if uncut_stall else "stalled")))
+                        if uncut_stall else "stalled at %d of the %d units asked (cut legit data)" % un if un else
+                        "stalled")))
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)
