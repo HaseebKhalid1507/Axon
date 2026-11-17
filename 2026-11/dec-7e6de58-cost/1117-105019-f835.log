@@ -1,0 +1,67 @@
+[axon-run 10:50:19] submitted 1117-105019-f835 by /home/haseeb/.cache/axon-dec: /usr/bin/bash costpod.sh ./s-7e6de58.tar ./axon-7e6de58 ./harness_accept.py
+[axon-run 11:08:29] job 1117-105019-f835 -> pod1 [RTX 4090 sm_89 secure] (pod z0jhl1x2rzc4wx): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 10500 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/costpod-cc6f0fa3b35b /usr/bin/bash costpod.sh ./s-7e6de58.tar ./axon-7e6de58 ./harness_accept.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (ce29850bcf9c0253dac473b4) + source of /home/haseeb/.cache/axon-podjob/costpod-cc6f0fa3b35b
+
+sent 4,130,543 bytes  received 152 bytes  266,496.45 bytes/sec
+total size is 13,697,489  speedup is 3.32
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-160850-bash-888 on pod1 (GPU, 10500 MB)
+[axon-node 16:08:50] GPU EXCLUSIVE taken; job wants 10500 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 16:08:50] run bash (ce29850bcf9c0253dac473b4) as /home/haseeb/.cache/axon-podjob/costpod-cc6f0fa3b35b on c51f24277203, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+Python 3.12.3
+2df5f141ed836fe15f37a8c80a63e61a  ./s-7e6de58.tar
+79451419b22910913906d13d4abe5055  ./axon-7e6de58
+5eb5a4f78b188d40355485a07a3471f7  ./harness_accept.py
+NVIDIA GeForce RTX 4090, 8.9, 595.112.07
+[axon-run 11:09:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:09:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:10:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:10:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 167.99, "arm": "on", "conc": 1, "constraint_tokens": 2837.0, "decode_tps": 172.455, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 5.776646998128854, "itl_p99_ms": 11.60168599744793, "round": 0, "stalls": 0.0, "tokens": 4227, "ttft_ms": 95.17673349910183, "ttft_srv_ms": 23.8975, "wall_s": 25.16}
+COST-CELL {"agg_tps": 443.7, "arm": "on", "conc": 4, "constraint_tokens": 2837.0, "decode_tps": 119.61, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 8.02398299856577, "itl_p99_ms": 27.62965200236067, "round": 0, "stalls": 0.0, "tokens": 4227, "ttft_ms": 121.31067800146411, "ttft_srv_ms": 17.881, "wall_s": 9.53}
+[axon-run 11:11:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 169.01, "arm": "off", "conc": 1, "constraint_tokens": 0.0, "decode_tps": 173.635, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 5.7605659967521206, "itl_p99_ms": 11.595815994951408, "round": 0, "stalls": 0.0, "tokens": 4193, "ttft_ms": 93.40809199784417, "ttft_srv_ms": 23.8785, "wall_s": 24.81}
+COST-CELL {"agg_tps": 453.45, "arm": "off", "conc": 4, "constraint_tokens": 0.0, "decode_tps": 120.545, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 7.941090996610001, "itl_p99_ms": 27.652272998238914, "round": 0, "stalls": 0.0, "tokens": 4193, "ttft_ms": 121.63508450248628, "ttft_srv_ms": 17.984, "wall_s": 9.25}
+[axon-run 11:11:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 168.79, "arm": "off", "conc": 1, "constraint_tokens": 0.0, "decode_tps": 173.42000000000002, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 5.766636997577734, "itl_p99_ms": 11.598295001022052, "round": 1, "stalls": 0.0, "tokens": 4193, "ttft_ms": 94.5840069980477, "ttft_srv_ms": 24.0305, "wall_s": 24.84}
+[axon-run 11:12:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 453.88, "arm": "off", "conc": 4, "constraint_tokens": 0.0, "decode_tps": 120.55, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 7.944120996398851, "itl_p99_ms": 27.62438199715689, "round": 1, "stalls": 0.0, "tokens": 4193, "ttft_ms": 121.30975850232062, "ttft_srv_ms": 18.0015, "wall_s": 9.24}
+COST-CELL {"agg_tps": 167.77, "arm": "on", "conc": 1, "constraint_tokens": 2837.0, "decode_tps": 172.29500000000002, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 5.785606997960713, "itl_p99_ms": 11.604675004491583, "round": 1, "stalls": 0.0, "tokens": 4227, "ttft_ms": 96.00214500096627, "ttft_srv_ms": 23.9495, "wall_s": 25.19}
+[axon-run 11:13:05] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 442.9, "arm": "on", "conc": 4, "constraint_tokens": 2837.0, "decode_tps": 119.47999999999999, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 8.039093998377211, "itl_p99_ms": 27.779667005233932, "round": 1, "stalls": 0.0, "tokens": 4227, "ttft_ms": 121.79678499887814, "ttft_srv_ms": 17.9625, "wall_s": 9.54}
+[axon-run 11:13:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 167.71, "arm": "on", "conc": 1, "constraint_tokens": 2837.0, "decode_tps": 172.35000000000002, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 5.785337001725566, "itl_p99_ms": 11.597044998779893, "round": 2, "stalls": 0.0, "tokens": 4227, "ttft_ms": 95.37830900080735, "ttft_srv_ms": 23.969, "wall_s": 25.2}
+COST-CELL {"agg_tps": 442.95, "arm": "on", "conc": 4, "constraint_tokens": 2837.0, "decode_tps": 119.32, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 8.037054001761135, "itl_p99_ms": 27.512508000654634, "round": 2, "stalls": 0.0, "tokens": 4227, "ttft_ms": 121.4453680004226, "ttft_srv_ms": 17.9895, "wall_s": 9.54}
+[axon-run 11:14:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 168.84, "arm": "off", "conc": 1, "constraint_tokens": 0.0, "decode_tps": 173.495, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 5.765426998550538, "itl_p99_ms": 11.601765996601898, "round": 2, "stalls": 0.0, "tokens": 4193, "ttft_ms": 94.13699149808963, "ttft_srv_ms": 23.9925, "wall_s": 24.83}
+[axon-run 11:14:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 453.95, "arm": "off", "conc": 4, "constraint_tokens": 0.0, "decode_tps": 120.57499999999999, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 7.945760997245088, "itl_p99_ms": 27.637723003863357, "round": 2, "stalls": 0.0, "tokens": 4193, "ttft_ms": 121.43230250148918, "ttft_srv_ms": 18.014, "wall_s": 9.24}
+COST-CELL {"agg_tps": 168.9, "arm": "off", "conc": 1, "constraint_tokens": 0.0, "decode_tps": 173.505, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 5.764137000369374, "itl_p99_ms": 11.592675000429153, "round": 3, "stalls": 0.0, "tokens": 4193, "ttft_ms": 94.26026049914071, "ttft_srv_ms": 24.0235, "wall_s": 24.82}
+[axon-run 11:15:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 453.06, "arm": "off", "conc": 4, "constraint_tokens": 0.0, "decode_tps": 120.245, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 7.949318001919892, "itl_p99_ms": 27.755003997299355, "round": 3, "stalls": 0.0, "tokens": 4193, "ttft_ms": 121.14732999907574, "ttft_srv_ms": 18.0355, "wall_s": 9.25}
+[axon-run 11:15:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 167.75, "arm": "on", "conc": 1, "constraint_tokens": 2837.0, "decode_tps": 172.245, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 5.783975000667851, "itl_p99_ms": 11.641500997939147, "round": 3, "stalls": 0.0, "tokens": 4227, "ttft_ms": 94.51355549754226, "ttft_srv_ms": 24.052500000000002, "wall_s": 25.2}
+COST-CELL {"agg_tps": 442.96, "arm": "on", "conc": 4, "constraint_tokens": 2837.0, "decode_tps": 119.31, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 8.042670000577345, "itl_p99_ms": 27.543816999241244, "round": 3, "stalls": 0.0, "tokens": 4227, "ttft_ms": 121.58417249884224, "ttft_srv_ms": 17.985500000000002, "wall_s": 9.54}
+[axon-run 11:16:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 167.7, "arm": "on", "conc": 1, "constraint_tokens": 2837.0, "decode_tps": 172.23, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 5.785255001683254, "itl_p99_ms": 11.609551002038643, "round": 4, "stalls": 0.0, "tokens": 4227, "ttft_ms": 95.92692850128515, "ttft_srv_ms": 24.0415, "wall_s": 25.21}
+COST-CELL {"agg_tps": 443.14, "arm": "on", "conc": 4, "constraint_tokens": 2837.0, "decode_tps": 119.16999999999999, "fallbacks": 511.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_cd549e8826834d49", "itl_p50_ms": 8.034440004848875, "itl_p99_ms": 27.701851999154314, "round": 4, "stalls": 0.0, "tokens": 4227, "ttft_ms": 122.46368199703284, "ttft_srv_ms": 17.9995, "wall_s": 9.54}
+[axon-run 11:16:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+COST-CELL {"agg_tps": 168.79, "arm": "off", "conc": 1, "constraint_tokens": 0.0, "decode_tps": 173.435, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 5.766264999692794, "itl_p99_ms": 11.628312000539154, "round": 4, "stalls": 0.0, "tokens": 4193, "ttft_ms": 95.09965600227588, "ttft_srv_ms": 24.011000000000003, "wall_s": 24.84}
+COST-CELL {"agg_tps": 453.68, "arm": "off", "conc": 4, "constraint_tokens": 0.0, "decode_tps": 120.53999999999999, "fallbacks": 0.0, "finish": {"length": 3, "tool_calls": 25}, "fp": "fp_b32437c91cad4b56", "itl_p50_ms": 7.947067002533004, "itl_p99_ms": 27.696522003680002, "round": 4, "stalls": 0.0, "tokens": 4193, "ttft_ms": 121.65392500173766, "ttft_srv_ms": 18.017, "wall_s": 9.24}
+C=1 fallbacks 2555 of 14185 constrained tokens (18.0 %)
+C=1 decode_tps  on    172.30 off    173.50 on/off 0.9931 (bar >= 0.98) PASS   per round on [172.455, 172.29500000000002, 172.35000000000002, 172.245, 172.23] off [173.635, 173.42000000000002, 173.495, 173.505, 173.435]
+C=1 ttft_ms     on     95.38 off     94.26 on/off 1.0119 (bar <= 1.02) PASS   per round on [95.17673349910183, 96.00214500096627, 95.37830900080735, 94.51355549754226, 95.92692850128515] off [93.40809199784417, 94.5840069980477, 94.13699149808963, 94.26026049914071, 95.09965600227588]
+C=1 itl_p99_ms  on     11.60 off     11.60 on/off 1.0006 (bar <= 1.03) PASS   per round on [11.60168599744793, 11.604675004491583, 11.597044998779893, 11.641500997939147, 11.609551002038643] off [11.595815994951408, 11.598295001022052, 11.601765996601898, 11.592675000429153, 11.628312000539154]
+C=4 fallbacks 2555 of 14185 constrained tokens (18.0 %)
+C=4 decode_tps  on    119.32 off    120.55 on/off 0.9898 (bar >= 0.98) PASS   per round on [119.61, 119.47999999999999, 119.32, 119.31, 119.16999999999999] off [120.545, 120.55, 120.57499999999999, 120.245, 120.53999999999999]
+C=4 ttft_ms     on    121.58 off    121.43 on/off 1.0013 (bar <= 1.02) PASS   per round on [121.31067800146411, 121.79678499887814, 121.4453680004226, 121.58417249884224, 122.46368199703284] off [121.63508450248628, 121.30975850232062, 121.43230250148918, 121.14732999907574, 121.65392500173766]
+C=4 itl_p99_ms  on     27.63 off     27.65 on/off 0.9992 (bar <= 1.03) PASS   per round on [27.62965200236067, 27.779667005233932, 27.512508000654634, 27.543816999241244, 27.701851999154314] off [27.652272998238914, 27.62438199715689, 27.637723003863357, 27.755003997299355, 27.696522003680002]
+COST PASS
+[axon-node 16:17:12] exit 0 after 501.3s
+[axon-node 16:17:12] peak RSS 747 MB (job process tree PSS, 2 s samples x248)
+[axon-run 11:17:13] exit 0 after 523.8s (host pod1)
+[axon-run 11:17:18] EXPECT ok: output matches /^COST (PASS|FAIL)/
+[axon-run 11:17:18] FOREIGN_GPU max=0% mean=0.0% samples=15
