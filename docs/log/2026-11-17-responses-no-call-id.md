@@ -1,4 +1,4 @@
-# serve /v1/responses: codex's goal item is a tool message, not a 400  (PR #PR)
+# serve /v1/responses: codex's goal item is a tool message, not a 400  (PR #278)
 
 - Date: 2026-11-17. Branch: fix/responses-no-call-id. Base: main 1a1d751. Status: open
 - Pick / design: issue #273 (eval track, from #235's acceptance runs); the foreman's 11-17 ruling: take the issue's first
@@ -45,7 +45,7 @@ template does with `last_tool_call`), and refuses one with no call before it. Th
 | release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | group 1117-093534-8c12: 8480, c89a, 2a88 |
 | debug-assertion suite, 3 shards (jade, CPU) | PENDING | group 1117-093819-80a9: f823, 47e5, d3bb |
 | `/v1/responses` e2e differential, main 1a1d751 vs 7a6c175 (jade, CPU, 3 models) | PENDING | 1117-093917-0144 |
-| mutants: each part of the fix undone alone | PENDING | MUTJOBS |
+| mutants: each part of the fix undone alone | PENDING | 1117-094724-d553 (`mutants.sh`: each mutant must fail at least its tests, the candidate none) |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
 
 **Bit identity for requests main accepts.** These are exactly the requests where every `function_call_output` has a
