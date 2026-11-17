@@ -54,9 +54,9 @@ changed `responses.rs`, and the e2e script had the bug the review found (below).
 | targeted, debug-assertion build at c559c64: `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
 | release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | 1117-100032-edd3, -14b5, -1565 (group 9c4a) |
 | debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-100307-343e, -26e6, -d5bb (group 1ec3) |
-| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PENDING | 1117-095805-eb7f |
-| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, with codex's wire request (jade, CPU, 3 models) | PENDING | G_E2E |
-| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | G_MUT |
+| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PENDING | 1117-100614-67b4 |
+| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, with codex's wire request (jade, CPU, 3 models) | PENDING | submitted when the wire check is done (gatewatch `eval-43efbb3-e2e`) |
+| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | 1117-101610-fcdd |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
 
 **Bit identity for requests main accepts.** These are exactly the requests where every `function_call_output` has a
