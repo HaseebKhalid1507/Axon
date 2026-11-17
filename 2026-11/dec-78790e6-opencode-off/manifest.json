@@ -1,0 +1,29 @@
+{
+ "label": "dec-78790e6-opencode-off",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1117-080906-a229",
+   "name": "dec-78790e6-accept-qwen2.5-7b-opencode-r1",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "78790e6",
+   "binary": "bash",
+   "started": 1794922090.5287411,
+   "ended": 1794925387.4122283,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "93497baa6c63d7713b49a07b54a62c6d796c0eccc50bff2d1b94c14a6b0988b7",
+   "log_bytes": 52040
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 09:23:09 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
