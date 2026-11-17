@@ -13,10 +13,13 @@ measurements behind them.
   is one md5 across placements). On bella (RTX 5070 Ti Laptop, 12 GB), auto kept 15 of 24 layers at ctx 32768
   and 18 at ctx 8192: prompt ×1.8–2.4 / ×3.1–3.3 and decode ×1.7–1.9 / ×2.0–2.2 vs experts on the CPU. bella
   runs from a busy desktop, so the log marks these TAINTED; a clean rerun is pending.
-- **Placement plans the bytes the GPU holds.** `--gpu-experts` budgets each layer at its device size: gpt-oss's
-  MXFP4 rows in the twins' layout (1,536 bytes a row where the file has 1,530) plus its expert biases, 2.6 MiB a
-  layer more than the file's bytes. The upload repacks one expert at a time, so it stages about 4 MiB rather than
-  a whole 134 MiB tensor next to what is placed. A layer the GPU can't take is refused from its metadata before
+- **Placement plans the experts' device buffers.** `--gpu-experts` budgets each layer at the lengths of the
+  buffers its upload allocates: gpt-oss's MXFP4 rows in the twins' layout (1,536 bytes a row where the file has
+  1,530) plus its expert biases. A gpt-oss-20b layer plans at 406.05 MiB. That's 1.58 MiB more than those tensors
+  take in the file, and 2.64 MiB more than the old plan, which left the biases out. The plan doesn't yet count
+  allocator rounding (with 2 MiB pages, up to ~14 MiB a layer, taken from the 512 MiB headroom; #279). The upload
+  repacks one expert at a time, so it stages about 4 MiB rather than a whole 134 MiB tensor next to what is
+  placed. A layer the GPU can't take is refused from its metadata before
   anything is uploaded. Other MoE models plan and place as before.
 - **`AXON_MOE_PROFILE=1` covers prefill too.** Every batched pass of a model with experts on the CPU now prints
   the per-layer columns (GPU segment, copy down, CPU experts, copy up), the pass's wall time and the experts' share.
