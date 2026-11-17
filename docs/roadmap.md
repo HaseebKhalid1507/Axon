@@ -68,8 +68,12 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
    bits): cubins for sm_75–sm_120, PTX for newer GPUs; NVRTC stays the fallback ([models.md](models.md#nvidia-gpus)).
 4. **Compatibility audit:** the 30 most-pulled ollama models, each: runs, refused, or prompt differs from llama.cpp's
    (`scripts/zoo.py`; last sweep 18 small files, [hardening.md](hardening.md#model-zoo-results-2026-10-18-measured)). It orders weeks 2–3.
+   Measured 11-13 (PR #235): [log/2026-11-13-compat-audit.md](log/2026-11-13-compat-audit.md). 13 of 30 chat after
+   #246 (4 of them fixed by #246, not re-measured), 17 load; the refusals ranked by pulls are #243.
 5. **Harness acceptance test:** opencode, codex and pi on fixed tasks, scored on completion.
    `scripts/examples/harness-repo/make_repo.py` already builds one such task.
+   Measured on Qwen2.5-7B 11-13 to 11-15 (PR #235, `scripts/harness_accept.py`):
+   [log/2026-11-13-harness-accept.md](log/2026-11-13-harness-accept.md). Qwen3-8B and gpt-oss-20b pending.
 6. **Done (#231): `axon pull`.** Hugging Face files plus about ten checksummed aliases, no registry; HTTPS through
    `curl` (none of the five crates in `Cargo.toml` speaks TLS: [AGENTS.md](../AGENTS.md) hard rule 4).
 7. **v0.1.0, Linux only:** the tag, the boards re-run on its commit, a Linux binary. It waits on items 3 and 6 (both are
@@ -82,7 +86,9 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
 - **gpt-oss experts on the GPU** (prefill 0.27× today). Bar: 0.9× llama.cpp or better on a 4090, and at least 3×
   today's 265 tok/s on bella (the 12–16 GB PC); under 0.8× after 4 days, prefer Qwen3-30B-A3B.
 - **Constrained JSON and tool calls** (`response_format`, #116): a sampler mask, so the bits are unaffected. Defer
-  if the harness test shows under 1 % malformed calls.
+  if the harness test shows under 1 % malformed calls. **Not deferred:** after #262, 23.1 % of Qwen2.5-7B's tool-call
+  replies were malformed, over 1 % on every harness. #264's opt-in grammar brings that to 1.6 %; the rest (pi 5.6 %)
+  needs #272 ([log](log/2026-11-13-harness-accept.md), #259).
 - **MoE into the paged KV, the RAM tier and sharing** (all three are off for MoE today). Bar: an evicted 25k-token
   MoE session resumes in under 0.5 s on a 4090, md5 equal to solo; no page image for gpt-oss in 3 days: qwen3moe only.
 
