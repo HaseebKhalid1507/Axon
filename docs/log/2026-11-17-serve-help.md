@@ -1,4 +1,4 @@
-# serve --help exits 0, and serve's help states every flag it takes  (PR #PR)
+# serve --help exits 0, and serve's help states every flag it takes  (PR #280)
 
 - Date: 2026-11-17. Branch: fix/serve-help. Base: main 1a1d751. Status: open
 - Pick / design: issue #252 (shady's SHOULDs on #225, the `--help` refresh); the foreman's 11-17 ruling: bug-fix scope
@@ -51,7 +51,7 @@ without the caveats docs/models.md has.
 | targeted, debug-assertion build: `cli::tests::` (the help tests among them), `sample::tests::` (`is_flag` against `set`) (jade, CPU) | PENDING | 1117-102223-55f0 |
 | release suite, 3 shards (jade, CPU) | PENDING | 1117-102224-770e, -df4a, -c812 (group 40b5) |
 | debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-102224-a4cb, -4560, -2186 (group 4210) |
-| mutants H1–H6, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | MUT |
+| mutants H1–H6, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | 1117-103233-13e1 |
 | md5 of `gen` | not run: no generation code changed (`sample::FLAGS` is the same 7 names `is_flag` matched) | |
 
 **`serve_help_lists_every_flag`** (cli.rs). The flags serve takes are `SWITCHES`, `VALUE_FLAGS` and `--cors`, minus
