@@ -50,5 +50,5 @@ The full selfcheck passes on jade at 4f500a4 (job 1117-080803-c2c4, sandboxed). 
 ## Not changed
 The sandbox still binds the whole arm directory, so an agent could also reach the arm's other workspaces, round 1's
 included while round 2 runs. None of the 587 task transcripts on bella (`r*-t*.out`, 131 of them round 2) names
-another task's workspace; 277 name their own. Binding only the task's workspace and HOME would close it. It's left out here, so that the runs in flight
-(#274) keep the conditions their earlier rows had.
+another task's workspace; 277 name their own. Binding only the task's workspace and HOME would close it. It's left out
+here, so that the runs in flight (#274) keep the conditions their earlier rows had.
