@@ -9,27 +9,27 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use crate::model::deepseek2_tests::{Opt, ds2_fixture};
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
     /// Uniform in [-1, 1).
-    fn f(&mut self) -> f32 {
+    pub(super) fn f(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0
     }
 }
 
 /// Bits of a float, every NaN as one value.
-fn key(v: f32) -> u32 {
+pub(super) fn key(v: f32) -> u32 {
     if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() }
 }
 
 /// Positions where a and b differ in `key`: the count and the first few.
-fn diffs(a: &[f32], b: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
+pub(super) fn diffs(a: &[f32], b: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
     assert_eq!(a.len(), b.len());
     let d: Vec<usize> = (0..a.len()).filter(|&i| key(a[i]) != key(b[i])).collect();
     (
@@ -48,8 +48,15 @@ fn twin_refusals() {
     for cc in [(8, 0), (8, 6), (8, 9), (9, 0), (12, 0)] {
         twin_gemm_ok(cc).unwrap();
     }
+    // MXFP4's batched twin is dp4a: sm_61+; the r8 types' still sm_80+.
+    for cc in [(6, 1), (7, 5), (8, 9), (12, 0)] {
+        twin_gemm_ok_for(cc, crate::quant::MXFP4).unwrap();
+    }
+    let e = twin_gemm_ok_for((6, 0), crate::quant::MXFP4).unwrap_err();
+    assert!(e.contains("sm_61") && !e.contains("sm_80"), "{e}");
+    assert!(twin_gemm_ok_for((7, 5), crate::quant::Q4_K).is_err());
     use crate::quant::*;
-    for qt in [Q4_K, Q5_0, Q8_0, Q6_K] {
+    for qt in [Q4_K, Q5_0, Q8_0, Q6_K, MXFP4] {
         twin_type(qt).unwrap();
     }
     for qt in [Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, Q5_K, IQ4_NL, F16, F32] {
@@ -60,18 +67,36 @@ fn twin_refusals() {
 /// The batch sizes of the gate.
 const NBS: [usize; 5] = [1, 6, 48, 510, 1024];
 
+/// gpt-oss's (spec §3 item 3): odd sizes around moe_gemm_mx's 32-token
+/// tiles, and the prefill batch.
+pub(super) const OSS_NBS: [usize; 5] = [1, 7, 48, 129, 1152];
+
 /// Layer l of `m` on the GPU vs `cpu.moe_layer_batch` at every nb of NBS:
 /// nb random hidden states (every third token 8x larger), routed by the CPU's
 /// router; then nb invariance on the largest batch (the decode GEMV, token by
-/// token). Below sm_80 the batched path must refuse, and the GEMV path is
-/// checked against the CPU instead.
+/// token). Where the batched path can't run (below sm_80; MXFP4's below
+/// sm_61) it must refuse, and the GEMV path is checked against the CPU
+/// instead.
 fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
+    check_layer_at(g, ex, cpu, l, what, &NBS)
+}
+
+/// `check_layer` at the batch sizes `nbs` (nb invariance on the largest).
+pub(super) fn check_layer_at(
+    _g: &Gpu,
+    ex: &CudaExperts,
+    cpu: &Qwen2,
+    l: usize,
+    what: &str,
+    nbs: &[usize],
+) {
     let mut rng = Rng(0x6d6f_6572_6573_0000 ^ l as u64);
     let (dim, k) = (cpu.dim, ex.k);
-    let mma = twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    let mma = ex.mma.is_ok();
     assert_eq!(ex.fused(), crate::vmath::fused(), "one F: the host CPU's");
     let mut used = vec![0usize; ex.n_e];
-    for nb in NBS {
+    let big = *nbs.iter().max().unwrap();
+    for &nb in nbs {
         let h: Vec<f32> = (0..nb * dim)
             .map(|i| rng.f() * if (i / dim) % 3 == 0 { 8.0 } else { 1.0 })
             .collect();
@@ -129,9 +154,9 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
                 "{what} layer {l}: batched path at nb 1 differs: {first:?}"
             );
         }
-        if nb == 1024 && mma {
+        if nb == big && nb > 8 && mma {
             // nb invariance: tokens alone (decode GEMV) == their batch columns.
-            let pick: Vec<usize> = (0..8).chain([511, 512, 1023]).collect();
+            let pick: Vec<usize> = (0..8).chain([nb / 2 - 1, nb / 2, nb - 1]).collect();
             let hp: Vec<f32> = pick
                 .iter()
                 .flat_map(|&t| h[t * dim..(t + 1) * dim].iter().copied())
@@ -150,7 +175,7 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
                     diffs(&alone[j * dim..(j + 1) * dim], &got[t * dim..(t + 1) * dim]);
                 assert_eq!(
                     n, 0,
-                    "{what} layer {l}: token {t} alone != in the batch of 1024: {first:?}"
+                    "{what} layer {l}: token {t} alone != in the batch of {nb}: {first:?}"
                 );
             }
         }
@@ -366,64 +391,93 @@ fn resident_placement_and_identity() {
     assert_eq!(GpuExperts::parse("auto"), Ok(GpuExperts::Auto));
     assert_eq!(GpuExperts::parse("12"), Ok(GpuExperts::N(12)));
     assert!(GpuExperts::parse("-1").is_err() && GpuExperts::parse("all").is_err());
-    twin_identity(true, true, true).unwrap();
-    twin_identity(true, false, false).unwrap();
+    twin_identity(true, true, true, true).unwrap();
+    twin_identity(true, true, false, false).unwrap();
     assert!(
-        twin_identity(false, true, true)
+        twin_identity(true, false, true, true)
             .unwrap_err()
             .contains("AXON_REPACK=0")
     );
     assert!(
-        twin_identity(true, true, false)
+        twin_identity(true, true, true, false)
             .unwrap_err()
             .contains("fused")
     );
-    assert!(twin_identity(true, false, true).is_err());
+    assert!(twin_identity(true, true, false, true).is_err());
+    // MXFP4 (repack not needed): AXON_REPACK=0 is fine, F still must match.
+    twin_identity(false, false, true, true).unwrap();
+    twin_identity(false, true, false, false).unwrap();
+    assert!(twin_identity(false, false, true, false).is_err());
 }
 
 /// The fixture with an extra F32 tensor `name` of `dims` (zeros).
-fn fixture_plus(name: &str, dims: &[u64]) -> Model {
+fn fixture_plus(extra: &[(String, Vec<u64>)]) -> Model {
     let o = Opt {
         q_lora: false,
         yarn: false,
     };
     let (meta, mut list, mut data) =
         crate::model::deepseek2_tests::fixture_tensors(o, crate::quant::Q8_0);
-    list.push((name.to_string(), dims.to_vec(), crate::quant::F32));
-    data.push(vec![0u8; 4 * dims.iter().product::<u64>() as usize]);
+    for (name, dims) in extra {
+        list.push((name.clone(), dims.clone(), crate::quant::F32));
+        data.push(vec![0u8; 4 * dims.iter().product::<u64>() as usize]);
+    }
     let l: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
     crate::gguf::build_for_test_with(&meta, &l, &data)
 }
 
-/// Expert biases are refused, with the tensor named, by the check `upload`
-/// runs before any upload (#122 review): on the fixture with a synthetic
-/// `ffn_{gate,up,down}_exps.bias` (gpt-oss's shapes: [rows, n_e]) in layer
-/// 1; layer 2 and the plain fixture pass. No GPU needed; with one,
-/// `CudaExperts::upload` itself refuses.
+/// Expert biases need MXFP4 experts (only oss.cu's twins add them; stage B
+/// lifted the refusal of biases as such), and `LayerPlan` refuses them from
+/// the metadata, before any upload (#122's order): on the Q8_0 fixture's
+/// layer 1, all three (gpt-oss's shapes, [rows, n_e]: "non-MXFP4") or one
+/// ("missing"), naming the layer; layer 2, without, plans the file's bytes
+/// (the r8 types upload as they are, nothing staged). No GPU needed; with
+/// one, `CudaExperts::upload` refuses the same and layer 2 holds its plan.
 #[test]
-fn expert_biases_refused_before_upload() {
+fn expert_biases_need_mxfp4() {
     use crate::model::deepseek2_tests::FX;
-    let (plain, _) = ds2_fixture(
-        Opt {
-            q_lora: false,
-            yarn: false,
-        },
-        crate::quant::Q8_0,
-    );
-    refuse_expert_biases(&plain, 1).unwrap();
-    for (p, rows) in [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)] {
-        let name = format!("blk.1.ffn_{p}_exps.bias");
-        let m = fixture_plus(&name, &[rows as u64, FX.n_exp as u64]);
-        let e = refuse_expert_biases(&m, 1).unwrap_err();
-        assert!(e.contains(&name) && e.contains("expert biases"), "{e}");
-        refuse_expert_biases(&m, 2).unwrap();
-        if let Some(g) = crate::testutil::gpu() {
-            let km = Kernels::module_for(&g, &m).unwrap();
-            let e = CudaExperts::upload(&g, &km, &m, 1, FX.k_exp)
+    let all: Vec<(String, Vec<u64>)> = [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)]
+        .iter()
+        .map(|&(p, rows)| {
+            let name = format!("blk.1.ffn_{p}_exps.bias");
+            (name, vec![rows as u64, FX.n_exp as u64])
+        })
+        .collect();
+    let g = crate::testutil::gpu();
+    for (set, why) in [(&all[..], "non-MXFP4"), (&all[..1], "missing")] {
+        let m = fixture_plus(set);
+        let e = LayerPlan::new(&m, 1, FX.k_exp).err().expect("refused");
+        assert!(e.contains("layer 1") && e.contains(why), "{e}");
+        let p = LayerPlan::new(&m, 2, FX.k_exp).unwrap();
+        let file: u64 = (m.tensors.iter())
+            .filter(|t| t.name.starts_with("blk.2.ffn_") && t.name.ends_with("_exps.weight"))
+            .map(|t| t.n_bytes)
+            .sum();
+        assert_eq!((p.bytes as u64, p.transient), (file, 0));
+        if let Some(g) = &g {
+            let km = Kernels::module_for(g, &m).unwrap();
+            let e = CudaExperts::upload(g, &km, &m, 1, FX.k_exp)
                 .err()
                 .expect("refused");
-            assert!(e.contains(&name), "{e}");
-            CudaExperts::upload(&g, &km, &m, 2, FX.k_exp).unwrap();
+            assert!(e.contains("layer 1") && e.contains(why), "{e}");
+            let ex = CudaExperts::upload(g, &km, &m, 2, FX.k_exp).unwrap();
+            assert_eq!(ex.bytes(), p.bytes);
         }
+    }
+}
+
+/// experts.rs's copies of oss.cu's `moe_gemm_mx` launch shape are the
+/// source's: MX_BN and MX_THREADS as defined there, MX_SMEM the value its
+/// static_assert holds MX_SH_BYTES to (NVRTC refuses the module if that
+/// moves). No GPU needed.
+#[test]
+fn mx_consts_are_oss_cu() {
+    let src = include_str!("../oss.cu");
+    for line in [
+        format!("#define MX_BN {MX_BN}\n"),
+        format!("#define MX_THREADS {MX_THREADS}\n"),
+        format!("static_assert(MX_SH_BYTES == {MX_SMEM}, "),
+    ] {
+        assert_eq!(src.matches(&line).count(), 1, "oss.cu: {line:?}");
     }
 }

@@ -18,7 +18,9 @@
 //! gpt-oss runs the same way (stage 1): its windowed attention with sinks
 //! is cuda/oss.cu's (the model's module, `Kernels::module_for`), its biased
 //! router moe.cu's `moe_router` (`MoeKind::Oai`), and its MXFP4 experts are read in place
-//! from the mapping (`Qwen2::new_experts`: no repack, no copy).
+//! from the mapping (`Qwen2::new_experts`: no repack, no copy). With
+//! `--gpu-experts`, resident layers take oss.cu's MXFP4 twins (bias
+//! epilogues, `swiglu_oai`), the CPU's bits as for the other kinds.
 //!
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
@@ -40,7 +42,7 @@ pub(crate) struct MoeQwen3<'m, 'g> {
     /// asked).
     pub(crate) ctx: usize,
     /// The MoE layers whose experts are resident on the GPU
-    /// (`--gpu-experts`; deepseek2 and qwen3moe), and why there are none if
+    /// (`--gpu-experts`; deepseek2, qwen3moe and gpt-oss), and why there are none if
     /// some were asked for.
     res: Option<Resident<'g>>,
     res_note: Option<String>,
@@ -223,27 +225,46 @@ fn place_resident<'g>(
     env: TwinEnv,
 ) -> Result<Resident<'g>, String> {
     {
-        if matches!(kind, MoeKind::Oai(_)) {
-            return Err(format!(
-                "resident experts: deepseek2 and qwen3moe only for now ({})",
-                m.arch
-            ));
-        }
-        experts::twin_identity(env.repack, env.cpu_fused, crate::vmath::fused())?;
-        experts::twin_gemm_ok(gpu.info()?.cc)?;
         let all = expert_layers(m);
+        let d = net.moe.expect("a mixture-of-experts model");
+        // Layer l's routed experts' weight types.
+        let types = |l: usize| {
+            (m.tensors.iter())
+                .filter(move |t| {
+                    t.layer == l as i32
+                        && crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                })
+                .map(|t| t.qtype.id)
+        };
         // Layers with a weight type the twins don't cover stay on the CPU
         // (rather than refusing every layer at that one's upload).
-        let layers: Vec<(usize, usize)> = (all.iter().copied())
-            .filter(|&(l, _)| {
-                m.tensors.iter().all(|t| {
-                    t.layer != l as i32
-                        || !crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
-                        || crate::cuda::qwen2::twin_type(t.qtype.id).is_ok()
-                })
-            })
+        let twins: Vec<usize> = (all.iter().copied())
+            .filter(|&l| types(l).all(|q| crate::cuda::qwen2::twin_type(q).is_ok()))
             .collect();
-        let d = net.moe.expect("a mixture-of-experts model");
+        // The twins' conditions, by the types they'd run: the r8 types need
+        // the CPU's repack and tensor cores; MXFP4 (gpt-oss) neither.
+        let qts: Vec<u32> = twins.iter().flat_map(|&l| types(l)).collect();
+        let repack_needed = qts.iter().any(|&q| q != crate::quant::MXFP4);
+        experts::twin_identity(
+            repack_needed,
+            env.repack,
+            env.cpu_fused,
+            crate::vmath::fused(),
+        )?;
+        let cc = gpu.info()?.cc;
+        for &q in &qts {
+            experts::twin_gemm_ok_for(cc, q)?;
+        }
+        // Each layer's device bytes as uploaded (`LayerPlan`: MXFP4 in the
+        // twin's layout, with gpt-oss's biases), and the most an upload
+        // stages besides; every refusal here, before any byte goes up.
+        let mut layers: Vec<(usize, usize)> = Vec::new();
+        let mut staged = 0;
+        for &l in &twins {
+            let p = experts::LayerPlan::new(m, l, d.k)?;
+            layers.push((l, p.bytes));
+            staged = staged.max(p.transient);
+        }
         let dim = net.dim;
         // ctx first: the free memory with one cache of the planned context
         // (the GPU cache and the kind's scratch, as `new_cache` makes).
@@ -263,7 +284,8 @@ fn place_resident<'g>(
             } as usize;
             f.saturating_sub(ResBufs::bytes(max, dim, d.ffn, d.k))
         };
-        let budget = free.saturating_sub(RESIDENT_HEADROOM);
+        // The last layer's upload stages its rows next to every layer placed.
+        let budget = free.saturating_sub(RESIDENT_HEADROOM + staged);
         let pick = experts::place(&layers, want, budget);
         if let GpuExperts::N(n) = want
             && pick.len() < n
@@ -284,9 +306,17 @@ fn place_resident<'g>(
             }
         }
         let r = Resident::upload(gpu, module, m, net.n_layers, &pick, d.k)?;
+        debug_assert_eq!(
+            r.bytes(),
+            (layers.iter())
+                .filter(|(l, _)| pick.contains(l))
+                .map(|e| e.1)
+                .sum::<usize>(),
+            "the plan's device bytes are the upload's"
+        );
         for l in r.which() {
-            let f = r.get(l).expect("resident").fused();
-            experts::twin_identity(env.repack, env.cpu_fused, f)?;
+            let ex = r.get(l).expect("resident");
+            experts::twin_identity(ex.repack_needed(), env.repack, env.cpu_fused, ex.fused())?;
         }
         Ok(r)
     }
@@ -405,17 +435,15 @@ impl<'g> MoeQwen3<'_, 'g> {
 /// batch passes' transient buffers).
 const RESIDENT_HEADROOM: usize = 512 << 20;
 
-/// Each MoE layer's routed experts: (layer, bytes of its three tensors).
-fn expert_layers(m: &Model) -> Vec<(usize, usize)> {
-    let mut v: Vec<(usize, usize)> = Vec::new();
+/// The MoE layers (those with routed experts), ascending.
+fn expert_layers(m: &Model) -> Vec<usize> {
+    let mut v: Vec<usize> = Vec::new();
     for t in &m.tensors {
         if crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
             && let Ok(l) = usize::try_from(t.layer)
+            && !v.contains(&l)
         {
-            match v.iter_mut().find(|e| e.0 == l) {
-                Some(e) => e.1 += t.n_bytes as usize,
-                None => v.push((l, t.n_bytes as usize)),
-            }
+            v.push(l);
         }
     }
     v.sort();
@@ -508,12 +536,17 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 #[cfg(test)]
 mod ds2_tests;
 #[cfg(test)]
+mod ossres_tests;
+#[cfg(test)]
 mod q3res_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
 #[cfg(test)]
 mod oss_tests;
+
+#[cfg(test)]
+mod oss_s0_tests;
 
 #[cfg(test)]
 mod router_legacy_tests;

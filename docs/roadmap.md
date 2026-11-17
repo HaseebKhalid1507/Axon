@@ -84,7 +84,12 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
 ### Weeks 2–3, and whatever the audit ranks
 
 - **gpt-oss experts on the GPU** (prefill 0.27× today). Bar: 0.9× llama.cpp or better on a 4090, and at least 3×
-  today's 265 tok/s on bella (the 12–16 GB PC); under 0.8× after 4 days, prefer Qwen3-30B-A3B.
+  today's 265 tok/s on bella (the 12–16 GB PC); under 0.8× after 4 days, prefer Qwen3-30B-A3B. **Stop rule, applied
+  in #271:** the 4090 half is missed on paper. All experts resident project to 0.54× of llama.cpp's pp512 12,171
+  (DERIVED from stage A's kernel; the pods are off, so not measured), and nobody chases it unless the maintainer
+  rules for U or E2 ([log](log/2026-11-14-oss-twin.md)). Stages B and C go on for bella's half. Its 265 is #98's
+  24-thread figure; at 16 threads, the count #271's runs use, it is 218.5, which makes the 3× bar 655 rather than
+  795. Stage C picks one thread count, and the bar that goes with it, before its run.
 - **Constrained JSON and tool calls** (`response_format`, #116): a sampler mask, so the bits are unaffected. Defer
   if the harness test shows under 1 % malformed calls. **Not deferred:** after #262, 23.1 % of Qwen2.5-7B's tool-call
   replies were malformed, over 1 % on every harness. #264's opt-in grammar brings that to 1.6 %; the rest (pi 5.6 %)

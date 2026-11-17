@@ -47,7 +47,9 @@ re-convert message.
 `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
 GGUF) runs on the CPU (stage 0, [log](log/2026-10-18-gpt-oss-s0.md)) or, with
 `--device cuda`, with its attention, norms, router and head on the GPU and its MXFP4 experts on
-the CPU (stage 1, [log](log/2026-10-18-gpt-oss-s1.md): f16 KV only): MXFP4
+the CPU (stage 1, [log](log/2026-10-18-gpt-oss-s1.md): f16 KV only). `--gpu-experts N|auto` keeps
+the experts of N layers on the GPU as well, with the same bits (the MXFP4 twins,
+[log](log/2026-11-14-oss-twin.md)); opt-in, default 0. MXFP4
 experts read in place, attention sinks, the 128-token sliding window on alternate layers,
 YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
 channel; `axon serve` returns the `analysis` channel as `reasoning_content`, with tool
@@ -60,7 +62,7 @@ scaling and YaRN ([usage.md](usage.md#long-context)) excepted) are refused with 
 Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and
 IQ4_NL on the CPU, so every Q2_K and Q3_K_S/M/L GGUF runs (IQ4_NL is llama.cpp's fallback
 for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
-gpt-oss's experts (CPU only: the GPU gets gpt-oss's other tensors). On the GPU every weight matrix must be one of the eleven
+gpt-oss's experts (on the CPU, or on the GPU with `--gpu-experts`). On the GPU every weight matrix must be one of the eleven
 quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
 
 ## Model files: GGUF and safetensors

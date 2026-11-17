@@ -507,8 +507,9 @@ fn engine_nvrtc(g: &Gpu) -> Result<&'static ffi::Nvrtc, String> {
 /// The whole kernel module compiles (NVRTC, no GPU needed) for the oldest
 /// architectures NVRTC still supports - sm_70 and sm_75, where it has them -
 /// which take the paths without tensor cores (the split attention, gemvn),
-/// and for sm_80 (the oldest with them). With a GPU, by the NVRTC the engine
-/// picks for it. Skipped without NVRTC.
+/// and for sm_80 (the oldest with them); so does gpt-oss's (`KERNELS_OSS`,
+/// with oss.cu's `__CUDA_ARCH__ >= 800` split: cp.async or plain copies).
+/// With a GPU, by the NVRTC the engine picks for it. Skipped without NVRTC.
 #[test]
 fn nvrtc_kernels_compile_for_old_archs() {
     // No testutil::gpu lock: the handle only picks the NVRTC, no GPU work runs.
@@ -529,8 +530,10 @@ fn nvrtc_kernels_compile_for_old_archs() {
         let t = Target::Cubin(a);
         let mut opts = vec![format!("--gpu-architecture={t}")];
         opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
-        let image = compile(n, KERNELS, &opts, t).unwrap_or_else(|e| panic!("sm_{a}: {e}"));
-        eprintln!("sm_{a}: {} bytes of cubin", image.len());
+        for (what, src) in [("kernels", KERNELS), ("oss", super::KERNELS_OSS)] {
+            let image = compile(n, src, &opts, t).unwrap_or_else(|e| panic!("sm_{a} {what}: {e}"));
+            eprintln!("sm_{a} {what}: {} bytes of cubin", image.len());
+        }
     }
 }
 
@@ -543,7 +546,8 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
 /// kernels are in the cubin) with no wgmma note in the log: ptxas reports
 /// wgmma it had to serialize or waits it had to inject (C7510-C7517: a
 /// silent 3-5x slowdown) there. For plain sm_90 hopper.cu compiles to nothing. NVRTC
-/// only, no GPU needed; skipped without NVRTC or sm_90.
+/// only, no GPU needed; skipped without NVRTC or sm_90. gpt-oss's module
+/// (`KERNELS_OSS`, the same plus oss.cu) the same way.
 #[test]
 fn nvrtc_kernels_compile_for_sm90a() {
     let n = match ffi::nvrtc() {
@@ -571,21 +575,24 @@ fn nvrtc_kernels_compile_for_sm90a() {
         b"gemmh2_q4_k_gu",
         b"gemmh1_q4_k",
     ];
-    for t in [Target::Cubin90a, Target::Cubin(90)] {
+    for (t, (what, src)) in [Target::Cubin90a, Target::Cubin(90)]
+        .into_iter()
+        .flat_map(|t| [("kernels", KERNELS), ("oss", super::KERNELS_OSS)].map(|s| (t, s)))
+    {
         let mut opts = vec![format!("--gpu-architecture={t}")];
         opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
         let (image, log) =
-            compile_logged(n, KERNELS, &opts, t).unwrap_or_else(|e| panic!("{t}: {e}"));
-        eprintln!("{t}: {} bytes of cubin", image.len());
+            compile_logged(n, src, &opts, t).unwrap_or_else(|e| panic!("{t} {what}: {e}"));
+        eprintln!("{t} {what}: {} bytes of cubin", image.len());
         assert!(
             !log.contains("wgmma") && !log.contains("serialized") && !log.contains("C751"),
-            "{t}: wgmma notes in the NVRTC log:\n{log}"
+            "{t} {what}: wgmma notes in the NVRTC log:\n{log}"
         );
         for k in hopper_kernels {
             assert_eq!(
                 contains_bytes(&image, k),
                 t == Target::Cubin90a,
-                "{t}: {}",
+                "{t} {what}: {}",
                 String::from_utf8_lossy(k)
             );
         }

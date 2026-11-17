@@ -10,7 +10,7 @@ use super::*;
 use crate::cuda::Kernels;
 use crate::cuda::qwen2::experts::GpuExperts;
 
-fn bits(v: &[Vec<f32>]) -> Vec<Vec<u32>> {
+pub(super) fn bits(v: &[Vec<f32>]) -> Vec<Vec<u32>> {
     v.iter()
         .map(|x| x.iter().map(|f| f.to_bits()).collect())
         .collect()
@@ -29,7 +29,7 @@ fn gpu_mma() -> Option<Gpu> {
 
 /// Every expert tensor of the resident layers `r` reads as released (`m`
 /// anonymous memory: `tensor_data` panics on a released tensor).
-fn assert_released(m: &Model, r: &[usize], what: &str) {
+pub(super) fn assert_released(m: &Model, r: &[usize], what: &str) {
     for t in m.tensors.iter().filter(|t| {
         crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
             && usize::try_from(t.layer).is_ok_and(|l| r.contains(&l))
@@ -42,7 +42,7 @@ fn assert_released(m: &Model, r: &[usize], what: &str) {
 
 /// verify (`verify_argmax`: the batched pass with `Head::Argmax`) picks the
 /// argmax of each decode logits row in `tr` (its first ids.len() rows).
-fn check_verify(net: &MoeQwen3, ids: &[u32], tr: &[Vec<f32>], what: &str) {
+pub(super) fn check_verify(net: &MoeQwen3, ids: &[u32], tr: &[Vec<f32>], what: &str) {
     let mut c = net.new_cache(ids.len() + 1);
     let picks = net.verify_argmax(ids, 0, &mut c);
     let want: Vec<u32> = tr[..ids.len()].iter().map(|l| crate::argmax(l)).collect();
@@ -167,7 +167,7 @@ fn q3_resident_model_bits() {
 
 /// The refusals still fall back to CPU experts on qwen3moe with N(0)'s
 /// bits: AXON_REPACK=0 and a twin F that isn't the host's (forced through
-/// `new_inner`); gpt-oss (MXFP4 experts, expert biases) is refused.
+/// `new_inner`). (gpt-oss is placed since stage B: ossres_tests.rs.)
 #[test]
 fn q3_resident_fallbacks() {
     use super::TwinEnv;
@@ -236,29 +236,4 @@ fn q3_resident_fallbacks() {
         assert!(run(&net) == base, "{why}: bits differ from N(0)");
         eprintln!("qwen3moe fallback ({why}): {d}");
     }
-    let o = crate::model::gptoss_tests::oss_fixture_dims(
-        (3, 256, 16, 2, 64, 64, 4, 2, 64, 4),
-        |_| {},
-        |_| {},
-    );
-    let ok = Kernels::module_for(g, &o).unwrap();
-    let om = Kernels::moe_module_for(g, &o).unwrap();
-    let net = MoeQwen3::new_with(
-        g,
-        &ok,
-        &om,
-        &o,
-        32,
-        CacheKv::F16,
-        false,
-        true,
-        GpuExperts::Auto,
-    )
-    .unwrap();
-    let d = net.describe(32);
-    assert!(
-        net.resident_layers().is_empty() && d.contains("deepseek2 and qwen3moe only"),
-        "{d}"
-    );
-    eprintln!("gpt-oss fallback: {d}");
 }
