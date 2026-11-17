@@ -3823,7 +3823,9 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--numerics",
 ];
 
-/// Old names `run` still takes, each said in its new name's help line.
+/// Old names `run` still takes (in `VALUE_FLAGS`), each said in its new
+/// name's help line: the help test's list.
+#[cfg(test)]
 pub(crate) const OLD_FLAGS: &[&str] = &["--prefill-ms"];
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
