@@ -14,7 +14,9 @@ gpt-oss's experts on the GPU as far as they fit). Stdlib only, one file (axon-po
     harness_accept.py rescore DIR                 a run made before the 11-14 fixes: per-task attribution and
                                                   compaction / cold-prompt counts redone from its files
     harness_accept.py selfcheck [--no-sandbox]    every task's check fails before and passes after its reference
-                                                  solution; the proxy's parsing against a fake upstream (no model)
+                                                  solution; the proxy's parsing against a fake upstream; a deleted or
+                                                  broken workspace, and `run`'s servers stopped on every way out (a
+                                                  fake engine; no model)
     harness_accept.py capture --harness H --out DIR [--task ID] [--no-sandbox]
                                                   the request bodies a harness sends (one turn against a stub
                                                   server, no model): DIR/<harness>-<n>.json, for prompt_diff.py
@@ -49,12 +51,15 @@ next to the proxy's `tc_unoffered`.
 
 Safety: every harness, and every check that runs model-written code, runs under bubblewrap (no --no-sandbox): only
 /usr, /etc, /opt, /sys read-only, an empty /home with the run directory bound in, private /tmp and pid namespace, a
-clean environment (scratch HOME / XDG dirs, dummy keys). The network namespace is shared (the harness must reach the
-proxy on 127.0.0.1), so a model could still reach the internet, and every service listening on the host's localhost
-(ollama's API, other engines' ports) as well.
+clean environment (scratch HOME / XDG dirs, dummy keys). A harness gets its arm's directory (`<arm>-<harness>`: every
+task's workspace and its HOME) read-write, so an agent can delete or replace its own workspace (job 1117-042150-6ccd:
+`rm -rf` on it), which fails the task (`workspace missing` / `workspace broken`), and could reach the arm's other
+workspaces (none of the runs' transcripts so far name another task's). The network namespace is shared (the harness
+must reach the proxy on 127.0.0.1), so a model could still reach the internet, and every service listening on the
+host's localhost (ollama's API, other engines' ports) as well.
 """
-import argparse, ast, csv, datetime, glob, hashlib, http.client, http.server, io, json, os, re, select, shutil, signal
-import socket, socketserver, statistics, subprocess, sys, tempfile, threading, time, urllib.request
+import argparse, ast, contextlib, csv, datetime, glob, hashlib, http.client, http.server, io, json, os, re, select
+import shutil, signal, socket, socketserver, statistics, subprocess, sys, tempfile, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESSES = ("opencode", "codex", "pi")
@@ -754,10 +759,20 @@ TASK_BY_ID = {t["id"]: t for t in TASKS}
 
 
 def run_check(t, ws):
-    """The task's check on a copy of ws (the agent's tree stays as it left it)."""
+    """The task's check on a copy of ws (the agent's tree stays as it left it). A workspace the agent deleted, replaced
+    or left uncopyable fails the task: job 1117-042150-6ccd crashed when opencode's model ran `rm -rf` on its own
+    workspace (the arm's dir is the sandbox's rw bind, so the agent can remove the workspace itself)."""
+    if not os.path.lexists(ws):
+        return False, "workspace missing"
+    if os.path.islink(ws) or not os.path.isdir(ws):  # a symlink is not followed: it could point anywhere
+        return False, "workspace broken: not a directory"
     chk = ws.rstrip("/") + ".check"
     shutil.rmtree(chk, ignore_errors=True)
-    shutil.copytree(ws, chk, symlinks=True, ignore=shutil.ignore_patterns(".git", "node_modules"))
+    try:
+        shutil.copytree(ws, chk, symlinks=True, ignore=shutil.ignore_patterns(".git", "node_modules"))
+    except OSError as e:  # shutil.Error too: a named pipe, an unreadable file
+        shutil.rmtree(chk, ignore_errors=True)
+        return False, "workspace broken: %s: %s" % (type(e).__name__, str(e)[:300])
     try:
         return t["check"](chk)
     except Exception as e:  # a check must never take the run down
@@ -1381,6 +1396,11 @@ def run_turn(h, alias, root, home, ws, cont, prompt, timeout, outp):
                 os.killpg(p.pid, signal.SIGKILL)
                 p.wait()
                 rc, to = 124, True
+            except BaseException:  # the run is going down (an exception, SIGTERM): the harness with it
+                with contextlib.suppress(OSError):
+                    os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                raise
         except OSError as e:
             f.write("harness_accept: %s\n" % e)
             rc, to = 127, False
@@ -1539,7 +1559,42 @@ def summarize(recs, m0, m1, cts=None):
         cold_first=sum(r.get("cold_first", 0) for r in recs))
 
 
+LIVE = []  # the engines and proxies `run` has up: stopped however it ends
+
+
+def signal_exit(sig, frame):
+    raise SystemExit(128 + sig)
+
+
 def cmd_run(a):
+    """`run`, with its servers stopped on every way out: a normal end, an exception (job 1117-042150-6ccd left a
+    crashed run's axon serve holding 8.7 GB of VRAM until axon-run's sweep), SIGTERM or SIGHUP (raised as SystemExit,
+    so the turn in flight kills its harness too). SIGKILL leaves them to axon-run's sweep of the job's scope."""
+    old = {s: signal.signal(s, signal_exit) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        return run_all(a)
+    finally:
+        while LIVE:
+            x = LIVE.pop()
+            try:
+                x.stop()
+            except Exception as e:  # noqa: BLE001 - the others still get stopped
+                print("WARN stopping %s: %s: %s" % (type(x).__name__, type(e).__name__, e), flush=True)
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
+def harness_version(h, vh):
+    """The last line of `h --version` ("?" if it fails), None if h can't be run."""
+    try:
+        r = subprocess.run([h, "--version"], capture_output=True, text=True, timeout=60, env=clean_env(vh),
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return ((r.stdout.strip() or r.stderr.strip()).splitlines() or ["?"])[-1] if r.returncode == 0 else "?"
+
+
+def run_all(a):
     global SANDBOX
     SANDBOX = not a.no_sandbox
     if SANDBOX and not shutil.which("bwrap"):
@@ -1573,12 +1628,8 @@ def cmd_run(a):
     vh = os.path.join(out, "verhome")
     os.makedirs(vh, exist_ok=True)
     for h in harn:
-        try:
-            r = subprocess.run([h, "--version"], capture_output=True, text=True, timeout=60, env=clean_env(vh),
-                               stdin=subprocess.DEVNULL)
-            vers[h] = ((r.stdout.strip() or r.stderr.strip()).splitlines() or ["?"])[-1] if r.returncode == 0 else "?"
-        except (OSError, subprocess.TimeoutExpired):
-            vers[h] = "missing"
+        vers[h] = harness_version(h, vh)
+        if vers[h] is None:
             sys.exit("harness_accept: harness %s not runnable" % h)
     me = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:12]
     # other AXON_* variables inherited from the job's environment reach every Axon arm (arm_env drops only the arms'
@@ -1591,6 +1642,7 @@ def cmd_run(a):
     results = []
     for ek in engines:
         eng = Engine(ek, os.path.abspath(bins[ek]), mpath, a.model, prof, out)
+        LIVE.append(eng)
         try:
             info = eng.start()
         except RuntimeError as e:
@@ -1606,6 +1658,7 @@ def cmd_run(a):
               info["env"] or "{}", (" log: " + " / ".join(info["notes"])) if info["notes"] else "",
               (" tried: " + " | ".join(info["tried"])) if info["tried"] else ""), flush=True)
         px = Proxy(eng.port)
+        LIVE.append(px)
         for h in harn:
             root = os.path.join(out, "%s-%s" % (ek, h))
             home = os.path.join(root, "home")
@@ -1683,8 +1736,9 @@ def cmd_run(a):
                     resf.write(json.dumps(res) + "\n")
                     resf.flush()
                     print("RESULT " + json.dumps(res), flush=True)
-        px.stop()
-        eng.stop()
+        for x in (px, eng):
+            x.stop()
+            LIVE.remove(x)
     reqf.close()
     print_summary(results)
     print_latency(load_requests([os.path.join(out, "requests.jsonl")]))
@@ -2336,6 +2390,171 @@ def selfcheck_arms():
     return bad
 
 
+FAKE_ENGINE = r"""#!/usr/bin/env python3
+# selfcheck_exits' stand-in for axon serve: /health, a warm-up reply, empty /metrics; its pid appended to engine.pid
+import http.server, os, sys
+port = int(sys.argv[sys.argv.index("--port") + 1])
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.pid"), "a") as f:
+    f.write("%d\n" % os.getpid())
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, b):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        self._send(b"" if self.path.startswith("/metrics") else b'{"status": "ok"}')
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self._send(b'{"choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, '
+                   b'"finish_reason": "stop"}]}')
+
+
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+
+def selfcheck_exits():
+    """Job 1117-042150-6ccd: a workspace the agent deleted or broke is a failed result, not a crash; and `run` stops
+    its engine and proxy (and the harness in flight) however it ends: a normal end, an exception, SIGTERM. `run` goes
+    against a fake engine, with the harness swapped for a shell command (no model, no GPU)."""
+    bad = 0
+    d = tempfile.mkdtemp(prefix="ha-self-exit-")
+    g = globals()
+    try:
+        # run_check on workspaces an agent broke (the check itself must never run: each detail says why)
+        out_dir = os.path.join(d, "outside")
+        wr(out_dir, "secret.txt", "not the workspace\n")
+        os.symlink(out_dir, os.path.join(d, "link"))
+        wr(d, "file", "x\n")
+        os.makedirs(os.path.join(d, "fifo"))
+        os.mkfifo(os.path.join(d, "fifo", "pipe"))
+        for name, ws, want in (("missing", os.path.join(d, "gone"), "workspace missing"),
+                               ("symlink", os.path.join(d, "link"), "workspace broken: not a directory"),
+                               ("a file", os.path.join(d, "file"), "workspace broken: not a directory"),
+                               ("named pipe", os.path.join(d, "fifo"), "workspace broken: Error")):
+            try:
+                ok, det = run_check(TASK_BY_ID["pyproject"], ws)
+            except Exception as e:  # noqa: BLE001
+                ok, det = None, "CRASH %s: %s" % (type(e).__name__, e)
+            good = ok is False and det.startswith(want) and not os.path.lexists(ws + ".check")
+            bad += not good
+            print("%-32s %s  %s" % ("workspace: " + name, "OK  " if good else "FAIL", det[:100]))
+
+        fake, model = os.path.join(d, "fake-axon"), os.path.join(d, "model.gguf")
+        wr(d, "fake-axon", FAKE_ENGINE)
+        os.chmod(fake, 0o755)
+        wr(d, "model.gguf", "not a model\n")
+        pidf = os.path.join(d, "engine.pid")
+
+        def gone(pid):  # an unreaped zombie counts as alive: Engine.stop waits for its process
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        def running(tag):
+            pids = []
+            for x in os.listdir("/proc"):
+                try:
+                    with open("/proc/%s/cmdline" % x, "rb") as f:
+                        if x.isdigit() and tag.encode() in f.read():
+                            pids.append(int(x))
+                except OSError:
+                    pass
+            return pids
+
+        def closed(port):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=2).close()
+                return False
+            except OSError:
+                return True
+
+        def run(name, agent, patch=None, during=None):
+            """`run` on one task with the harness replaced by `agent`: (rc or the exception, results, servers gone)."""
+            out = os.path.join(d, name)
+            open(pidf, "w").close()
+            made, base = [], Proxy
+
+            class P(base):  # the proxies `run` makes, to see they're closed
+                def __init__(self, *x, **k):
+                    base.__init__(self, *x, **k)
+                    made.append(self)
+            swap = dict(harness_argv=lambda h, alias, home, ws, cont, prompt: ({}, list(agent)),
+                        harness_version=lambda h, vh: "fake", Proxy=P, **(patch or {}))
+            saved = {k: g[k] for k in swap}
+            g.update(swap)
+            a = argparse.Namespace(model="qwen2.5-0.5b", model_path=model, sampler="card", tasks="pyproject",
+                                   harness="opencode", engines="axon", out=out, axon_bin=fake, llama_bin=None, rounds=1,
+                                   turn_timeout=60, no_sandbox=not SANDBOX)
+            th = threading.Thread(target=during, args=(out,), daemon=True) if during else None
+            buf = io.StringIO()
+            try:
+                if th:
+                    th.start()
+                with contextlib.redirect_stdout(buf):
+                    end = cmd_run(a)
+            except BaseException as e:  # noqa: BLE001 - SystemExit from SIGTERM included
+                end = e
+            finally:
+                g.update(saved)
+            pids = [int(x) for x in open(pidf).read().split()]
+            res = [json.loads(x) for x in open(os.path.join(out, "results.jsonl"))]
+            down = bool(pids) and all(gone(x) for x in pids) and bool(made) and all(closed(x.port) for x in made)
+            return end, res, down, buf.getvalue()
+
+        def report(name, good, end, res, down, log):
+            print("%-32s %s  end %r, results %s, engine and proxy %s" % (
+                name, "OK  " if good else "FAIL", end, [(r["ok"], r["detail"][:40]) for r in res],
+                "stopped" if down else "STILL UP"))
+            if not good:
+                print("  " + "\n  ".join(log.splitlines()[-12:]))
+            return not good
+
+        # the agent deletes its own workspace (6ccd's exception task): a failed result, the run goes on to its end
+        end, res, down, log = run("rm-ws", ["sh", "-c", 'rm -rf "$PWD"'])
+        bad += report("run: agent deletes its workspace", end == 0 and len(res) == 1 and not res[0]["ok"]
+                      and res[0]["detail"] == "workspace missing" and down, end, res, down, log)
+
+        # a bug in the harness (6ccd's crash site raising): the exception gets out, the servers don't stay up
+        def boom(t, ws):
+            raise RuntimeError("selfcheck: a bug after the turn")
+        end, res, down, log = run("bug", ["true"], patch=dict(run_check=boom))
+        bad += report("run: an exception", isinstance(end, RuntimeError) and down, end, res, down, log)
+
+        # SIGTERM mid-turn (axon-run kill, --max-min): SystemExit(143); servers stopped, the harness killed
+        tag = "61.%d" % (os.getpid() % 1000)
+
+        def term(out):
+            mark = os.path.join(out, "axon-opencode", "r1-pyproject", ".agent-up")
+            for _ in range(600):
+                if os.path.exists(mark):
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                time.sleep(0.05)
+        end, res, down, log = run("sigterm", ["sh", "-c", 'touch "$PWD/.agent-up"; exec sleep %s' % tag], during=term)
+        for _ in range(50):
+            left = running("sleep\0" + tag)
+            if not left:
+                break
+            time.sleep(0.1)
+        bad += report("run: SIGTERM mid-turn", isinstance(end, SystemExit) and end.code == 143 and down and not left,
+                      end, res, down, log + ("\nharness still running: %s" % left if left else ""))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return bad
+
+
 def stub_upstream(outdir, tag):
     """A stand-in server for `capture`: saves every POST body as OUTDIR/<tag>-<n>.json and answers with a one-word
     final reply (chat completions or the Responses API, streamed or not), so the harness ends its turn."""
@@ -2517,6 +2736,7 @@ def cmd_selfcheck(a):
     up.shutdown()
     bad += selfcheck_compactions()
     bad += selfcheck_arms()
+    bad += selfcheck_exits()
     print("SELFCHECK %s (%d failures)" % ("PASS" if not bad else "FAIL", bad))
     return 1 if bad else 0
 
