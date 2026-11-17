@@ -80,6 +80,8 @@ Each fix reverted on its own (locally) fails exactly its own case:
   case crashes);
 - without clearing the transcript path: the symlink case (the outside file overwritten).
 
+The full selfcheck passes on jade at e280d1c (job 1117-083539-be4d, sandboxed).
+
 ## Not changed
 The sandbox still binds the whole arm directory. An agent could also reach the arm's other workspaces, round 1's
 included while round 2 runs. None of the 587 task transcripts on bella (`r*-t*.out`, 131 of them round 2) names
