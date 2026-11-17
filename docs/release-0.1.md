@@ -5,7 +5,7 @@
 > maintainer's list at the end. Full list of changes: [CHANGELOG.md](../CHANGELOG.md).
 >
 > The release candidate is main `9f3630c`'s binary (2026-11-14), from the release workflow's dry run; the boards
-> below ran on it. The tag can't be that commit: this PR (#270) and the CHANGELOG's date land after it, so the tag
+> below run on it. The tag can't be that commit: this PR (#270) and the CHANGELOG's date land after it, so the tag
 > is a docs-only descendant, whose binary should be the same bytes. The maintainer checks that before publishing
 > (releasing.md, "The boards' binary"); if it differs, the board lines say they measured the candidate, not the
 > release binary.
@@ -121,17 +121,18 @@ boards on `9f3630c` are below them.
   board below re-runs it against seven llama-server configurations chosen to favor it, and its R supersedes this
   line.
 - **The boards on `9f3630c`** (bella, the release candidate's own binary, its kernel pack only; roadmap week 1,
-  item 7). **Pending:** they run on bella once a smoke of the same scripts has passed. Each is stated here only once
-  its log is in this PR. The rules were written down before any board ran ([log](log/2026-11-14-release-0.1-prep.md)).
+  item 7). **Pending:** they run on bella once a smoke of the same scripts has passed, one cell per job, a run lost
+  to foreign GPU load alone run again (bounded). Each is stated here only once its log is in this PR. The rules were
+  written down before any board ran ([log](log/2026-11-14-release-0.1-prep.md)).
   - *Single stream:* axon vs llama-bench, upstream's official build of llama.cpp master (b12387, 2026-11-14) and
     bella's `4413a19`, the weekly pod board's protocol with the run order rotated by round. Each cell is read
     against the faster of the two builds; ahead or behind only past 2 % with the rounds' ranges apart. Job `<sb>`.
-  - *Agent replay:* the cell above. llama-server first runs seven configurations chosen to favor it, from
-    llama.cpp's source; the one with the lowest turn TTFT p50 is its pick. Then axon vs that configuration, 3
-    rounds, the engine order alternating. **Stop rule:** R = llama-server's median turn TTFT p50 over axon's,
-    over the rounds where both engines are clean. If llama-server is faster in every round, or the rounds' ratios
-    include 1, the one-sentence summary above says so. If R ≤ 1.5, the edge is thinner than claimed, and MoE in the
-    paged pool goes first in the roadmap. The tag goes ahead either way. Jobs `<sweep>`, `<board>`.
+  - *Agent replay:* the cell above. llama-server first runs seven configurations chosen to favor it, from llama.cpp's
+    source; the one with the lowest turn TTFT p50 is its pick. Then axon vs that configuration, 3 rounds not lost to
+    foreign GPU load (at most 8), the engine order alternating. **Stop rule:** R = llama-server's median turn TTFT p50
+    over axon's, over the rounds where both engines are clean. If llama-server is faster in every round, or the rounds'
+    ratios include 1, the one-sentence summary above says so. If R ≤ 1.5, the edge is thinner than claimed, and MoE in
+    the paged pool goes first in the roadmap. The tag goes ahead either way. Jobs `<sweep>`, `<board>`.
 
 ## Known limits
 
@@ -178,7 +179,10 @@ The procedure, its checks and what each refusal means: [releasing.md](releasing.
       boards' binary"). If not, the board lines say "measured on the candidate `9f3630c`, not the release binary".
 - [ ] The draft's notes: this page from "In one sentence" to the end of "Known limits" (not the banner, not this
       list), with no `<sb>`, `<sweep>`, `<board>` or "Pending" left in it, keeping the job's "SHA-256 of the
-      tarball: …" and "Built from commit …" lines, each exactly once, and the title.
+      tarball: …" and "Built from commit …" lines, each exactly once, and the title. A board with no reading by
+      the tag (its queue still running, no untainted run, NO_VERDICT) doesn't hold the tag: its sub-bullet goes,
+      and the bullet says which board wasn't measured on the candidate and why, in one line. The 10-27 agent line
+      then stands as written, its caveat included. Nothing from the failed 11-15 run is cited.
 - [ ] Publish: `scripts/release/publish.sh v0.1.0 <SHA-256>`, with the SHA-256 written next to the checks.
 - [ ] No `cargo publish` under the name `axon`: it's taken on crates.io (aep/axon); pick a package name first
       (`[lib] name = "axon"` can stay).

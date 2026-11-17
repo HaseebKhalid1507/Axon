@@ -8,15 +8,16 @@ ran, after shady's #270 review):
      prompt-count mismatches, is not tainted (foreign GPU load), and was sent and measured every request of the plan:
      requests = the plan's requests, n turn = the plan's turns (agent_replay.py's plan_counts). The counts are the
      plan's, never axon's: axon's reference run only sets the KV budget, and its failures don't veto an arm.
-     A tainted arm's rerun (NAME-r2) counts instead of it if the rerun is clean.
+     An arm's runs are NAME, NAME-r2, NAME-r3 (queue.py reruns an arm whose run's one fault is taint, at most 3
+     runs): its first untainted run counts; if every run is tainted, the arm doesn't qualify.
   2. The winner is the qualifying arm with the lowest TTFT-turn p50, the stop rule's own metric, full stop. No
      tie band: an arm that is slower on that metric never wins. (An exact tie, equal to the millisecond: the lower
      TTFT-new p50, then the arm's name.) ITL p99 and the rest are reported for every arm, not used.
 Prints a table of every arm, then WINNER; writes SWEEP_DIR/WINNER.env (sourced by agent_board.sh).
-Exit 1 if no arm qualifies. --tainted: print the arms whose run is tainted (agent_sweep.sh reruns them once).
+Exit 1 if no arm qualifies. --tainted: print the arms whose counted run is tainted.
 --smoke (AXON_REL_SMOKE=1, next to other GPU jobs): taint doesn't disqualify; the mechanics only.
 --selftest: the rule on fake sweeps (no GPU, no engine)."""
-import glob, json, os, shutil, sys, tempfile
+import glob, json, os, re, shutil, sys, tempfile
 
 ARMS = {  # prefix -> (llama.cpp build, -np as a multiple of budget//32768 (0 = the board's default), --llama-args)
     'A0': ('old', 0, ''), 'A1': ('new', 0, ''), 'A2': ('new', 0, '--no-cache-idle-slots'),
@@ -31,20 +32,32 @@ def run(d):
     return json.load(open(fs[0])) if fs else None
 
 
+def attempt(name):
+    """'A2-noidle-r3' -> ('A2-noidle', 3); 'A2-noidle' -> ('A2-noidle', 1)."""
+    m = re.match(r'(.*)-r(\d+)$', name)
+    return (m.group(1), int(m.group(2))) if m else (name, 1)
+
+
 def load(out):
-    """(axon's reference run, {arm: (run, the dir it came from)}), a clean rerun replacing a tainted run."""
+    """(axon's reference run, {arm: (run, the dir it came from)}): an arm's first untainted run (NAME, NAME-r2, ...),
+    else its first run (tainted: shown, doesn't qualify)."""
     ax = run(os.path.join(out, 'axon'))
+    tries = {}
+    for d in glob.glob(os.path.join(out, 'A[0-9]-*')):
+        if os.path.isdir(d):
+            base, k = attempt(os.path.basename(d))
+            tries.setdefault(base, []).append((k, os.path.basename(d), run(d)))
     arms = {}
-    for d in sorted(glob.glob(os.path.join(out, 'A[0-9]-*'))):
-        name = os.path.basename(d)
-        base = name[:-3] if name.endswith('-r2') else name
-        r = run(d)
-        if name.endswith('-r2'):
-            if r and not r.get('tainted'):
-                arms[base] = (r, name)
-        else:
-            arms.setdefault(base, (r, name))
+    for base in sorted(tries):
+        ts = sorted(tries[base])
+        good = [(r, name) for _, name, r in ts if r and not r.get('tainted')]
+        arms[base] = good[0] if good else (ts[0][2], ts[0][1])
     return ax, arms
+
+
+def taint_only(r):
+    """True if the run's one fault is foreign GPU load: queue.py reruns it. Any other fault is the run's result."""
+    return bool(r) and bool(r.get('tainted')) and why_not(dict(r, tainted=False)) == ''
 
 
 def why_not(r, smoke=False):
@@ -149,13 +162,30 @@ def selftest():
         fake(out2, 'axon')
         fake(out2, 'A1-b12387-defaults', errors=2)
         fake(out2, 'A2-noidle', tainted=True)
+        fake(out2, 'A3-noidle-ub2048', ttft_turn_p50=0.1, tainted=True)          # tainted 3 times: out, however fast
+        fake(out2, 'A3-noidle-ub2048-r2', ttft_turn_p50=0.1, tainted=True)
+        fake(out2, 'A3-noidle-ub2048-r3', ttft_turn_p50=0.1, tainted=True)
+        fake(out2, 'A4-2x-slots', tainted=True)                                 # clean on its 3rd run: that run counts
+        fake(out2, 'A4-2x-slots-r2', tainted=True)
+        fake(out2, 'A4-2x-slots-r3', ttft_turn_p50=3.0)
+        fake(out2, 'A5-noidle-cram16g', tainted=True, errors=1)                  # tainted AND an error: no rerun
+        _, arms2 = load(out2)
+        assert arms2['A3-noidle-ub2048'][1] == 'A3-noidle-ub2048' and why_not(arms2['A3-noidle-ub2048'][0]) == 'tainted'
+        assert arms2['A4-2x-slots'][1] == 'A4-2x-slots-r3' and why_not(arms2['A4-2x-slots'][0]) == ''
+        assert taint_only(arms2['A3-noidle-ub2048'][0]) and not taint_only(arms2['A5-noidle-cram16g'][0])
+        assert not taint_only(arms2['A4-2x-slots'][0]) and not taint_only(None)
+        assert attempt('A4-2x-slots-r3') == ('A4-2x-slots', 3) and attempt('A4-2x-slots') == ('A4-2x-slots', 1)
+        assert pick(out2, say=quiet) == 'A4-2x-slots', 'a clean 3rd run qualifies'
+        for n in ('A4-2x-slots', 'A4-2x-slots-r2', 'A4-2x-slots-r3'):
+            shutil.rmtree(os.path.join(out2, n))
+        os.remove(os.path.join(out2, 'WINNER.env'))
         assert pick(out2, say=quiet) is None and not os.path.exists(os.path.join(out2, 'WINNER.env'))
-        assert pick(out2, smoke=True, say=quiet) == 'A2-noidle', 'smoke mode: taint does not disqualify'
+        assert pick(out2, smoke=True, say=quiet) == 'A3-noidle-ub2048', 'smoke mode: taint does not disqualify'
     finally:
         shutil.rmtree(t)
     print('SELFTEST pick OK: lowest TTFT-turn p50 wins over a lower ITL p99; axon\'s failed turns veto nothing; an '
-          'error, a short turn count, an unsent request, no run, no plan counts disqualify; a clean rerun replaces a '
-          'tainted run; exact ties; -np for A4; no winner -> none')
+          'error, a short turn count, an unsent request, no run, no plan counts disqualify; an arm\'s first untainted run '
+          '(of NAME, -r2, -r3) counts; tainted on every run: out; taint_only; exact ties; -np for A4; no winner -> none')
 
 
 def main():
