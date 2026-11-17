@@ -1,0 +1,94 @@
+# serve --help exits 0, and serve's help states every flag it takes  (PR #PR)
+
+- Date: 2026-11-17. Branch: fix/serve-help. Base: main 1a1d751. Status: open
+- Pick / design: issue #252 (shady's SHOULDs on #225, the `--help` refresh); the foreman's 11-17 ruling: bug-fix scope
+  only (serve --help exit 0, SERVE_USAGE current, missing or mislabelled flags and caveats, `--ctx` included), with a test
+  that pins `serve --help`'s exit 0 and that every flag the parser accepts is in the help.
+
+## What changed
+- **`axon serve -h | --help` exits 0** and prints `axon --help`'s text on stdout (`cli::help()`, shared by both). The
+  check comes first in `serve::run`, before the model argument is resolved. That matters because a name that isn't
+  pulled yet is a usage error there, so `axon serve qwen3-8b --help` must not get that far. `-h` or `--help` anywhere
+  among serve's arguments counts. A model path or name is not required. Before, `serve --help` was a usage error
+  (`fail(SERVE_USAGE)`, exit 2), and `serve MODEL --help` was "unknown argument '--help' for serve" (exit 2), or the
+  not-pulled error.
+- **`SERVE_USAGE`**, the line a serve usage error prints:
+  - drops `--prefill-ms`, the old name of `--step-ms`, which is still accepted and said in `--step-ms`'s entry;
+  - adds `--step-ms`, `--step-tokens`, `--admit-order sjf|fifo`, `--admit-age-ms`, `--prefill-lanes` and `[rope flags]`;
+  - points to `axon serve --help`.
+- **`--help`, issue item 2:** entries under `flags:` for `--host`, `--port`, `--alias`, `--max-tokens`, `--cors`,
+  `--max-conns`, `--max-queue`, `--think-inline` and `--quiet`, with their defaults and behaviour from `serve.rs` and
+  docs/serving.md. Under `environment:`:
+  - `AXON_SHARE_KV` (#267's kill switch) and `AXON_KV_RAM_ALLOC`, worded from docs/environment.md;
+  - a header pointer: "these and the rest, serve's among them: docs/environment.md; serve's flags in full:
+    docs/serving.md".
+- **Item 5, `--ctx`:** it now opens "chat, serve, gen: the context in tokens, which means something different in each",
+  then one clause each:
+  - chat: the conversation's;
+  - serve: each request's, the most one slot holds. With paged KV (the default) it is a slot's cap, not memory set
+    aside, and the slots share one pool of pages;
+  - gen: as before.
+- **Items 3 and 4, the footer:** deepseek2 "MLA GGUFs" (legacy non-MLA V2 files are refused: docs/models.md). Native FP8
+  with `--numerics fast` "experimental, parked: docs/models.md".
+- The serve synopsis in `--help` gains `[rope flags]`. serve takes them; the rope entry already says so.
+- **For the test, no behaviour change:**
+  - `serve::run`'s parser reads its switches and value flags from two consts, `SWITCHES` and `VALUE_FLAGS`: the same 4
+    and 25 flags, in the same order, as match guards instead of literal arms.
+  - `SampleArgs::is_flag` reads `sample::FLAGS` (the same 7).
+  - `OLD_FLAGS` (`--prefill-ms`) is `cfg(test)`.
+
+## Why
+#252, from shady's review of #225. A help that exits 2 is a usage error to every script and wrapper that probes it. A
+usage line that names a renamed flag and misses five current ones sends people to the wrong flags. Nine flags had no
+entry at all. `--ctx`'s serve meaning was buried under a `chat:` label, and the footer offered native FP8 and deepseek2
+without the caveats docs/models.md has.
+
+## How it was verified
+| gate | result | job ID / log |
+|---|---|---|
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 0e95bda | OK | bella `~/.cache/axon-eval/logs/buildall-0e95bda.log` |
+| clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
+| targeted, debug-assertion build: `cli::tests::` (the help tests among them), `sample::tests::` (`is_flag` against `set`) (jade, CPU) | PENDING | 1117-102223-55f0 |
+| release suite, 3 shards (jade, CPU) | PENDING | 1117-102224-770e, -df4a, -c812 (group 40b5) |
+| debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-102224-a4cb, -4560, -2186 (group 4210) |
+| mutants H1–H6, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | MUT |
+| md5 of `gen` | not run: no generation code changed (`sample::FLAGS` is the same 7 names `is_flag` matched) | |
+
+**`serve_help_lists_every_flag`** (cli.rs). The flags serve takes are `SWITCHES`, `VALUE_FLAGS` and `--cors`, minus
+`OLD_FLAGS`, plus the sampling flags (`sample::FLAGS`) and the rope flags (`rope::FLAGS`). The test checks:
+- serve's synopsis in `--help` lists **exactly** those flags: none missing, and no stale or old name, so `--prefill-ms`
+  in the synopsis fails;
+- `SERVE_USAGE` lists exactly those flags, plus its pointer to `--help`;
+- each of them has an entry under `flags:` whose text says serve;
+- each old name is said in its new name's entry ("--prefill-ms is its old name");
+- each sampling flag has an entry in the "sampling flags (gen, chat, serve; ..." section;
+- each rope flag is in the `--rope-scaling` entry, which says serve.
+
+A flag added to the parser's lists without help fails the test.
+
+**`serve_help_exits_0`** (cli.rs). The test binary runs itself as a child, running the ignored `serve_help_child`, which
+calls `serve::run` on given arguments and requires `Ok` (then `main` exits 0). The parent checks the child's exit
+status and that the help is on its stdout. A usage error exits the process, so it can't be tested in-process. Five
+argument lists: `--help`, `-h`, `no-such-model-name --help` (a name not pulled), `/no/such/file.gguf --port 1 -h`, and
+`/no/such/file.gguf --bogus --help`.
+
+**Mutants** (sources at bella `~/.cache/axon-eval/mut2/H*/src/...`, each a copy of 0e95bda's file with one change; release
+test builds, `cli::tests::serve_help`):
+
+| mutant | the one change | must fail |
+|---|---|---|
+| H1-no-help-check | the help check never fires | `serve_help_exits_0` |
+| H2-help-first-only | help only as serve's first argument | `serve_help_exits_0` |
+| H3-help-on-stderr | the help on stderr | `serve_help_exits_0` |
+| H4-stale-prefill-ms | `SERVE_USAGE` says `--prefill-ms` again | `serve_help_lists_every_flag` |
+| H5-no-host-entry | `--host`'s entry deleted | `serve_help_lists_every_flag` |
+| H6-new-flag-no-help | the parser takes a new `--new-flag` | `serve_help_lists_every_flag` |
+
+## Results
+PENDING: the gates above (gatewatch `eval-0e95bda-gates`). Help text and a parser refactor: no performance numbers apply.
+
+## Not done
+- `axon chat --help`, `axon gen --help` and `axon info --help` are still usage errors (exit 2). #252 is about serve; the
+  same one-line check would fix them, in another PR if wanted.
+- `-h` or `--help` given as another flag's value (`--alias --help`) is taken as the help. No real value is spelled that
+  way.
