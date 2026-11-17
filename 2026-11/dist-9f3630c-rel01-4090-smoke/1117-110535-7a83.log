@@ -1,0 +1,41 @@
+[axon-run 11:05:35] submitted 1117-110535-7a83 by /home/haseeb/.cache/axon-wt-dist-rel: /usr/bin/bash pod.sh ./axon ./board-trace-v1.json ./harness.tar ./llama-4413a19-sm89.tar ./SHA256SUMS single_stream.sh 1
+[axon-run 11:40:50] job 1117-110535-7a83 -> pod1 [RTX 4090 sm_89 secure] (pod rgmfbbluuwptxz): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 20000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/pod-c3c0c62a7e2e /usr/bin/bash pod.sh ./axon ./board-trace-v1.json ./harness.tar ./llama-4413a19-sm89.tar ./SHA256SUMS single_stream.sh 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (7064b7c71e1a186defd9c72a) + source of /home/haseeb/.cache/axon-podjob/pod-c3c0c62a7e2e
+[axon-run 11:41:39] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 11:42:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:42:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:43:20] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:44:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:44:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:45:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:45:41] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:45:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:46:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:47:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:47:44] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:48:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+
+sent 145,630,013 bytes  received 250 bytes  306,267.64 bytes/sec
+total size is 218,355,981  speedup is 1.50
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-164851-bash-1589 on pod1 (GPU, 20000 MB)
+[axon-node 16:48:51] GPU EXCLUSIVE taken; job wants 20000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 16:48:51] run bash (7064b7c71e1a186defd9c72a) as /home/haseeb/.cache/axon-podjob/pod-c3c0c62a7e2e on 8822d6980e4c, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+POD JOB single_stream.sh 1 on 8822d6980e4c pod none 2026-11-17 16:48:51 UTC
+NVIDIA GeForce RTX 4090, 595.112.07, 24564 MiB
+harness.tar sha256 811f93eb15734c889f749401bc0d614283f82d33b4dc13cb001828c397157fff (commit dd0ce89f57df0e71828adba7bc60696e3741beec)
+[axon-run 11:49:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+b12387: fetched and checked
+/root/axon-node/cache/axon-rel01/dl/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz: 2 runtime files
+[axon-run 11:49:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:50:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+refused: libcublas-linux-x86_64-12.8.4.1-archive/lib/libcublas.so.12
+STOP: unpack libcublas-linux-x86_64-12.8.4.1-archive.tar.xz
+axon-podjob: rc 1; run dir kept: /root/axon-node/cache/axon-podjob-runs/pod-ua7cER7c
+[axon-node 16:50:05] exit 1 after 74.2s
+[axon-node 16:50:05] peak RSS 17 MB (job process tree PSS, 2 s samples x37)
+[axon-run 11:50:06] exit 1 after 555.5s (host pod1)
+[axon-run 11:50:07] FOREIGN_GPU max=0% mean=0.0% samples=17
