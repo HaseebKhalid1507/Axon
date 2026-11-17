@@ -1,0 +1,49 @@
+{
+ "label": "dec-3c205cc-gates-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1117-075506-34e0",
+   "name": "dec-3c205cc-unit-cpu-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "3c205cc",
+   "binary": "axon-test-3c205cc",
+   "started": 1794920106.7726097,
+   "ended": 1794920487.949513,
+   "attempts": 1,
+   "remote_job": "20261117-075516-axon-test-3c205cc-1229401",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f476c56cc6feb56e81e3b536c576aa49026fbb7e8b993de5a22ee267afcb77ea",
+   "log_bytes": 6115
+  },
+  {
+   "job": "1117-075031-aec4",
+   "name": "dec-3c205cc-cbcheck",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "620.70.06",
+   "sha": "3c205cc",
+   "binary": "bash",
+   "started": 1794920167.0590005,
+   "ended": 1794922090.5287411,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "52646ebbfb4466543b13d43bb6265c91c313860de07ef8240221a2f96f884ecb",
+   "log_bytes": 27058
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 09:11:51 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
