@@ -56,12 +56,12 @@ without the caveats docs/models.md has.
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 0e95bda | OK | bella `~/.cache/axon-eval/logs/buildall-0e95bda.log` |
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 77ae344 | OK | bella `~/.cache/axon-eval/logs/buildall-77ae344.log` |
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
-| targeted, debug-assertion build: `cli::tests::` (the help tests among them), `sample::tests::` (`is_flag` against `set`) (jade, CPU) | PENDING | 1117-102223-55f0 |
-| release suite, 3 shards (jade, CPU) | PENDING | 1117-102224-770e, -df4a, -c812 (group 40b5) |
-| debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-102224-a4cb, -4560, -2186 (group 4210) |
-| mutants H1–H6, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | 1117-103233-13e1 |
+| targeted, debug-assertion build: `cli::tests::` (the help tests among them), `sample::tests::` (`is_flag` against `set`) (jade, CPU) | PENDING | 1117-104814-0039 |
+| release suite, 3 shards (jade, CPU) | PENDING | 1117-104830-f6b3, -ae0d, -974c (group 769d) |
+| debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-104830-a7e6, -a0f2, -0648 (group 5446) |
+| mutants H1–H7, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | 1117-105835-0eed |
 | md5 of `gen` | not run: no generation code changed (`sample::FLAGS` is the same 7 names `is_flag` matched) | |
 
 **`serve_help_lists_every_flag`** (cli.rs). The flags serve takes are `SWITCHES`, `VALUE_FLAGS` and `--cors`, minus
@@ -69,12 +69,13 @@ without the caveats docs/models.md has.
 - serve's synopsis in `--help` lists **exactly** those flags: none missing, and no stale or old name, so `--prefill-ms`
   in the synopsis fails;
 - `SERVE_USAGE` lists exactly those flags, plus its pointer to `--help`;
-- each of them has an entry under `flags:` whose text says serve;
+- each of them has an entry under `flags:` whose label, the text before its first `:`, names serve;
 - each old name is said in its new name's entry ("--prefill-ms is its old name");
 - each sampling flag has an entry in the "sampling flags (gen, chat, serve; ..." section;
 - each rope flag is in the `--rope-scaling` entry, which says serve.
 
-A flag added to the parser's lists without help fails the test.
+A flag added to the parser's lists without help fails the test. A new literal match arm (as `--cors` is) wouldn't,
+which is why the test adds `--cors` by hand.
 
 **`serve_help_exits_0`** (cli.rs). The test binary runs itself as a child, running the ignored `serve_help_child`, which
 calls `serve::run` on given arguments and requires `Ok` (then `main` exits 0). The parent checks the child's exit
@@ -82,7 +83,7 @@ status and that the help is on its stdout. A usage error exits the process, so i
 argument lists: `--help`, `-h`, `no-such-model-name --help` (a name not pulled), `/no/such/file.gguf --port 1 -h`, and
 `/no/such/file.gguf --bogus --help`.
 
-**Mutants** (sources at bella `~/.cache/axon-eval/mut2/H*/src/...`, each a copy of 0e95bda's file with one change; release
+**Mutants** (sources at bella `~/.cache/axon-eval/mut2/H*/src/...`, each a copy of 77ae344's file with one change; release
 test builds, `cli::tests::serve_help`):
 
 | mutant | the one change | must fail |
@@ -93,12 +94,26 @@ test builds, `cli::tests::serve_help`):
 | H4-stale-prefill-ms | `SERVE_USAGE` says `--prefill-ms` again | `serve_help_lists_every_flag` |
 | H5-no-host-entry | `--host`'s entry deleted | `serve_help_lists_every_flag` |
 | H6-new-flag-no-help | the parser takes a new `--new-flag` | `serve_help_lists_every_flag` |
+| H7-cors-mislabelled | `--cors`'s entry labelled `chat:`; its text still says "server", which the old `contains("serve")` passed | `serve_help_lists_every_flag` |
+
+H1–H6 are 0e95bda's, carried to 77ae344 by their diffs; H7 is new with the label check. No mutant removes the
+`--draft` arm: no test drives a value flag through `run` (it loads a model and serves), so nothing would catch it but
+the panic at the first `--draft`, which is the point of the `unreachable!`.
 
 ## Results
-PENDING: the gates above (gatewatch `eval-0e95bda-gates`). Help text and a parser refactor: no performance numbers apply.
+PENDING: the gates above (gatewatch `eval-77ae344-gates`). 0e95bda's (55f0, 770e/df4a/c812, a4cb/4560/2186, 13e1) were
+dropped while queued: shady's round changed `src/`. Help text and a parser refactor: no performance numbers apply.
 
 ## Not done
 - `axon chat --help`, `axon gen --help` and `axon info --help` are still usage errors (exit 2). #252 is about serve; the
   same one-line check would fix them, in another PR if wanted.
 - `-h` or `--help` given as another flag's value (`--alias --help`) is taken as the help. No real value is spelled that
   way.
+- `axon serve help` (the bare word the top-level command takes) is still read as a model name, the not-pulled error.
+  Left as it is (shady's NIT 7, the foreman's call).
+
+## Review
+shady 9/10 SHIP on cd2c535 ([comment 6952843853](https://github.com/HaseebKhalid1507/Axon/pull/280#issuecomment-6952843853)).
+Fixed at 77ae344: the SHOULD (`--draft`'s own arm, `unreachable!` fallback), NIT 1 (the PR body's claim now says "the
+parser's lists", as this log did), NIT 2 (label check, H7), NIT 3 (`--quiet`), NIT 4 (the GPU's default), NIT 5
+(roadmap.md), NIT 6 (CHANGELOG). NIT 7: above.
