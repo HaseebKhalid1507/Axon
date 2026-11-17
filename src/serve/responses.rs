@@ -18,7 +18,8 @@
 //!   module answers with, in that order, so a reply sent back as input
 //!   renders as the chat-completions history would.
 //! - `function_call_output` is a `tool` message: the call it answers is its
-//!   `call_id`, else it needs a `name` (codex's own items, its goal: #273).
+//!   `call_id`, else it needs a `name` (codex's own items, its goal: #273)
+//!   and has no `tool_call_id`.
 //!
 //! Tools: `function` tools become chat tools (`{"type": "function",
 //! "function": {name, description, parameters, strict}}`). Other tool types
@@ -224,13 +225,11 @@ fn items(input: &[J], out: &mut Vec<J>) -> Result<(), ApiError> {
                 // and no call: codex's own items, as its goal
                 // (`{"type": "function_call_output", "id": "fco_...", "name":
                 // "goal_objective", "namespace": "agent", "output": ...}`).
-                // That is a tool message too, its id the item's `id` if it
-                // has one (no template here renders tool_call_id).
+                // That is a tool message too, with no tool_call_id: it
+                // answers no call (the item's `id` names no call either).
                 let id = match (it.get("call_id"), it.get("name")) {
                     (Some(J::Str(id)), _) => Some(id.as_str()),
-                    (None | Some(J::Null), Some(J::Str(n))) if !n.is_empty() => {
-                        it.get("id").and_then(J::str)
-                    }
+                    (None | Some(J::Null), Some(J::Str(n))) if !n.is_empty() => None,
                     _ => {
                         return Err(bad(
                             "input",
@@ -1364,8 +1363,9 @@ mod tests {
     /// task. The request parses to the ToolReq of the chat request with a
     /// plain tool message there (no tool_call_id), so every template renders
     /// it as that tool message, bit for bit (`tools::render` reads only the
-    /// ToolReq). The stored conversation keeps the item's `id` as the
-    /// message's tool_call_id; without an `id` there is none.
+    /// ToolReq). The stored message has no tool_call_id (it answers no call;
+    /// the item's `id` isn't one), with or without an `id`, and with a null
+    /// `call_id`.
     #[test]
     fn codex_goal_item_is_a_tool_message() {
         let goal = "Write unit tests for ledger/validate.py in a new file \
@@ -1381,18 +1381,10 @@ mod tests {
                 {"type": "object", "properties": {"objective": {"type": "string"}}}}}]});
         let no_id = CODEX_GOAL.replace(r#""id":"fco_01a1dd99-167a-7410-8a4c-4f7dea6c71f1","#, "");
         assert_ne!(no_id, CODEX_GOAL);
-        for (item, msg) in [
-            (
-                CODEX_GOAL,
-                format!(
-                    r#"{{"role":"tool","tool_call_id":"fco_01a1dd99-167a-7410-8a4c-4f7dea6c71f1","content":"{goal}"}}"#
-                ),
-            ),
-            (
-                no_id.as_str(),
-                format!(r#"{{"role":"tool","content":"{goal}"}}"#),
-            ),
-        ] {
+        let null_call = CODEX_GOAL.replace(r#""name":"#, r#""call_id":null,"name":"#);
+        assert_ne!(null_call, CODEX_GOAL);
+        let msg = format!(r#"{{"role":"tool","content":"{goal}"}}"#);
+        for item in [CODEX_GOAL, no_id.as_str(), null_call.as_str()] {
             let (g, x) = parse(codex_body(item).as_bytes()).unwrap();
             let want = tools::parse_json(&msg).unwrap();
             assert_eq!(x.history.last(), Some(&want), "{item}");
