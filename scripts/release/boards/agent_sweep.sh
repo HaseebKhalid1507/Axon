@@ -1,12 +1,12 @@
 #!/bin/bash
-# agent_sweep.sh CELL [ATTEMPT]: release 0.1's agent board, part 1 of 2 (bella, --timing bella): ONE cell of the sweep
-# per job. queue.py runs the cells, each its own job (the 11-15 sweep ran all its cells in one job and hit its bound:
+# agent_sweep.sh CELL [ATTEMPT]: release 0.1's agent board, part 1 of 2: ONE cell of the sweep per job, on a 4090 pod
+# (--timing 4090, through pod.sh; amendment 3, 11-17: bella's desktop tainted its runs) or on bella (--timing bella). queue.py runs the cells, each its own job (the 11-15 sweep ran all its cells in one job and hit its bound:
 # docs/log/2026-11-14-release-0.1-prep.md). Pre-registered in that log before it ran. Cell agent-32k
 # (scripts/agent_board.sh's), f16 KV, speed 1, one round per run:
 #   axon (the release binary): its paged pool is the KV budget every llama-server arm gets (--kv-tokens);
 #   llama-server arms on that budget: seven configurations chosen to favor it, from llama.cpp's source (A6 from the
 #   reviewer arguing its side, shady on #270):
-#     A0  4413a19 (bella's build), the board's defaults: -np budget//32768 -c np*32768 -kvu --cache-reuse 256
+#     A0  4413a19 (on a pod axon-weekly's sm_89 build, on bella bella's), the board's defaults: -np budget//32768 -c np*32768 -kvu --cache-reuse 256
 #         (the 10-27 board and the weekly's config; the reference)
 #     A1  b12387 (upstream's official build of today's master), the same defaults
 #     A2  A1 + --no-cache-idle-slots   (by default llama-server saves AND clears every idle slot on each new task
@@ -55,8 +55,8 @@ case $C in   # name, build, port (+100 per attempt), agent_replay args
 esac
 dir=$name; [ "$K" -gt 1 ] && dir=$name-r$K
 [ -e "$OUT/$dir" ] && { echo "STOP: $OUT/$dir exists (a run is never overwritten)"; exit 1; }
-bin=$NEW/llama-server lenv=(--llama-env "LD_LIBRARY_PATH=$NEW")
-[ "$which" = old ] && bin=$OLD/llama-server lenv=()
+bin=$NEW/llama-server; [ "$which" = old ] && bin=$OLD/llama-server
+read -ra lenv <<< "$(llama_env "$which")"
 mkdir -p "$OUT/$dir"; hw "$OUT/$dir/hw.txt"; cat "$OUT/$dir/hw.txt"
 echo "== arm $dir (run $K): $bin ${args[*]}; KV budget $POOL tokens"
 python3 -u "$W/scripts/agent_replay.py" board --engines llama --llama-server "$bin" "${lenv[@]}" --kv-tokens "$POOL" \

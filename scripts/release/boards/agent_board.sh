@@ -1,6 +1,7 @@
 #!/bin/bash
-# agent_board.sh ROUND: release 0.1's agent board, part 2 of 2 (bella, --timing bella), after agent_sweep.sh: ONE round
-# per job (queue.py runs the rounds, each its own job; a round is ~1 h: docs/log/2026-11-14-release-0.1-prep.md).
+# agent_board.sh ROUND: release 0.1's agent board, part 2 of 2, after agent_sweep.sh: ONE round per job, on a 4090 pod
+# (--timing 4090, through pod.sh; amendment 3, 11-17) or on bella (--timing bella). queue.py runs the rounds, each its
+# own job (a round is ~30 min: docs/log/2026-11-14-release-0.1-prep.md).
 # axon (the release binary) vs llama-server in the sweep's winning config (sweep/WINNER.env), cell agent-32k, f16 KV,
 # speeds 1 and 4 (scripts/agent_board.sh's protocol; no ollama), the engine order reversed on odd rounds
 # (--rotate-engines: by the round number), llama-server on the sweep's KV budget (sweep/POOL: the budget its winner
@@ -23,8 +24,8 @@ OUT=$D/board; mkdir -p "$OUT"
 compgen -G "$OUT/run-*-r$R.json" > /dev/null && { echo "STOP: round $R exists in $OUT (never overwritten)"; exit 1; }
 hw "$OUT/hw-r$R.txt"; cat "$OUT/hw-r$R.txt"
 echo "round $R: llama-server: arm $ARM ($WHICH build, -np ${PAR:-default}, args '${LARGS}'); KV budget $POOL tokens (the sweep's)"
-bin=$NEW/llama-server lenv=(--llama-env "LD_LIBRARY_PATH=$NEW")
-[ "$WHICH" = old ] && bin=$OLD/llama-server lenv=()
+bin=$NEW/llama-server; [ "$WHICH" = old ] && bin=$OLD/llama-server
+read -ra lenv <<< "$(llama_env "$WHICH")"
 extra=(); [ "$PAR" != 0 ] && extra+=(--llama-parallel "$PAR"); [ -n "$LARGS" ] && extra+=("--llama-args=$LARGS")
 python3 -u "$W/scripts/agent_replay.py" board --engines axon,llama --axon "$AX" --llama-server "$bin" "${lenv[@]}" \
   "${extra[@]}" --kv-tokens "$POOL" --rotate-engines --kv f16 --round-offset "$R" --rounds 1 \

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""queue.py [--with-smoke] [--resume] | queue.py --selftest: release 0.1's boards on bella, one cell per axon-run job.
+"""queue.py [--with-smoke] [--resume] | queue.py --selftest: release 0.1's boards on a 4090 pod, one cell per job.
 
-Why (11-15, jobs 1115-032610-223e, -bbd2, 1115-032613-4ff7; docs/log/2026-11-14-release-0.1-prep.md): the sweep ran its
-8 cells (~650 s each: a 600-s window, ~40 s of priming, engine start and stop) and the reruns of its tainted arms in
-ONE --timing job bounded at 120 min. 8 cells are 87 min; 6 of the 7 arms were tainted, so 14 cells (152 min) were due
-and the bound stopped it in its 12th. bella is a desktop: its foreign GPU load passes the start check (<= 10 % for
-120 s) and still tainted 8 of 11 runs (foreign max 28-51 % > 25 %, foreign mean 1.4-3.9 %: Xorg, every 10-20 min).
-So every cell is its own --timing job (it waits for a quiet desktop, under a bound that fits one cell), and a run whose
-ONE fault is taint is run again as a new job, a bounded number of times:
+Hardware (amendment 3, 11-17, Haseeb's decision): a RunPod RTX 4090 (axon-run --timing 4090, secure), no longer bella.
+On bella no board produced a valid result: the 11-15 sweep hit its bound and 8 of its 11 runs were tainted by the
+desktop's GPU load; then bella was held (paused) for its owner. The change was made before any board ran clean, so no
+result informed it. The protocol and its rules (pick.py, read_board.py, sb_read.py, the reruns below) are unchanged.
+
+Why one cell per job (11-15, jobs 1115-032610-223e, -bbd2, 1115-032613-4ff7; docs/log/2026-11-14-release-0.1-prep.md):
+the sweep ran its 8 cells (~650 s each) and the reruns of its tainted arms in ONE --timing job bounded at 120 min and
+the bound stopped it. So every cell is its own --timing job, and a run whose ONE fault is taint is run again as a new
+job, a bounded number of times:
 
   1. Single stream (single_stream.sh K): one job; run again while axon-run marks the job tainted, at most 4 jobs.
      The first untainted job's sb_read.py reading is the board's (sb/READING.txt says which).
@@ -22,19 +24,30 @@ A rerun depends on taint only: never on a run's numbers, its errors or its verdi
 it). A job that fails (rc != 0: a script's STOP, the --max-min bound, an OOM, a kill) stops the queue; nothing is
 retried blind. Order: single stream first (one job, the release notes' table), then the sweep and the board.
 
---with-smoke: first the smoke (AXON_REL_SMOKE=1: the 0.5B, 60-s windows, 1 round, speed 1, next to other GPU jobs, no
-reruns, outputs under rel01-smoke; it writes the PASSED markers the real cells check), then the real run.
+How a cell reaches the pod: axon-podjob (axon-run sends scripts to pods only that way) with pod.sh and five files staged
+once on bella (stage(): the release binary, the agent trace, `git archive` of this commit's harness, axon-weekly's
+4413a19 sm_89 build, their SHA256SUMS; the same five for every job, so a pod gets them once). pod.sh fetches the rest
+(sha256-pinned) and runs the cell with common.sh's pod profile. Every job declares the models.tsv files its cell reads
+(--models; the first job, single stream, all five: the pod booked for the queue holds them all). The cell's outputs come back in the job's
+log (payload.py); queue.py unpacks each into DIR/jobs/KEY/ and merges it into DIR, where the readers find it as before.
+Inputs from earlier cells go to the next job in its environment (AXON_REL_IN_POOL, AXON_REL_IN_WINNER).
+
+--with-smoke: first the smoke (AXON_REL_SMOKE=1: the 0.5B, 60-s windows, 1 round, speed 1, no reruns, outputs under
+rel01-4090-smoke), on the pod, then the real run. A real job runs only on the harness a smoke passed on: the smoke's
+jobs print "SMOKE PASSED sb|agent <harness sha256>", queue.py records it (QUEUE-SMOKE-OK), and passes it to the real
+jobs (AXON_REL_SMOKE_OK; common.sh need_smoke checks it against the harness the pod unpacked).
 --resume: continue after this process died: the jobs already submitted (DIR/queue-jobs.jsonl) are waited for, never
-submitted again. At the end (done or STOP) it writes DIR/QUEUE-RESULT.txt, submits a CPU job that prints it
-(rc 1 on STOP) and arms `axon-gatewatch dist-9f3630c-boards` on that job: one event for the whole queue.
+submitted again. At the end (done or STOP) it writes DIR/QUEUE-RESULT.txt and sends ONE event to the foreman
+(axon-notify, label dist-9f3630c-boards).
 Run on bella, detached: setsid nohup scripts/release/boards/queue.py --with-smoke > ~/.cache/axon-dist/queue.log 2>&1 &
---selftest: the queue's decisions on a fake axon-run (no GPU, no engine, no jobs)."""
-import glob, json, os, re, shutil, subprocess, sys, tempfile, time
+--selftest: the queue's decisions on a fake axon-run, the payload path, the staged harness (no GPU, no engine, no jobs)."""
+import base64, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 
 S = os.path.dirname(os.path.abspath(__file__))
 W = os.path.dirname(os.path.dirname(os.path.dirname(S)))   # the repo: scripts/release/boards -> ../../..
 sys.path.insert(0, S)
 from pick import ARMS, attempt, pick, run as sweep_run, taint_only, why_not  # noqa: E402,F401
+import payload  # noqa: E402
 import read_board  # noqa: E402
 
 K_SB, K_ARM, ROUNDS, MAX_ROUNDS = 4, 3, 3, 8
@@ -42,8 +55,23 @@ CELLS = ['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6']
 NAMES = {'A0': 'A0-4413a19-defaults', 'A1': 'A1-b12387-defaults', 'A2': 'A2-noidle', 'A3': 'A3-noidle-ub2048',
          'A4': 'A4-2x-slots', 'A5': 'A5-noidle-cram16g', 'A6': 'A6-cram16g'}
 SMOKE_ENV = {'AXON_REL_SMOKE': '1', 'AXON_REL_SPEEDS': '1', 'AXON_REL_SB_MODELS': '0.5B', 'AXON_REL_SB_ROUNDS': '1'}
-TAG = 'dist-9f3630c-rel01'
+TAG = 'dist-9f3630c-rel01-4090'
 LABEL = 'dist-9f3630c-boards'
+TIMING = '4090'
+# the models.tsv files a cell reads, declared per job (--models): single stream all five (pod.sh checks all five, the
+# smoke too), an agent cell the 7B (the smoke: the 0.5B). A pod booked for this queue is booked for its first job, the
+# single-stream smoke: it gets all five, and every later cell's set is a subset (one pod, no re-booking). An agent cell
+# can also run on a pod booked for other 4090 timing work that has the 7B.
+SB_MODELS = ['qwen2.5-0.5b-q4_k_m.gguf', 'qwen2.5-1.5b-instruct-q4_k_m.gguf', 'qwen2.5-3b-instruct-q4_k_m.gguf',
+             'Qwen2.5-7B-Instruct-Q4_K_M.gguf', 'Qwen3-8B-Q4_K_M.gguf']
+AGENT_MODEL = {True: 'qwen2.5-0.5b-q4_k_m.gguf', False: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'}
+WS_MB = 5200   # the model working set: one model mapped at a time (the 8B, 4.7 GB)
+STAGED = ['axon', 'board-trace-v1.json', 'harness.tar', 'llama-4413a19-sm89.tar', 'SHA256SUMS']
+HARNESS = ['scripts/agent_replay.py', 'scripts/release/boards']
+RC_AXON = os.path.expanduser('~/.cache/axon-dist/rel01/rc/axon')       # the dry run's binary (rc/axon.sha256)
+TRACE = os.path.expanduser('~/.cache/axon-agent/traces/board-trace-v1.json')
+OLD_BUILD = os.path.expanduser('~/.cache/axon-weekly/llama-4413a19-sm89')   # axon-weekly's 4413a19 sm_89 build
+RUN_LOGS = os.path.expanduser('~/.cache/axon-run/logs')
 
 
 class Stop(Exception):
@@ -51,25 +79,23 @@ class Stop(Exception):
 
 
 def out_dir(smoke):
-    return os.path.expanduser('~/.cache/axon-dist/rel01' + ('-smoke' if smoke else ''))
+    return os.path.expanduser('~/.cache/axon-dist/rel01-4090' + ('-smoke' if smoke else ''))
 
 
 def spec(smoke, phase, cell, k):
-    """One job: (key, name, argv, timing, vram, ram, max_min, expect)."""
+    """One job: (key, name, argv = the cell script in the harness + its args, timing, vram, ram, max_min, expect).
+    Bounds (--max-min) are the cell's time plus the pod's first-job setup (the upload, b12387 and CUDA 12.8 fetched)."""
     sm = '-smoke' if smoke else ''
-    b = os.path.join('scripts', 'release', 'boards')
     if phase == 'sb':
-        return dict(key=f'sb-t{k}', name=f'{TAG}{sm}-sb-t{k}', argv=[os.path.join(b, 'single_stream.sh'), str(k)],
-                    timing=not smoke, vram=2500 if smoke else 11000, ram=5000 if smoke else 8000,
-                    max_min=15 if smoke else 20, expect='SB END ok')
+        return dict(key=f'sb-t{k}', name=f'{TAG}{sm}-sb-t{k}', argv=['single_stream.sh', str(k)], timing=TIMING,
+                    models=SB_MODELS, vram=20000, ram=5000 if smoke else 8000, max_min=25 if smoke else 45,
+                    expect='SB END ok')
     if phase == 'sweep':
         return dict(key=f'sweep-{cell}-t{k}', name=f'{TAG}{sm}-sweep-{cell}-t{k}',
-                    argv=[os.path.join(b, 'agent_sweep.sh'), cell, str(k)], timing=not smoke,
-                    vram=3000 if smoke else 11000, ram=6000 if smoke else 20000, max_min=10 if smoke else 20,
-                    expect='CELL END ok')
-    return dict(key=f'board-r{cell}', name=f'{TAG}{sm}-board-r{cell}', argv=[os.path.join(b, 'agent_board.sh'), str(cell)],
-                timing=not smoke, vram=3000 if smoke else 11000, ram=6000 if smoke else 20000,
-                max_min=15 if smoke else 90, expect='ROUND END ok')
+                    argv=['agent_sweep.sh', cell, str(k)], timing=TIMING, models=[AGENT_MODEL[smoke]],
+                    vram=20000, ram=6000 if smoke else 20000, max_min=20 if smoke else 30, expect='CELL END ok')
+    return dict(key=f'board-r{cell}', name=f'{TAG}{sm}-board-r{cell}', argv=['agent_board.sh', str(cell)], timing=TIMING,
+                models=[AGENT_MODEL[smoke]], vram=20000, ram=6000 if smoke else 20000, max_min=20 if smoke else 75, expect='ROUND END ok')
 
 
 def round_state(board, r, smoke=False):
@@ -161,8 +187,8 @@ def queue(R, D, smoke, say):
 
 def archive(D, say):
     """Move the last run's outputs aside (never deleted): DIR/old-<time>/."""
-    old = [n for n in ('sweep', 'board', 'sb', 'sbnode', 'queue-jobs.jsonl', 'QUEUE-RESULT.txt', 'QUEUE-SMOKE-OK')
-           + tuple(os.path.basename(p) for p in glob.glob(os.path.join(D, 'PASSED-*'))) if os.path.exists(os.path.join(D, n))]
+    old = [n for n in ('sweep', 'board', 'sb', 'jobs', 'queue-jobs.jsonl', 'QUEUE-RESULT.txt', 'QUEUE-SMOKE-OK')
+           if os.path.exists(os.path.join(D, n))]
     if old:
         a = os.path.join(D, 'old-' + time.strftime('%Y%m%d-%H%M%S'))
         os.makedirs(a)
@@ -171,15 +197,75 @@ def archive(D, say):
         say(f'archived {", ".join(old)} -> {a}')
 
 
+def harness_tar(rev='HEAD', clean=True):
+    """(tar bytes, sha256): `git archive` of the harness at rev (byte-stable for a commit); refuses a dirty tree."""
+    st = subprocess.run(['git', '-C', W, 'status', '--porcelain', '--'] + HARNESS, capture_output=True, text=True)
+    if clean and (st.returncode or st.stdout.strip()):
+        raise Stop(f'uncommitted changes in the harness ({" ".join(HARNESS)}): {st.stdout.strip()[:200]}')
+    t = subprocess.run(['git', '-C', W, 'archive', '--format=tar', rev, '--'] + HARNESS, capture_output=True)
+    if t.returncode:
+        raise Stop(f'git archive: {t.stderr.decode()[:200]}')
+    return t.stdout, hashlib.sha256(t.stdout).hexdigest()
+
+
+def sha256_file(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h.update(b)
+    return h.hexdigest()
+
+
+def pinned(name, path):
+    """A sha256 constant from a harness file (one source: common.sh REL_AXON_SHA256, pod.sh TRACE_SHA256)."""
+    m = re.search(rf'^{name}=([0-9a-f]{{64}})$', open(os.path.join(S, path)).read(), re.M)
+    if not m:
+        raise Stop(f'no {name} in {path}')
+    return m.group(1)
+
+
+def stage(say):
+    """The five files every pod job gets, staged once per harness commit: dict(dir, harness, commit)."""
+    tar, hs = harness_tar()
+    commit = subprocess.run(['git', '-C', W, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    sd = os.path.expanduser(f'~/.cache/axon-dist/rel01-pod/stage-{hs[:12]}')
+    if not os.path.exists(os.path.join(sd, '.done')):
+        if sha256_file(RC_AXON) != pinned('REL_AXON_SHA256', 'common.sh'):
+            raise Stop(f'{RC_AXON} is not the release candidate')
+        if sha256_file(TRACE) != pinned('TRACE_SHA256', 'pod.sh'):
+            raise Stop(f'{TRACE} is not board-trace-v1.json')
+        tmp = sd + f'.tmp{os.getpid()}'
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        open(os.path.join(tmp, 'harness.tar'), 'wb').write(tar)
+        pod = subprocess.run(['git', '-C', W, 'show', 'HEAD:scripts/release/boards/pod.sh'], capture_output=True)
+        open(os.path.join(tmp, 'pod.sh'), 'wb').write(pod.stdout)
+        os.chmod(os.path.join(tmp, 'pod.sh'), 0o755)
+        for src, n in ((RC_AXON, 'axon'), (TRACE, 'board-trace-v1.json')):
+            subprocess.run(['cp', '--reflink=auto', '-p', src, os.path.join(tmp, n)], check=True)
+        subprocess.run(['tar', '-cf', os.path.join(tmp, 'llama-4413a19-sm89.tar'), '--sort=name', '--mtime=@0',
+                        '--owner=0', '--group=0', '--numeric-owner', '-C', os.path.dirname(OLD_BUILD)]
+                       + [f'llama-4413a19-sm89/{f}' for f in ('BUILD.txt', 'llama-bench', 'llama-server')], check=True)
+        with open(os.path.join(tmp, 'SHA256SUMS'), 'w') as f:
+            for n in STAGED[:-1]:
+                f.write(f'{sha256_file(os.path.join(tmp, n))}  {n}\n')
+        open(os.path.join(tmp, '.done'), 'w').write(f'{commit}\n')
+        os.rename(tmp, sd)
+        say(f'staged {sd} (harness {hs[:16]}, commit {commit[:12]})')
+    return dict(dir=sd, harness=hs, commit=commit)
+
+
 class AxonRun:
-    """Submits a job with axon-run and waits for it; a job already in DIR/queue-jobs.jsonl is never submitted again."""
+    """Submits a cell to a 4090 pod (axon-podjob -> axon-run --timing 4090), waits, and brings its outputs back from the
+    job's log into DIR (payload.py). A job already in DIR/queue-jobs.jsonl is never submitted again."""
     WAITING = ('queued', 'running', 'paused', 'starting', 'placed')
 
-    def __init__(self, D, env, say, poll=60):
-        self.D, self.env, self.say, self.poll = D, env, say, poll
+    def __init__(self, D, env, say, st=None, poll=20):
+        self.D, self.env, self.say, self.st, self.poll = D, env, say, st, poll
         self.bin = shutil.which('axon-run') or os.path.expanduser('~/.local/bin/axon-run')
+        self.podjob = shutil.which('axon-podjob') or os.path.expanduser('~/.local/bin/axon-podjob')
         self.state_f = os.path.join(D, 'queue-jobs.jsonl')
-        self.state = {}
+        self.state, self.marks, self.logs = {}, set(), RUN_LOGS
         if os.path.exists(self.state_f):
             for ln in open(self.state_f):
                 x = json.loads(ln)
@@ -187,22 +273,35 @@ class AxonRun:
 
     def run(self, sp):
         jid = self.state.get(sp['key']) or self.submit(sp)
-        return self.wait(jid)
+        j = self.wait(jid)
+        self.collect(sp, j)
+        return j
+
+    def inputs(self, sp):
+        """The earlier cells' outputs this cell reads: sweep/POOL (an arm, a round), sweep/WINNER.env (a round)."""
+        a, env, sw = sp['argv'], {}, os.path.join(self.D, 'sweep')
+        if (a[0] == 'agent_sweep.sh' and a[1] != 'axon') or a[0] == 'agent_board.sh':
+            if os.path.exists(os.path.join(sw, 'POOL')):
+                env['AXON_REL_IN_POOL'] = open(os.path.join(sw, 'POOL')).read().strip()
+        if a[0] == 'agent_board.sh' and os.path.exists(os.path.join(sw, 'WINNER.env')):
+            env['AXON_REL_IN_WINNER'] = base64.b64encode(open(os.path.join(sw, 'WINNER.env'), 'rb').read()).decode()
+        return env
 
     def submit(self, sp):
-        cmd = [self.bin, '--detach'] + (['--timing', 'bella'] if sp['timing'] else []) + [
-            '--vram', str(sp['vram']), '--ram', str(sp['ram']), '--max-min', str(sp['max_min']),
-            '--name', sp['name'], '--expect', sp['expect'], '--'] + sp['argv']
-        if sp.get('cpu'):
-            cmd = [self.bin, '--detach', '--cpu', '--ram', str(sp['ram']), '--max-min', str(sp['max_min']),
-                   '--name', sp['name'], '--expect', sp['expect'], '--'] + sp['argv']
-        p = subprocess.run(cmd, cwd=W, env=self.env, capture_output=True, text=True, timeout=300)
+        sd = self.st['dir']
+        cmd = [self.podjob, '--detach', '--timing', sp['timing'], '--vram', str(sp['vram']), '--ram', str(sp['ram']),
+               '--ws', str(WS_MB), '--models', ','.join(sp['models']), '--max-min', str(sp['max_min']), '--name', sp['name'],
+               '--expect', sp['expect'], '--', os.path.join(sd, 'pod.sh')] + [os.path.join(sd, n) for n in STAGED] \
+            + sp['argv']
+        env = dict(self.env, **self.inputs(sp))
+        p = subprocess.run(cmd, cwd=W, env=env, capture_output=True, text=True, timeout=300)
         m = re.search(r'job (\d{4}-\d{6}-[0-9a-f]{4})', p.stdout + p.stderr)
         if not m:
             raise Stop(f'submit {sp["name"]}: rc {p.returncode}: {(p.stdout + p.stderr)[-400:]}')
         jid = m.group(1)
         with open(self.state_f, 'a') as f:
-            f.write(json.dumps(dict(key=sp['key'], id=jid, name=sp['name'], at=time.strftime('%F %T'))) + '\n')
+            f.write(json.dumps(dict(key=sp['key'], id=jid, name=sp['name'], harness=(self.st or {}).get('harness'),
+                                    at=time.strftime('%F %T'))) + '\n')
         self.state[sp['key']] = jid
         self.say(f'submitted {sp["name"]}: {jid}')
         return jid
@@ -225,8 +324,45 @@ class AxonRun:
             else:
                 bad_since = None
                 if d.get('rc') is not None and d.get('state') not in self.WAITING:
-                    return dict(id=jid, rc=d['rc'], tainted=d.get('tainted'), state=d.get('state'))
+                    return dict(id=jid, rc=d['rc'], tainted=d.get('tainted'), state=d.get('state'),
+                                host=d.get('host'), pod=d.get('pod'))
             time.sleep(self.poll)
+
+    def collect(self, sp, j):
+        """The job's payload -> DIR/jobs/KEY/out -> merged into DIR (once: DIR/jobs/KEY/.merged); its smoke markers."""
+        lp = os.path.join(self.logs, j['id'] + '.log')
+        text = open(lp, errors='replace').read() if os.path.exists(lp) else ''
+        self.marks |= set(re.findall(r'^SMOKE PASSED (agent|sb) harness tar sha256 ([0-9a-f]{64})', text, re.M))
+        jd = os.path.join(self.D, 'jobs', sp['key'])
+        if os.path.exists(os.path.join(jd, '.merged')):
+            return
+        try:
+            data, _ = payload.extract(text)
+        except ValueError as e:
+            if j['rc'] == 0:
+                raise Stop(f'{sp["name"]}: job {j["id"]} rc 0, but its log ({lp}) carries no outputs: {e}')
+            self.say(f'{sp["name"]}: job {j["id"]} rc {j["rc"]}: no outputs in its log ({e})')
+            return
+        shutil.rmtree(jd, ignore_errors=True)
+        payload.unpack(data, jd)
+        try:
+            payload.merge(os.path.join(jd, 'out'), self.D)
+        except ValueError as e:
+            raise Stop(f'{sp["name"]}: job {j["id"]}: {e}')
+        open(os.path.join(jd, '.merged'), 'w').write(json.dumps(j) + '\n')
+        self.say(f'{sp["name"]}: job {j["id"]} on {j.get("host")} (pod {j.get("pod")}): outputs merged')
+
+
+def notify(lines, ok, say):
+    """ONE event to the foreman for the whole queue (the gatewatch's channel: axon-notify, source axon-gates)."""
+    n = shutil.which('axon-notify') or os.path.expanduser('~/.local/bin/axon-notify')
+    txt = f'[axon-gates] {LABEL} queue {"done" if ok else "STOPPED"}: ' + ' | '.join(lines)
+    try:
+        p = subprocess.run([n, '--session', os.environ.get('AXON_FOREMAN') or 'axon', '--source', 'axon-gates',
+                            '--severity', 'high', txt[:3800]], capture_output=True, text=True, timeout=180)
+        say(f'notify rc {p.returncode} {(p.stdout + p.stderr).strip()[-200:]}')
+    except (subprocess.SubprocessError, OSError) as e:
+        say(f'notify failed: {e}')
 
 
 def say_to(f):
@@ -248,20 +384,41 @@ def main():
     lines, ok, last_D = [], False, out_dir(False)
     say = say_to(None)
     try:
+        st = stage(say)
+        base['AXON_REL_HARNESS_COMMIT'] = st['commit']
+        lines.append(f'harness {st["harness"][:16]} (commit {st["commit"][:12]}), staged {st["dir"]}')
         for smoke in ([True, False] if with_smoke else [False]):
             D = out_dir(smoke)
             os.makedirs(D, exist_ok=True)
             say = say_to(os.path.join(D, 'queue.log'))
             last_D = D
-            if not (resume and os.path.exists(os.path.join(D, 'queue-jobs.jsonl'))):
-                archive(D, say)
-            env = dict(base, **SMOKE_ENV, AXON_REL_AXON=os.path.join(out_dir(False), 'rc', 'axon')) if smoke else base
-            if smoke and resume and os.path.exists(os.path.join(D, 'QUEUE-SMOKE-OK')):
-                say('smoke already passed in this queue (--resume): skipped')
+            okf = os.path.join(D, 'QUEUE-SMOKE-OK')
+            if smoke and resume and os.path.exists(okf) and open(okf).read().split()[0] == st['harness']:
+                say('smoke already passed on this harness (--resume): skipped')
                 continue
-            lines += queue(AxonRun(D, env, say), D, smoke, say)
+            jf = os.path.join(D, 'queue-jobs.jsonl')
+            if resume and os.path.exists(jf) and {json.loads(x).get('harness') for x in open(jf)} != {st['harness']}:
+                say(f'--resume: {jf} has jobs of another harness: not resumed')
+                resume_d = False
+            else:
+                resume_d = resume and os.path.exists(jf)
+            if not resume_d:
+                archive(D, say)
             if smoke:
-                open(os.path.join(D, 'QUEUE-SMOKE-OK'), 'w').write(time.strftime('%F %T') + '\n')
+                env = dict(base, **SMOKE_ENV)
+            else:
+                sok = os.path.join(out_dir(True), 'QUEUE-SMOKE-OK')
+                h = open(sok).read().split()[0] if os.path.exists(sok) else 'none'
+                if h != st['harness']:
+                    raise Stop(f'no smoke passed on this harness ({st["harness"][:16]}; {sok}: {h[:16]}): run --with-smoke')
+                env = dict(base, AXON_REL_SMOKE_OK=st['harness'])
+            R = AxonRun(D, env, say, st)
+            lines += queue(R, D, smoke, say)
+            if smoke:
+                need = {('sb', st['harness']), ('agent', st['harness'])}
+                if not need <= R.marks:
+                    raise Stop(f'smoke: the jobs ran but printed no SMOKE PASSED for {sorted(x for x, _ in need - R.marks)}')
+                open(okf, 'w').write(f'{st["harness"]} {time.strftime("%F %T")}\n')
         ok = True
     except Stop as e:
         lines.append(f'QUEUE STOP: {e}')
@@ -272,16 +429,7 @@ def main():
     res = os.path.join(last_D, 'QUEUE-RESULT.txt')
     open(res, 'w').write('\n'.join(lines) + '\n')
     say('\n'.join(lines))
-    sp = dict(key='result', name=f'{TAG}-result', cpu=True, ram=200, max_min=5, expect='QUEUE END ok',
-              argv=['bash', '-c', f'cat {res}; grep -q "^QUEUE END ok" {res}'], timing=False, vram=0)
-    try:
-        jid = AxonRun(last_D, base, say).submit(sp)
-        gw = shutil.which('axon-gatewatch') or os.path.expanduser('~/.local/bin/axon-gatewatch')
-        subprocess.Popen(['setsid', 'nohup', gw, LABEL, jid], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-        say(f'gatewatch {LABEL} armed on {jid}')
-    except Exception as e:  # noqa: BLE001
-        say(f'could not submit the result job / arm the gatewatch: {e}')
+    notify(lines + [f'details: bella {res}'], ok, say)
     sys.exit(0 if ok else 1)
 
 
@@ -333,9 +481,14 @@ class FakeRun:
 def selftest():
     T = {'tainted': True}
     assert os.path.isdir(os.path.join(W, '.git')) or os.path.isfile(os.path.join(W, '.git')), f'W {W} is not the repo'
-    for smoke in (True, False):   # the paths axon-run gets: relative to W (its cwd), executable
+    for smoke in (True, False):   # pod.sh runs the cell script from the harness: it exists, executable; all on pods
         for sp in (spec(smoke, 'sb', None, 1), spec(smoke, 'sweep', 'A0', 1), spec(smoke, 'board', 0, 1)):
-            assert os.access(os.path.join(W, sp['argv'][0]), os.X_OK), sp['argv'][0]
+            assert os.access(os.path.join(S, sp['argv'][0]), os.X_OK) and sp['timing'] == '4090', sp
+            pm = open(os.path.join(S, 'pod.sh')).read()   # what pod.sh checks is what the job declares
+            assert all(m in pm for m in sp['models']) and set(sp['models']) <= set(SB_MODELS), sp
+            assert sp['argv'][0] in open(os.path.join(S, 'pod.sh')).read()
+    assert os.access(os.path.join(S, 'pod.sh'), os.X_OK)
+    assert pinned('REL_AXON_SHA256', 'common.sh').startswith('2c19415b') and pinned('TRACE_SHA256', 'pod.sh')
     t = tempfile.mkdtemp(prefix='queue-selftest-')
     quiet = lambda *_: None  # noqa: E731
     try:
@@ -387,23 +540,68 @@ def selftest():
         R = FakeRun(D, {'sb-t1': T, 'sweep-A1-t1': {'run': T}, 'board-r0': {'llama': T}})
         L = queue(R, D, True, quiet)
         assert R.keys == ['sb-t1', 'sweep-axon-t1'] + [f'sweep-{c}-t1' for c in CELLS] + ['board-r0'], R.keys
-        assert 'r0 counted' in L[4] and not spec(True, 'board', 0, 1)['timing'] and spec(False, 'board', 0, 1)['timing']
+        assert 'r0 counted' in L[4]
         # 6. archive moves a run aside, never deletes; resume keeps the state
         D = os.path.join(t, 'q6')
         os.makedirs(os.path.join(D, 'sweep'))
-        open(os.path.join(D, 'PASSED-agent'), 'w').write('x')
         open(os.path.join(D, 'QUEUE-SMOKE-OK'), 'w').write('x')   # a fresh queue must smoke again
         archive(D, quiet)
         assert not os.path.exists(os.path.join(D, 'QUEUE-SMOKE-OK'))
         assert not os.path.exists(os.path.join(D, 'sweep')) and len(glob.glob(os.path.join(D, 'old-*', 'sweep'))) == 1
-        assert glob.glob(os.path.join(D, 'old-*', 'PASSED-agent'))
         open(os.path.join(D, 'queue-jobs.jsonl'), 'w').write(json.dumps(dict(key='sb-t1', id='1117-000000-abcd')) + '\n')
         assert AxonRun(D, {}, quiet).state == {'sb-t1': '1117-000000-abcd'}
+        # 7. the pod path: each cell's inputs; a job's outputs from its log, merged once; smoke markers; no payload
+        D = os.path.join(t, 'q7')
+        R = AxonRun(D, {}, quiet)
+        R.logs = os.path.join(t, 'logs')
+        os.makedirs(R.logs)
+        assert R.inputs(spec(False, 'sweep', 'A3', 1)) == {}   # nothing yet
+        os.makedirs(os.path.join(D, 'sweep'))
+        open(os.path.join(D, 'sweep', 'POOL'), 'w').write('101248\n')
+        open(os.path.join(D, 'sweep', 'WINNER.env'), 'w').write("ARM=A3\nWHICH=new\nPAR=0\nLARGS='-ub 2048'\n")
+        assert R.inputs(spec(False, 'sweep', 'axon', 1)) == {} and R.inputs(spec(False, 'sb', None, 1)) == {}
+        assert R.inputs(spec(False, 'sweep', 'A3', 2)) == {'AXON_REL_IN_POOL': '101248'}
+        b = R.inputs(spec(False, 'board', 4, 1))
+        assert b['AXON_REL_IN_POOL'] == '101248' and base64.b64decode(b['AXON_REL_IN_WINNER']).startswith(b'ARM=A3')
+        src = os.path.join(t, 'pod', 'out')
+        os.makedirs(os.path.join(src, 'sweep', 'A3-noidle-ub2048'))
+        open(os.path.join(src, 'sweep', 'POOL'), 'w').write('101248\n')   # what pod.sh wrote: the same bytes
+        open(os.path.join(src, 'sweep', 'A3-noidle-ub2048', 'run-llama-f16-s1-r0.json'), 'w').write('{"errors": 0}')
+        tgz = os.path.join(t, 'r.tgz')
+        subprocess.run(['tar', '-czf', tgz, '-C', os.path.dirname(src), 'out'], check=True)
+        import io
+        buf = io.StringIO()
+        payload.emit(open(tgz, 'rb').read(), 'agent_sweep.sh:A3,1', buf)
+        hs = 'ab' * 32
+        open(os.path.join(R.logs, '1117-000000-0007.log'), 'w').write(
+            f'[axon-run 11:00:00] submitted\nSMOKE PASSED sb harness tar sha256 {hs} (commit c)\nCELL END ok\n'
+            + buf.getvalue() + 'POD END rc 0\n')
+        j = dict(id='1117-000000-0007', rc=0, host='pod1', pod='p')
+        sp7 = spec(False, 'sweep', 'A3', 1)
+        R.collect(sp7, j)
+        R.collect(sp7, j)   # once
+        assert json.load(open(os.path.join(D, 'sweep', 'A3-noidle-ub2048', 'run-llama-f16-s1-r0.json'))) == {'errors': 0}
+        assert os.path.exists(os.path.join(D, 'jobs', sp7['key'], '.merged')) and R.marks == {('sb', hs)}
+        open(os.path.join(R.logs, '1117-000000-0008.log'), 'w').write('CELL END ok\n')
+        try:
+            R.collect(spec(False, 'sweep', 'A4', 1), dict(id='1117-000000-0008', rc=0))
+            raise AssertionError('no Stop')
+        except Stop as e:
+            assert 'carries no outputs' in str(e)
+        R.collect(spec(False, 'sweep', 'A5', 1), dict(id='1117-000000-0008', rc=1))   # failed: queue() stops on its rc
+        # 8. the staged harness: git archive of the cell scripts, pod.sh, payload.py, agent_replay.py; byte-stable
+        tar1, h1 = harness_tar(clean=False)
+        assert h1 == harness_tar(clean=False)[1]
+        names = subprocess.run(['tar', '-tf', '-'], input=tar1, capture_output=True).stdout.decode().split()
+        for n in ('scripts/agent_replay.py', 'scripts/release/boards/pod.sh', 'scripts/release/boards/payload.py',
+                  'scripts/release/boards/common.sh', 'scripts/release/boards/agent_board.sh'):
+            assert n in names, n
     finally:
         shutil.rmtree(t)
     print('SELFTEST queue OK: reruns on taint alone (sb <= 4 jobs, an arm <= 3 runs, a round replaced, <= 8 rounds); '
           'errors and missing runs are kept, never rerun; a failed job stops the queue; no winner -> no board; smoke: '
-          'no reruns, one round; archive moves, resume reuses the submitted jobs')
+          'no reruns, one round; every cell on a 4090 pod; archive moves, resume reuses the submitted jobs; a cell '
+          'gets its inputs, its outputs come back from its log and merge once; smoke markers; the staged harness')
 
 
 if __name__ == '__main__':

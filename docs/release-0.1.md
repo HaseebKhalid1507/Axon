@@ -120,16 +120,20 @@ boards on `9f3630c` are below them.
   (20 sessions, prompts p50 17.2k tokens, scaled to 0.15× and clipped at 32k), Qwen2.5-7B Q4_K_M, f16 KV, against
   llama-server `4413a19`: turn TTFT p50 0.122 vs 1.06 s, ITL p99 119 vs 611 ms. llama-server was configured by
   Axon's side; it re-prefilled 1.9 % of its prompt tokens, Axon 10.3 %. [log](log/2026-10-27-agent-replay.md). The
-  board below re-runs it against seven llama-server configurations chosen to favor it, and its R supersedes this
-  line.
-- **The boards on `9f3630c`** (bella, the release candidate's own binary, its kernel pack only; roadmap week 1,
-  item 7). **Pending:** they run on bella once a smoke of the same scripts has passed, one cell per job, a run lost
-  to foreign GPU load alone run again (bounded). Each is stated here only once its log is in this PR. The rules were
-  written down before any board ran ([log](log/2026-11-14-release-0.1-prep.md)).
+  board below re-runs it on an RTX 4090 against seven llama-server configurations chosen to favor it; its R
+  supersedes this line as the current agent number (this one stays bella's, dated).
+- **The boards on `9f3630c`: RTX 4090 numbers** (a RunPod secure RTX 4090, 24 GB, driver 595; the release
+  candidate's own binary, its kernel pack only; roadmap week 1, item 7). **Pending:** they run on the pod once a
+  smoke of the same harness has passed there, one cell per job, a run lost to foreign GPU load alone run again
+  (bounded). They moved off bella before any board there gave a valid result: its desktop's GPU load tainted the
+  runs. Each is stated here only once its log is in this PR. The rules were written down before any board ran
+  ([log](log/2026-11-14-release-0.1-prep.md): the protocol, amendments 2 and 3).
   - *Single stream:* axon vs llama-bench, upstream's official build of llama.cpp master (b12387, 2026-11-14) and
-    bella's `4413a19`, the weekly pod board's protocol with the run order rotated by round. Each cell is read
-    against the faster of the two builds; ahead or behind only past 2 % with the rounds' ranges apart. Job `<sb>`.
-  - *Agent replay:* the cell above. llama-server first runs seven configurations chosen to favor it, from llama.cpp's
+    `4413a19` (the weekly pod board's sm_89 build), the weekly pod board's protocol with the run order rotated by
+    round. Each cell is read against the faster of the two builds; ahead or behind only past 2 % with the rounds'
+    ranges apart. Job `<sb>`.
+  - *Agent replay:* the cell above (its trace window, scale, clip, model and f16 KV; the KV budget is axon's paged
+    pool on the 4090's 24 GB). llama-server first runs seven configurations chosen to favor it, from llama.cpp's
     source; the one with the lowest turn TTFT p50 is its pick. Then axon vs that configuration, 3 rounds not lost to
     foreign GPU load (at most 8), the engine order alternating. **Stop rule:** R = llama-server's median turn TTFT p50
     over axon's, over the rounds where both engines are clean. If llama-server is faster in every round, or the rounds'
