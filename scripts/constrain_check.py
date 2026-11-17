@@ -39,7 +39,10 @@ time (each reply's stalls are /metrics' delta), on the same server flags:
   runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, every
             call valid but a stalled one (the call ends by itself, or it stalls: the reply ends there and the call,
             the last, arrives cut off, its arguments not JSON: judged `stalled`, never `ok`, the lead's ruling of
-            11-17: a stalled call is not delivered as a usable call). --known-miss names (cell, mode) pairs
+            11-17), and a stalled reply must say it was cut: finish `length` (Responses: `incomplete`; the lead's
+            ruling of 11-17 on Fable's review: pi runs a repaired call otherwise). A reply cut without a stall ran
+            on. A runaway cell that no mode loops on is printed NO-LOOP (it tests nothing at that head; shady's
+            review of 3c205cc). --known-miss names (cell, mode) pairs
             the stall rule is known to miss (11-16: 11-pi-edit seeds 1 and 2, a loop that breaks off and starts
             over; docs/serving.md): such a reply may run on to its limit, its call cut there and nothing else wrong,
             no stall (reported as a miss, not judged); a listed reply that ends is fine. Any other runaway that
@@ -306,7 +309,7 @@ def stop(proc):
 
 def run(a):
     proc, port, logf, res = start(a)
-    bad, http = [], Http()
+    bad, calls_bad, http = [], [], Http()
     try:
         ident = json.loads(req(port, "GET", "/identity")[1])
         res["identity"] = ident
@@ -323,7 +326,7 @@ def run(a):
             rep, judged = reply_of(route, st, raw, offered(body))
             alone[name] = digest(rep)
             res["cells"][name] = dict(digest=alone[name], judged=judged, reply=rep)
-            bad += ["%s: %s %s" % (name, j, n) for j, n in judged if j not in ("ok", "cut")]
+            calls_bad += ["%s: %s %s" % (name, j, n) for j, n in judged if j not in ("ok", "cut")]
         th, outs = [], {}
 
         def one(name, route, body):
@@ -390,13 +393,18 @@ def run(a):
             for w in ws:
                 w.join()
             res["stress"] = dict(counts=counts, replies=sorted(reps, key=lambda r: r["seed"]))
-            bad += ["stress: %d %s" % (counts[k], k) for k in ("badjson", "unoffered", "text", "http") if counts.get(k)]
+            calls_bad += ["stress: %d %s" % (counts[k], k) for k in ("badjson", "unoffered", "text", "http")
+                          if counts.get(k)]
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)
     probs, ilines = integrity(res, http, a.expect_constraint)
-    bad += ["integrity: " + p for p in probs]
-    res["bad"] = bad
+    # The calls are judged where the constraint is on; an unconstrained arm (--no-constrain, AXON_CONSTRAIN=0, main:
+    # --expect-constraint off) is expected to write malformed calls, so they are reported, not judged (shady's
+    # review of 3c205cc, SHOULD 4: its VERDICT said FAIL on a run that passed).
+    judge_calls = a.expect_constraint != "off"
+    bad = (calls_bad if judge_calls else []) + bad + ["integrity: " + p for p in probs]
+    res["bad"], res["calls_not_judged"] = bad, None if judge_calls else calls_bad
     json.dump(res, open(a.out, "w"), indent=1)
     print("fingerprint %s numerics %s model %s banner %s" % (res["identity"]["system_fingerprint"],
                                                             res["identity"].get("numerics"), res.get("model_id"),
@@ -410,6 +418,9 @@ def run(a):
     print("METRICS %s" % json.dumps({k: res["metrics_after"].get(k, 0) - res["metrics_before"].get(k, 0)
                                      for k in res["metrics_after"]}, sort_keys=True))
     print("\n".join(ilines))
+    if not judge_calls:
+        print("CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): %s"
+              % ("; ".join(calls_bad[:20]) or "none malformed"))
     print("VERDICT %s" % ("PASS" if not bad else "FAIL: " + "; ".join(bad[:20])))
     return 2 if probs else 0 if not bad else 1
 
@@ -453,17 +464,21 @@ def replay(a):
                 m1 = metrics(port)
                 rep, judged = reply_of(c["route"], st, raw, offered(body))
                 stalls = m1.get("axon_constraint_stalls_total", 0) - m0.get("axon_constraint_stalls_total", 0)
-                ran_on = rep.get("finish") in ("length", "incomplete")
-                # A stall ends the reply at the call, cut off: its last call, arguments not JSON (or, with calls
-                # decided whole, its block as content). That one is `stalled`; a stalled call judged `ok` (closed,
-                # usable) is a failure below.
-                if stalls == 1 and not ran_on and judged and judged[-1][0] in ("badjson", "text"):
+                cut = rep.get("finish") in ("length", "incomplete")
+                # A stall ends the reply at the call, cut off, and the reply says it was cut as the token limit
+                # says it (`length`; Responses `incomplete`: the lead's ruling of 11-17 on Fable's review, pi runs
+                # a repaired call otherwise). Its last call, arguments not JSON, reply_of judges `cut`; that one is
+                # `stalled`. A stalled call judged `ok` (closed, usable), or a stalled reply that doesn't say it
+                # was cut, is a failure below. A reply cut without a stall ran on to its limit.
+                ran_on = cut and not stalls
+                if stalls == 1 and cut and judged and judged[-1][0] == "cut":
                     judged[-1] = ("stalled", judged[-1][1])
                 badj = [j for j, _n in judged if j not in ("ok", "stalled")]
                 usable_stall = stalls > 0 and not any(j == "stalled" for j, _n in judged)
+                uncut_stall = stalls > 0 and not cut
                 miss = None
                 if c["kind"] == "runaway":
-                    ok = not ran_on and not badj and not usable_stall
+                    ok = not ran_on and not badj and not usable_stall and not uncut_stall
                     if not ok and "%s:%s" % (name, mode) in a.known_miss and ran_on and not stalls \
                             and badj and all(j == "cut" for j in badj):
                         ok, miss = None, "known-miss"
@@ -484,7 +499,9 @@ def replay(a):
                     ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
                 if ok is False:
                     bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else badj or (
-                        "a stalled call delivered as a usable one" if usable_stall else "stalled")))
+                        "a stalled call delivered as a usable one" if usable_stall else
+                        "a stalled reply that finished %s, not length/incomplete" % rep.get("finish")
+                        if uncut_stall else "stalled")))
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)
@@ -494,6 +511,13 @@ def replay(a):
     res["stall_lines"] = [ln.strip() for ln in open(logf, errors="replace") if "stalled after" in ln]
     json.dump(res, open(a.out, "w"), indent=1)
     print("STALL-LINES %d" % len(res["stall_lines"]))
+    # A runaway cell no mode looped on (no stall, none ran on) tests nothing at this head: said, so a gate that
+    # passes on such cells alone isn't read as coverage (shady's review of 3c205cc, SHOULD 3).
+    res["no_loop"] = sorted({r["cell"] for r in rows if r["kind"] == "runaway"} -
+                            {r["cell"] for r in rows if r["kind"] == "runaway" and (r["stalls"] or
+                                                                                   r["finish"] in ("length", "incomplete"))})
+    for cell in res["no_loop"]:
+        print("NO-LOOP %s: no mode stalled or ran on (%s): tests nothing at this head" % (cell, ", ".join(modes)))
     for x in sorted(a.known_miss):
         r = [r for r in rows if "%s:%s" % (r["cell"], r["mode"]) == x]
         print("KNOWN-MISS %s: %s" % (x, "ran on (to %s/%s tokens), not judged" % (r[0]["tokens"], r[0]["cap"])
