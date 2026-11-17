@@ -1,0 +1,50 @@
+[axon-run 11:57:41] submitted 1117-115741-899c by /home/haseeb/.cache/axon-dec: /usr/bin/bash rep14c-c.sh ./axon-7e6de58 models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ./cc_keep.py ./rep14c-c.tar /root/axon-node/cache/axon-podjob-runs/rep14c-nglskbkh/A.json
+[axon-run 11:57:45] timing job waiting: foreign GPU load 0 % max, quiet 67 s of the 120 s needed (on pod1; > 10 %)
+[axon-run 11:59:24] job 1117-115741-899c -> pod1 [RTX 4090 sm_89 secure] (pod rgmfbbluuwptxz): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 6000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/rep14c-c-1f8862588e5e /usr/bin/bash rep14c-c.sh ./axon-7e6de58 models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ./cc_keep.py ./rep14c-c.tar /root/axon-node/cache/axon-podjob-runs/rep14c-nglskbkh/A.json
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (f7d5024f447f0a9a2baa3b16) + source of /home/haseeb/.cache/axon-podjob/rep14c-c-1f8862588e5e (delta vs 3 earlier upload(s) there)
+
+sent 6,705 bytes  received 121 bytes  4,550.67 bytes/sec
+total size is 12,939,726  speedup is 1,895.65
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261117-165931-bash-4003 on pod1 (GPU, 6000 MB)
+[axon-node 16:59:31] GPU EXCLUSIVE taken; job wants 6000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 16:59:31] run bash (f7d5024f447f0a9a2baa3b16) as /home/haseeb/.cache/axon-podjob/rep14c-c-1f8862588e5e on 8822d6980e4c, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.112.07
+Python 3.12.3
+OLD-A /root/axon-node/cache/axon-podjob-runs/rep14c-nglskbkh/A.json (6f9d's arm A)
+REPLAY 14-c-table-of-zeros                legit    greedy FAIL stalls 0 tokens 4096/4096 finish length calls cut:write
+[axon-run 11:59:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 14-c-table-of-zeros                legit    seed1  ok   stalls 0 tokens 808/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    seed2  FAIL stalls 0 tokens 4096/4096 finish length calls cut:write
+[axon-run 12:00:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 16-csv-of-80-identical-rows        known-fp greedy -    stalls 0 tokens 4096/4096 finish length calls cut:write
+[axon-run 12:01:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 16-csv-of-80-identical-rows        known-fp seed1  -    stalls 0 tokens 4096/4096 finish length calls cut:write
+REPLAY 16-csv-of-80-identical-rows        known-fp seed2  -    stalls 0 tokens 4096/4096 finish length calls cut:write
+STALL-LINES 0
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 5.0}
+HTTP all 200 (6 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+VERDICT FAIL: 14-c-table-of-zeros greedy: ran on; 14-c-table-of-zeros seed2: ran on
+A-VS-7F0E 14-c greedy equal
+A-VS-7F0E 14-c seed2  equal
+ARGV-C serve --no-constrain
+CONSTRAINT-TOKENS-C 0.0
+CMP 14-c-table-of-zeros          greedy C tokens  4096 finish length     calls 1 chars  4102 zeros 1354 rows   0 breaks   0 raw-nl   0  | A tokens 2083 finish length chars 2089: common 2089 = A's whole text
+CMP 14-c-table-of-zeros          seed1  C tokens   808 finish tool_calls calls 1 chars   832 zeros  240 rows   0 breaks  18 raw-nl   0  | A tokens 808 finish tool_calls chars 832: common 832 = A's whole text
+CMP 14-c-table-of-zeros          seed2  C tokens  4096 finish length     calls 1 chars  4102 zeros 1354 rows   0 breaks   0 raw-nl   0  | A tokens 2083 finish length chars 2089: common 2089 = A's whole text
+CMP 16-csv-of-80-identical-rows  greedy C tokens  4096 finish length     calls 1 chars  4318 zeros  717 rows 239 breaks 240 raw-nl   0  | 7f0e tokens 2076 finish length chars 2179: common 2179 = A's whole text
+CMP 16-csv-of-80-identical-rows  seed1  C tokens  4096 finish length     calls 1 chars  4318 zeros  717 rows 239 breaks 240 raw-nl   0  | 7f0e tokens 2076 finish length chars 2179: common 2179 = A's whole text
+CMP 16-csv-of-80-identical-rows  seed2  C tokens  4096 finish length     calls 1 chars  4318 zeros  717 rows 239 breaks 240 raw-nl   0  | 7f0e tokens 2076 finish length chars 2179: common 2179 = A's whole text
+VERDICT-14C greedy MODEL-OWN  (decides)
+VERDICT-14C seed1  MODEL-OWN  (sampled: the mask renormalizes the draw, so a divergence here alone does not show a refused pick)
+VERDICT-14C seed2  MODEL-OWN  (sampled: the mask renormalizes the draw, so a divergence here alone does not show a refused pick)
+[axon-node 17:01:33] exit 0 after 121.7s
+[axon-node 17:01:33] peak RSS 239 MB (job process tree PSS, 2 s samples x60)
+[axon-run 12:01:34] exit 0 after 129.4s (host pod1)
+[axon-run 12:01:39] EXPECT ok: output matches /^VERDICT-14C greedy /
+[axon-run 12:01:39] FOREIGN_GPU max=0% mean=0.0% samples=3

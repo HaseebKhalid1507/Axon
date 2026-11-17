@@ -1,0 +1,29 @@
+{
+ "label": "dec-7e6de58-rep14c-armc",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1117-115741-899c",
+   "name": "dec-7e6de58-rep14c-armc",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-17_11:59.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.112.07",
+   "sha": "7e6de58",
+   "binary": "bash",
+   "started": 1794934761.2318728,
+   "ended": 1794934897.3918717,
+   "attempts": 1,
+   "remote_job": "20261117-165931-bash-4003",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "fc14a739cfeae08c821f070bc47c8ba8466280d9b5ee18e6825e64201a11659b",
+   "log_bytes": 5266
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 12:01:41 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
