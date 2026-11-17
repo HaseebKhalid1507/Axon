@@ -1,0 +1,29 @@
+{
+ "label": "dec-d788377-cbcheck",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1117-120627-9a13",
+   "name": "dec-d788377-cbcheck",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-11-17_15:31.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.112.07",
+   "sha": "d788377",
+   "binary": "bash",
+   "started": 1794947492.7205734,
+   "ended": 1794948620.4796379,
+   "attempts": 1,
+   "remote_job": "20261117-203216-bash-1057",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8e68f1b526b97e8ff0cf8d40f0c74dd741866e6641d22f0353fa0ce7eaf6d837",
+   "log_bytes": 30845
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 15:50:37 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

@@ -1,0 +1,330 @@
+[axon-run 12:06:27] submitted 1117-120627-9a13 by /home/haseeb/.cache/axon-dec: /usr/bin/bash cbcheckpod.sh ./s-d788377.tar ./axon-base-cb-9f3630c ./axon-7e6de58 ./harness_accept.py
+[axon-run 15:31:32] job 1117-120627-9a13 -> pod1 [RTX 4090 sm_89 secure] (pod 2jx54v9v1cyhq5): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 10500 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/cbcheckpod-03cfbb6a1688 /usr/bin/bash cbcheckpod.sh ./s-d788377.tar ./axon-base-cb-9f3630c ./axon-7e6de58 ./harness_accept.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (598a7ad7116c747ca66bb184) + source of /home/haseeb/.cache/axon-podjob/cbcheckpod-03cfbb6a1688
+
+sent 8,125,643 bytes  received 175 bytes  216,688.48 bytes/sec
+total size is 26,517,383  speedup is 3.26
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-203216-bash-1057 on pod1 (GPU, 10500 MB)
+[axon-node 20:32:16] GPU EXCLUSIVE taken; job wants 10500 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 20:32:16] run bash (598a7ad7116c747ca66bb184) as /home/haseeb/.cache/axon-podjob/cbcheckpod-03cfbb6a1688 on 788d8a1aa33d, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+Python 3.12.3
+ace8ef683fc0cc95f5364b9f9f84d7de  ./s-d788377.tar
+0f795127818575253bc053a6845766d7  ./axon-base-cb-9f3630c
+79451419b22910913906d13d4abe5055  ./axon-7e6de58
+5eb5a4f78b188d40355485a07a3471f7  ./harness_accept.py
+NVIDIA GeForce RTX 4090, 8.9, 595.112.07
+[axon-run 15:32:22] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 15:32:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:33:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:33:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:34:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:35:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_cd549e8826834d49 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:38811/v1']
+CELL codex-greedy           23754be90d2b71f44a8ad76a88d02f94 completed ok:exec_command
+CELL codex-seed1            b4d6b57edb92a72776becc088a722f22 completed ok:exec_command
+CELL opencode-greedy        2ff4c6e96a02f4ed9a9939186bf016c0 tool_calls ok:shell
+CELL opencode-seed2         5fdb3b41f21235e6a8218fb550fec036 tool_calls ok:shell
+CELL pi-greedy              a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL pi-seed3               a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL codex-259-seed4        2b2f62b9f62b5fe253985aaac5bd1763 tool_calls ok:update_plan,ok:exec_command
+CELL codex-required-seed5   4945ddf1d2e1351183b447a3d0a8696f tool_calls ok:exec_command
+batched == alone: True; pins: recorded
+STRESS {"cut": 1, "finish_length": 1, "finish_tool_calls": 199, "ok": 261, "replies": 200, "replies_with_call": 200}
+METRICS {"axon_constraint_fallback_total": 3701.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 112.0, "axon_constraint_mask_seconds_total": 0.100537, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 23113.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 1.0}
+HTTP all 200 (216 requests)
+CONSTRAINT-TOKENS 23113 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== Qwen2.5-7B-Instruct-Q4_K_M cand default (cells, batched, stress): PASS
+fingerprint fp_cd549e8826834d49 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:41225/v1']
+CELL codex-greedy           23754be90d2b71f44a8ad76a88d02f94 completed ok:exec_command
+CELL codex-seed1            b4d6b57edb92a72776becc088a722f22 completed ok:exec_command
+CELL opencode-greedy        2ff4c6e96a02f4ed9a9939186bf016c0 tool_calls ok:shell
+CELL opencode-seed2         5fdb3b41f21235e6a8218fb550fec036 tool_calls ok:shell
+CELL pi-greedy              a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL pi-seed3               a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL codex-259-seed4        2b2f62b9f62b5fe253985aaac5bd1763 tool_calls ok:update_plan,ok:exec_command
+CELL codex-required-seed5   4945ddf1d2e1351183b447a3d0a8696f tool_calls ok:exec_command
+batched == alone: True; pins: match
+METRICS {"axon_constraint_fallback_total": 139.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 107.0, "axon_constraint_mask_seconds_total": 0.00443, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 822.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 822 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== Qwen2.5-7B-Instruct-Q4_K_M cand default again (pins): PASS
+fingerprint fp_b32437c91cad4b56 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: constrained tool calls off (--no-constrain)']
+CELL codex-greedy           23754be90d2b71f44a8ad76a88d02f94 completed ok:exec_command
+CELL codex-seed1            b4d6b57edb92a72776becc088a722f22 completed ok:exec_command
+CELL opencode-greedy        2ff4c6e96a02f4ed9a9939186bf016c0 tool_calls ok:shell
+CELL opencode-seed2         5fdb3b41f21235e6a8218fb550fec036 tool_calls ok:shell
+CELL pi-greedy              a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL pi-seed3               a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL codex-259-seed4        27e780707b7ebebe3895332af1794171 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   4945ddf1d2e1351183b447a3d0a8696f tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): codex-259-seed4: badjson exec_command
+VERDICT PASS
+[axon-run 15:35:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_b32437c91cad4b56 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: constrained tool calls off (AXON_CONSTRAIN=0)']
+CELL codex-greedy           23754be90d2b71f44a8ad76a88d02f94 completed ok:exec_command
+CELL codex-seed1            b4d6b57edb92a72776becc088a722f22 completed ok:exec_command
+CELL opencode-greedy        2ff4c6e96a02f4ed9a9939186bf016c0 tool_calls ok:shell
+CELL opencode-seed2         5fdb3b41f21235e6a8218fb550fec036 tool_calls ok:shell
+CELL pi-greedy              a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL pi-seed3               a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL codex-259-seed4        27e780707b7ebebe3895332af1794171 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   4945ddf1d2e1351183b447a3d0a8696f tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): codex-259-seed4: badjson exec_command
+VERDICT PASS
+fingerprint fp_9fef4a9f68a25d99 numerics exact/1 model Qwen2.5-7B-Instruct-Q4_K_M banner []
+CELL codex-greedy           23754be90d2b71f44a8ad76a88d02f94 completed ok:exec_command
+CELL codex-seed1            b4d6b57edb92a72776becc088a722f22 completed ok:exec_command
+CELL opencode-greedy        2ff4c6e96a02f4ed9a9939186bf016c0 tool_calls ok:shell
+CELL opencode-seed2         5fdb3b41f21235e6a8218fb550fec036 tool_calls ok:shell
+CELL pi-greedy              a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL pi-seed3               a0bb918a11f4fe1308d3a65416b0a658 tool_calls ok:bash
+CELL codex-259-seed4        27e780707b7ebebe3895332af1794171 tool_calls ok:update_plan,badjson:exec_command
+CELL codex-required-seed5   4945ddf1d2e1351183b447a3d0a8696f tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): codex-259-seed4: badjson exec_command
+VERDICT PASS
+== Qwen2.5-7B-Instruct-Q4_K_M integrity, every arm (all 200; constraint on in cand, off in --no-constrain, AXON_CONSTRAIN=0, main): PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen2.5-7B-Instruct-Q4_K_M --no-constrain == main: PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen2.5-7B-Instruct-Q4_K_M AXON_CONSTRAIN=0 == main: PASS
+fingerprint fp_cd549e8826834d49 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:38811/v1']
+fingerprint fp_b32437c91cad4b56 numerics exact/2 model Qwen2.5-7B-Instruct-Q4_K_M banner ['axon serve: constrained tool calls off (--no-constrain)']
+fingerprint fp_9fef4a9f68a25d99 numerics exact/1 model Qwen2.5-7B-Instruct-Q4_K_M banner []
+[axon-run 15:36:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_f7a9e68a061e0107 numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:51015/v1']
+CELL codex-greedy           66bdba96f8ce641c5d6a46f6187204e5 incomplete cut:exec_command
+CELL codex-seed1            960f720c211d84310adae29349c92ee8 incomplete no call
+CELL opencode-greedy        00d314640dad33b733cc49d98ff167d1 length no call
+CELL opencode-seed2         8722aa1284078d18b3fb8f185339bfed length no call
+CELL pi-greedy              e0d96a984eeb6988607c1feac2528adc length no call
+CELL pi-seed3               85b93e66ea301e5f36ea6bba5a75954e length no call
+CELL codex-259-seed4        5300979de8780c82dfda9ee48b29e09f tool_calls ok:update_plan
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: recorded
+METRICS {"axon_constraint_fallback_total": 43.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 105.0, "axon_constraint_mask_seconds_total": 0.001825, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 350.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 2.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 350 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== Qwen3-8B-Q4_K_M cand default (cells, batched, stress): PASS
+[axon-run 15:36:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_f7a9e68a061e0107 numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:40231/v1']
+CELL codex-greedy           66bdba96f8ce641c5d6a46f6187204e5 incomplete cut:exec_command
+CELL codex-seed1            960f720c211d84310adae29349c92ee8 incomplete no call
+CELL opencode-greedy        00d314640dad33b733cc49d98ff167d1 length no call
+CELL opencode-seed2         8722aa1284078d18b3fb8f185339bfed length no call
+CELL pi-greedy              e0d96a984eeb6988607c1feac2528adc length no call
+CELL pi-seed3               85b93e66ea301e5f36ea6bba5a75954e length no call
+CELL codex-259-seed4        5300979de8780c82dfda9ee48b29e09f tool_calls ok:update_plan
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: match
+METRICS {"axon_constraint_fallback_total": 43.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 105.0, "axon_constraint_mask_seconds_total": 0.002556, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 350.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 2.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 350 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== Qwen3-8B-Q4_K_M cand default again (pins): PASS
+[axon-run 15:37:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:37:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_1f8a3ccb83fcb14c numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: constrained tool calls off (--no-constrain)']
+CELL codex-greedy           66bdba96f8ce641c5d6a46f6187204e5 incomplete cut:exec_command
+CELL codex-seed1            960f720c211d84310adae29349c92ee8 incomplete no call
+CELL opencode-greedy        00d314640dad33b733cc49d98ff167d1 length no call
+CELL opencode-seed2         8722aa1284078d18b3fb8f185339bfed length no call
+CELL pi-greedy              e0d96a984eeb6988607c1feac2528adc length no call
+CELL pi-seed3               85b93e66ea301e5f36ea6bba5a75954e length no call
+CELL codex-259-seed4        5300979de8780c82dfda9ee48b29e09f tool_calls ok:update_plan
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 2.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): none malformed
+VERDICT PASS
+[axon-run 15:38:13] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_1f8a3ccb83fcb14c numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: constrained tool calls off (AXON_CONSTRAIN=0)']
+CELL codex-greedy           66bdba96f8ce641c5d6a46f6187204e5 incomplete cut:exec_command
+CELL codex-seed1            960f720c211d84310adae29349c92ee8 incomplete no call
+CELL opencode-greedy        00d314640dad33b733cc49d98ff167d1 length no call
+CELL opencode-seed2         8722aa1284078d18b3fb8f185339bfed length no call
+CELL pi-greedy              e0d96a984eeb6988607c1feac2528adc length no call
+CELL pi-seed3               85b93e66ea301e5f36ea6bba5a75954e length no call
+CELL codex-259-seed4        5300979de8780c82dfda9ee48b29e09f tool_calls ok:update_plan
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 2.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): none malformed
+VERDICT PASS
+[axon-run 15:38:44] FOREIGN_GPU sample max=0% mean=0.0% n=1
+fingerprint fp_3df78a127de02898 numerics exact/1 model Qwen3-8B-Q4_K_M banner []
+CELL codex-greedy           66bdba96f8ce641c5d6a46f6187204e5 incomplete cut:exec_command
+CELL codex-seed1            960f720c211d84310adae29349c92ee8 incomplete no call
+CELL opencode-greedy        00d314640dad33b733cc49d98ff167d1 length no call
+CELL opencode-seed2         8722aa1284078d18b3fb8f185339bfed length no call
+CELL pi-greedy              e0d96a984eeb6988607c1feac2528adc length no call
+CELL pi-seed3               85b93e66ea301e5f36ea6bba5a75954e length no call
+CELL codex-259-seed4        5300979de8780c82dfda9ee48b29e09f tool_calls ok:update_plan
+CELL codex-required-seed5   68e5ec86be96d835d0ffc438beb75310 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_tool_calls_dropped_total": 2.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+CALLS NOT JUDGED (an unconstrained arm, malformed calls expected): none malformed
+VERDICT PASS
+== Qwen3-8B-Q4_K_M integrity, every arm (all 200; constraint on in cand, off in --no-constrain, AXON_CONSTRAIN=0, main): PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen3-8B-Q4_K_M --no-constrain == main: PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== Qwen3-8B-Q4_K_M AXON_CONSTRAIN=0 == main: PASS
+fingerprint fp_f7a9e68a061e0107 numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: Qwen3-8B-Q4_K_M (cuda, kv q8, ctx 32768, every layer on the GPU, KV: 2048 pages x 64 = 131072 tokens (4 sequences of the full 32768 at once) over up to 4 slots (cap 32768), constrained tool calls (hermes-json 4e3d5bed2fe9cdb3)) on http://127.0.0.1:51015/v1']
+fingerprint fp_1f8a3ccb83fcb14c numerics exact/2 model Qwen3-8B-Q4_K_M banner ['axon serve: constrained tool calls off (--no-constrain)']
+fingerprint fp_3df78a127de02898 numerics exact/1 model Qwen3-8B-Q4_K_M banner []
+[axon-run 15:39:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cand: ready after 2.0 s
+SERVE cand: cached 13038, restored None, shared 1920.0, evicted 0.0, preempted 0, unfed 0, pages 512, generated 840 (max 40, >1024: 0), digest fb830ece7723
+SERVE MD5 cuda q8 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 21/21 same
+== serve md5 (no tools) cuda Qwen2.5-7B-Instruct-Q4_K_M: PASS
+[axon-run 15:39:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:40:42] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 15:41:13] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cand: ready after 1.0 s
+SERVE cand: cached 13082, restored None, shared None, evicted None, preempted None, unfed None, pages None, generated 840 (max 40, >1024: 0), digest ca1591ef8e4a
+SERVE MD5 cpu f16 qwen2.5-0.5b-q4_k_m.gguf: 21/21 same
+== serve md5 (no tools) cpu qwen2.5-0.5b-q4_k_m: PASS
+REPLAY 01-codex-exec-command              runaway  greedy ok   stalls 0 tokens 304/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 01-codex-exec-command              runaway  seed1  ok   stalls 0 tokens 313/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 01-codex-exec-command              runaway  seed2  ok   stalls 0 tokens 169/8192 finish completed calls ok:update_plan
+REPLAY 02-codex-apply-patch               runaway  greedy ok   stalls 0 tokens 208/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 02-codex-apply-patch               runaway  seed1  ok   stalls 0 tokens 277/8192 finish completed calls ok:update_plan,ok:exec_command
+REPLAY 02-codex-apply-patch               runaway  seed2  ok   stalls 0 tokens 104/8192 finish completed calls ok:update_plan,ok:exec_command
+[axon-run 15:41:44] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 03-pi-edit                         runaway  greedy ok   stalls 0 tokens 203/4096 finish tool_calls calls ok:edit
+REPLAY 03-pi-edit                         runaway  seed1  ok   stalls 0 tokens 369/4096 finish tool_calls calls ok:edit,ok:edit
+REPLAY 03-pi-edit                         runaway  seed2  ok   stalls 0 tokens 365/4096 finish tool_calls calls ok:edit,ok:edit
+REPLAY 04-pi-edit                         runaway  greedy ok   stalls 0 tokens 113/4096 finish tool_calls calls ok:edit
+REPLAY 04-pi-edit                         runaway  seed1  ok   stalls 0 tokens 300/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 04-pi-edit                         runaway  seed2  ok   stalls 0 tokens 295/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit
+REPLAY 05-pi-edit                         runaway  greedy ok   stalls 1 tokens 2340/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:42:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 05-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2617/4096 finish length calls stalled:edit
+REPLAY 05-pi-edit                         runaway  seed2  ok   stalls 0 tokens 104/4096 finish tool_calls calls ok:edit
+[axon-run 15:42:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 06-pi-edit                         runaway  greedy ok   stalls 1 tokens 2359/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 06-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2348/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:43:08] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 06-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2357/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 07-pi-edit                         runaway  greedy ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:43:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 07-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2354/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 07-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 08-pi-edit                         runaway  greedy ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:44:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 08-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2354/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 08-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:44:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 09-pi-edit                         runaway  greedy ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+[axon-run 15:45:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 09-pi-edit                         runaway  seed1  ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 09-pi-edit                         runaway  seed2  ok   stalls 1 tokens 2353/4096 finish length calls ok:edit,ok:edit,stalled:edit
+REPLAY 10-pi-edit                         runaway  greedy ok   stalls 0 tokens 1742/4096 finish tool_calls calls ok:edit,ok:edit
+REPLAY 10-pi-edit                         runaway  seed1  ok   stalls 0 tokens 741/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit,ok:write,ok:bash
+REPLAY 10-pi-edit                         runaway  seed2  ok   stalls 0 tokens 768/4096 finish tool_calls calls ok:edit,ok:edit,ok:edit,ok:write,ok:bash
+[axon-run 15:45:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 11-pi-edit                         runaway  greedy ok   stalls 1 tokens 3076/4096 finish length calls stalled:edit
+REPLAY 11-pi-edit                         runaway  seed1  ok   stalls 0 tokens 879/4096 finish tool_calls calls ok:edit
+[axon-run 15:46:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 11-pi-edit                         runaway  seed2  miss stalls 0 tokens 4096/4096 finish length calls cut:edit
+REPLAY 12-pi-edit                         runaway  greedy ok   stalls 0 tokens 71/4096 finish tool_calls calls ok:read
+REPLAY 12-pi-edit                         runaway  seed1  ok   stalls 0 tokens 476/4096 finish tool_calls calls ok:edit
+REPLAY 12-pi-edit                         runaway  seed2  ok   stalls 0 tokens 81/4096 finish tool_calls calls ok:read
+REPLAY 13-board-of-zeros                  legit    greedy ok   stalls 0 tokens 383/4096 finish tool_calls calls ok:write
+REPLAY 13-board-of-zeros                  legit    seed1  ok   stalls 0 tokens 353/4096 finish tool_calls calls ok:write
+REPLAY 13-board-of-zeros                  legit    seed2  ok   stalls 0 tokens 378/4096 finish tool_calls calls ok:write
+[axon-run 15:46:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 14-c-table-of-zeros                legit    greedy ok   stalls 1 tokens 2083/4096 finish length calls stalled:write overran 683/256
+REPLAY 14-c-table-of-zeros                legit    seed1  ok   stalls 0 tokens 808/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    seed2  ok   stalls 1 tokens 2083/4096 finish length calls stalled:write overran 683/256
+REPLAY 15-html-table-of-empty-cells       legit    greedy ok   stalls 0 tokens 612/4096 finish tool_calls calls ok:write
+REPLAY 15-html-table-of-empty-cells       legit    seed1  ok   stalls 0 tokens 612/4096 finish tool_calls calls ok:write
+REPLAY 15-html-table-of-empty-cells       legit    seed2  ok   stalls 0 tokens 596/4096 finish tool_calls calls ok:write
+[axon-run 15:47:28] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 16-csv-of-80-identical-rows        legit    greedy ok   stalls 1 tokens 2076/4096 finish length calls stalled:write overran 120/80
+REPLAY 16-csv-of-80-identical-rows        legit    seed1  ok   stalls 1 tokens 2076/4096 finish length calls stalled:write overran 120/80
+[axon-run 15:47:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 16-csv-of-80-identical-rows        legit    seed2  ok   stalls 1 tokens 2076/4096 finish length calls stalled:write overran 120/80
+STALL-LINES 20
+NO-LOOP 01-codex-exec-command: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+NO-LOOP 02-codex-apply-patch: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+NO-LOOP 03-pi-edit: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+NO-LOOP 04-pi-edit: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+NO-LOOP 10-pi-edit: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+NO-LOOP 12-pi-edit: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+KNOWN-MISS 11-pi-edit:seed1: ended (tool_calls)
+KNOWN-MISS 11-pi-edit:seed2: ran on (to 4096/4096 tokens), not judged
+METRICS {"axon_constraint_fallback_total": 5518.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 107.0, "axon_constraint_mask_seconds_total": 0.72662, "axon_constraint_stalls_total": 20.0, "axon_constraint_tokens_total": 58929.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 21.0}
+HTTP all 200 (48 requests)
+CONSTRAINT-TOKENS 58929 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== replay Qwen2.5-7B-Instruct-Q4_K_M (runaways end, legit data doesn't stall; all 200, constraint on): PASS
+STALLED-DELIVERY Qwen2.5-7B-Instruct-Q4_K_M: 20 of 20 rows that stalled show the call as stalled:, 20 of 20 finish length/incomplete
+== replay Qwen2.5-7B-Instruct-Q4_K_M: every stalled call delivered cut off, the reply finishing length (20, 20 of 20), at least one: PASS
+[axon-run 15:48:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:49:01] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:49:32] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 15:50:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 00-pi-edit                         runaway  greedy ok   stalls 0 tokens 105/4096 finish tool_calls calls ok:edit
+REPLAY 00-pi-edit                         runaway  seed1  ok   stalls 0 tokens 206/4096 finish tool_calls calls ok:edit
+REPLAY 00-pi-edit                         runaway  seed2  ok   stalls 0 tokens 88/4096 finish tool_calls calls ok:edit
+STALL-LINES 0
+NO-LOOP 00-pi-edit: no mode stalled or ran on (greedy, seed1, seed2): tests nothing at this head
+METRICS {"axon_constraint_fallback_total": 24.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 95.0, "axon_constraint_mask_seconds_total": 0.000979, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 396.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (3 requests)
+CONSTRAINT-TOKENS 396 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== replay Qwen2.5-0.5B-Instruct-Q4_0 (runaways end, legit data doesn't stall; all 200, constraint on): PASS
+STALLED-DELIVERY Qwen2.5-0.5B-Instruct-Q4_0: 0 of 0 rows that stalled show the call as stalled:, 0 of 0 finish length/incomplete
+== replay Qwen2.5-0.5B-Instruct-Q4_0: every stalled call delivered cut off, the reply finishing length (0, 0 of 0): PASS
+CBCHECK PASS
+[axon-node 20:50:16] exit 0 after 1080.4s
+[axon-node 20:50:16] peak RSS 900 MB (job process tree PSS, 2 s samples x535)
+[axon-run 15:50:17] exit 0 after 1124.7s (host pod1)
+[axon-run 15:50:34] EXPECT ok: output matches /^CBCHECK PASS/
+[axon-run 15:50:34] FOREIGN_GPU max=0% mean=0.0% samples=36
