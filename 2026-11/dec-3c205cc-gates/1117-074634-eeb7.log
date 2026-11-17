@@ -1,0 +1,120 @@
+[axon-run 07:46:34] submitted 1117-074634-eeb7 by /home/haseeb/.cache/axon-wt-dec-cb: /home/haseeb/.cache/axon-dec/bin/axon-test-3c205cc constrain:: identity:: serve_constrained serve::tools:: serve_tool_calls cli::
+[axon-run 07:47:38] job 1117-074634-eeb7 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-wt-dec-cb --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /home/haseeb/.cache/axon-dec/bin/axon-test-3c205cc constrain:: identity:: serve_constrained serve::tools:: serve_tool_calls cli:: --test-threads 1
+axon-remote: uploading axon-test-3c205cc (da1ce7f2320c486a726cad01) + source of /home/haseeb/.cache/axon-wt-dec-cb
+
+sent 2,997,793 bytes  received 7,505 bytes  858,656.57 bytes/sec
+total size is 10,493,776  speedup is 3.49
+
+sent 8,583,814 bytes  received 35 bytes  3,433,539.60 bytes/sec
+total size is 27,996,560  speedup is 3.26
+axon-remote: job 20261117-074750-axon-test-3c205cc-1221238 on jade (CPU-only)
+[axon-node 07:47:50] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 07:47:50] run axon-test-3c205cc (da1ce7f2320c486a726cad01) as /home/haseeb/.cache/axon-wt-dec-cb on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 07:47:50] memory cap (scope MemoryMax) 2844 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 07:47:50] MemAvailable 4380 MB, load ['4.56', '3.74', '3.63']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 85 tests
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test cli::tests::drafting_matches_greedy ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cli::tests::drafting_matches_greedy_hybrid ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::help_is_current ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test constrain::model_tests::constrained_step_cost_cuda ... ignored
+test constrain::model_tests::cpu_constrained_contract ... ok
+test constrain::model_tests::cuda_constrained_contract ... ok
+test constrain::model_tests::mask_cost_real ... ignored
+test constrain::model_tests::real_vocab_masks ... ok
+test constrain::model_tests::split_backends_constrained_contract ... ok
+test constrain::tests::bounded_space ... ok
+test constrain::tests::cands_masked_reference ... ok
+test constrain::tests::constrain_env_strict ... ok
+test constrain::tests::constrained_drafting_matches_plain ... ok
+test constrain::tests::constrained_drafting_past_a_stall ... ok
+test constrain::tests::draft_copies_not_counted ... ok
+test constrain::tests::finisher_closes_from_anywhere ... ok
+test constrain::tests::forced_seeds ... ok
+test constrain::tests::held_json_matches_its_oracle ... ok
+test constrain::tests::hermes_cycle ... ok
+test constrain::tests::hermes_field ... ok
+test constrain::tests::hermes_field_hashes_the_graph ... ok
+test constrain::tests::hermes_grammars_kept ... ok
+test constrain::tests::hermes_names ... ok
+test constrain::tests::hermes_triggers ... ok
+test constrain::tests::json_matches_parse_json ... ok
+test constrain::tests::long_cycles_stall ... ok
+test constrain::tests::malformed_259_impossible ... ok
+test constrain::tests::mask_cost_synthetic ... ignored
+test constrain::tests::masked_via_rows ... ok
+test constrain::tests::masks_match_naive ... ok
+test constrain::tests::mixed_arrays_held ... ok
+test constrain::tests::parser_agrees_on_random_calls ... ok
+test constrain::tests::stalled_call_closes ... ok
+test constrain::tests::stalled_reply_ends ... ok
+test constrain::tests::unheld_counted_said_once ... ok
+test constrain::tests::verify_cands_masked_rows ... ok
+test identity::tests::fields ... ok
+test identity::tests::fingerprint_stable_and_sensitive ... ok
+test identity::tests::model_digest_golden ... ok
+test identity::tests::model_digest_sees_the_file ... ok
+test identity::tests::numerics_mode_in_the_fingerprint ... ok
+test identity::tests::of_fp8_split_act_is_the_nets ... ok
+test identity::tests::of_split_and_pipeline ... ok
+test identity::tests::of_split_attention_gemma3 ... ok
+test identity::tests::predicted_is_of ... FAILED
+test identity::tests::rope_scaling_in_the_fingerprint ... ok
+test identity::tests::sha256_vectors ... ok
+test serve::tests::serve_constrained_forced_and_default ... ok
+test serve::tests::serve_constrained_stall ... ok
+test serve::tests::serve_constrained_tool_calls ... ok
+test serve::tests::serve_tool_calls ... ok
+test serve::tests::serve_tool_calls_streamed ... ok
+test serve::tools::tests::api_parse_with_tools ... ok
+test serve::tools::tests::arg_scan ... ok
+test serve::tools::tests::call_scan_matches_the_parser ... ok
+test serve::tools::tests::call_scan_name_and_arguments ... ok
+test serve::tools::tests::forced_and_ids ... ok
+test serve::tools::tests::harmony_parser ... ok
+test serve::tools::tests::harmony_typescript_tools ... ok
+test serve::tools::tests::hermes_open_tag_ends_a_call ... ok
+test serve::tools::tests::hermes_parser ... ok
+test serve::tools::tests::json_keeps_order_and_prints_like_python ... ok
+test serve::tools::tests::json_parser_llama ... ok
+test serve::tools::tests::long_block_bytewise ... ok
+test serve::tools::tests::render_harmony ... ok
+test serve::tools::tests::render_llama31 ... ok
+test serve::tools::tests::render_qwen25 ... ok
+test serve::tools::tests::render_qwen3 ... ok
+test serve::tools::tests::requests ... ok
+test serve::tools::tests::response_json ... ok
+test serve::tools::tests::stream_early_content ... ok
+test serve::tools::tests::stream_forced ... ok
+test serve::tools::tests::stream_harmony ... ok
+test serve::tools::tests::stream_hermes_bad_arguments ... ok
+test serve::tools::tests::stream_hermes_valid_blocks ... ok
+test serve::tools::tests::stream_json_llama ... ok
+test serve::tools::tests::stream_runaway_block ... ok
+
+failures:
+
+---- identity::tests::predicted_is_of stdout ----
+skipping: no usable GPU (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected) and AXON_SKIP_GPU_TESTS is set
+
+thread 'identity::tests::predicted_is_of' (1225115) panicked at src/testutil.rs:105:5:
+the FP8 checkpoint /home/haseeb/.cache/axon-wt-dec-cb/models/hf/Qwen2.5-0.5B-Instruct-FP8-dynamic is missing (no model.safetensors). Download RedHatAI/Qwen2.5-0.5B-Instruct-FP8-dynamic into it (see CONTRIBUTING.md), or set AXON_SKIP_FP8_MODEL_TESTS=1 to skip the tests that need it.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    identity::tests::predicted_is_of
+
+test result: FAILED. 81 passed; 1 failed; 3 ignored; 0 measured; 916 filtered out; finished in 380.33s
+
+[axon-node 07:54:15] exit 101 after 384.9s; lowest MemAvailable seen 3245 MB
+[axon-node 07:54:15] peak RSS 1158 MB (job process tree PSS, 2 s samples x190)
+[axon-run 07:54:16] exit 101 after 397.7s (host jade)
