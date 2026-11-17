@@ -16,5 +16,6 @@ the modes `run`, `replay`, `cost` and `diff`. The inputs are kept here so a gate
   `constrain_check.py run`'s cells.
 - `serve_md5_share.py`: the md5 of tool-free serve traffic, base against candidate (from #216).
 - `cbbar.py`: the harness bar. It reads `harness_accept.py`'s RESULT lines and gives malformed replies, stalls,
-  fallbacks and tasks passed per harness and engine. Pass `--stalls-malformed` for runs at `3c205cc` or later,
-  where a stalled call already arrives malformed.
+  fallbacks and tasks passed per harness and engine, and splits stalls per task run (first, repeats). Pass
+  `--stalls-malformed` for runs at `1b88537` or later: a stalled call arrives malformed and its reply finishes
+  `length`, so stalls aren't counted twice and the length note leaves them out.

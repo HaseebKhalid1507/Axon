@@ -29,19 +29,21 @@ measurements behind them.
   mid-arguments: `finish_reason` `length` (`/v1/responses`: `incomplete`, the call's item too; ollama: `done_reason`
   `length`); with calls streamed (the default) a call whose `arguments` aren't JSON (`axon_tool_calls_invalid_total`),
   decided whole (`AXON_TOOL_STREAM=0`, ollama) content (`axon_tool_calls_dropped_total`). A client that parses
-  arguments strictly can't run it, and pi refuses a call in a reply that ended `length`; pi repairs and runs a cut-off
-  call otherwise, so the finish says `length` (Fable's review). codex ends its turn on an `incomplete` response. A
-  client that repairs cut-off JSON and ignores `length` would still run it: `AXON_TOOL_STREAM=0` for it. Until the
-  lead's ruling of 11-17 the rule closed the call the shortest way, a well-formed call that a harness applied: in a pi
-  run a model dropped a string's closing quote, wrote on inside the string until the rule fired, and the closed
-  `edit` wrote that text into the file; each next turn copied it and stalled again. Data that fills 2,048 tokens with
-  one repeated block (8 or more times over for a 256-token block) can trip it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines or a 32×32
-  matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a line on
-  stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block of P
-  tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the rule off
-  alone (a call in a loop runs to `max_tokens`, still held to a name and JSON). Known miss: a loop that breaks
-  off and starts over (a key written again, the loop again), so that no 2,048 tokens repeat one block, runs to
-  `max_tokens` as it did before (Qwen2.5-7B, a pi `edit` replayed: 2 of 3 seeds); catching it cut legit data.
+  arguments strictly can't run it, and pi refuses a call in a reply that ended `length`; pi before 1.3.0 repairs and
+  runs a cut-off call otherwise (from 1.3.0 it fails it: pi #10897), so the finish says `length` (Fable's review).
+  opencode 2.2.7 refuses the call too and goes on with the turn (seen on `max_tokens` cuts, not yet on a stall);
+  codex ends its turn on an `incomplete` response. A client that repairs cut-off JSON and ignores `length` would
+  still run it: `AXON_TOOL_STREAM=0` for it. Until the lead's ruling of 11-17 the rule closed the call the shortest
+  way, a well-formed call that a harness applied: in a pi run a model dropped a string's closing quote, wrote on
+  inside the string until the rule fired, and the closed `edit` wrote that text into the file; each next turn copied
+  it and stalled again. Data that fills 2,048 tokens with one repeated block (8 or more times over for a 256-token
+  block) can trip it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines
+  or a 32×32 matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a
+  line on stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block
+  of P tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the rule off
+  alone (a call in a loop runs to `max_tokens`, still held to a name and JSON). Known miss: a loop that breaks off and
+  starts over (a key written again, the loop again), so that no 2,048 tokens repeat one block, runs to `max_tokens` as
+  it did before (Qwen2.5-7B, a pi `edit` replayed: 2 of 3 seeds); catching it cut legit data.
 - **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
   its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
   refuses to start (PR A read only `1` as on).

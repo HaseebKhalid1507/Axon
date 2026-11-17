@@ -13,8 +13,8 @@
 #   (2) cand default again, a new server: the cells match (1)'s pins;
 #   (3) cand --no-constrain and (4) BASE (main 9f3630c): their cells' replies equal (the kill switch runs main's
 #       paths: tool traffic identical), (5) cand AXON_CONSTRAIN=0 too.
-#  serve md5 of tool-free traffic (serve_md5_share-v3.py: 7 sessions x 3 turns, greedy and seeded): BASE vs cand
-#  default on Qwen2.5-7B cuda q8 and qwen2.5-0.5b cpu.
+#  serve md5 of tool-free traffic (SERVE_MD5_PY, a copy of #216's serve_md5_share-v3.py: 7 sessions x 3 turns,
+#  greedy and seeded): BASE vs cand default on Qwen2.5-7B cuda q8 and qwen2.5-0.5b cpu.
 #  replay (shady's SHOULD 5 on #274): constrain_check.py replay of REPLAYS (the 13 acceptance calls that tripped the
 #  first stall windows, as the requests that led to them, each cell's `orig` naming the call; plus data that repeats
 #  one value)

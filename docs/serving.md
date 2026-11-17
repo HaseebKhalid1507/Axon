@@ -403,11 +403,15 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
     block is content and no client sees a call (`axon_tool_calls_dropped_total`).
     What a client does with it is the client's: one that parses `arguments` strictly
     (`JSON.parse`, as the OpenAI SDKs do) can't run it, and pi refuses a call in a reply that
-    ended `length` (0.85.1: "the response hit the output token limit"). pi repairs a cut-off
-    call's JSON (it closes the open string and containers) and runs it when the finish is
-    anything else, which is why a stalled reply says `length` (Fable's review of #274, the
-    lead's ruling of 11-17). codex ends its turn on an `incomplete` response ("Incomplete
-    response returned"), as it does when a reply hits the token limit. A client that repairs
+    ended `length` (0.85.1: "the response hit the output token limit"). pi before 1.3.0
+    repairs a cut-off call's JSON (it closes the open string and containers) and runs it
+    when the finish is anything else (from 1.3.0 it fails such a call: pi #10897), which is
+    why a stalled reply says `length` (Fable's review of #274, the lead's ruling of 11-17).
+    opencode (2.2.7) refuses a call in a reply that ended `length` too ("The tool call was
+    not executed because the output token limit (stop reason: length) was reached") and
+    goes on with the turn; that was seen on `max_tokens` cuts, not yet on a stall. codex
+    ends its turn on an `incomplete` response ("Incomplete response returned"), as it does
+    when a reply hits the token limit. A client that repairs
     cut-off JSON and ignores `length` would still run what was written; for such a client
     set `AXON_TOOL_STREAM=0`. Until the lead's ruling of 11-17 the call was closed the
     shortest way, a well-formed call that harnesses applied: a pi run's model dropped a
