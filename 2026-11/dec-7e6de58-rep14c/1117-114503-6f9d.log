@@ -1,0 +1,50 @@
+[axon-run 11:45:03] submitted 1117-114503-6f9d by /home/haseeb/.cache/axon-dec: /usr/bin/bash rep14c.sh ./axon-7e6de58 models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ./cc_keep.py ./rep14c.tar
+[axon-run 11:50:49] job 1117-114503-6f9d -> pod1 [RTX 4090 sm_89 secure] (pod rgmfbbluuwptxz): ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host pod1 --vram 6000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/rep14c-81f34b8fa096 /usr/bin/bash rep14c.sh ./axon-7e6de58 models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ./cc_keep.py ./rep14c.tar
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (d004251f8fc59a09d6892e65) + source of /home/haseeb/.cache/axon-podjob/rep14c-81f34b8fa096 (delta vs 1 earlier upload(s) there)
+
+sent 4,048,786 bytes  received 159 bytes  261,222.26 bytes/sec
+total size is 12,929,325  speedup is 3.19
+[axon-run 11:51:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+
+sent 57 bytes  received 19 bytes  50.67 bytes/sec
+total size is 89  speedup is 1.17
+axon-remote: job 20261117-165109-bash-1997 on pod1 (GPU, 6000 MB)
+[axon-node 16:51:09] GPU EXCLUSIVE taken; job wants 6000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 16:51:09] run bash (d004251f8fc59a09d6892e65) as /home/haseeb/.cache/axon-podjob/rep14c-81f34b8fa096 on 8822d6980e4c, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.112.07
+[axon-run 11:51:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:52:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 11:52:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 14-c-table-of-zeros                legit    greedy FAIL stalls 1 tokens 2083/4096 finish length calls stalled:write
+REPLAY 14-c-table-of-zeros                legit    seed1  ok   stalls 0 tokens 808/4096 finish tool_calls calls ok:write
+REPLAY 14-c-table-of-zeros                legit    seed2  FAIL stalls 1 tokens 2083/4096 finish length calls stalled:write
+STALL-LINES 2
+METRICS {"axon_constraint_fallback_total": 21.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 95.0, "axon_constraint_mask_seconds_total": 0.007529, "axon_constraint_stalls_total": 2.0, "axon_constraint_tokens_total": 4971.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (3 requests)
+CONSTRAINT-TOKENS 4971 (expected on)
+INTEGRITY PASS
+VERDICT FAIL: 14-c-table-of-zeros greedy: stalled; 14-c-table-of-zeros seed2: stalled
+[axon-run 11:53:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 14-c-table-of-zeros                legit    greedy FAIL stalls 0 tokens 4096/4096 finish length calls cut:write
+REPLAY 14-c-table-of-zeros                legit    seed1  ok   stalls 0 tokens 808/4096 finish tool_calls calls ok:write
+[axon-run 11:53:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+REPLAY 14-c-table-of-zeros                legit    seed2  FAIL stalls 0 tokens 4096/4096 finish length calls cut:write
+STALL-LINES 0
+METRICS {"axon_constraint_fallback_total": 19.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 95.0, "axon_constraint_mask_seconds_total": 0.013808, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 8997.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 2.0}
+HTTP all 200 (3 requests)
+CONSTRAINT-TOKENS 8997 (expected on)
+INTEGRITY PASS
+VERDICT FAIL: 14-c-table-of-zeros greedy: ran on; 14-c-table-of-zeros seed2: ran on
+usage: cc_keep.py [-h] {run,diff,replay,cost} ...
+cc_keep.py: error: unrecognized arguments: --no-constrain
+Traceback (most recent call last):
+  File "/root/axon-node/cache/axon-podjob-runs/rep14c-nglskbkh/cmp.py", line 6, in <module>
+    arms = {n: json.load(open(p)) for n, p in zip("ABC", sys.argv[2:5])}
+                         ^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C.json'
+axon-podjob: rc 1; run dir kept: /root/axon-node/cache/axon-podjob-runs/rep14c-nglskbkh
+[axon-node 16:54:14] exit 1 after 185.0s
+[axon-node 16:54:14] peak RSS 797 MB (job process tree PSS, 2 s samples x91)
+[axon-run 11:54:16] exit 1 after 207.0s (host pod1)
+[axon-run 11:54:17] FOREIGN_GPU max=0% mean=0.0% samples=6

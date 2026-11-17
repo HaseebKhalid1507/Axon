@@ -1,0 +1,29 @@
+{
+ "label": "dec-7e6de58-rep14c",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1117-114503-6f9d",
+   "name": "dec-7e6de58-rep14c",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "pod1",
+   "hw": "hw-pod1-11-17_11:50.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.112.07",
+   "sha": "7e6de58",
+   "binary": "bash",
+   "started": 1794934232.8467824,
+   "ended": 1794934457.9333622,
+   "attempts": 1,
+   "remote_job": "20261117-165109-bash-1997",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a699555eab2c9d63a00679d0e1e390bea6f84fb85465ac03cbaae20355b8c9da",
+   "log_bytes": 4496
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 11:54:20 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}
