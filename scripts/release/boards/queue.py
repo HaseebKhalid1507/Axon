@@ -289,6 +289,9 @@ class AxonRun:
 
     def submit(self, sp):
         sd = self.st['dir']
+        clash = [a for a in sp['argv'] if os.path.exists(os.path.join(W, a))]
+        if clash:   # axon-podjob stages an argument that names a file in its cwd and rewrites it to ./NAME
+            raise Stop(f'submit {sp["name"]}: argument(s) {clash} name files in {W}: axon-podjob would stage them')
         cmd = [self.podjob, '--detach', '--timing', sp['timing'], '--vram', str(sp['vram']), '--ram', str(sp['ram']),
                '--ws', str(WS_MB), '--models', ','.join(sp['models']), '--max-min', str(sp['max_min']), '--name', sp['name'],
                '--expect', sp['expect'], '--', os.path.join(sd, 'pod.sh')] + [os.path.join(sd, n) for n in STAGED] \
@@ -589,6 +592,12 @@ def selftest():
         except Stop as e:
             assert 'carries no outputs' in str(e)
         R.collect(spec(False, 'sweep', 'A5', 1), dict(id='1117-000000-0008', rc=1))   # failed: queue() stops on its rc
+        try:   # a cell argument that names a file in the repo root: refused before axon-podjob could stage it
+            R.st = dict(dir=t)
+            R.submit(dict(spec(False, 'sweep', 'A0', 1), argv=['agent_sweep.sh', 'README.md', '1']))
+            raise AssertionError('no Stop')
+        except Stop as e:
+            assert "['README.md']" in str(e)
         # 8. the staged harness: git archive of the cell scripts, pod.sh, payload.py, agent_replay.py; byte-stable
         tar1, h1 = harness_tar(clean=False)
         assert h1 == harness_tar(clean=False)[1]
