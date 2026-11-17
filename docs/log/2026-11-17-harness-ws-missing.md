@@ -1,4 +1,4 @@
-# harness_accept.py: a deleted workspace fails the task; `run` stops its servers on every exit
+# harness_accept.py: deleted or planted workspaces, and `run` stops its servers on every exit
 
 - Date: 2026-11-17. Branch: fix/harness-ws-missing, off main 110a17b. Scripts only, no engine code.
 
@@ -47,8 +47,43 @@ Each fix reverted on its own fails its own case, run locally:
 The full selfcheck passes on jade at 4f500a4 (job 1117-080803-c2c4, sandboxed). okarin's patched copy passes too
 (1117-081128-c7a4).
 
+## Review fixes (shady 8/10 SHIP, comment 6949228150)
+- **A second signal during cleanup** (SHOULD 1). `signal_exit` stayed installed while the finally ran. A second
+  SIGTERM in `Proxy.stop`'s up-to-0.5 s wait escaped, so the engine stayed up and the handlers weren't restored.
+  Shady's probe `double.py` showed this at gaps of 0.05, 0.2 and 0.4 s. The finally now ignores SIGTERM, SIGHUP and
+  SIGINT until it's done, stops the engine first (it holds the VRAM), then restores the handlers. This is what
+  axon-run's runner does. With the fix, `double.py` shows the engine stopped and the handlers restored at every gap
+  (0 to 3 s).
+- **Paths an agent planted** (SHOULD 2). The arm's directory is the sandbox's rw bind, so an agent can put a symlink at
+  a later task's workspace. `rmtree(ignore_errors=True)` silently refused it, `build_base` followed it, and
+  `git_init` ran `git add -A` in the target, which is the trusted side writing outside the sandbox. A plain file there
+  crashed the run (`FileExistsError`). The turn's transcript, `<arm>/r<n>-<task>-t<i>.out`, had the same hole:
+  `open(..., "w")` wrote through a planted symlink. Shady's review didn't list that one. `clear_path` now removes
+  whatever is at those paths, and at `<ws>.check`, without following it.
+- **nohup** (a regression in 4f500a4, found while fixing SHOULD 1). `cmd_run` turned SIGHUP into an exit even when
+  the run was started ignoring it, so a `nohup`'d run would die on logout. An inherited SIG_IGN is now kept.
+- **Nit:** the selfcheck matches the whole `sleep` argument (`sleep\0<tag>\0`).
+
+New selfcheck cases:
+- **`run: 2nd signal during cleanup`:** the engine's and the proxy's `stop()` each first send TERM, HUP and INT to
+  the process, so the case doesn't depend on timing.
+- **`run: SIGHUP under nohup`.**
+- **`run: symlink planted at a ws`:** a symlink at round 2's workspace and transcript, pointing outside.
+- **`run: file planted at a ws`.**
+
+A server `cmd_run` leaves in `LIVE` now fails its case, and is stopped before the next case.
+
+Each fix reverted on its own (locally) fails exactly its own case:
+- without the SIG_IGN, or with the proxy stopped first: the second-signal case;
+- without the nohup guard: nohup (SystemExit 129);
+- with the old `rmtree` reset: both planted cases (the repo and `.git` written into the outside directory; the file
+  case crashes);
+- without clearing the transcript path: the symlink case (the outside file overwritten).
+
 ## Not changed
-The sandbox still binds the whole arm directory, so an agent could also reach the arm's other workspaces, round 1's
+The sandbox still binds the whole arm directory. An agent could also reach the arm's other workspaces, round 1's
 included while round 2 runs. None of the 587 task transcripts on bella (`r*-t*.out`, 131 of them round 2) names
-another task's workspace; 277 name their own. Binding only the task's workspace and HOME would close it. It's left out
-here, so that the runs in flight (#274) keep the conditions their earlier rows had.
+another task's workspace; 277 name their own. It could also delete the harness config in HOME, which fails the arm's
+later tasks (SHOULD 3). #277 tracks binding only the task's workspace and HOME, a config detector, and the selfcheck
+in CI. The lead's ruling: after #274's runs finish, in its own PR, so those runs keep the conditions their earlier
+rows had.
