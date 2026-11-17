@@ -1,0 +1,29 @@
+{
+ "label": "eval-e280d1c-selfcheck",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1117-083539-be4d",
+   "name": "eval-e280d1c-selfcheck",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "e280d1c",
+   "binary": "bash",
+   "started": 1794922539.7228372,
+   "ended": 1794922583.744522,
+   "attempts": 1,
+   "remote_job": "20261117-083543-bash-1253823",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "830f017a764e99fae1e192bb8d73c281aec5554a0322828b875ec1c124289737",
+   "log_bytes": 8546
+  }
+ ],
+ "redactions": {},
+ "published": "2026-11-17 08:36:27 EST",
+ "by": "axon-gatelogs (axon-devstack)"
+}

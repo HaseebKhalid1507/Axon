@@ -1,0 +1,79 @@
+[axon-run 08:35:39] submitted 1117-083539-be4d by /home/haseeb/.cache/axon-wt-eval: /usr/bin/bash harness_accept.sh selfcheck ./harness_accept.py ./make_repo.py
+[axon-run 08:35:39] job 1117-083539-be4d -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/harness_accept-d75289129f46 --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash harness_accept.sh selfcheck ./harness_accept.py ./make_repo.py --test-threads 1
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (eb838c2cf7a3387f1d3df629) + source of /home/haseeb/.cache/axon-podjob/harness_accept-d75289129f46
+
+sent 53,395 bytes  received 133 bytes  35,685.33 bytes/sec
+total size is 173,004  speedup is 3.23
+
+sent 167 bytes  received 35 bytes  404.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-083543-bash-1253823 on jade (CPU-only)
+[axon-node 08:35:43] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 08:35:43] run bash (eb838c2cf7a3387f1d3df629) as /home/haseeb/.cache/axon-podjob/harness_accept-d75289129f46 on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 08:35:43] memory cap (scope MemoryMax) 2904 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 08:35:43] MemAvailable 4440 MB, load ['0.18', '0.69', '1.30']; nice -n 19 ionice -c3 taskset -c 0-7
+WARN proxy_err None/None/self: AttributeError: 'str' object has no attribute 'get'
+WARN proxy_err None/None/self: AttributeError: 'NoneType' object has no attribute 'startswith'
+WARN proxy_err None/None/self: AttributeError: 'str' object has no attribute 'get'
+selfcheck: sandbox True
+bugfix         OK    before: test suite fails (FAILED (failures=2)); apply_discount values: AssertionError | after: ok
+cli-bug        OK    before: ledger --db chk.jsonl add o9 ann --item ABC-001 pen 150 2: rc 1, output '", line 9, in che | after: ok
+feature-csv    OK    before: render(rows, 'csv'): ValueError: unknown format 'csv'; have ['text']; ledger --db chk.json | after: ok
+filter-resume  OK    before: ledger --db chk.jsonl report --customer ann: rc 2, output 'usage: ledger [-h] [--db DB] {a | after: ok
+rename         OK    before: customer_rows still in ['ledger/reports.py', 'tests/test_reports.py']; rows_by_customer: I | after: ok
+spec-func      OK    before: check_rate: ImportError: cannot import name 'check_rate' from 'ledger.validate' (/tmp/ha-s | after: ok
+write-tests    OK    before: tests/test_validate.py missing | after: ok
+pyproject      OK    before: pyproject.toml: FileNotFoundError: [Errno 2] No such file or directory: 'pyproject.toml' | after: ok
+answer         OK    before: ANSWER.txt is '', want 564 | after: ok
+align          OK    before: as_text alignment: AssertionError: ['name  n', '---------', 'a     5', 'bbb   123'] | after: ok
+delete-cmd     OK    before: ledger --db chk.jsonl delete b1: rc 2, output "dger [-h] [--db DB] {add,report} ...\nledge | after: ok
+stubs          OK    before: test suite fails (FAILED (errors=3)); hidden cases: NotImplementedError | after: ok
+typehints      OK    before: unannotated: ['apply_discount', 'tax', 'total'] | after: ok
+exception      OK    before: OrderNotFound: ImportError: cannot import name 'OrderNotFound' from 'ledger.storage' (/tmp | after: ok
+write-tests-2  OK    weak tests rejected: a check_sku that accepts everything passes the tests; a check_qty that accepts everything passes the tests; a check_disc
+proxy /v1/chat/completions            OK    {'status': 200, 'tc': 1, 'tc_badjson': 0, 'tc_text': 0, 'held': 0, 'srv_prompt_ms': None, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   badjson  OK    {'status': 200, 'tc': 1, 'tc_badjson': 1, 'tool_res_err': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   text_tc  OK    {'status': 200, 'tc': 0, 'tc_text': 1, 'empty': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   held     OK    {'status': 200, 'tc': 1, 'held': 1, 'cached_tokens': 100, 'srv_prompt_n': 1200, 'srv_prompt_ms': 400.0, 'srv_pred_n': 25, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   ctx      OK    {'status': 400, 'ctx_overflow': 1, 'ttft_ms': None, 'err': 'context_length_exceeded: prompt is 40000 tokens'}
+proxy /v1/responses          err_int  OK    {'status': 400, 'is_err': 1, 'ctx_overflow': 0, 'ttft_ms': None, 'err': "400: Cannot determine type of 'item'"}
+proxy /v1/chat/completions   two_calls OK    {'status': 200, 'tc': 2, 'tc_badjson': 1, 'tc_text': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/responses                   OK    {'status': 200, 'tc': 1, 'tc_badjson': 0, 'prompt_tokens': 50, 'ttft_ms': 200, 'err': None}
+proxy /v1/responses          badjson  OK    {'status': 200, 'tc': 1, 'tc_badjson': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/responses                   OK    {'status': 200, 'tc': 1, 'tc_unoffered': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/responses          unoffered OK    {'status': 200, 'tc': 1, 'tc_unoffered': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions            OK    {'status': 200, 'tc': 1, 'tc_unoffered': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions            OK    {'status': 200, 'tc': 1, 'tc_unoffered': 0, 'ttft_ms': 201, 'err': None}
+proxy /v1/chat/completions   perr     OK    {'status': 200, 'tc': 1, 'proxy_err': 1, 'done': 1, 'ttft_ms': 201, 'err': None}
+proxy /v1/responses          perr     OK    {'status': 200, 'tc': 1, 'proxy_err': 2, 'done': 1, 'ttft_ms': 201, 'err': None}
+proxy hang-up hold              OK    upstream closed 0.0s after the client; record cut=client status=200
+proxy hang-up hold_whole        OK    upstream closed 0.0s after the client; record cut=client status=499
+proxy outlives its task          OK    B: 0 records after 0.00s; A: 1 record(s) after 1.40s, status 200 cut None
+proxy drain cuts what's left     OK    cut 1, records 1, cut=drain, upstream saw the close: True
+compactions per harness          OK    {'pi': 2, 'codex': 1, 'opencode': 2} (want {'pi': 2, 'codex': 1, 'opencode': 2})
+codex's unsupported calls         OK    (2, '-') (want (2, '-'))
+WARN compactions opencode /tmp/ha-self-x6po9pgm/r1-x: OperationalError: no such table: session_message
+compactions, unknown layout      OK    None (want None: reported as ?)
+cold prompts and compactions     OK    [(1, 0, 1), (0, 0, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0), (0, 0, 0), (1, 0, 0)]; row cmp 1 cold 3 c_cmp 1 c_1st 1
+arms: environments               OK    inherited arm vars dropped
+arms: start-line check           OK    (True, False, False, True, True) (want (True, False, False, True, True))
+malformed: count and rate rules  OK    ([1, 2, 2, 3], (5, 21), (None, None)) (want ([1, 2, 2, 3], (5, 21), (None, None)))
+summary: /metrics float deltas   OK    ('125', '?', '-') (want ('125', '?', '-'))
+malformed: cut short, unoffered  OK    (3, 2, 2, None) (want (3, 2, 2, None))
+workspace: missing               OK    workspace missing
+workspace: symlink               OK    workspace broken: not a directory
+workspace: a file                OK    workspace broken: not a directory
+workspace: named pipe            OK    workspace broken: Error: [('/tmp/ha-self-exit-mnhm_p3p/fifo/pipe', '/tmp/ha-self-exit-mnhm_p3p/fifo.
+run: agent deletes its workspace OK    end 0, results [(False, 'workspace missing')], engine and proxy stopped
+run: an exception                OK    end RuntimeError('selfcheck: a bug after the turn'), results [], engine and proxy stopped
+run: SIGTERM mid-turn            OK    end SystemExit(143), results [], engine and proxy stopped
+run: 2nd signal during cleanup   OK    end SystemExit(143), results [], engine and proxy stopped, stopped ['engine', 'proxy']
+run: SIGHUP under nohup          OK    end 0, results [(False, 'pyproject.toml: FileNotFoundError: [Errn')], engine and proxy stopped
+run: symlink planted at a ws     OK    end 0, results [(False, 'pyproject.toml: FileNotFoundError: [Errn'), (False, 'pyproject.toml: FileNotFoundError: [Errn')], engine and proxy stopped, outside untouched, r2 workspace rebuilt
+run: file planted at a ws        OK    end 0, results [(False, 'pyproject.toml: FileNotFoundError: [Errn'), (False, 'pyproject.toml: FileNotFoundError: [Errn')], engine and proxy stopped
+SELFCHECK PASS (0 failures)
+[axon-node 08:36:19] exit 0 after 35.6s; lowest MemAvailable seen 4219 MB
+[axon-node 08:36:19] peak RSS 42 MB (job process tree PSS, 2 s samples x17)
+[axon-run 08:36:19] exit 0 after 39.9s (host jade)
+[axon-run 08:36:25] EXPECT ok: output matches /^SELFCHECK PASS/
