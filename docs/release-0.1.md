@@ -5,12 +5,17 @@
 > maintainer's list at the end. Full list of changes: [CHANGELOG.md](../CHANGELOG.md).
 >
 > The release candidate is main `9f3630c`'s binary (2026-11-14), from the release workflow's dry run; the boards
-> below run on it. Main has merged only scripts and docs since (#235, #276): the dry run on main `1a1d751`
-> (2026-11-17) built the same `axon`, byte for byte. The tag can't be `9f3630c`: this PR (#270) and the CHANGELOG's
-> date land after it, so the tag is a descendant with no change under `src/`, whose binary should be the same bytes.
-> If a PR that changes `src/` merges first (#271, #274 are open), the binary differs. The maintainer checks that
-> before publishing (releasing.md, "The boards' binary"); if it differs, the board lines say they measured the
-> candidate, not the release binary.
+> below ran on it. The dry run on main `1a1d751` (2026-11-17) built the same `axon`, byte for byte, and this PR's head
+> is `1a1d751` plus docs and scripts. **Main has since merged #274** (`29fd8f8`, 2026-11-17: tool calls constrained by
+> default in `axon serve`, a `src/` change), so a tag on main's tip builds another `axon`. Two ways, the maintainer's
+> call:
+> - **Tag this PR's head** (its `src/` is `1a1d751`'s): the release is the measured binary, and #274 waits for the
+>   next release. Before #270 merges, #274's CHANGELOG entry has to move back under `Unreleased`: merged as is, it
+>   lands under `[0.1.0]`.
+> - **Tag main's tip after #270 merges:** 0.1.0 has #274. The board lines then say "measured on the candidate
+>   `9f3630c`, not the release binary" (releasing.md, "The boards' binary"), and "What's new" gains #274. The boards
+>   didn't exercise #274: their requests carry no tools, and #274 changes what a request with tools gets (and
+>   nothing under `src/cuda/`) ([log](log/2026-11-14-release-0.1-prep.md#results)).
 
 ## In one sentence
 
@@ -119,26 +124,40 @@ boards on `9f3630c` are below them.
 - **Agent replay, bella (RTX 5070 Ti Laptop), main `d8a296c` (2026-10-27):** a 10-minute window of agent traffic
   (20 sessions, prompts p50 17.2k tokens, scaled to 0.15× and clipped at 32k), Qwen2.5-7B Q4_K_M, f16 KV, against
   llama-server `4413a19`: turn TTFT p50 0.122 vs 1.06 s, ITL p99 119 vs 611 ms. llama-server was configured by
-  Axon's side; it re-prefilled 1.9 % of its prompt tokens, Axon 10.3 %. [log](log/2026-10-27-agent-replay.md). The
-  board below re-runs it on an RTX 4090 against seven llama-server configurations chosen to favor it; its R
-  supersedes this line as the current agent number (this one stays bella's, dated).
-- **The boards on `9f3630c`: RTX 4090 numbers** (a RunPod secure RTX 4090, 24 GB, driver 595; the release
-  candidate's own binary, its kernel pack only; roadmap week 1, item 7). **Pending:** they run on the pod once a
-  smoke of the same harness has passed there, one cell per job, a run lost to foreign GPU load alone run again
-  (bounded). They moved off bella before any board there gave a valid result: its desktop's GPU load tainted the
-  runs. Each is stated here only once its log is in this PR. The rules were written down before any board ran
-  ([log](log/2026-11-14-release-0.1-prep.md): the protocol, amendments 2 and 3).
-  - *Single stream:* axon vs llama-bench, upstream's official build of llama.cpp master (b12387, 2026-11-14) and
-    `4413a19` (the weekly pod board's sm_89 build), the weekly pod board's protocol with the run order rotated by
-    round. Each cell is read against the faster of the two builds; ahead or behind only past 2 % with the rounds'
-    ranges apart. Job `<sb>`.
-  - *Agent replay:* the cell above (its trace window, scale, clip, model and f16 KV; the KV budget is axon's paged
-    pool on the 4090's 24 GB). llama-server first runs seven configurations chosen to favor it, from llama.cpp's
-    source; the one with the lowest turn TTFT p50 is its pick. Then axon vs that configuration, 3 rounds not lost to
-    foreign GPU load (at most 8), the engine order alternating. **Stop rule:** R = llama-server's median turn TTFT p50
-    over axon's, over the rounds where both engines are clean. If llama-server is faster in every round, or the rounds'
-    ratios include 1, the one-sentence summary above says so. If R ≤ 1.5, the edge is thinner than claimed, and MoE in
-    the paged pool goes first in the roadmap. The tag goes ahead either way. Jobs `<sweep>`, `<board>`.
+  Axon's side; it re-prefilled 1.9 % of its prompt tokens, Axon 10.3 %. [log](log/2026-10-27-agent-replay.md).
+  **Superseded** as the current agent number by the board below (RTX 4090, llama-server's best of seven
+  configurations: R = 2.35×). This line stays as bella's, dated.
+- **The boards on `9f3630c`'s binary (`2c19415b…`), RunPod secure RTX 4090, 24 GB, driver 595.112.07
+  (2026-11-17)**. Run with its kernel pack only (NVRTC refused) and the sm_89 cubins loaded; roadmap week 1, item 7.
+  The rules were written down before any board ran ([log](log/2026-11-14-release-0.1-prep.md): the protocol,
+  amendments 2 and 3, every table). The boards moved off bella before any board there gave a valid result, because
+  its desktop's GPU load tainted the runs; that data was set aside unread. No run on the pod was tainted.
+  - *Single stream* (job `1117-122831-e30e`): axon vs llama-bench, upstream's official build of llama.cpp master
+    (b12387, 2026-11-14) and `4413a19` (the weekly pod board's sm_89 build). The protocol is the weekly pod board's,
+    with the run order rotated by round. Each cell is read against the faster build at its best ubatch (`-ub 512` or
+    `4096`, `-fa 1`); it is ahead or behind only past 2 % with the rounds' ranges apart.
+    - **Ahead in all 15 cells** (Qwen2.5 0.5B / 1.5B / 3B / 7B and Qwen3 8B, Q4_K_M; pp560 / pp2100 / tg128); none
+      level, none behind.
+    - Thinnest: 7B tg128 +2.4 % (186.0 vs 181.6 tok/s, b12387), Qwen3 8B tg128 +2.8 % (169.7 vs 165.1), 3B tg128
+      +7.3 %.
+    - Prefill +17.0 % to +64.6 %.
+
+    Decode on the 7B and 8B is a small lead, as on 10-18.
+  - *Agent replay:* the cell above (its trace window, scale, clip, model and f16 KV). The KV budget is axon's paged
+    pool on 24 GB, 338,432 tokens.
+    - **llama-server's pick:** first, seven configurations chosen to favor it, from llama.cpp's source (one round
+      each). The pick, the lowest turn TTFT p50, was b12387 with `--no-cache-idle-slots -ub 2048`: 0.133 s. At the
+      board's defaults it was 0.951 s (`4413a19`) and 1.01 s (b12387).
+    - **The board:** axon vs that pick, 3 rounds, every run clean, the engine order alternating. **Axon leads on turn
+      TTFT by R = 2.35×** (median turn TTFT p50 0.06 vs 0.141 s; the rounds' ratios 2.09–2.35). ITL p99 10.79 vs
+      13.91 ms (medians).
+    - **llama-server's KV:** it ran with 262,144 KV tokens, not 338,432. With `-ub 2048` its compute buffer didn't
+      fit beside the full budget on 24 GB, and the board's start rule cut the budget by 15 %.
+    - **At 4× speed** (reported, not read; it overloads both): R = 2.66×, ITL p99 79.12 vs 541.6 ms.
+    - **Against 10-27's 8.7× (llama-server at its defaults):** the defaults save and clear every idle slot. In the
+      sweep, turning that off alone (`--no-cache-idle-slots`) took llama-server from 1.01 to 0.145 s.
+    - Jobs: `1117-123613-a678` through `1117-140826-1ece` (the sweep), `1117-142129-f90f`, `1117-145256-6869`,
+      `1117-152243-2ac9` (the board).
 
 ## Known limits
 

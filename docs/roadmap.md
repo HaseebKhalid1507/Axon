@@ -24,8 +24,11 @@ Why this target (MEASURED unless marked):
   0.122 vs 1.06 s, ITL p99 119 vs 611 ms ([log](log/2026-10-27-agent-replay.md); the trace scaled to 0.15× and clipped
   at 32k, llama-server set up by Axon's side, and it re-prefilled less: 1.9 vs 10.3 %). With the RAM tier an evicted
   25k session resumes in 0.141 s vs a 2.713 s re-prefill (#201, RTX 4090); shared pages: eight subagents' TTFT 0.591× (#211).
+  On the release candidate (RTX 4090, 11-17), against llama-server's best of seven configurations: R = 2.35× on turn
+  TTFT ([release-0.1.md](release-0.1.md#numbers-honestly)).
 - Single stream is parity, not a lead: 7B decode 186 vs 181 tok/s and prefill 1.13× llama.cpp on a 4090 (10-18,
-  [results.md](results.md)). No single-stream board has run since `7f42c02`.
+  [results.md](results.md)). On the release candidate (RTX 4090, 11-17): ahead in all 15 cells, decode still thin
+  (7B +2.4 %, Qwen3 8B +2.8 %).
 - Between that and a user: no release binary and NVRTC from a CUDA toolkit for the GPU, both closed since (#227,
   #230: v0.1.0, pending tag, needs only the driver); gpt-oss-20b prefills at 0.27× llama.cpp (265 vs 995 tok/s, bella,
   #98); no constrained JSON (`response_format` is a 400, #116; tool calls opt-in, #264); paged KV, the RAM tier and
