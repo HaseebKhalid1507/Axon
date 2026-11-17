@@ -32,7 +32,7 @@ Run on bella, detached: setsid nohup scripts/release/boards/queue.py --with-smok
 import glob, json, os, re, shutil, subprocess, sys, tempfile, time
 
 S = os.path.dirname(os.path.abspath(__file__))
-W = os.path.dirname(os.path.dirname(S))
+W = os.path.dirname(os.path.dirname(os.path.dirname(S)))   # the repo: scripts/release/boards -> ../../..
 sys.path.insert(0, S)
 from pick import ARMS, attempt, pick, run as sweep_run, taint_only, why_not  # noqa: E402,F401
 import read_board  # noqa: E402
@@ -332,6 +332,10 @@ class FakeRun:
 
 def selftest():
     T = {'tainted': True}
+    assert os.path.isdir(os.path.join(W, '.git')) or os.path.isfile(os.path.join(W, '.git')), f'W {W} is not the repo'
+    for smoke in (True, False):   # the paths axon-run gets: relative to W (its cwd), executable
+        for sp in (spec(smoke, 'sb', None, 1), spec(smoke, 'sweep', 'A0', 1), spec(smoke, 'board', 0, 1)):
+            assert os.access(os.path.join(W, sp['argv'][0]), os.X_OK), sp['argv'][0]
     t = tempfile.mkdtemp(prefix='queue-selftest-')
     quiet = lambda *_: None  # noqa: E731
     try:
