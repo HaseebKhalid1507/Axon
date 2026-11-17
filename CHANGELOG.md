@@ -6,6 +6,64 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### Constrained tool calls on by default (PR B of #259; #272's guards)
+- **A Hermes tool call names an offered tool and is a JSON object**, by default, in `axon serve` on Qwen2.5 and
+  Qwen3 models (PR A's `AXON_CONSTRAIN=1`, now on, and on Qwen3 too). From the reply's `<tool_call>` (its token or
+  the text spelled out, outside Qwen3's reasoning) to `</tool_call>`, each token is picked from those that keep the
+  call `{"name": NAME, "arguments": OBJECT}`, NAME one of the request's tool names: codex's unoffered `apply_patch`
+  calls (6 in #259's job; 23 and 29 in #235's codex runs, without and with `AXON_CONSTRAIN=1`) can't be written.
+  After the call the reply is free again (more calls, or text). `tool_choice` `required` and named are held from the
+  reply's first token, where the prompt's opening of the call leaves them. Requests without tools, `tool_choice:
+  "none"`, and every token before a call are unchanged.
+- **A held call can't run on** (#272: 13 of the constrained arm's 15 malformed calls were runaways cut by
+  `max_tokens`). Whitespace outside strings is bounded as llama.cpp's grammars bound it (one space, or one or two
+  newlines then at most 20 spaces or tabs), and a call whose last 2,048 tokens repeat one block of at most 256 ends
+  the reply right there. In the acceptance runs' 6,333 calls 11 of the 13
+  runaways trip it (the other two, a `, false` loop and a list loop, ended by themselves after 1,963 and 623 pieces)
+  and no other call comes near it (at most 383 pieces of text in a repeated block); no whitespace run went past
+  llama.cpp's rule outside the runaways. An array's items are any values, as in JSON (Fable's review dropped a
+  lock to the first item's kind, which rewrote real arguments such as `[["Alice", 30]]` without a trace), and a
+  rule that cut a call of at most 8 distinct tokens over 1,024 is gone too (it cut 400 dice rolls).
+- **A call the stall rule stops ends its reply cut off, as `max_tokens` cuts one.** The reply ends where it stalled,
+  the call left cut off unclosed, and the server returns it as main returns a call `max_tokens` cut off
+  mid-arguments: `finish_reason` `length` (`/v1/responses`: `incomplete`, the call's item too; ollama: `done_reason`
+  `length`); with calls streamed (the default) a call whose `arguments` aren't JSON (`axon_tool_calls_invalid_total`),
+  decided whole (`AXON_TOOL_STREAM=0`, ollama) content (`axon_tool_calls_dropped_total`). A client that parses
+  arguments strictly can't run it, and pi refuses a call in a reply that ended `length`; pi before 1.3.0 repairs and
+  runs a cut-off call otherwise (from 1.3.0 it fails it: pi #10897), so the finish says `length` (Fable's review).
+  opencode 2.2.7 refuses the call too and goes on with the turn (seen on `max_tokens` cuts, not yet on a stall);
+  codex ends its turn on an `incomplete` response. A client that repairs cut-off JSON and ignores `length` would
+  still run it: `AXON_TOOL_STREAM=0` for it. Until the lead's ruling of 11-17 the rule closed the call the shortest
+  way, a well-formed call that a harness applied: in a pi run a model dropped a string's closing quote, wrote on
+  inside the string until the rule fired, and the closed `edit` wrote that text into the file; each next turn copied
+  it and stalled again. Data that fills 2,048 tokens with one repeated block (8 or more times over for a 256-token
+  block) can trip it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines
+  or a 32×32 matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a
+  line on stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block
+  of P tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the rule off
+  alone (a call in a loop runs to `max_tokens`, still held to a name and JSON). Known miss: a loop that breaks off and
+  starts over (a key written again, the loop again), so that no 2,048 tokens repeat one block, runs to `max_tokens` as
+  it did before (Qwen2.5-7B, a pi `edit` replayed: 2 of 3 seeds); catching it cut legit data.
+- **The kill switch** is `--no-constrain` or `AXON_CONSTRAIN=0`: the server runs as before, token for token, and
+  its identity's `serve` field says `no-constrain`. `AXON_CONSTRAIN` takes `0`, `1` or nothing; any other value
+  refuses to start (PR A read only `1` as on).
+- **Every fingerprint changes once:** `NUMERICS_VERSION_EXACT` is 2 (`exact/2`, `fast/2.3`), the lead's ruling of
+  11-15. A tools request's own fingerprint was already truthful without it (it names the grammar), but the server's
+  `GET /identity` has no per-request part: without the bump it would read as main's for a server whose tools replies
+  changed. (PR A, opt-in, recorded "no bump" as its ruling 1: its default server was main's.) No kernel changed:
+  the bits of a request without tools are main's. A fast-mode KV session saved before is restored as tokens, not
+  bytes. A tools request's `system_fingerprint` still names the grammar (`constrain hermes-json <hash>`; the hash is
+  of the grammar's rules and of the automaton they compile to, not the request's tool names).
+- **Metrics:** `axon_constraint_tokens_total`, `axon_constraint_fallback_total`,
+  `axon_constraint_trigger_rejected_total`, `axon_constraint_stalls_total`, `axon_constraint_unheld_total` (tools
+  requests the grammar couldn't hold, left unconstrained; each reason also a stderr line, once),
+  `axon_constraint_mask_cache_clears_total`, `axon_constraint_mask_cache_peak_entries`,
+  `axon_constraint_mask_seconds_total`.
+- **The kill switch's parser** (`AXON_TOOL_STREAM=0`, the ollama routes) ends a call whose `</tool_call>` the model
+  left out where the next `<tool_call>` begins (#259 item 2), as the streaming parser already did.
+- Valid isn't right: an unescaped quote still ends its string, and the call parses but may not be what was meant.
+  Per-tool argument schemas are PR C.
+
 ### `AXON_SHARE_KV` read strictly; /slots `waiting` while a request runs alone; a server's start never exits its process (#267, #268, #269)
 - **`AXON_SHARE_KV` takes `0`, `1` or nothing** (#267, shady's SHOULD 2 on #228). `0` turns shared prefix KV pages
   off, `1` on (under fast kernels too), unset or empty is the default (on; off under fast kernels). Any other

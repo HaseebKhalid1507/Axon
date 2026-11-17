@@ -596,6 +596,39 @@ fn hermes_parser() {
     );
 }
 
+/// #259 item 2 (decide-whole mode, the kill switch's path): a call whose
+/// `</tool_call>` the model left out ends where the next `<tool_call>`
+/// begins, if the block so far is a call; a `<tool_call>` inside a block
+/// that isn't one yet (a string in its arguments) is the block's text.
+#[test]
+fn hermes_open_tag_ends_a_call() {
+    let h = Kind::Hermes;
+    every_split(
+        h,
+        "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n<tool_call>\n{\"name\": \"b\", \"arguments\": {\"x\": 1}}\n</tool_call>",
+        &[call("a", "{}"), call("b", "{\"x\": 1}")],
+    );
+    // Three in a row, the last left open at the end of the reply.
+    every_split(
+        h,
+        "<tool_call>{\"name\": \"a\"}<tool_call>{\"name\": \"b\"}<tool_call>{\"name\": \"c\"}",
+        &[call("a", "{}"), call("b", "{}"), call("c", "{}")],
+    );
+    every_split(
+        h,
+        "<tool_call>{\"name\": \"a\", \"arguments\": {\"s\": \"<tool_call>\"}}</tool_call>",
+        &[call("a", "{\"s\": \"<tool_call>\"}")],
+    );
+    // Not a call before the tag: the whole block is content, as before.
+    every_split(
+        h,
+        "<tool_call>{oops <tool_call>{\"name\": \"b\"}</tool_call>",
+        &[text(
+            "<tool_call>{oops <tool_call>{\"name\": \"b\"}</tool_call>",
+        )],
+    );
+}
+
 #[test]
 fn json_parser_llama() {
     let j = Kind::Json;

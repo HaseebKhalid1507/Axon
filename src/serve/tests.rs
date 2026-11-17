@@ -74,6 +74,8 @@ fn test_opts(path: &str, device: Device) -> Opts {
         cache_ram_alloc: super::tier::Alloc::Thread,
         numerics: Numerics::Exact,
         constrain: None,
+        constrain_stall: None,
+        constrain_closer: None,
     }
 }
 
@@ -2157,11 +2159,13 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
     }
 }
 
-/// Constrained tool calls (`Opts::constrain`, AXON_CONSTRAIN=1) end to end,
+/// Constrained tool calls (`Opts::constrain`, on by default) end to end,
 /// on the CPU (one request at a time: `sample::generate_constrained`) and
 /// on CUDA (the batch's masked rows, `RowHead::Sample.mask`): a request
-/// without tools gets the same reply and fingerprint from a server with
-/// constraints on or off; a tools request (tool_choice auto) gets its own
+/// without tools gets the same reply from a server with constraints on or
+/// off, and the default fingerprint from the server with them on (off adds
+/// `no-constrain` to the identity: `identity::serve_field`); a tools
+/// request (tool_choice auto) gets its own
 /// `system_fingerprint` (`identity::constrain_field`), and every call it
 /// makes has arguments that parse (but a call cut by `max_tokens`), with no
 /// `<tool_call>` block left in the content of a reply that stopped; on CUDA, tools requests and plain ones
@@ -2210,8 +2214,14 @@ fn serve_constrained_tool_calls() {
         let a = post(off.addr, "/v1/chat/completions", plain.clone()).json();
         let b = post(on.addr, "/v1/chat/completions", plain.clone()).json();
         assert_eq!(a["choices"], b["choices"], "{dev:?}: a plain request");
-        assert_eq!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        assert_ne!(a["system_fingerprint"], b["system_fingerprint"], "{dev:?}");
+        let ida = call(off.addr, "GET", "/identity", "").json();
+        let idb = call(on.addr, "GET", "/identity", "").json();
+        assert_eq!(ida["serve"], "no-constrain", "{ida}");
+        assert!(idb.get("serve").is_none(), "{idb}");
+        assert_eq!(b["system_fingerprint"], idb["system_fingerprint"]);
         let fp = a["system_fingerprint"].as_str().unwrap().to_string();
+        let fp_on = b["system_fingerprint"].as_str().unwrap().to_string();
         let (mut calls, mut cfps) = (0, Vec::new());
         for body in &tbodies {
             let v0 = post(off.addr, "/v1/chat/completions", body.clone()).json();
@@ -2225,6 +2235,7 @@ fn serve_constrained_tool_calls() {
             let v = r.json();
             let vfp = v["system_fingerprint"].as_str().unwrap().to_string();
             assert_ne!(vfp, fp, "{dev:?}: a constrained reply's fingerprint");
+            assert_ne!(vfp, fp_on, "{dev:?}: a constrained reply's fingerprint");
             cfps.push(vfp);
             let ch = &v["choices"][0];
             let cut = ch["finish_reason"] == "length";
@@ -2258,6 +2269,383 @@ fn serve_constrained_tool_calls() {
             bodies.extend(batch_bodies(true).into_iter().take(3));
             bodies.push(treq(json!({"temperature": 0, "repetition_penalty": 1.2})));
             constrained_together_vs_alone(on.addr, &bodies);
+        }
+    }
+}
+
+/// PR B of the constrained-decoding spec on the test model (CPU): a server
+/// started with no switch holds tool calls (a tools request carries the
+/// constrained fingerprint; AXON_CONSTRAIN set in the test's environment
+/// skips that part); tool_choice required and named start engaged where
+/// the prompt's call text leaves them, so the call names an offered tool
+/// (the named one) and its arguments are a JSON object, sampled hot too;
+/// a tools request whose history has calls but no tools offered is free;
+/// the constraint counters are on /metrics.
+#[test]
+fn serve_constrained_forced_and_default() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([
+        {"type": "function", "function": {"name": "get_weather",
+            "description": "Get the weather in a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}},
+        {"type": "function", "function": {"name": "get_time",
+            "description": "The local time in a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}}]);
+    let user = json!({"role": "user", "content": "What's the weather in Paris?"});
+    let req = |choice: Value, temp: f64, seed: u64| {
+        json!({"messages": [user], "tools": tools, "tool_choice": choice,
+               "temperature": temp, "seed": seed, "max_tokens": 96})
+    };
+    let default_on = std::env::var_os("AXON_CONSTRAIN").is_none();
+    let s = server_with(p, Device::Cpu, |o| {
+        if !default_on {
+            o.constrain = Some(true);
+        }
+    });
+    let a = s.addr;
+    let fp = call(a, "GET", "/identity", "").json()["system_fingerprint"].clone();
+    let named = json!({"type": "function", "function": {"name": "get_time"}});
+    let mut n_calls = 0;
+    for (choice, want) in [(json!("required"), None), (named, Some("get_time"))] {
+        for (temp, seed) in [(0.0, 0), (1.3, 7), (1.3, 8)] {
+            let v = post(a, "/v1/chat/completions", req(choice.clone(), temp, seed)).json();
+            assert_ne!(v["system_fingerprint"], fp, "constrained: {v}");
+            let ch = &v["choices"][0];
+            let calls = ch["message"]["tool_calls"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{v}"));
+            let cut = ch["finish_reason"] == "length";
+            for (i, c) in calls.iter().enumerate() {
+                let name = c["function"]["name"].as_str().unwrap();
+                assert!(["get_weather", "get_time"].contains(&name), "{v}");
+                if i == 0
+                    && let Some(w) = want
+                {
+                    assert_eq!(name, w, "{v}");
+                }
+                if !(cut && i + 1 == calls.len()) {
+                    let args = c["function"]["arguments"].as_str().unwrap();
+                    let j: Value =
+                        serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+                    assert!(j.is_object(), "{v}");
+                }
+                n_calls += 1;
+            }
+        }
+    }
+    assert!(n_calls >= 6, "{n_calls} calls");
+    // No tools offered (a history with a call): nothing to hold a call to.
+    let hist = json!({"messages": [user,
+        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "18C"}],
+        "tools": [], "temperature": 0, "max_tokens": 8});
+    let v = post(a, "/v1/chat/completions", hist).json();
+    assert_eq!(v["system_fingerprint"], fp, "{v}");
+    let g = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert!(g["axon_constraint_tokens_total"] >= 6.0, "{g:?}");
+    for k in [
+        "axon_constraint_fallback_total",
+        "axon_constraint_trigger_rejected_total",
+        "axon_constraint_stalls_total",
+        "axon_constraint_unheld_total",
+        "axon_constraint_mask_cache_clears_total",
+        "axon_constraint_mask_seconds_total",
+    ] {
+        assert!(g.contains_key(k), "{k}");
+    }
+    assert!(g["axon_constraint_mask_cache_peak_entries"] > 0.0, "{g:?}");
+    assert!(g["axon_constraint_mask_seconds_total"] > 0.0);
+    if !default_on {
+        return;
+    }
+    // Auto: the same server holds it by default (its own fingerprint).
+    let v = post(a, "/v1/chat/completions", req(json!("auto"), 0.0, 0)).json();
+    assert_ne!(v["system_fingerprint"], fp, "{v}");
+}
+
+/// A held call that stalls (shady's review of #274), with the stall
+/// window small (`Opts::constrain_stall`: 64 tokens repeating one block)
+/// so the test model's board of zeros trips it: the reply ends there, short
+/// of `max_tokens`, its call cut off unclosed (the lead's ruling of 11-17:
+/// a call the rule closed was applied by a harness). It goes where main
+/// sends a call `max_tokens` cut off mid-arguments, finish `length` (pi
+/// runs a call it repaired unless the finish is `length`: Fable's review,
+/// ruled 11-17): with calls streamed (#260, the default) the reply's last
+/// call, its arguments not JSON (`axon_tool_calls_invalid_total`); decided
+/// whole (AXON_TOOL_STREAM=0) no call at all, its block content
+/// (`axon_tool_calls_dropped_total`). On the CPU the same reply streamed
+/// (SSE), on /v1/responses (whole and streamed: `incomplete`, the call's
+/// item too) and on ollama's /api/chat (`done_reason` "length") says so
+/// too. The stall is counted. On CUDA, the
+/// stalling requests sent together with plain ones (at once and handing
+/// over, drafting) get what each gets alone. On the CPU, with the closer
+/// off (`Opts::constrain_closer`, as AXON_CONSTRAIN_STALL=0) a reply that
+/// stalled doesn't, and its fingerprint names another grammar.
+#[test]
+fn serve_constrained_stall() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let tools = json!([{"type": "function", "function": {"name": "write_file",
+        "description": "Write a text file",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"]}}}]);
+    let ask = "Write board.txt: an empty 9x9 sudoku board, every cell 0, the cells separated by \
+               spaces, one row a line. Then write the same board to board2.txt.";
+    let req = |choice: Value, temp: f64, seed: u64| {
+        json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+               "tool_choice": choice, "temperature": temp, "seed": seed, "max_tokens": 600})
+    };
+    let bodies = [
+        req(json!("required"), 0.0, 0),
+        req(json!("auto"), 0.0, 0),
+        req(json!("required"), 0.7, 3),
+    ];
+    let stall = crate::constrain::Stall { window: 64 };
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for dev in devices {
+        let s = server_with(p, dev, |o| {
+            o.constrain = Some(true);
+            o.constrain_stall = Some(stall);
+            if dev == Device::Cuda {
+                o.parallel = 4;
+                o.max_draft = 3;
+            }
+        });
+        let a = s.addr;
+        let metric = |a: SocketAddr, k: &str| prom_parse(&call(a, "GET", "/metrics", "").body)[k];
+        let stalls = || metric(a, "axon_constraint_stalls_total");
+        // Every call's arguments that parse as JSON: an object (a usable
+        // call), and how many calls don't parse.
+        let usable = |v: &Value| -> (Vec<Value>, usize) {
+            let calls = v["choices"][0]["message"]["tool_calls"].as_array();
+            let (mut ok, mut bad) = (Vec::new(), 0);
+            for c in calls.into_iter().flatten() {
+                match serde_json::from_str::<Value>(c["function"]["arguments"].as_str().unwrap()) {
+                    Ok(j) if j.is_object() => ok.push(json!([c["function"]["name"], j])),
+                    _ => bad += 1,
+                }
+            }
+            (ok, bad)
+        };
+        let mut stalled = 0;
+        let mut first_stalled = None;
+        for body in &bodies {
+            let (n0, i0) = (stalls(), metric(a, "axon_tool_calls_invalid_total"));
+            let r = post(a, "/v1/chat/completions", body.clone());
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            eprintln!("{dev:?} stall: {v}");
+            if stalls() == n0 {
+                continue;
+            }
+            first_stalled.get_or_insert_with(|| (body.clone(), v.clone()));
+            assert_eq!(
+                stalls(),
+                n0 + 1.0,
+                "{dev:?}: one stall a reply at most: {v}"
+            );
+            stalled += 1;
+            let ch = &v["choices"][0];
+            assert_eq!(ch["finish_reason"], "length", "{dev:?}: cut: {v}");
+            assert!(
+                v["usage"]["completion_tokens"].as_u64().unwrap() < 600,
+                "{v}"
+            );
+            // The stalled call: the last, cut off where it stalled, its
+            // arguments not JSON, and counted so; every call before it
+            // whole.
+            let calls = ch["message"]["tool_calls"].as_array().unwrap();
+            let last = calls.last().unwrap();
+            assert_eq!(last["function"]["name"], "write_file", "{v}");
+            assert_eq!(
+                usable(&v).1,
+                1,
+                "{dev:?}: the stalled call must not parse: {v}"
+            );
+            let args = last["function"]["arguments"].as_str().unwrap();
+            assert!(serde_json::from_str::<Value>(args).is_err(), "{v}");
+            assert!(args.starts_with('{'), "{v}");
+            assert_eq!(
+                metric(a, "axon_tool_calls_invalid_total"),
+                i0 + 1.0,
+                "{dev:?}: {v}"
+            );
+            let content = ch["message"]["content"].as_str().unwrap_or("");
+            assert!(!content.contains("<tool_call>"), "{dev:?}: {v}");
+        }
+        assert!(stalled >= 1, "{dev:?}: no reply stalled");
+        if dev == Device::Cuda {
+            let mut all: Vec<Value> = bodies.to_vec();
+            all.extend(batch_bodies(true).into_iter().take(2));
+            constrained_together_vs_alone(a, &all);
+        }
+        if dev == Device::Cpu {
+            let (body, on) = first_stalled.clone().unwrap();
+            let cut = on["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["function"]["arguments"]
+                .clone();
+            // Streamed (SSE): the same cut call, finish `length`.
+            let mut sb = body.clone();
+            sb["stream"] = json!(true);
+            let n0 = stalls();
+            let ev = post(a, "/v1/chat/completions", sb).events();
+            assert_eq!(stalls(), n0 + 1.0, "streamed: {ev:?}");
+            let (mut finish, mut at, mut args) = (Value::Null, Value::Null, String::new());
+            for e in ev.iter().filter(|e| *e != "[DONE]") {
+                let v: Value = serde_json::from_str(e).unwrap();
+                let c = &v["choices"][0];
+                if !c["finish_reason"].is_null() {
+                    finish = c["finish_reason"].clone();
+                }
+                for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                    if tc["index"] != at {
+                        at = tc["index"].clone();
+                        args.clear();
+                    }
+                    args.push_str(tc["function"]["arguments"].as_str().unwrap_or(""));
+                }
+            }
+            assert_eq!(finish, "length", "streamed: {ev:?}");
+            assert_eq!(json!(args), cut, "streamed: the same cut call");
+            // The first seed (1 to 12) whose reply on `path` stalls: the
+            // routes below render their prompts their own way, so they
+            // sample other replies (the same seed every run).
+            let first_stall = |path: &str, body: &dyn Fn(u64) -> Value| -> (u64, Value) {
+                for seed in 1..=12 {
+                    let n0 = stalls();
+                    let r = post(a, path, body(seed));
+                    assert_eq!(r.status, 200, "{}", r.body);
+                    if stalls() > n0 {
+                        assert_eq!(stalls(), n0 + 1.0, "{path} seed {seed}: {}", r.body);
+                        return (seed, r.json());
+                    }
+                }
+                panic!("{path}: no reply stalled, seeds 1 to 12");
+            };
+            // /v1/responses, whole and streamed: `incomplete`, as a reply
+            // max_output_tokens cut, and so is the cut call's item.
+            let rtools = json!([{"type": "function", "name": "write_file",
+                "description": "Write a text file",
+                "parameters": tools[0]["function"]["parameters"]}]);
+            let rb = |seed: u64, stream: bool| {
+                json!({"input": ask, "tools": rtools, "tool_choice": "required",
+                       "temperature": 0.7, "seed": seed, "max_output_tokens": 600,
+                       "stream": stream})
+            };
+            let (seed, whole) = first_stall("/v1/responses", &|seed| rb(seed, false));
+            eprintln!("responses stall, seed {seed}: {whole}");
+            let n0 = stalls();
+            let streamed = responses_stream(&post(a, "/v1/responses", rb(seed, true))).3;
+            assert_eq!(
+                stalls(),
+                n0 + 1.0,
+                "responses streamed, seed {seed}: {streamed}"
+            );
+            for resp in [&whole, &streamed] {
+                assert_eq!(
+                    resp["status"], "incomplete",
+                    "responses seed {seed}: {resp}"
+                );
+                assert_eq!(
+                    resp["incomplete_details"]["reason"], "max_output_tokens",
+                    "{resp}"
+                );
+                assert!(
+                    resp["usage"]["output_tokens"].as_u64().unwrap() < 600,
+                    "{resp}"
+                );
+                let last = resp["output"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["type"], "function_call", "{resp}");
+                assert_eq!(last["status"], "incomplete", "{resp}");
+                let args = last["arguments"].as_str().unwrap();
+                assert!(serde_json::from_str::<Value>(args).is_err(), "{resp}");
+            }
+            let shape = |r: &Value| -> Vec<Value> {
+                let items = r["output"].as_array().unwrap();
+                items
+                    .iter()
+                    .map(|i| json!([i["type"], i["status"], i["arguments"]]))
+                    .collect()
+            };
+            assert_eq!(shape(&streamed), shape(&whole), "streamed == whole");
+            // ollama's /api/chat (no tool_choice: auto; calls decided whole,
+            // so the cut block is content): `done_reason` "length".
+            let (seed, o) = first_stall("/api/chat", &|seed| {
+                json!({"messages": [{"role": "user", "content": ask}], "tools": tools,
+                       "stream": false,
+                       "options": {"temperature": 0.7, "seed": seed, "num_predict": 600}})
+            });
+            eprintln!("ollama stall, seed {seed}: {o}");
+            assert_eq!(o["done_reason"], "length", "ollama seed {seed}: {o}");
+            assert!(o["eval_count"].as_u64().unwrap() < 600, "{o}");
+            drop(s);
+            // Calls decided whole (AXON_TOOL_STREAM=0): the same tokens, and
+            // the stalled call is no call: its block is content, counted as
+            // dropped, as main returns a block cut off mid-call.
+            let s = server_with(p, dev, |o| {
+                o.constrain = Some(true);
+                o.constrain_stall = Some(stall);
+                o.tool_stream = Some(false);
+            });
+            let v = post(s.addr, "/v1/chat/completions", body.clone()).json();
+            let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
+            assert_eq!(m["axon_constraint_stalls_total"], 1.0, "whole: {v}");
+            assert_eq!(
+                v["choices"][0]["finish_reason"], "length",
+                "whole: cut: {v}"
+            );
+            assert_eq!(m["axon_tool_calls_dropped_total"], 1.0, "whole: {v}");
+            assert_eq!(m["axon_tool_calls_invalid_total"], 0.0, "whole: {v}");
+            assert_eq!(
+                usable(&v),
+                (usable(&on).0, 0),
+                "whole: the same calls but the stalled one: {v}"
+            );
+            let ch = &v["choices"][0];
+            assert!(
+                ch["message"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("<tool_call>"),
+                "{v}"
+            );
+            assert_eq!(
+                v["usage"]["completion_tokens"], on["usage"]["completion_tokens"],
+                "whole: the same tokens: {v}"
+            );
+            drop(s);
+            let s = server_with(p, dev, |o| {
+                o.constrain = Some(true);
+                o.constrain_stall = Some(stall);
+                o.constrain_closer = Some(false);
+            });
+            let r = post(s.addr, "/v1/chat/completions", body);
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
+            assert_eq!(m["axon_constraint_stalls_total"], 0.0, "closer off: {v}");
+            assert!(m["axon_constraint_tokens_total"] > 0.0, "still held: {v}");
+            assert_ne!(v["system_fingerprint"], on["system_fingerprint"], "{v}");
+            assert!(
+                v["usage"]["completion_tokens"].as_u64()
+                    > on["usage"]["completion_tokens"].as_u64(),
+                "closer off: the call runs on past where it stalled: {v}"
+            );
         }
     }
 }
