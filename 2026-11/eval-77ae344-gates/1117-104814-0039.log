@@ -1,0 +1,54 @@
+[axon-run 10:48:14] submitted 1117-104814-0039 by /home/haseeb/.cache/axon-wt-evalhelp: /home/haseeb/.cache/axon-eval/bin/axon-test-dbg-77ae344 cli::tests:: sample::tests::
+[axon-run 13:58:07] job 1117-104814-0039 -> jade: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-wt-evalhelp --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /home/haseeb/.cache/axon-eval/bin/axon-test-dbg-77ae344 cli::tests:: sample::tests:: --test-threads 1
+axon-remote: uploading axon-test-dbg-77ae344 (0fe3aa2559596543be9ce14f) + source of /home/haseeb/.cache/axon-wt-evalhelp
+
+sent 3,013,178 bytes  received 7,695 bytes  287,702.19 bytes/sec
+total size is 10,555,095  speedup is 3.49
+
+sent 8,966,221 bytes  received 35 bytes  303,940.88 bytes/sec
+total size is 29,725,056  speedup is 3.32
+axon-remote: job 20261117-135854-axon-test-dbg-77ae344-1455077 on jade (CPU-only)
+[axon-node 13:58:54] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 13:58:54] run axon-test-dbg-77ae344 (0fe3aa2559596543be9ce14f) as /home/haseeb/.cache/axon-wt-evalhelp on jade, AXON_THREADS=1 RUST_TEST_THREADS=1 AXON_READAHEAD=0
+[axon-node 13:58:54] memory cap (scope MemoryMax) 2887 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 13:58:54] MemAvailable 4423 MB, load ['8.21', '16.50', '18.49']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 32 tests
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test cli::tests::drafting_matches_greedy ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cli::tests::drafting_matches_greedy_hybrid ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::help_is_current ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+test cli::tests::serve_help_child ... ignored
+test cli::tests::serve_help_exits_0 ... ok
+test cli::tests::serve_help_lists_every_flag ... ok
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test sample::tests::defaults_are_ollamas ... ok
+test sample::tests::drafting_distribution_chi_square ... ok
+test sample::tests::drafting_matches_plain_sampling ... ok
+test sample::tests::draw_skips_zero_weights ... ok
+test sample::tests::draws_follow_dist ... ok
+test sample::tests::filters_by_hand ... ok
+test sample::tests::flags_parse_and_reject ... ok
+test sample::tests::inverse_cdf_shares ... ok
+test sample::tests::key_orders_like_argmax ... ok
+test sample::tests::real_model_sampling_cpu ... ok
+test sample::tests::real_model_sampling_cpu_llama ... ok
+test sample::tests::real_model_sampling_cpu_qwen3 ... ok
+test sample::tests::repeat_penalty ... ok
+test sample::tests::rng_is_seeded ... ok
+test sample::tests::top_k_matches_reference ... ok
+test sample::tests::top_k_multiversion_identical ... ok
+test sample::tests::top_k_off_is_whole_vocab ... ok
+test sample::tests::top_k_speed ... ignored
+
+test result: ok. 30 passed; 0 failed; 2 ignored; 0 measured; 952 filtered out; finished in 1325.47s
+
+[axon-node 14:21:59] exit 0 after 1385.1s; lowest MemAvailable seen 3398 MB
+[axon-node 14:21:59] peak RSS 1137 MB (job process tree PSS, 2 s samples x688)
+[axon-run 14:22:06] exit 0 after 1439.2s (host jade)

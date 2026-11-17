@@ -1,0 +1,28 @@
+[axon-run 13:59:52] submitted 1117-135952-83eb by /home/haseeb/.cache/axon-wt-evalhelp: /usr/bin/bash mutants2.sh ./axon-test-77ae344 ./axon-test-H1-no-help-check ./axon-test-H2-help-first-only ./axon-test-H3-help-on-stderr ./axon-test-H4-stale-prefill-ms ./axon-test-H5-no-host-entry ./axon-test-H6-new-flag-no-help ./axon-test-H7-cors-mislabelled
+[axon-run 18:46:21] job 1117-135952-83eb -> jade: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/mutants2-84750094316a --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash mutants2.sh ./axon-test-77ae344 ./axon-test-H1-no-help-check ./axon-test-H2-help-first-only ./axon-test-H3-help-on-stderr ./axon-test-H4-stale-prefill-ms ./axon-test-H5-no-host-entry ./axon-test-H6-new-flag-no-help ./axon-test-H7-cors-mislabelled
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (3ae24cf23e182c284e802afc) + source of /home/haseeb/.cache/axon-podjob/mutants2-84750094316a
+
+sent 67,749,101 bytes  received 263 bytes  305,866.20 bytes/sec
+total size is 219,024,374  speedup is 3.23
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-185010-bash-1690252 on jade (CPU-only)
+[axon-node 18:50:10] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 18:50:10] run bash (3ae24cf23e182c284e802afc) as /home/haseeb/.cache/axon-podjob/mutants2-84750094316a on jade, AXON_THREADS=1 RUST_TEST_THREADS=1 AXON_READAHEAD=0
+[axon-node 18:50:11] memory cap (scope MemoryMax) 3219 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 18:50:11] MemAvailable 4725 MB, load ['0.50', '1.15', '2.01']; nice -n 19 ionice -c3 taskset -c 0-7
+candidate:77ae344          OK   rc=0 failed: none | test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.01s
+H1-no-help-check           OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.00s
+H2-help-first-only         OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.02s
+H3-help-on-stderr          OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.00s
+H4-stale-prefill-ms        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.01s
+H5-no-host-entry           OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.01s
+H6-new-flag-no-help        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.01s
+H7-cors-mislabelled        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 981 filtered out; finished in 0.01s
+MUTANTS PASS
+[axon-node 18:50:13] exit 0 after 1.8s; lowest MemAvailable seen 4720 MB
+[axon-node 18:50:13] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 18:50:14] exit 0 after 232.7s (host jade)
+[axon-run 18:50:18] EXPECT ok: output matches /^MUTANTS PASS/
