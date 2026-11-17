@@ -205,7 +205,7 @@ budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COS
   `axon_constraint_fallback_total` (held positions decided on the whole logits row, the device's candidates
   holding too few allowed tokens), `axon_constraint_trigger_rejected_total` (a `<tool_call>` written out in a
   token that goes on with text no call starts with: left free), `axon_constraint_stalls_total` (held calls
-  closed the shortest way after they stalled: their arguments cut, each also a stderr line),
+  that stalled: the reply ended there, the call cut off and counted as invalid or dropped, each also a stderr line),
   `axon_constraint_unheld_total` (tools requests left unconstrained: the grammar couldn't hold their tools'
   names or the call their prompt opened; each reason also a stderr line, once),
   `axon_constraint_mask_cache_clears_total` and the gauge `axon_constraint_mask_cache_peak_entries` (how full
@@ -389,29 +389,35 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   were runaways that hit `max_tokens`):
   - **Whitespace** outside strings is one space, or one or two newlines and at most 20
     spaces or tabs, as llama.cpp's grammars bound it, in the call's frame and its arguments.
-  - **A stalled call is cut off.** When the last 2,048 tokens of a call repeat one block of
-    at most 256 tokens (`false, false, ...`, a string of `\n\n\n...`, `--exclude=*.pyc
-    --exclude=*.pyc ...`, a list in a loop, a 72-token block of code 53 times), it is closed
-    the shortest way from there: the string ends, then each open array and object, then
-    `</tool_call>`, and the reply ends after it (only its stop token is allowed), so a model
-    in a loop can't open the next call and stall again. **The client gets a well-formed
-    call whose arguments are cut where it stalled:** a file written short, a command run
-    short. The close can also invent its last piece: after a `,` an array needs one more
-    item and gets one digit (a number is the shortest JSON value), an object one more
-    member (`"": 0`), a number one more digit. Each stall is a line on stderr, whatever the
-    log level (`axon serve: #12: a held tool call stalled after 2077 tokens (its last 2048
-    repeat one block of 72 tokens): closed the shortest way, so its arguments are cut there
-    and may end with an invented item; the reply ends after it (AXON_CONSTRAIN_STALL=0 turns
-    this off)`), and counts in `axon_constraint_stalls_total`. In the acceptance runs' 6,333
+  - **A call the stall rule closes is not delivered as a call.** When the last 2,048 tokens
+    of a call repeat one block of at most 256 tokens (`false, false, ...`, a string of
+    `\n\n\n...`, `--exclude=*.pyc --exclude=*.pyc ...`, a list in a loop, a 72-token block of
+    code 53 times), the reply ends right there (only its stop token is allowed), so a model
+    in a loop can't open the next call and stall again. The call is left as written, cut
+    off, and goes where any call cut off mid-arguments goes (`max_tokens` without the
+    constraint): with calls streamed (the default) it is a call whose `arguments` aren't
+    JSON (`axon_tool_calls_invalid_total`, `finish_reason` `tool_calls`); decided whole
+    (`AXON_TOOL_STREAM=0`, ollama's API) its block is content (`axon_tool_calls_dropped_total`).
+    The harness rejects it and tells the model, which can retry; nothing is written. Until
+    the lead's ruling of 11-17 the call was closed the shortest way, a well-formed call that
+    harnesses applied: a pi run's model dropped a string's closing quote (`rows)}]}}` for
+    `rows)"}]}}`), so it wrote on inside the string, where neither a newline nor
+    `</tool_call>` is allowed, for 2,100 tokens until the rule fired; the closed `edit` wrote
+    them into the file, and each next turn copied them and stalled again. Each stall is a
+    line on stderr, whatever the log level (`axon serve: #12: a held tool call stalled after
+    2077 tokens (its last 2048 repeat one block of 72 tokens): the reply ends there, the call
+    cut off unclosed, so it isn't delivered as a usable call (its arguments aren't JSON, as a
+    call cut off by max_tokens; AXON_CONSTRAIN_STALL=0 turns this off)`), and counts in
+    `axon_constraint_stalls_total`. In the acceptance runs' 6,333
     calls 11 of the 13 runaways trip it (their loops are 2,144 to 50,831 tokens' worth of
     text); the other two, a `, false` loop and a list loop, ended by themselves first, after
     1,963 and 623. The other calls stay far from it (383 at most in a block repeated). Data
     that repeats one block 8 times or more trips it: 256 identical `<div class="cell"></div>`
-    lines after about 2,085 tokens (205 cells written, the closing tags lost), 100 identical
+    lines after about 2,085 tokens (cut after 205 cells), 100 identical
     log lines after about 2,070, a 32×32 matrix of zeros after about 2,070, 150 identical
     JSON objects after about 2,060. Data that doesn't repeat a block isn't cut, however few
     tokens it uses (400 dice rolls, a 30×20 tile map of 4 tile ids, a 2,048-bit string).
-    **`AXON_CONSTRAIN_STALL=0`** turns the closing off alone: a call in a loop then runs to
+    **`AXON_CONSTRAIN_STALL=0`** turns the rule off alone: a call in a loop then runs to
     `max_tokens`, its name and JSON still held (the grammar's hash in the fingerprint says
     `stall=off`). Until Fable's review of #274 two more rules held a call: an array kept its
     first item's kind (it rewrote real arguments without a trace: `[["Alice", 30]]`,
@@ -434,8 +440,8 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   Valid isn't right: where the model would have written an unescaped quote, the string ends
   there and the call goes on from it, so the call parses but may not be what was meant (the
   harness tells the model, which can retry). What it can't write whole: more blank space than
-  llama.cpp allows, or more than 2,048 tokens of one block written over and over (the call is
-  cut, above); with greedy decoding a retry stops at the same place, so such a file can't be
+  llama.cpp allows, or more than 2,048 tokens of one block written over and over (the reply
+  ends there, above); with greedy decoding a retry stops at the same place, so such a file can't be
   written through a held call (`AXON_CONSTRAIN_STALL=0` or `--no-constrain` can). Per-tool argument schemas are #259's next step (PR C).
   `max_tokens` can still cut a call short (a call with invalid arguments, as above). The
   identity changes with it: `NUMERICS_VERSION_EXACT` is 2 (every fingerprint moved), and a

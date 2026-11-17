@@ -2371,14 +2371,18 @@ fn serve_constrained_forced_and_default() {
 
 /// A held call that stalls (shady's review of #274), with the stall
 /// window small (`Opts::constrain_stall`: 64 tokens repeating one block)
-/// so the test model's board of zeros trips it: the call comes back
-/// closed, its arguments a JSON object, and the reply ends after it (no
-/// call after it, finish `tool_calls`, short of `max_tokens`); the stall is
-/// counted. On CUDA, the stalling requests sent together with plain ones
-/// (at once and handing over, drafting) get what each gets alone. On the
-/// CPU, with the closer off (`Opts::constrain_closer`, as
-/// AXON_CONSTRAIN_STALL=0) a reply that stalled doesn't, and its
-/// fingerprint names another grammar.
+/// so the test model's board of zeros trips it: the reply ends there, short
+/// of `max_tokens`, and the call is never delivered as a usable call (the
+/// lead's ruling of 11-17: a call the rule closed was applied by a
+/// harness). It goes where main sends a call cut off mid-arguments: with
+/// calls streamed (#260, the default) the reply's last call, its arguments
+/// not JSON (`axon_tool_calls_invalid_total`, finish `tool_calls`); decided
+/// whole (AXON_TOOL_STREAM=0) no call at all, its block content
+/// (`axon_tool_calls_dropped_total`). The stall is counted. On CUDA, the
+/// stalling requests sent together with plain ones (at once and handing
+/// over, drafting) get what each gets alone. On the CPU, with the closer
+/// off (`Opts::constrain_closer`, as AXON_CONSTRAIN_STALL=0) a reply that
+/// stalled doesn't, and its fingerprint names another grammar.
 #[test]
 fn serve_constrained_stall() {
     let Some(p) = crate::testutil::model_path() else {
@@ -2416,12 +2420,25 @@ fn serve_constrained_stall() {
             }
         });
         let a = s.addr;
-        let stalls =
-            || prom_parse(&call(a, "GET", "/metrics", "").body)["axon_constraint_stalls_total"];
+        let metric = |a: SocketAddr, k: &str| prom_parse(&call(a, "GET", "/metrics", "").body)[k];
+        let stalls = || metric(a, "axon_constraint_stalls_total");
+        // Every call's arguments that parse as JSON: an object (a usable
+        // call), and how many calls don't parse.
+        let usable = |v: &Value| -> (Vec<Value>, usize) {
+            let calls = v["choices"][0]["message"]["tool_calls"].as_array();
+            let (mut ok, mut bad) = (Vec::new(), 0);
+            for c in calls.into_iter().flatten() {
+                match serde_json::from_str::<Value>(c["function"]["arguments"].as_str().unwrap()) {
+                    Ok(j) if j.is_object() => ok.push(json!([c["function"]["name"], j])),
+                    _ => bad += 1,
+                }
+            }
+            (ok, bad)
+        };
         let mut stalled = 0;
         let mut first_stalled = None;
         for body in &bodies {
-            let n0 = stalls();
+            let (n0, i0) = (stalls(), metric(a, "axon_tool_calls_invalid_total"));
             let r = post(a, "/v1/chat/completions", body.clone());
             assert_eq!(r.status, 200, "{}", r.body);
             let v = r.json();
@@ -2442,12 +2459,21 @@ fn serve_constrained_stall() {
                 v["usage"]["completion_tokens"].as_u64().unwrap() < 600,
                 "{v}"
             );
+            // The stalled call: the last, cut off where it stalled, its
+            // arguments not JSON, and counted so; every call before it
+            // whole.
             let calls = ch["message"]["tool_calls"].as_array().unwrap();
             let last = calls.last().unwrap();
             assert_eq!(last["function"]["name"], "write_file", "{v}");
+            assert_eq!(usable(&v).1, 1, "{dev:?}: the stalled call is usable: {v}");
             let args = last["function"]["arguments"].as_str().unwrap();
-            let j: Value = serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {v}"));
-            assert!(j.is_object(), "{v}");
+            assert!(serde_json::from_str::<Value>(args).is_err(), "{v}");
+            assert!(args.starts_with('{'), "{v}");
+            assert_eq!(
+                metric(a, "axon_tool_calls_invalid_total"),
+                i0 + 1.0,
+                "{dev:?}: {v}"
+            );
             let content = ch["message"]["content"].as_str().unwrap_or("");
             assert!(!content.contains("<tool_call>"), "{dev:?}: {v}");
         }
@@ -2460,6 +2486,37 @@ fn serve_constrained_stall() {
         if dev == Device::Cpu {
             drop(s);
             let (body, on) = first_stalled.unwrap();
+            // Calls decided whole (AXON_TOOL_STREAM=0): the same tokens, and
+            // the stalled call is no call: its block is content, counted as
+            // dropped, as main returns a block cut off mid-call.
+            let s = server_with(p, dev, |o| {
+                o.constrain = Some(true);
+                o.constrain_stall = Some(stall);
+                o.tool_stream = Some(false);
+            });
+            let v = post(s.addr, "/v1/chat/completions", body.clone()).json();
+            let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
+            assert_eq!(m["axon_constraint_stalls_total"], 1.0, "whole: {v}");
+            assert_eq!(m["axon_tool_calls_dropped_total"], 1.0, "whole: {v}");
+            assert_eq!(m["axon_tool_calls_invalid_total"], 0.0, "whole: {v}");
+            assert_eq!(
+                usable(&v),
+                (usable(&on).0, 0),
+                "whole: the same calls but the stalled one: {v}"
+            );
+            let ch = &v["choices"][0];
+            assert!(
+                ch["message"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("<tool_call>"),
+                "{v}"
+            );
+            assert_eq!(
+                v["usage"]["completion_tokens"], on["usage"]["completion_tokens"],
+                "whole: the same tokens: {v}"
+            );
+            drop(s);
             let s = server_with(p, dev, |o| {
                 o.constrain = Some(true);
                 o.constrain_stall = Some(stall);

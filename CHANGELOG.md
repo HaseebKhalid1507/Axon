@@ -17,20 +17,25 @@ measurements behind them.
   "none"`, and every token before a call are unchanged.
 - **A held call can't run on** (#272: 13 of the constrained arm's 15 malformed calls were runaways cut by
   `max_tokens`). Whitespace outside strings is bounded as llama.cpp's grammars bound it (one space, or one or two
-  newlines then at most 20 spaces or tabs), and a call whose last 2,048 tokens repeat one block of at most 256 is
-  closed the shortest way from there, and the reply ends after it. In the acceptance runs' 6,333 calls 11 of the 13
+  newlines then at most 20 spaces or tabs), and a call whose last 2,048 tokens repeat one block of at most 256 ends
+  the reply right there. In the acceptance runs' 6,333 calls 11 of the 13
   runaways trip it (the other two, a `, false` loop and a list loop, ended by themselves after 1,963 and 623 pieces)
   and no other call comes near it (at most 383 pieces of text in a repeated block); no whitespace run went past
   llama.cpp's rule outside the runaways. An array's items are any values, as in JSON (Fable's review dropped a
   lock to the first item's kind, which rewrote real arguments such as `[["Alice", 30]]` without a trace), and a
   rule that cut a call of at most 8 distinct tokens over 1,024 is gone too (it cut 400 dice rolls).
-- **A stalled call arrives cut off.** The client gets a well-formed call whose arguments stop where it stalled (a
-  file written short, a command run short), and the close may invent its last piece: one more array item (a
-  digit), one more object member (`"": 0`), one more digit. Data that repeats one block 8 times or more can trip
+- **A call the stall rule closes is not delivered as a call.** The reply ends where it stalled and the call is left
+  cut off, so the server returns it as it returns any call cut off mid-arguments (`max_tokens` without the
+  constraint): with calls streamed (the default) a call whose `arguments` aren't JSON (`axon_tool_calls_invalid_total`,
+  `finish_reason` `tool_calls`), decided whole (`AXON_TOOL_STREAM=0`, ollama) content (`axon_tool_calls_dropped_total`).
+  The harness rejects it and tells the model, and nothing is written. Until the lead's ruling of 11-17 the rule closed
+  the call the shortest way, a well-formed call that a harness applied: in a pi run a model dropped a string's
+  closing quote, wrote on inside the string until the rule fired, and the closed `edit` wrote that text into the
+  file; each next turn copied it and stalled again. Data that repeats one block 8 times or more can trip
   it: 256 identical `<div class="cell"></div>` lines after about 2,085 tokens, 100 identical log lines or a 32×32
   matrix of zeros after about 2,070; with greedy decoding a retry stops at the same place. Each stall is a line on
   stderr whatever the log level (`#N: a held tool call stalled after T tokens (its last 2048 repeat one block of P
-  tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the closing off
+  tokens) ...`) and counts in `axon_constraint_stalls_total`. **`AXON_CONSTRAIN_STALL=0`** turns the rule off
   alone (a call in a loop runs to `max_tokens`, still held to a name and JSON). Known miss: a loop that breaks
   off and starts over (a key written again, the loop again), so that no 2,048 tokens repeat one block, runs to
   `max_tokens` as it did before (Qwen2.5-7B, a pi `edit` replayed: 2 of 3 seeds); catching it cut legit data.

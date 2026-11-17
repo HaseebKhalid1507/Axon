@@ -35,13 +35,19 @@
 //! bounds it (`pda::Style::HELD`), and a call that stalls (its last 2048
 //! tokens one block of at most 256 over and over: `, false, false, ...`,
 //! `\n\n\n...` in a string, `--exclude=*.pyc --exclude=*.pyc ...`:
-//! `LOOP_WINDOW`) is closed the shortest way (`pda::Graph::finisher`), and
-//! the reply ends after it. A stalled call arrives cut off where it
-//! stalled, maybe with an invented last item or member (the shortest one
-//! that closes it), so a stall is logged and counted (`Constraint::stall`,
-//! `Counters::stalls`); `AXON_CONSTRAIN_STALL=0` turns the closing off
-//! alone (`stall_env`). The kill switch is `--no-constrain` /
-//! `AXON_CONSTRAIN=0`. Per-tool argument schemas are the spec's PR C.
+//! `LOOP_WINDOW`) ends the reply right there (`Constraint::with_end`), the
+//! call left as written: cut off and unclosed, so it is never delivered as
+//! a usable call. The server's tools parser returns it as it returns any
+//! call cut off mid-arguments (`max_tokens` on a call without the
+//! constraint): its arguments aren't JSON. Closing it the shortest way
+//! instead (`pda::Graph::finisher`, as #274 first did) made a valid-looking
+//! call that a harness applied: a model that dropped a string's closing
+//! quote wrote on inside the string until the rule fired, and the closed
+//! call wrote that text into a file (the lead's ruling of 11-17). A stall
+//! is logged and counted (`Constraint::stall`, `Counters::stalls`);
+//! `AXON_CONSTRAIN_STALL=0` turns the rule off alone (`stall_env`). The
+//! kill switch is `--no-constrain` / `AXON_CONSTRAIN=0`. Per-tool argument
+//! schemas are the spec's PR C.
 
 mod mask;
 #[cfg(test)]
@@ -63,10 +69,10 @@ use std::sync::{Arc, Mutex};
 /// Hermes's call markers, as text (a special token decodes to it).
 const OPEN: &[u8] = b"<tool_call>";
 
-/// A held call stalls, and is then closed the shortest way, when its last
+/// A held call stalls, and the reply ends there, when its last
 /// `LOOP_WINDOW` tokens repeat one block of at most `LOOP_PERIOD` tokens
-/// (written twice at least): a model in a loop. Closing cuts the call's
-/// data where it stalled, so the window is wide: when in doubt, don't fire
+/// (written twice at least): a model in a loop. That cuts the call where it
+/// stalled, so the window is wide: when in doubt, don't fire
 /// (the lead's ruling of 11-15 on shady's review of #274). In the
 /// acceptance runs' 6,333 calls (codex, opencode, pi, axon and
 /// llama-server; split as a byte-level pre-tokenizer splits text, a token
@@ -125,8 +131,9 @@ impl std::fmt::Display for Stalled {
         write!(
             f,
             "a held tool call stalled after {} tokens (its last {} repeat one block of {} \
-             token{s}): closed the shortest way, so its arguments are cut there and may end with \
-             an invented item; the reply ends after it (AXON_CONSTRAIN_STALL=0 turns this off)",
+             token{s}): the reply ends there, the call cut off unclosed, so it isn't delivered as a \
+             usable call (its arguments aren't JSON, as a call cut off by max_tokens; \
+             AXON_CONSTRAIN_STALL=0 turns this off)",
             self.after, self.window, self.period
         )
     }
@@ -144,7 +151,7 @@ pub struct Counters {
     /// Time in `Constraint::mask` (cache lookups, first-visit compiles,
     /// the live check of deep tokens), nanoseconds.
     pub mask_ns: AtomicU64,
-    /// Calls closed the shortest way after they stalled.
+    /// Calls that stalled (the reply ended there, the call cut off).
     pub stalls: AtomicU64,
     /// Tools requests left unconstrained: the grammar couldn't hold their
     /// tools (`Hermes::grammar`) or the call their prompt opened
@@ -162,7 +169,9 @@ pub struct Counters {
 pub struct Grammar {
     masks: Masks,
     /// The same states' shortest way out (`pda::Graph::finisher`): what a
-    /// stalled call takes.
+    /// stalled call takes when the reply has no end tokens (a library
+    /// caller's `Constraint`; the server's end the reply instead:
+    /// `Constraint::with_end`).
     finish: Masks,
     /// Where an engaged constraint starts.
     start: NodeId,
@@ -185,13 +194,16 @@ pub struct Grammar {
 /// of #274).
 fn hermes_desc(open: u32, close: Option<u32>, stall: Option<Stall>) -> String {
     format!(
-        "axon-constrain/4\nhermes\nopen={open}\nclose={close:?}\n\
+        "axon-constrain/5\nhermes\nopen={open}\nclose={close:?}\n\
          trigger=open-token-or-spelled,not-in-first-token-reasoning,re-armed-after-call\n\
          name=enum(offered)\narguments=object\nmax_depth={}\nspace=llama({})\nstall={}\n",
         pda::MAX_DEPTH,
         pda::INDENT_MAX,
         match stall {
-            Some(st) => format!("loop={}/{}:shortest-close,then-end", st.window, LOOP_PERIOD),
+            Some(st) => format!(
+                "loop={}/{}:end-reply-there,call-unclosed",
+                st.window, LOOP_PERIOD
+            ),
             None => "off".into(),
         }
     )
@@ -489,8 +501,9 @@ enum Phase {
         node: NodeId,
         stack: Vec<NodeId>,
     },
-    /// After a stalled call: only the reply's end (`Constraint::with_end`),
-    /// so a model in a loop can't open the next call and stall again.
+    /// From the token a call stalled at: only the reply's end
+    /// (`Constraint::with_end`). The call stays as written, cut off, and a
+    /// model in a loop can't open the next call and stall again.
     Ended,
 }
 
@@ -554,9 +567,12 @@ impl Constraint {
         }
     }
 
-    /// After a stalled call the reply may take only `end` (its stop
-    /// tokens: `serve`'s `Job::stop_ids`), so it ends there. Empty (the
-    /// default): it goes on free, armed for another call.
+    /// When a call stalls the reply may then take only `end` (its stop
+    /// tokens: `serve`'s `Job::stop_ids`), so it ends right there, the call
+    /// cut off unclosed where it stalled (never a usable call: the tools
+    /// parser returns it as a call cut mid-arguments). Empty (the default):
+    /// the call is closed the shortest way (`Grammar::finish`), and the
+    /// reply goes on free, armed for another call.
     pub fn with_end(mut self, end: &[u32]) -> Constraint {
         self.end = end.into();
         self
@@ -576,8 +592,9 @@ impl Constraint {
         }
     }
 
-    /// An engaged token taken: into the stall rule (`LOOP_WINDOW`'s note);
-    /// stalled (the next states take the shortest way out) when it trips.
+    /// An engaged token taken: into the stall rule (`LOOP_WINDOW`'s note).
+    /// When it trips: with end tokens (`with_end`) the reply ends here,
+    /// else the next states take the shortest way out (`stalled`).
     fn note(&mut self, id: u32) {
         let Some(Stall { window }) = self.g.stall else {
             return;
@@ -621,7 +638,11 @@ impl Constraint {
         let Some(period) = period else {
             return;
         };
-        self.stalled = true;
+        if self.end.is_empty() {
+            self.stalled = true;
+        } else {
+            self.phase = Phase::Ended;
+        }
         self.seen = Some(Stalled {
             after: self.taken,
             period,
@@ -784,12 +805,9 @@ impl Constraint {
         std::mem::swap(stack, &mut self.buf);
         *node = n;
         if self.g.masks.graph.nodes[n as usize].accept && stack.is_empty() {
-            // Complete: armed again for the next call; after a stalled one,
-            // only the reply's end.
-            self.phase = match self.stalled && !self.end.is_empty() {
-                true => Phase::Ended,
-                false => Phase::Free,
-            };
+            // Complete: armed again for the next call (a stalled one closed
+            // the shortest way too: there are no end tokens to end on).
+            self.phase = Phase::Free;
         } else {
             self.note(id);
         }
@@ -802,7 +820,8 @@ impl Constraint {
         self.stalled = true;
     }
 
-    /// Stalled: the call is being closed the shortest way (`note`).
+    /// Stalled without end tokens: the call is being closed the shortest
+    /// way (`note`).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn stalled(&self) -> bool {
         self.stalled && self.engaged()
@@ -845,7 +864,7 @@ pub fn env_value(v: Option<&str>) -> Result<Option<bool>, String> {
 /// loop runs to `max_tokens`, its name and JSON still held: Fable's review
 /// of #274, for data the rule would cut), "1" or unset on.
 pub fn stall_env_value(v: Option<&str>) -> Result<Option<bool>, String> {
-    switch_value("AXON_CONSTRAIN_STALL", "closing a stalled tool call", v)
+    switch_value("AXON_CONSTRAIN_STALL", "cutting a stalled tool call", v)
 }
 
 /// Variable `var`'s value `v` as an on/off switch for `what`.

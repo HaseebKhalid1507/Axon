@@ -36,8 +36,10 @@ constraint counters (before and after).
 replay (shady's review of #274: the stall rule on the real model): DIR's cells (`{"kind", "what", "model",
 "route", "body"}`; the ones whose "model" isn't M's file name are skipped), each greedy and with seeds 1..N, one at a
 time (each reply's stalls are /metrics' delta), on the same server flags:
-  runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, with
-            every call valid (a stall closes it, or the call ends by itself). --known-miss names (cell, mode) pairs
+  runaway   a request after which an acceptance run's call ran on: the reply must end before its token limit, every
+            call valid but a stalled one (the call ends by itself, or it stalls: the reply ends there and the call,
+            the last, arrives cut off, its arguments not JSON: judged `stalled`, never `ok`, the lead's ruling of
+            11-17: a stalled call is not delivered as a usable call). --known-miss names (cell, mode) pairs
             the stall rule is known to miss (11-16: 11-pi-edit seeds 1 and 2, a loop that breaks off and starts
             over; docs/serving.md): such a reply may run on to its limit, its call cut there and nothing else wrong,
             no stall (reported as a miss, not judged); a listed reply that ends is fine. Any other runaway that
@@ -452,10 +454,16 @@ def replay(a):
                 rep, judged = reply_of(c["route"], st, raw, offered(body))
                 stalls = m1.get("axon_constraint_stalls_total", 0) - m0.get("axon_constraint_stalls_total", 0)
                 ran_on = rep.get("finish") in ("length", "incomplete")
-                badj = [j for j, _n in judged if j != "ok"]
+                # A stall ends the reply at the call, cut off: its last call, arguments not JSON (or, with calls
+                # decided whole, its block as content). That one is `stalled`; a stalled call judged `ok` (closed,
+                # usable) is a failure below.
+                if stalls == 1 and not ran_on and judged and judged[-1][0] in ("badjson", "text"):
+                    judged[-1] = ("stalled", judged[-1][1])
+                badj = [j for j, _n in judged if j not in ("ok", "stalled")]
+                usable_stall = stalls > 0 and not any(j == "stalled" for j, _n in judged)
                 miss = None
                 if c["kind"] == "runaway":
-                    ok = not ran_on and not badj
+                    ok = not ran_on and not badj and not usable_stall
                     if not ok and "%s:%s" % (name, mode) in a.known_miss and ran_on and not stalls \
                             and badj and all(j == "cut" for j in badj):
                         ok, miss = None, "known-miss"
@@ -475,7 +483,8 @@ def replay(a):
                     name, c["kind"], mode, verdict, stalls, rep.get("tokens"), cap, rep.get("finish"),
                     ",".join("%s:%s" % j for j in judged) or "none"), flush=True)
                 if ok is False:
-                    bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else (badj or "stalled")))
+                    bad.append("%s %s: %s" % (name, mode, "ran on" if ran_on else badj or (
+                        "a stalled call delivered as a usable one" if usable_stall else "stalled")))
         res["metrics_after"] = metrics(port)
     finally:
         stop(proc)

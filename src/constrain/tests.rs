@@ -1033,8 +1033,8 @@ fn constrained_drafting_matches_plain() {
 /// A toy model that writes one call and then loops in it: from its prompt
 /// on, `script`'s tokens, then `cycle`'s over and over, each far likelier
 /// than the rest (soft logits from a hash besides, as `Toy`'s), so a
-/// constrained run stalls (`LOOP_WINDOW`) and is closed the shortest way on
-/// what the hash ranks next.
+/// constrained run stalls (`LOOP_WINDOW`), and the reply ends there (its
+/// stop token, the only one allowed: the server's `with_end`).
 struct Looper {
     v: Arc<Vocab>,
     p0: usize,
@@ -1094,10 +1094,11 @@ impl Lm for Looper {
 /// of 3 ids) and in a string (a block of 12), greedy and sampled:
 /// drafts that are always right, always wrong, random or real prompt lookup
 /// (long and accepted on a loop, across the stall and the masks' switch to
-/// the finisher inside a verify block) give the very tokens undrafted
-/// generation gives. The runs that stall repeat the block meant, the call
-/// they close parses, and the reply ends after it (the stop token, not the
-/// length).
+/// the reply's end inside a verify block) give the very tokens undrafted
+/// generation gives. The runs that stall repeat the block meant, and the
+/// reply ends at the very token that tripped the rule (the stop token, not
+/// the length), its call left unclosed: no call in it parses (the lead's
+/// ruling of 11-17: a stalled call is never delivered as a usable one).
 #[test]
 fn constrained_drafting_past_a_stall() {
     use super::LOOP_WINDOW;
@@ -1174,9 +1175,25 @@ fn constrained_drafting_past_a_stall() {
             if let Some(st) = st {
                 stalled += 1;
                 assert_eq!(st.period, cycle.len(), "{what} seed {seed}: {st}");
-                // Closed, then only the stop token: the reply ended there.
+                // Only the stop token after it: the reply ended there, at
+                // the token that tripped the rule, the call unclosed.
                 assert!(!c.engaged() && plain.ids.len() < n, "{what} seed {seed}");
-                assert_eq!(calls_parse(&g, &v, &plain.ids).0, 1, "{what} seed {seed}");
+                assert_eq!(
+                    c.mask().unwrap().unwrap().ids().collect::<Vec<_>>(),
+                    stop,
+                    "{what} seed {seed}"
+                );
+                let mut c2 = Constraint::new(g.clone()).with_end(&stop);
+                let (last, before) = plain.ids.split_last().unwrap();
+                for &t in before {
+                    assert!(c2.accept(t));
+                }
+                assert!(c2.stall().is_none() && c2.engaged(), "{what} seed {seed}");
+                assert!(
+                    c2.accept(*last) && c2.stall() == Some(st),
+                    "{what} seed {seed}"
+                );
+                assert_eq!(calls_parse(&g, &v, &plain.ids).0, 0, "{what} seed {seed}");
             }
             if cfg.is_none() {
                 assert!(st.is_some(), "{what} seed {seed}: greedy never stalled");
@@ -1925,12 +1942,15 @@ fn long_cycles_stall() {
     );
 }
 
-/// After a call that stalled, a reply given its end tokens (`with_end`:
-/// the server's stop tokens) may take only those, so a model in a loop
-/// can't open the next call and stall again (shady's review of #274);
-/// without them it goes on free. The stall is reported (`stall`: after how
-/// many tokens, the block) by the constraint that took it, and counted
-/// once: a draft's copy that stalls reports its own and counts nothing.
+/// A reply given its end tokens (`with_end`: the server's stop tokens) may
+/// take only those from the token its call stalled at: it ends there, the
+/// call left unclosed, so it is never delivered as a usable call (the
+/// lead's ruling of 11-17) and a model in a loop can't open the next call
+/// and stall again (shady's review of #274). Without them the call is
+/// closed the shortest way and the reply goes on free. The stall is
+/// reported (`stall`: after how many tokens, the block) by the constraint
+/// that took it, and counted once: a draft's copy that stalls reports its
+/// own and counts nothing.
 #[test]
 fn stalled_reply_ends() {
     use super::LOOP_WINDOW;
@@ -1954,14 +1974,16 @@ fn stalled_reply_ends() {
         let n0 = g.counters.stalls.load(Relaxed);
         let mut d = c.draft_copy();
         let mut taken = 0;
-        while !c.stalled() {
-            assert_eq!(c.stall(), None);
+        while c.stall().is_none() {
+            assert!(c.engaged() && !c.stalled());
             assert!(c.accept(b'z' as u32) && d.accept(b'z' as u32));
             taken += 1;
             assert!(taken <= LOOP_WINDOW, "never stalled");
         }
         let st = c.stall().unwrap();
-        assert!(d.stalled() && d.stall() == Some(st), "the copy's own");
+        assert_eq!(d.stall(), Some(st), "the copy's own");
+        assert_eq!(c.stalled(), !with_end);
+        assert_eq!(d.stalled(), !with_end);
         assert_eq!(
             g.counters.stalls.load(Relaxed),
             n0 + 1,
@@ -1975,21 +1997,25 @@ fn stalled_reply_ends() {
                 && line.contains(&format!(
                     "its last {LOOP_WINDOW} repeat one block of 1 token)"
                 ))
-                && line.contains("cut")
-                && line.contains("invented")
+                && line.contains("the reply ends there")
+                && line.contains("isn't delivered as a usable call")
                 && line.contains("AXON_CONSTRAIN_STALL=0"),
             "{line}"
         );
-        // Closed the shortest way: `"`, `}`, `}`, `</tool_call>`.
-        for t in [b'"' as u32, b'}' as u32, b'}' as u32, sp[1]] {
-            assert!(c.mask().unwrap().unwrap().allows(t));
-            assert!(c.accept(t));
+        if !with_end {
+            // Closed the shortest way: `"`, `}`, `}`, `</tool_call>`.
+            for t in [b'"' as u32, b'}' as u32, b'}' as u32, sp[1]] {
+                assert!(c.mask().unwrap().unwrap().allows(t));
+                assert!(c.accept(t));
+            }
         }
         assert!(!c.engaged() && !c.stalled() && c.stall() == Some(st));
         if with_end {
-            // Only the end now, whatever comes.
+            // Only the end now, right after the token that stalled: no
+            // quote, no `}`, no `</tool_call>` closes the call.
             let m = c.mask().unwrap().unwrap();
             assert_eq!(m.ids().collect::<Vec<_>>(), end);
+            assert!(!c.accept(b'"' as u32) && !c.accept(b'}' as u32) && !c.accept(sp[1]));
             assert!(!c.accept(sp[0]) && !c.accept(b'<' as u32) && !c.accept(b'a' as u32));
             assert!(c.accept(sp[2]) && c.mask().unwrap().unwrap().count() == 1);
             assert!(!c.engaged() && !c.in_string());

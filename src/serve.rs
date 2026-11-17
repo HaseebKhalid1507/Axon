@@ -192,10 +192,10 @@ pub struct Opts {
     /// `Stall::DEFAULT`; no flag sets it (the tests set small ones, so a
     /// call stalls in a few tokens).
     pub constrain_stall: Option<crate::constrain::Stall>,
-    /// Closing a held call that stalls, on or off (None:
-    /// AXON_CONSTRAIN_STALL, `constrain::stall_env`: on unless "0"). Off,
-    /// a call in a loop runs to `max_tokens`; its name and JSON are still
-    /// held.
+    /// Ending the reply at a held call that stalls (the call cut off
+    /// there), on or off (None: AXON_CONSTRAIN_STALL, `constrain::
+    /// stall_env`: on unless "0"). Off, a call in a loop runs to
+    /// `max_tokens`; its name and JSON are still held.
     pub constrain_closer: Option<bool>,
 }
 
@@ -1799,7 +1799,7 @@ fn engine(
                     let stall = match closer_set.value() {
                         Some(false) => {
                             eprintln!(
-                                "axon serve: stalled tool calls aren't closed ({}): a held \
+                                "axon serve: stalled tool calls aren't cut off ({}): a held \
                                  call in a loop runs to max_tokens",
                                 match closer_set {
                                     ShareSet::Env(_) => "AXON_CONSTRAIN_STALL=0",
@@ -3420,8 +3420,9 @@ fn run_request(
     // armed until the reply's `<tool_call>` (outside its reasoning), then
     // again after each call. required or named: engaged from the reply's
     // first token, where the prompt's call text left it. No tools offered
-    // (only tool turns in the history), or none chosen: free. After a call
-    // that stalled, only the reply's stop tokens. One the grammar can't
+    // (only tool turns in the history), or none chosen: free. A call that
+    // stalls ends the reply there (only its stop tokens), the call cut off
+    // unclosed: the parser returns it as a call cut mid-arguments. One the grammar can't
     // hold goes free: counted, and each reason said once.
     let constraint = match (&g.tools, &m.constrain) {
         (Some(tr), Some(h)) if parser.is_some() && !tr.tools.is_empty() => {
