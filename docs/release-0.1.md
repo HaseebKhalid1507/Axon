@@ -7,10 +7,10 @@
 > The release candidate is main `9f3630c`'s binary (2026-11-14), from the release workflow's dry run; the boards
 > below run on it. Main has merged only scripts and docs since (#235, #276): the dry run on main `1a1d751`
 > (2026-11-17) built the same `axon`, byte for byte. The tag can't be `9f3630c`: this PR (#270) and the CHANGELOG's
-> date land after it, so the tag is a descendant with no change under `src/`, whose binary should be the same
-> bytes. If a PR that changes `src/` merges first (#271, #274 are open), the binary differs. The maintainer checks that before publishing
-> (releasing.md, "The boards' binary"); if it differs, the board lines say they measured the candidate, not the
-> release binary.
+> date land after it, so the tag is a descendant with no change under `src/`, whose binary should be the same bytes.
+> If a PR that changes `src/` merges first (#271, #274 are open), the binary differs. The maintainer checks that
+> before publishing (releasing.md, "The boards' binary"); if it differs, the board lines say they measured the
+> candidate, not the release binary.
 
 ## In one sentence
 
