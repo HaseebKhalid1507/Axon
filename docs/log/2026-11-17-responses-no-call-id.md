@@ -6,9 +6,16 @@
 
 ## What changed
 `src/serve/responses.rs`, `items()`: a `function_call_output` item without a `call_id` but with a non-empty `name`
-string becomes a tool message (`{"role": "tool", "content": output}`). Its `tool_call_id` is the item's `id` when that
-is a string; otherwise the message has none. No template in Axon renders a `tool_call_id` (`tools::TMsg` has no id
-field), so this only shows in the stored conversation (`previous_response_id`).
+string becomes a tool message with no `tool_call_id`: `{"role": "tool", "content": output}`. A `call_id` that is null
+counts as absent.
+- **No `tool_call_id`, not even the item's `id`.** At 7a6c175 the message took the item's `id` as its `tool_call_id`.
+  That followed the issue's "a template that requires ids can get the item's id", as the foreman relayed it. shady's
+  review (NIT) showed it was dead data, and misleading:
+  - `tool_call_id` names the call a tool message answers, and the goal answers none.
+  - No template in Axon reads the field (`tools::TMsg` has no id), and only the stored conversation kept it.
+  - A template that does render call ids (Mistral's `[TOOL_RESULTS]`, for one) would emit a dangling id.
+
+  43efbb3 drops it.
 - With neither a `call_id` nor a `name`, the item is still a 400 (param `input`). The message now names both fields:
   "a function_call_output item needs a 'call_id' string (or a 'name', for an output that answers no call)".
 - A `call_id` that is present but not a string, or an empty or non-string `name`, is still a 400.
@@ -37,15 +44,19 @@ template does with `last_tool_call`), and refuses one with no call before it. Th
 `functions.<the last call>`, which is the same rule chat completions follows.
 
 ## How it was verified
+Code at 43efbb3 (the review round). 7a6c175's suites, e2e and mutants were killed before they finished: the round
+changed `responses.rs`, and the e2e script had the bug the review found (below).
+
 | gate | result | job ID / log |
 |---|---|---|
-| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 7a6c175 | OK | bella `~/.cache/axon-eval/logs/buildall-7a6c175.log` |
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 43efbb3 | OK | bella `~/.cache/axon-eval/logs/buildall-43efbb3.log` |
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
-| targeted, debug-assertion build at c559c64 (code identical to 7a6c175 except the module doc comment): `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
-| release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | group 1117-093534-8c12: 8480, c89a, 2a88 |
-| debug-assertion suite, 3 shards (jade, CPU) | PENDING | group 1117-093819-80a9: f823, 47e5, d3bb |
-| `/v1/responses` e2e differential, main 1a1d751 vs 7a6c175 (jade, CPU, 3 models) | PENDING | 1117-093917-0144 |
-| mutants: each part of the fix undone alone | PENDING | 1117-094724-d553 (`mutants.sh`: each mutant must fail at least its tests, the candidate none) |
+| targeted, debug-assertion build at c559c64: `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
+| release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | 1117-100032-edd3, -14b5, -1565 (group 9c4a) |
+| debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-100307-343e, -26e6, -d5bb (group 1ec3) |
+| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PENDING | 1117-095805-eb7f |
+| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, with codex's wire request (jade, CPU, 3 models) | PENDING | G_E2E |
+| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | G_MUT |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
 
 **Bit identity for requests main accepts.** These are exactly the requests where every `function_call_output` has a
@@ -64,25 +75,61 @@ the same three keys in the same order, and nothing else in `items()` or `parse()
 call, its output, then the goal item.
 - The request parses to the same `ToolReq` as the chat request with a plain tool message (no `tool_call_id`) in that
   place. `tools::render` reads only the `ToolReq`, so every template renders the goal as that tool message, bit for bit.
-- It checks the stored history: `tool_call_id` is the item's `id`, and with no `id` there is none.
+- The stored history holds exactly `{"role": "tool", "content": goal}`. That holds for the item as sent, without its
+  `id`, and with `"call_id": null` (the review round).
 - Without its `name`, the item is a 400 with param `input`, and the message names both fields.
 - `bad_shapes_are_400` gets five more shapes: codex's item without its name, a null `call_id` with a null `name`, an
   empty `name`, a numeric `name`, and a numeric `call_id` with a name.
 
+**Codex over the wire** (`codex_wire.py` / `codex_wire.sh`; the review's SHOULD 3). The unit test's item comes from
+codex's rollout, which is codex's own serialization, not the request body. So `codex exec` (0.169.0, bella's, the
+version of the runs) runs a write-tests prompt against a stub Responses server. The stub answers the first request
+that offers `create_goal` with a call to it, and every later request with "Done.". The check passes if a later
+request carries a `function_call_output` with a non-empty `name` and no `call_id`. That request is kept as it went
+over the wire and replayed in the e2e (W1). No model, no GPU.
+
 **e2e differential** (`resp_e2e.py` / `resp_e2e.sh`, in the eval scratch dir; sha256 in the PR body). It starts
 `axon serve` from main 1a1d751 and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
-tools), Qwen3-0.6B (Qwen3) and Llama-3.2-1B (Llama 3.1 tools). Each gets the same greedy requests, 40 tokens:
+tools; context 32768, for W1), Qwen3-0.6B (Qwen3) and Llama-3.2-1B (Llama 3.1 tools). Each gets the same greedy
+requests, 40 tokens:
 - **A, requests main accepts.** Tools with no history; a call and its output; that output with codex's extra fields;
-  two calls, one output given as text parts; the call and output streamed; instructions with no tools; main's own 400;
-  a stored conversation continued by `previous_response_id`. The candidate must equal main byte for byte, ids and
-  timestamps dropped, every SSE event of a stream included.
+  two calls, one output given as text parts; the call and output streamed; instructions with no tools; a stored
+  conversation continued by `previous_response_id`. Each must be 200 on both, and the candidate must equal main byte
+  for byte, ids and timestamps dropped, every SSE event of a stream included.
+- **A7, an output with neither field.** 400 on both, with the same type, param and code. The message is this PR's to
+  change, so the candidate's must name `'name'`.
 - **B, the goal.** The goal item with its `id`, without it, and streamed. Main must answer 400 and the candidate 200.
   The candidate's answer must equal its answer to the chat-completions twin: same prompt tokens, reasoning, text and
   calls.
+- **B4.** The goal stored (`store: true`), then continued by `previous_response_id`: 200 twice on the candidate.
 - **C.** The goal item without its `name` is a 400 on both.
+- **W1, codex's wire request** (from the wire check), on Qwen2.5-0.5B only, with only `stream` turned off and
+  `max_output_tokens` set to 16. Main must answer 400, naming `call_id`, and the candidate 200.
+
+**Mutants** (sources at bella `~/.cache/axon-eval/mut/M*.rs`, each a copy of 43efbb3's `responses.rs` with one hunk
+changed; release test builds, `serve::responses::`):
+
+| mutant | the one change | must fail |
+|---|---|---|
+| M1-main | main's arm back (`call_id` required) | `codex_goal_item_is_a_tool_message` |
+| M2-no-name-needed | `(None \| Some(J::Null), _) => None` | `bad_shapes_are_400`, `codex_goal_item_is_a_tool_message` |
+| M3-any-call-id | `(_, Some(J::Str(n))) if !n.is_empty() => None` | `bad_shapes_are_400` |
+| M4-name-first | that arm before the `call_id` arm | `outputs_with_a_call_id_are_unchanged` |
+| M5-no-null-call-id | `(None, Some(J::Str(n))) ...` (no `\| Some(J::Null)`) | `codex_goal_item_is_a_tool_message` |
+
+M5 replaces 7a6c175's M5, which undid the item-`id` fallback the review round removed.
+
+## Review
+shady 8/10 SHIP-AFTER-FIXES on 16a5d7a ([comment 6951583424](https://github.com/HaseebKhalid1507/Axon/pull/278#issuecomment-6951583424)):
+- **MUST, fixed in the script.** The e2e's A7 compared the whole 400 body, message included, and this PR changes that
+  message. 1117-093917-0144 would have failed on every model. It was killed while still queued.
+- **SHOULD 1, fixed.** A1–A6 must be 200, not just equal.
+- **SHOULD 2, fixed.** A null `call_id` with a name is now tested; it kills the mutant without `| Some(J::Null)` (M5).
+- **SHOULD 3, done.** Codex over the wire, above.
+- **NITs.** No `tool_call_id` (above); the stored-goal continuation (B4); the mutants published (above).
 
 ## Results
-PENDING: the suites, the e2e differential and the mutants above (gatewatch `eval-7a6c175-gates`). Not a
+PENDING: the gates above (gatewatch `eval-43efbb3-gates`). Not a
 performance change: no pp/tg numbers apply.
 
 ## What didn't work / not done
