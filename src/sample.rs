@@ -96,6 +96,18 @@ impl SampleCfg {
     }
 }
 
+/// The sampling flags (`SampleArgs::is_flag`, `set`): gen, chat and serve
+/// take them, and `--help` lists each one.
+pub const FLAGS: &[&str] = &[
+    "--temp",
+    "--top-k",
+    "--top-p",
+    "--min-p",
+    "--repeat-penalty",
+    "--repeat-last-n",
+    "--seed",
+];
+
 /// Sampling flags as given on the command line; `resolve` fills in defaults.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SampleArgs {
@@ -110,16 +122,7 @@ pub struct SampleArgs {
 
 impl SampleArgs {
     pub fn is_flag(f: &str) -> bool {
-        matches!(
-            f,
-            "--temp"
-                | "--top-k"
-                | "--top-p"
-                | "--min-p"
-                | "--repeat-penalty"
-                | "--repeat-last-n"
-                | "--seed"
-        )
+        FLAGS.contains(&f)
     }
 
     /// Set `flag` (one `is_flag` accepts) from its value; Err says what's wrong.

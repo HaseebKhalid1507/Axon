@@ -53,7 +53,8 @@ usage:
             [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--numerics M] [--datacenter]
             [--cache-ram BYTES|auto|off]
-            [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
+            [--no-think] [--think-inline] [--quiet] [rope flags]
+            [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
                                             up to --parallel (16) requests decode together,
@@ -110,14 +111,20 @@ flags:
   --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3/llama)
   --no-think  chat, serve: qwen3: answer without reasoning first (by default it thinks, as
               ollama does; serve: for the requests that don't set enable_thinking)
-  --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
+  --think-inline  serve: leave the reply's <think> block in `content` (default: the reasoning
+              comes apart, as `reasoning_content`)
+  --quiet     serve: no per-request line on stderr
+  --ctx N     chat, serve, gen: the context in tokens, which means something different in each.
+              chat: the conversation's (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
               split); when the conversation outgrows it, the oldest exchanges are forgotten
               (see --forget-to);
-              serve: per request (default: the model's trained context if the whole model fits
-              on the GPU(s) with it, else the longest that does if at least 4096; on the CPU, as
-              much of it as fits in free RAM, at least 8192; a CPU/GPU split, at most 8192; a
-              shorter one is said on stderr); an explicit N is never shortened;
+              serve: each request's, the most one slot holds (default: the model's trained
+              context if the whole model fits on the GPU(s) with it, else the longest that does
+              if at least 4096; on the CPU, as much of it as fits in free RAM, at least 8192; a
+              CPU/GPU split, at most 8192; a shorter one is said on stderr); an explicit N is
+              never shortened. With paged KV (the default) it is a slot's cap, not memory set
+              aside for it: the slots share one pool of pages (--parallel);
               gen: place the model and size its cache for N tokens, as chat would (default: the
               prompt and -n), to see a long context's speed (it may split the model)
   --forget-to F  chat: when the conversation outgrows --ctx, forget the oldest exchanges until
@@ -136,6 +143,17 @@ flags:
               One process per session file: a session in use by another axon process is refused
               (an advisory lock on F.lock beside it, left in place; where the filesystem can't lock,
               a warning and no lock)
+  --host H    serve: the address to listen on (default 127.0.0.1: this machine only)
+  --port P    serve: the TCP port (default 8080)
+  --alias NAME  serve: another model name to answer to (besides the file's, or the name it was
+              pulled as)
+  --max-tokens N  serve: a cap on any request's generation (default: up to the context)
+  --cors [ORIGIN]  serve: answer CORS preflights and allow ORIGIN (alone: any, *), to call the
+              server from web pages (default: off, so an arbitrary page can't use your model)
+  --max-conns N  serve: open connections at most (default 256); one more closes the one that
+              has waited longest for a request, or if every one is busy, is answered 503
+  --max-queue N  serve: requests waiting for the engine at most (default 128); more are
+              answered 503
   --parallel N  serve: requests decoded together on the GPU (default 16 with paged KV, the
               default: the slots share the KV pages that fit; 8 with AXON_PAGED_KV=0; 1: one
               at a time). An explicit N that doesn't fit is refused. Without paged KV, N
@@ -203,7 +221,8 @@ the requests that don't set their own):
                       0 = greedy: the highest logit, no penalty, no other flag applies
   --seed S            the random seed (default: a new one each run, printed by gen)
 
-environment:
+environment (these and the rest, serve's among them: docs/environment.md; serve's flags in
+full: docs/serving.md):
   AXON_THREADS=N             worker threads (default: cores minus a quarter)
   AXON_SIMD=scalar|avx2|vnni force a kernel set (default: the best the CPU has)
   AXON_POOL_ADAPT=0          keep every worker in every job (no adaptive drop-out)
@@ -239,17 +258,32 @@ environment:
                              on 32B; not with --draft)
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
+  AXON_SHARE_KV=0|1          serve, the GPU's paged pool: requests share the KV pages of a
+                             common prompt prefix (same bits); default on, off under
+                             --numerics fast's FP8 kernels (1: on); 0 is the kill switch;
+                             another value refuses to start
+  AXON_KV_RAM_ALLOC=start    serve --cache-ram on the GPU: pin the whole tier before the
+                             server answers, instead of in 64 MiB pieces while it runs
 
 models (docs/models.md):
   GGUF: qwen2, qwen3 and llama (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B, Llama-3.2-3B-Instruct, Q4_K_M);
         gemma3 (Gemma 3 1B and 4B; on cuda the whole model on the GPU); mixture-of-experts models:
-        qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight) and gpt-oss
+        qwen3moe (Qwen3-30B-A3B), deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight; MLA GGUFs) and gpt-oss
         (gpt-oss-20b), whose experts run on the CPU under --device cuda (--gpu-experts moves
         qwen3moe's and deepseek2's to the GPU)
   a Hugging Face checkpoint directory of a qwen2, qwen3 or llama model (config.json, tokenizer.json,
         model.safetensors or its shards): BF16/F16/F32 weights on the CPU (run as the GGUF F16 of
         the same weights); FP8 (RedHatAI's *-FP8-dynamic) on the CPU and the GPU, as Q8_0 converted
-        at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+)";
+        at load (--numerics exact, the default), or on the GPU natively with --numerics fast (sm_89+;
+        experimental, parked: docs/models.md)";
+
+/// `axon --help`'s text (`axon serve --help` prints it too).
+pub(crate) fn help() -> String {
+    format!(
+        "axon {}: CPU and CUDA inference for GGUF language models\n\n{USAGE}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
@@ -388,10 +422,7 @@ fn run() -> std::io::Result<()> {
             std::process::exit(2);
         }
         Some("-h" | "--help" | "help") => {
-            println!(
-                "axon {}: CPU and CUDA inference for GGUF language models\n\n{USAGE}",
-                env!("CARGO_PKG_VERSION")
-            );
+            println!("{}", help());
             return Ok(());
         }
         Some("-V" | "--version") => {
@@ -2065,6 +2096,141 @@ mod tests {
         for stale in ["pending", "README"] {
             assert!(!flat.contains(stale), "--help still says {stale:?}");
         }
+    }
+
+    /// `axon serve`'s flags as its help states them (#252): serve's synopsis
+    /// in `--help` and the usage line of a serve usage error (SERVE_USAGE)
+    /// list exactly the flags `serve::run` parses (no old name, none
+    /// missing), each has an entry under `flags:` that says serve, and the
+    /// sampling and rope flags are in their serve-labelled sections. Old
+    /// names are said in their new name's entry.
+    #[test]
+    fn serve_help_lists_every_flag() {
+        use crate::serve::{OLD_FLAGS, SERVE_USAGE, SWITCHES, VALUE_FLAGS};
+        use std::collections::BTreeSet;
+        let usage = super::USAGE;
+        // The `--name` words of a text.
+        let words = |t: &str| -> BTreeSet<String> {
+            t.split(|c: char| c.is_whitespace() || "[]|,;():".contains(c))
+                .filter(|w| w.starts_with("--") && w.len() > 2)
+                .map(str::to_string)
+                .collect()
+        };
+        let current: BTreeSet<String> = SWITCHES
+            .iter()
+            .chain(VALUE_FLAGS)
+            .chain(&["--cors"])
+            .filter(|f| !OLD_FLAGS.contains(f))
+            .map(|f| f.to_string())
+            .collect();
+        assert!(current.len() >= 28, "{current:?}");
+        // serve's synopsis: from its line to the next command's.
+        let at = usage.find("\n  axon serve <model.gguf>").unwrap();
+        let end = at + 1 + usage[at + 1..].find("\n  axon ").unwrap();
+        assert_eq!(
+            words(&usage[at..end]),
+            current,
+            "serve's synopsis in --help"
+        );
+        let mut said = words(SERVE_USAGE);
+        assert!(said.remove("--help"), "SERVE_USAGE doesn't point to --help");
+        assert_eq!(said, current, "SERVE_USAGE");
+        // The sections: `flags:`, `sampling flags (...)`, up to `environment`.
+        let section = |from: &str, to: &str| {
+            let a = usage.find(from).unwrap();
+            &usage[a..a + usage[a..].find(to).unwrap()]
+        };
+        // An entry: a line opening with two spaces and a flag, and the
+        // lines below it indented further.
+        let entries = |t: &str| -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = Vec::new();
+            for line in t.lines() {
+                if line.starts_with("  -") {
+                    let name = line.split_whitespace().next().unwrap().to_string();
+                    out.push((name, line.to_string()));
+                } else if line.starts_with("   ")
+                    && let Some(e) = out.last_mut()
+                {
+                    e.1 += line;
+                }
+            }
+            out
+        };
+        let flags = entries(section("\nflags:\n", "\nsampling flags ("));
+        for f in &current {
+            let e = flags.iter().find(|(n, _)| n == f);
+            let Some((_, text)) = e else {
+                panic!("--help has no entry for serve's {f}");
+            };
+            assert!(
+                text.contains("serve"),
+                "{f}'s entry doesn't say serve: {text}"
+            );
+        }
+        let flat = usage.split_whitespace().collect::<Vec<_>>().join(" ");
+        for f in OLD_FLAGS {
+            assert!(flat.contains(&format!("{f} is its old name")), "{f}");
+        }
+        let sampling = section("\nsampling flags (", "\nenvironment");
+        assert!(sampling.starts_with("\nsampling flags (gen, chat, serve;"));
+        let names: Vec<String> = entries(sampling).into_iter().map(|e| e.0).collect();
+        for f in crate::sample::FLAGS {
+            assert!(names.iter().any(|n| n == f), "no sampling entry for {f}");
+        }
+        let (_, rope) = flags.iter().find(|(n, _)| n == "--rope-scaling").unwrap();
+        assert!(rope.contains("serve"), "{rope}");
+        for f in crate::rope::FLAGS {
+            assert!(words(rope).contains(f), "the rope entry lacks {f}");
+        }
+    }
+
+    /// `axon serve -h | --help` (#252) prints the help on stdout and exits
+    /// 0, wherever it is among serve's arguments and before the model is
+    /// resolved or read (it exited 2, a usage error). Run in a child (this
+    /// binary's ignored `serve_help_child`): a usage error exits the process.
+    #[test]
+    fn serve_help_exits_0() {
+        for argv in [
+            &["--help"][..],
+            &["-h"],
+            &["no-such-model-name", "--help"],
+            &["/no/such/file.gguf", "--port", "1", "-h"],
+            &["/no/such/file.gguf", "--bogus", "--help"],
+        ] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+                .arg("cli::tests::serve_help_child")
+                .env("SERVE_HELP_CHILD_ARGS", argv.join("\n"))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let text = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success() && text.contains("test result: ok. 1 passed"),
+                "axon serve {argv:?}: {:?}\n{text}",
+                out.status
+            );
+            assert!(
+                stdout.contains(&super::help()),
+                "axon serve {argv:?}: no help on stdout"
+            );
+        }
+    }
+
+    /// `serve_help_exits_0`'s child: `serve::run` on its arguments must
+    /// return Ok (`main` then exits 0). Does nothing without them.
+    #[test]
+    #[ignore]
+    fn serve_help_child() {
+        let Ok(a) = std::env::var("SERVE_HELP_CHILD_ARGS") else {
+            return;
+        };
+        let args: Vec<String> = ["axon", "serve"]
+            .into_iter()
+            .chain(a.split('\n'))
+            .map(String::from)
+            .collect();
+        assert!(crate::serve::run(&args).is_ok());
     }
 
     use super::{gen_budget, placement, utf8_args};
