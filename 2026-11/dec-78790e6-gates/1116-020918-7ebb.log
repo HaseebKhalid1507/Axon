@@ -1,0 +1,59 @@
+[axon-run 02:09:18] submitted 1116-020918-7ebb by /home/haseeb/.cache/axon-dec: /usr/bin/bash cbmoe.sh ./axon-base-cb-9f3630c ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/moe-78790e6
+[axon-run 04:55:12] scope axon-job-1116-020918-7ebb-1794822912.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 04:55:12] job 1116-020918-7ebb -> bella: systemd-run --user --scope --quiet --unit=axon-job-1116-020918-7ebb-1794822912 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash cbmoe.sh ./axon-base-cb-9f3630c ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/moe-78790e6
+axon-q 04:55:12 start slot 16-23: /usr/bin/bash cbmoe.sh ./axon-base-cb-9f3630c ./axon-78790e6 ./constrain_check.py /home/haseeb/.cache/axon-dec/cb/bodies /home/haseeb/.cache/axon-dec/cb/moe-78790e6
+fingerprint fp_34745a40de944378 numerics exact/2 model Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M banner ['axon serve: Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M (attention + router on the GPU (0.95 GiB, ctx 32768), 128 experts x 28 layers on the CPU (top-8); 20 of 48 expert layers resident on the GPU (6.33 GiB), kv q8, ctx 32768, one request at a time, constrained tool calls (hermes-json e32688dabdfb3633)) on http://127.0.0.1:52267/v1']
+CELL codex-greedy           7032d697badd87d7b8e64a7b84552444 completed ok:exec_command
+CELL codex-seed1            733a3c92a69db00db6c5de4ea51f1eb5 completed ok:exec_command
+CELL opencode-greedy        ebbe873996ce0781c49c88ed770fbb37 tool_calls ok:shell
+CELL opencode-seed2         317df1c06bd359a357baba0f97f91880 tool_calls ok:shell
+CELL pi-greedy              1a7039be8b41df7d5fffda992d499709 tool_calls ok:bash
+CELL pi-seed3               27c8d00a44d157efe14e823cc0661e77 tool_calls ok:bash
+CELL codex-259-seed4        2e70c72e8d1761f086dc4ecf0fd8c425 tool_calls ok:exec_command
+CELL codex-required-seed5   bdf454a05b8f3d610bf47cd62da5db79 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 102.0, "axon_constraint_mask_seconds_total": 0.002642, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 542.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 542 (expected on)
+INTEGRITY PASS
+VERDICT PASS
+== moe-qwen3-30b-a3b cand default (cells valid, batched == alone, constraint on): PASS
+fingerprint fp_34745a40de944378 numerics exact/2 model Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M banner ['axon serve: Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M (attention + router on the GPU (0.95 GiB, ctx 32768), 128 experts x 28 layers on the CPU (top-8); 20 of 48 expert layers resident on the GPU (6.33 GiB), kv q8, ctx 32768, one request at a time, constrained tool calls (hermes-json e32688dabdfb3633)) on http://127.0.0.1:52267/v1']
+fingerprint fp_127d480dfc98e656 numerics exact/2 model Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M banner ['axon serve: constrained tool calls off (--no-constrain)']
+CELL codex-greedy           7032d697badd87d7b8e64a7b84552444 completed ok:exec_command
+CELL codex-seed1            733a3c92a69db00db6c5de4ea51f1eb5 completed ok:exec_command
+CELL opencode-greedy        ebbe873996ce0781c49c88ed770fbb37 tool_calls ok:shell
+CELL opencode-seed2         317df1c06bd359a357baba0f97f91880 tool_calls ok:shell
+CELL pi-greedy              1a7039be8b41df7d5fffda992d499709 tool_calls ok:bash
+CELL pi-seed3               27c8d00a44d157efe14e823cc0661e77 tool_calls ok:bash
+CELL codex-259-seed4        2e70c72e8d1761f086dc4ecf0fd8c425 tool_calls ok:exec_command
+CELL codex-required-seed5   bdf454a05b8f3d610bf47cd62da5db79 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_constraint_fallback_total": 0.0, "axon_constraint_mask_cache_clears_total": 0.0, "axon_constraint_mask_cache_peak_entries": 0.0, "axon_constraint_mask_seconds_total": 0.0, "axon_constraint_stalls_total": 0.0, "axon_constraint_tokens_total": 0.0, "axon_constraint_trigger_rejected_total": 0.0, "axon_constraint_unheld_total": 0.0, "axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+VERDICT PASS
+fingerprint fp_9369aa705695076b numerics exact/1 model Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M banner []
+CELL codex-greedy           7032d697badd87d7b8e64a7b84552444 completed ok:exec_command
+CELL codex-seed1            733a3c92a69db00db6c5de4ea51f1eb5 completed ok:exec_command
+CELL opencode-greedy        ebbe873996ce0781c49c88ed770fbb37 tool_calls ok:shell
+CELL opencode-seed2         317df1c06bd359a357baba0f97f91880 tool_calls ok:shell
+CELL pi-greedy              1a7039be8b41df7d5fffda992d499709 tool_calls ok:bash
+CELL pi-seed3               27c8d00a44d157efe14e823cc0661e77 tool_calls ok:bash
+CELL codex-259-seed4        2e70c72e8d1761f086dc4ecf0fd8c425 tool_calls ok:exec_command
+CELL codex-required-seed5   bdf454a05b8f3d610bf47cd62da5db79 tool_calls ok:exec_command
+batched == alone: True; pins: None
+METRICS {"axon_tool_calls_dropped_total": 0.0, "axon_tool_calls_invalid_total": 0.0}
+HTTP all 200 (16 requests)
+CONSTRAINT-TOKENS 0 (expected off)
+INTEGRITY PASS
+VERDICT PASS
+== moe-qwen3-30b-a3b integrity (--no-constrain, main: all 200, constraint off): PASS
+same 8: codex-greedy,codex-seed1,opencode-greedy,opencode-seed2,pi-greedy,pi-seed3,codex-259-seed4,codex-required-seed5
+DIFFER 0: 
+CELLS-EQUAL
+== moe-qwen3-30b-a3b --no-constrain == main: PASS
+CBMOE PASS
+[axon-run 05:03:54] exit 0 after 521.8s (host bella)
+[axon-run 05:03:59] EXPECT ok: output matches /^CBMOE PASS/
