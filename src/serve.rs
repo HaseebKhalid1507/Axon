@@ -3988,6 +3988,22 @@ fn api_key_of(
     }
 }
 
+/// One of `SWITCHES`, into `o` (`--datacenter` into `datacenter`). Each
+/// switch has its own arm: one in `SWITCHES` without an arm panics here
+/// instead of acting as another switch, as it did when the last arm was
+/// `--quiet`'s fallback (#280 review). `switches_each_set_their_own`
+/// runs every entry through it.
+fn switch(f: &str, o: &mut Opts, datacenter: &mut bool) {
+    match f {
+        "--no-think" => o.no_think = true,
+        "--think-inline" => o.think_inline = true,
+        "--quiet" => o.log = false,
+        "--datacenter" => *datacenter = true,
+        "--no-constrain" => o.constrain = Some(false),
+        _ => unreachable!("{f} is in SWITCHES with no arm"),
+    }
+}
+
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
     // `-h` / `--help` anywhere among serve's arguments (#252): the help on
@@ -4053,13 +4069,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         let f = args[i].as_str();
         match f {
             _ if SWITCHES.contains(&f) => {
-                match f {
-                    "--no-think" => o.no_think = true,
-                    "--think-inline" => o.think_inline = true,
-                    "--datacenter" => datacenter = true,
-                    "--no-constrain" => o.constrain = Some(false),
-                    _ => o.log = false,
-                }
+                switch(f, &mut o, &mut datacenter);
                 i += 1;
                 continue;
             }
