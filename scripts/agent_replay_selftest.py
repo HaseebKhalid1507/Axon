@@ -111,7 +111,7 @@ print(f'SELFTEST sessions OK: S = {len(order)}; N = S canonical; stratified orde
 # ------------------------------------------------------------------------------------------------ board: an engine per cell
 tb = tempfile.mkdtemp(prefix='agent-replay-selftest-board-')
 saved = {k: getattr(ar, k) for k in ('start_engine', 'run_cell', 'stop_engine', 'word_list', 'kv_bytes_per_token',
-                                     'gpu_name', 'install_guards')}
+                                     'gpu_name', 'gpu_state', 'install_guards')}
 try:
     tf, fm = os.path.join(tb, 'trace.json'), os.path.join(tb, 'm.gguf')
     json.dump(trace, open(tf, 'w'))
@@ -134,7 +134,7 @@ try:
     ar.start_engine, ar.run_cell = fake_start, fake_run
     ar.stop_engine = lambda p, grace=30.0: events.append(('stop', None, p.pid))
     ar.word_list, ar.kv_bytes_per_token = lambda m, n=2048: [f'w{i}' for i in range(500)], lambda m: 1
-    ar.gpu_name, ar.install_guards = lambda: None, lambda: None
+    ar.gpu_name, ar.install_guards, ar.gpu_state = lambda: None, lambda: None, lambda: '40, 2000 MHz'
     ba = types.SimpleNamespace(trace=tf, model=fm, out=os.path.join(tb, 'out'), speeds='1,4', sessions='2,4',
                                engines='axon,llama', kv='f16', rounds=3, round_offset=0, axon=fm, llama_server=fm,
                                ollama_models=None, kv_tokens=None, port=18600, scale=1.0, clip=32768, window_s=60,
@@ -157,12 +157,26 @@ try:
     assert len(m['starts']) == 24 and all(x['start_s'] >= 0 and x['stop_s'] >= 0 for x in m['starts']), m['starts']
     rj = [json.load(open(os.path.join(ba.out, f))) for f in os.listdir(ba.out) if f.startswith('run-')]
     assert len(rj) == 24 and len({r['engine_pid'] for r in rj}) == 24 and all('engine_start_s' in r for r in rj)
+    # every run carries the plan's own counts (judged against the plan, not another engine) and the GPU's state
+    for r in rj:
+        assert r['plan_requests'] == r['requests'] and r['plan_turn'] <= r['plan_requests'], r
+        assert r['gpu_before'] == r['gpu_after'] == '40, 2000 MHz', r
+    # --rotate-engines: the engine order reverses on odd rounds (ABBA)
+    events.clear()
+    ba.out, ba.rotate_engines = os.path.join(tb, 'out-rot'), True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ar.cmd_board(ba)
+    runs = [e for e in events if e[0] == 'run']
+    for rnd in range(3):
+        got = [(e[1], e[3], e[4]) for e in runs[rnd * 8:(rnd + 1) * 8]]
+        ks = ('llama', 'axon') if rnd % 2 else ('axon', 'llama')
+        assert got == [(k, sp, n) for sp, n in base[rnd:] + base[:rnd] for k in ks], (rnd, got)
 finally:
     for k, v in saved.items():
         setattr(ar, k, v)
     shutil.rmtree(tb)
 print('SELFTEST board OK: 2 speeds x 2 N x 2 engines x 3 rounds = 24 cells on 24 processes (start, one cell, stop), '
-      'cell order rotated per round, restart cost recorded')
+      'cell order rotated per round, restart cost recorded, plan counts and GPU state per run, --rotate-engines ABBA')
 
 # ------------------------------------------------------------------------------------------------ ollama_check
 tmp = tempfile.mkdtemp(prefix='agent-replay-selftest-')

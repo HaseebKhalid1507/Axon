@@ -38,6 +38,16 @@ jobs:
       # The agent replay harness's offline self-test (stdlib only, no engine or model, ~0.1 s).
       - name: agent replay self-test
         run: python3 scripts/agent_replay_selftest.py
+      # Release 0.1's board rules (pre-registered): the winner, the stop rule's R, the single-stream verdicts, and the
+      # queue that runs the boards one cell per job (its reruns: taint alone).
+      - name: release board readers selftest
+        run: |
+          python3 scripts/release/boards/pick.py --selftest
+          python3 scripts/release/boards/queue.py --selftest
+          python3 scripts/release/boards/payload.py --selftest
+          shellcheck --shell=bash --severity=warning -x -P SCRIPTDIR scripts/release/boards/*.sh
+          python3 scripts/release/boards/read_board.py --selftest
+          python3 scripts/release/boards/sb_read.py --selftest
       # golden.py's parsers, verdict logic and one() on a fake llama-server and a stub axon, and golden-top10.sh's
       # exit code on a fake golden.py (stdlib only, no model, no network, ~1.5 s).
       - name: golden self-test

@@ -4,7 +4,17 @@ All notable changes to Axon. Versions follow [SemVer](https://semver.org/); befo
 can change in any minor release. Each entry names its pull requests (#N on GitHub); the engineering log (`docs/log/`) has the
 measurements behind them.
 
-## Unreleased (after 0.1.0's draft)
+## Unreleased
+
+Nothing yet.
+
+## [0.1.0] - unreleased
+
+The first version: everything merged to `main` from the start of the project (2026-10-10) through #270 (2026-11-14);
+the release candidate's binary is main `9f3630c`'s (#269), and #270 changed only docs and scripts. Release notes:
+[docs/release-0.1.md](docs/release-0.1.md). The tag and the date are the maintainer's call. The entries after the
+first draft come first, newest first; the first draft's (through PR #113, main `aecc49d`, 2026-10-20) follow, under
+"Through #113".
 
 ### `axon serve --help` exits 0, and serve's help states every flag it takes (#280, closes #252)
 - **`axon serve -h` / `--help` prints the help and exits 0** wherever it is among serve's arguments, before the model
@@ -664,11 +674,10 @@ measurements behind them.
 - Diagnostics: `AXON_SERVE_TRACE=FILE`, a per-step trace of `serve`'s pool (#125); `AXON_MOE_PROFILE` counts resident
   layers' steps (#153).
 
-## [0.1.0] - unreleased (draft; not tagged)
+### Through #113 (the first draft)
 
-The first version: everything merged to `main` from the start of the project (2026-10-10) through PR #113
-(main `aecc49d`, 2026-10-20), 103 pull requests, plus the library split below. Release notes:
-[docs/release-0.1.md](docs/release-0.1.md). The tag and the date are the maintainer's call.
+Everything merged to `main` from the start of the project (2026-10-10) through PR #113 (main `aecc49d`,
+2026-10-20), 103 pull requests, plus the library split below. The sections that follow are this draft's.
 
 ### Library
 - The crate is now a library (`axon`) plus the `axon` binary on top of it. `src/lib.rs` is the crate root and the

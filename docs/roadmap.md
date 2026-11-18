@@ -20,15 +20,21 @@ For the four weeks from 2026-11-12: **the best local backend for coding agents (
 Linux then Windows, installed with one command on a machine with only the GPU driver.**
 
 Why this target (MEASURED unless marked):
-- Agent traffic is Axon's one clear edge, on one replay: bella, Qwen2.5-7B f16, against llama-server: turn TTFT p50
-  0.122 vs 1.06 s, ITL p99 119 vs 611 ms ([log](log/2026-10-27-agent-replay.md); the trace scaled to 0.15× and clipped
-  at 32k, llama-server set up by Axon's side, and it re-prefilled less: 1.9 vs 10.3 %). With the RAM tier an evicted
-  25k session resumes in 0.141 s vs a 2.713 s re-prefill (#201, RTX 4090); shared pages: eight subagents' TTFT 0.591× (#211).
-- Single stream is parity, not a lead: 7B decode 186 vs 181 tok/s and prefill 1.13× llama.cpp on a 4090 (10-18,
-  [results.md](results.md)). No single-stream board has run since `7f42c02`.
-- Between that and a user: no release binary; the GPU path needs NVRTC from a CUDA toolkit
-  ([models.md](models.md#nvidia-gpus)); gpt-oss-20b prefills at 0.27× llama.cpp (265 vs 995 tok/s, bella, #98); no
-  constrained JSON (`response_format` is a 400, #116); paged KV, the RAM tier and sharing are off for MoE
+- Agent traffic is Axon's one clear edge: **2.35× on turn TTFT** (p50 0.06 vs 0.141 s; ITL p99 10.79 vs 13.91 ms)
+  against llama-server's best of seven configurations, on the release candidate's binary (RunPod RTX 4090,
+  Qwen2.5-7B f16, the agent replay's trace, 11-17; [release-0.1.md](release-0.1.md#numbers-honestly)). That R is the
+  ratio of the medians, as pre-registered; the rounds' ratios were 2.09–2.35 (median 2.20), the highest from the
+  third round, on a second pod instance. The 10-27 replay's 8.7× (bella, 0.122 vs 1.06 s) was mostly llama-server's
+  default of saving and clearing idle slots ([log](log/2026-10-27-agent-replay.md)). With the RAM tier an evicted 25k
+  session resumes in 0.141 s vs a 2.713 s re-prefill (#201, RTX 4090); shared pages: eight subagents' TTFT 0.591×
+  (#211).
+- Single stream was parity on 10-18 (7B decode 186 vs 181 tok/s, +3 %; prefill 1.13× llama.cpp; RTX 4090,
+  [results.md](results.md)). On the release candidate (RTX 4090, 11-17): ahead in all 15 cells, decode still thin
+  (7B +2.4 %, Qwen3 8B +2.8 %).
+- Between that and a user: no release binary and NVRTC from a CUDA toolkit for the GPU, both closed since (#227,
+  #230: v0.1.0, pending tag, needs only the driver); gpt-oss-20b prefills at 0.27× llama.cpp (265 vs 995 tok/s, bella,
+  #98); no constrained JSON (`response_format` is a 400, #116; Hermes tool calls are held to the offered tools: #264
+  opt-in, on by default since #274, after 0.1.0's candidate); paged KV, the RAM tier and sharing are off for MoE
   ([serving.md](serving.md)).
 
 ## Shelved for now
@@ -56,16 +62,16 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
 1. **Process v2** ([methodology](methodology.md#process-v2-2026-11-12)). Its jobs and safeguards (builder: case):
    rules 2, 3 and 5 first, then rule 8's CI model tests and fuzzers (Windows and arm64 CI come with Distribution).
 2. **Decisions** (a flip's A/B cells: Process v2 rule 4). The two flips are decoupled (the lead, 11-13):
-   - Shared prefix pages go default-on on their own evidence (#228), once #218 is fixed, the A/B's sharing-alone arm
-     is within 2 % and a soak of 4 h or more passes under a small pool (debug build). They don't wait on #233 or #234.
+   - **Done (#228, merged 11-14; follow-ups #269):** shared prefix pages are default-on, on their own evidence: #218
+     fixed, the A/B's sharing-alone arm within 2 % (4090), a 4.58 h soak under a small pool (debug build).
      `AXON_SHARE_KV=0` is the kill switch. The win is subagent fan-out (#211: TTFT 0.591×); the board shares 4–7 %.
    - `--cache-ram auto` is the smaller of 4 GiB and ¼ of the RAM available after the model, and off when a cgroup is
      the tighter bound, the banner saying so (#226). Its default-on flip failed its A/B (4090: C=16 tok/s 0.977×, C=8
      ITL p99 1.103×) and waits on #233 (the first request after a start waits 3.2–4.0 s) and #234 (the write-behind:
      2–3 % tok/s, ITL p99), then a new A/B. `--cache-ram off` is the kill switch.
    - FP8 fast mode is parked (#194 closed 11-12); #222 (`--help` is stale) is fixed.
-3. **A GPU start with only the driver:** embed the kernels as PTX, which the driver compiles itself, so no NVRTC is
-   needed. Main already sends PTX to a GPU newer than its NVRTC ([models.md](models.md#nvidia-gpus)).
+3. **Done (#227): a GPU start with only the driver.** A release binary carries its kernels precompiled by NVRTC (same
+   bits): cubins for sm_75–sm_120, PTX for newer GPUs; NVRTC stays the fallback ([models.md](models.md#nvidia-gpus)).
 4. **Compatibility audit:** the 30 most-pulled ollama models, each: runs, refused, or prompt differs from llama.cpp's
    (`scripts/zoo.py`; last sweep 18 small files, [hardening.md](hardening.md#model-zoo-results-2026-10-18-measured)). It orders weeks 2–3.
    Measured 11-13 (PR #235): [log/2026-11-13-compat-audit.md](log/2026-11-13-compat-audit.md). 13 of 30 chat after
@@ -74,8 +80,8 @@ Macs wait for a Mac (none for now, Haseeb 11-12). AMD stays out of scope. So doe
    `scripts/examples/harness-repo/make_repo.py` already builds one such task.
    Measured on Qwen2.5-7B 11-13 to 11-15 (PR #235, `scripts/harness_accept.py`):
    [log/2026-11-13-harness-accept.md](log/2026-11-13-harness-accept.md). Qwen3-8B and gpt-oss-20b pending.
-6. **`axon pull`:** Hugging Face files plus about ten checksummed aliases; no registry. HTTPS means `curl` or a TLS
-   crate: none of the five in `Cargo.toml` speaks TLS (a dependency decision, [AGENTS.md](../AGENTS.md) hard rule 4).
+6. **Done (#231): `axon pull`.** Hugging Face files plus about ten checksummed aliases, no registry; HTTPS through
+   `curl` (none of the five crates in `Cargo.toml` speaks TLS: [AGENTS.md](../AGENTS.md) hard rule 4).
 7. **v0.1.0, Linux only:** the tag, the boards re-run on its commit, a Linux binary. It waits on items 3 and 6 (both are
    part of a one-command install), not on the two flips. The agent board's llama-server is tuned by someone arguing its
    side; stop rule: within 1.5× on turn TTFT, the edge is thinner than claimed and MoE in the pool goes first; tag either
@@ -115,9 +121,9 @@ At most three at once (Process v2 rule 9), each tied to its metric; week 1's dec
 
 ## Open follow-ups
 
-The live list is `gh issue list` ([issues](https://github.com/HaseebKhalid1507/Axon/issues)). At 11-12:
-- **Week 1:** #222 (`--help`), #218 (blocks the sharing flip), #219 (the shared-tokens counter), #210, #211 (close with the flip);
-  #233, #234 (block the tier's flip).
+The live list is `gh issue list` ([issues](https://github.com/HaseebKhalid1507/Axon/issues)). At 11-14:
+- **Week 1:** #233, #234 (block the tier's flip). Closed: #222 (`--help`, 11-13); #218, #219, #210, #211 (with the
+  sharing flip, 11-14).
 - **Agent API:** #116 (`tool_choice: required` with several tools on gpt-oss).
 - **gpt-oss / MoE:** #121 (the MoE-resident twins' hardening).
 - **No track:** #188 (shared pages C4: prefill once, join many), #189 (the replay harness's provenance), #217, #220,
