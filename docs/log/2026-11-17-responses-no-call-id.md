@@ -60,7 +60,7 @@ code, and the merge didn't change it.
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
 | `serve::` + `cli::`, debug-assertion build (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1118-042944-671c |
 | `serve::` + `cli::`, release build (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1118-042945-4905 |
-| `serve::tests::serve_gauges_settle_back_to_back` alone, 5 runs, debug-assertion build (`repeat.sh`, jade, CPU) | PENDING | 1118-042940-a7c5 |
+| `serve::tests::serve_gauges_settle_back_to_back` alone, 5 runs, debug-assertion build (`repeat.sh`, jade, CPU) | **PASS** 5/5, 29–32 s each, load average 1.3–6.7 | 1118-042940-a7c5 |
 | codex over the wire, codex pinned to 0.169.0 (bella, CPU, no model); its capture is what W1 replays | PENDING (bella held) | 1117-104504-ed9d |
 | `/v1/responses` e2e differential, main 87be6fb vs f8b69e3, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-f8b69e3-e2e`) |
 | mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PASS at 23337f4; stands, since `responses.rs` and its tests are unchanged by the merge | 1117-192847-a771 |
@@ -77,8 +77,8 @@ one `/metrics` keep-alive connection open while it sends 200 one-token requests 
 closes a keep-alive connection that has been idle for `IDLE` (30 s, serve.rs:73). If one request took over 30 s on
 the loaded host, the next `/metrics` read would get exactly this panic. That's a hypothesis: the panic doesn't say
 which connection closed. The test sends `/v1/responses` requests too, but with a string `input`, which never reaches
-the `function_call_output` branch this PR changes. If any of the 5 runs on an idle jade fails, this is treated as a
-possible serve bug, not load.
+the `function_call_output` branch this PR changes. All 5 runs on an idle jade passed, in 29–32 s each, so 200
+requests average about 0.15 s. That fits a load flake. It doesn't prove the idle-close cause.
 
 **At 23337f4** (43efbb3 with main 29fd8f8 merged in, #274's constrained tool calls among it; only CHANGELOG
 conflicted, `responses.rs` exactly 43efbb3's):
