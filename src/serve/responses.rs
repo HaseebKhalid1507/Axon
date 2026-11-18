@@ -17,7 +17,9 @@
 //!   (`reasoning_content`, `content`, `tool_calls`), which is what this
 //!   module answers with, in that order, so a reply sent back as input
 //!   renders as the chat-completions history would.
-//! - `function_call_output` is a `tool` message.
+//! - `function_call_output` is a `tool` message: the call it answers is its
+//!   `call_id`, else it needs a `name` (codex's own items, its goal: #273)
+//!   and has no `tool_call_id`.
 //!
 //! Tools: `function` tools become chat tools (`{"type": "function",
 //! "function": {name, description, parameters, strict}}`). Other tool types
@@ -219,18 +221,30 @@ fn items(input: &[J], out: &mut Vec<J>) -> Result<(), ApiError> {
             }
             (Some("function_call_output"), _) => {
                 flush(&mut turn, out);
-                let Some(id) = it.get("call_id").and_then(J::str) else {
-                    return Err(bad(
-                        "input",
-                        "a function_call_output item needs a 'call_id' string",
-                    ));
+                // The call it answers, else (#273) an output with a `name`
+                // and no call: codex's own items, as its goal
+                // (`{"type": "function_call_output", "id": "fco_...", "name":
+                // "goal_objective", "namespace": "agent", "output": ...}`).
+                // That is a tool message too, with no tool_call_id: it
+                // answers no call (the item's `id` names no call either).
+                let id = match (it.get("call_id"), it.get("name")) {
+                    (Some(J::Str(id)), _) => Some(id.as_str()),
+                    (None | Some(J::Null), Some(J::Str(n))) if !n.is_empty() => None,
+                    _ => {
+                        return Err(bad(
+                            "input",
+                            "a function_call_output item needs a 'call_id' string \
+                             (or a 'name', for an output that answers no call)",
+                        ));
+                    }
                 };
                 let text = text_of(it.get("output"), "input")?;
-                out.push(obj(vec![
-                    ("role", s("tool")),
-                    ("tool_call_id", s(id)),
-                    ("content", J::Str(text)),
-                ]));
+                let mut m = vec![("role", s("tool"))];
+                if let Some(id) = id {
+                    m.push(("tool_call_id", s(id)));
+                }
+                m.push(("content", J::Str(text)));
+                out.push(obj(m));
             }
             (Some("reasoning"), _) => {
                 // Its text (the raw reasoning, else the summary); an
@@ -1242,7 +1256,11 @@ mod tests {
     /// The chat-completions body a Responses body becomes, parsed: equal to
     /// parsing `chat` directly (prompt, tools, sampling).
     fn same(resp: Value, chat: Value) {
-        let (g, _) = p(resp).unwrap();
+        same_as(p(resp).unwrap().0, chat)
+    }
+
+    /// `same` for a request already parsed.
+    fn same_as(g: GenReq, chat: Value) {
         let c = api::parse(chat.to_string().as_bytes(), true).unwrap();
         assert_eq!(g.prompt, c.prompt);
         // json! sorts keys (tool_key_order_survives checks the order).
@@ -1322,6 +1340,103 @@ mod tests {
         );
     }
 
+    /// Codex 0.169's goal item (#273), byte for byte from its rollout (job
+    /// 1114-192659-82f7, axon-constrain arm, write-tests): a
+    /// function_call_output with a `name` and no `call_id`, after the
+    /// outputs of the calls it came with.
+    const CODEX_GOAL: &str = r#"{"type":"function_call_output","id":"fco_01a1dd99-167a-7410-8a4c-4f7dea6c71f1","name":"goal_objective","namespace":"agent","output":"Write unit tests for ledger/validate.py in a new file tests/test_validate.py and run the full test suite to ensure it passes.","internal_chat_message_metadata_passthrough":{"turn_id":"01a1dd99-06d3-7f00-a2bf-319820b5dbd1","create_time":1794719159.9305158}}"#;
+
+    /// A codex request ending in `goal` (an input item's JSON).
+    fn codex_body(goal: &str) -> String {
+        [
+            r#"{"model":"m","instructions":"sys","input":["#,
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"Add tests"}]},"#,
+            r#"{"type":"function_call","id":"fc_1","call_id":"call_1","name":"create_goal","arguments":"{\"objective\": \"x\"}"},"#,
+            r#"{"type":"function_call_output","id":"fco_0","call_id":"call_1","output":"ok"},"#,
+            goal,
+            r#"],"tools":[{"type":"function","name":"create_goal","parameters":{"type":"object","properties":{"objective":{"type":"string"}}}}]}"#,
+        ]
+        .concat()
+    }
+
+    /// #273: codex's goal item is a tool message, not a 400 that ends the
+    /// task. The request parses to the ToolReq of the chat request with a
+    /// plain tool message there (no tool_call_id), so every template renders
+    /// it as that tool message, bit for bit (`tools::render` reads only the
+    /// ToolReq). The stored message has no tool_call_id (it answers no call;
+    /// the item's `id` isn't one), with or without an `id`, and with a null
+    /// `call_id`.
+    #[test]
+    fn codex_goal_item_is_a_tool_message() {
+        let goal = "Write unit tests for ledger/validate.py in a new file \
+                    tests/test_validate.py and run the full test suite to ensure it passes.";
+        let chat = json!({"model": "m", "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Add tests"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function",
+                "function": {"name": "create_goal", "arguments": "{\"objective\": \"x\"}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            {"role": "tool", "content": goal}],
+            "tools": [{"type": "function", "function": {"name": "create_goal", "parameters":
+                {"type": "object", "properties": {"objective": {"type": "string"}}}}}]});
+        let no_id = CODEX_GOAL.replace(r#""id":"fco_01a1dd99-167a-7410-8a4c-4f7dea6c71f1","#, "");
+        assert_ne!(no_id, CODEX_GOAL);
+        let null_call = CODEX_GOAL.replace(r#""name":"#, r#""call_id":null,"name":"#);
+        assert_ne!(null_call, CODEX_GOAL);
+        let msg = format!(r#"{{"role":"tool","content":"{goal}"}}"#);
+        for item in [CODEX_GOAL, no_id.as_str(), null_call.as_str()] {
+            let (g, x) = parse(codex_body(item).as_bytes()).unwrap();
+            let want = tools::parse_json(&msg).unwrap();
+            assert_eq!(x.history.last(), Some(&want), "{item}");
+            assert_eq!(x.history.len(), 4, "{item}");
+            same_as(g, chat.clone());
+        }
+        // Without its name too, it answers nothing: still a 400, saying why.
+        let no_name = CODEX_GOAL.replace(r#""name":"goal_objective","#, "");
+        assert_ne!(no_name, CODEX_GOAL);
+        let e = parse(codex_body(&no_name).as_bytes()).err().unwrap();
+        assert_eq!((e.status, e.param), (400, Some("input")));
+        assert!(
+            e.msg.contains("'call_id'") && e.msg.contains("'name'"),
+            "{}",
+            e.msg
+        );
+    }
+
+    /// Every function_call_output main took before #273 has a `call_id`
+    /// string, and still becomes exactly the message it did (role,
+    /// tool_call_id = call_id, content, in that order), whatever else the
+    /// item has: a `name`, an `id`, codex's other fields. So no request main
+    /// accepted changes (the rest of `items` is untouched).
+    #[test]
+    fn outputs_with_a_call_id_are_unchanged() {
+        let want =
+            tools::parse_json(r#"{"role":"tool","tool_call_id":"call_1","content":"r"}"#).unwrap();
+        for extra in [
+            json!({}),
+            json!({"id": "fco_1"}),
+            json!({"name": "goal_objective"}),
+            json!({"name": "", "id": 5}),
+            json!({"name": 5, "id": null}),
+            json!({"id": "fco_1", "name": "goal_objective", "namespace": "agent",
+                   "internal_chat_message_metadata_passthrough": {"turn_id": "t"}}),
+        ] {
+            let mut item =
+                json!({"type": "function_call_output", "call_id": "call_1", "output": "r"});
+            for (k, v) in extra.as_object().unwrap() {
+                item[k] = v.clone();
+            }
+            let inputs = [
+                json!([item.clone()]),
+                json!([{"role": "user", "content": "u"}, item.clone()]),
+            ];
+            for input in inputs {
+                let (_, x) = p(json!({"input": input})).unwrap();
+                assert_eq!(x.history.last(), Some(&want), "{item}");
+            }
+        }
+    }
+
     #[test]
     fn tool_key_order_survives() {
         // serde_json would sort these; the prompt must keep the request's order.
@@ -1367,6 +1482,31 @@ mod tests {
             ),
             (
                 json!({"input": [{"type": "function_call_output", "output": "x"}]}),
+                Some("input"),
+            ),
+            // #273: neither a call_id nor a name (codex's goal item without its
+            // name), an empty or non-string name, a call_id that isn't a string.
+            (
+                json!({"input": [{"type": "function_call_output", "id": "fco_1",
+                    "namespace": "agent", "output": "x"}]}),
+                Some("input"),
+            ),
+            (
+                json!({"input": [{"type": "function_call_output", "call_id": null,
+                    "name": null, "output": "x"}]}),
+                Some("input"),
+            ),
+            (
+                json!({"input": [{"type": "function_call_output", "name": "", "output": "x"}]}),
+                Some("input"),
+            ),
+            (
+                json!({"input": [{"type": "function_call_output", "name": 5, "output": "x"}]}),
+                Some("input"),
+            ),
+            (
+                json!({"input": [{"type": "function_call_output", "call_id": 7,
+                    "name": "goal_objective", "output": "x"}]}),
                 Some("input"),
             ),
             (

@@ -6,6 +6,12 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `/v1/responses`: codex's goal item is a tool message, not a 400 (#278, closes #273)
+- **A `function_call_output` item with no `call_id` but a non-empty `name` is accepted** as a tool message with no
+  `tool_call_id`. codex 0.169 sends one of its own after the model calls its `create_goal` tool (`"name":
+  "goal_objective"`, no `call_id`), and Axon answered it 400, which ended codex's task. An item with neither is still
+  a 400, whose message now names both fields; an item with a `call_id` is read exactly as before.
+
 ### `axon serve --help` exits 0, and serve's help states every flag it takes (#280, closes #252)
 - **`axon serve -h` / `--help` prints the help and exits 0** wherever it is among serve's arguments, before the model
   is resolved, so a name that isn't pulled yet doesn't stop it. It was a usage error (exit 2).
