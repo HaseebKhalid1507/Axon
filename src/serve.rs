@@ -3907,12 +3907,59 @@ fn stream(
     }
 }
 
-const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
+pub(crate) const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto|off] \
+     [--step-ms MS] [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N] \
+     [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto|off] \
      [--numerics exact|fast] [--datacenter] [--no-constrain] [--no-think] [--think-inline] [--quiet] \
-     [sampling flags]";
+     [sampling flags] [rope flags] (axon serve --help: what each does)";
+
+/// `serve`'s flags without a value, as `run` parses them. With
+/// `VALUE_FLAGS`, `--cors [ORIGIN]` and the sampling and rope flags
+/// (`SampleArgs::is_flag`, `rope::FLAGS`), every flag it takes: the help
+/// lists each one (cli.rs, `serve_help_lists_every_flag`).
+pub(crate) const SWITCHES: &[&str] = &[
+    "--no-think",
+    "--think-inline",
+    "--quiet",
+    "--datacenter",
+    "--no-constrain",
+];
+
+/// `serve`'s flags that take a value, as `run` parses them.
+pub(crate) const VALUE_FLAGS: &[&str] = &[
+    "--host",
+    "--port",
+    "--ctx",
+    "--draft",
+    "--draft-model",
+    "--device",
+    "--gpu-layers",
+    "--kv",
+    "--alias",
+    "--max-tokens",
+    "--max-conns",
+    "--max-queue",
+    "--parallel",
+    "--prefill-chunk",
+    "--prefill-ms",
+    "--step-ms",
+    "--step-tokens",
+    "--admit-order",
+    "--admit-age-ms",
+    "--prefill-lanes",
+    "--api-key",
+    "--max-prompt-tokens",
+    "--cache-ram",
+    "--slot-idle-ms",
+    "--numerics",
+];
+
+/// Old names `run` still takes (in `VALUE_FLAGS`), each said in its new
+/// name's help line: the help test's list.
+#[cfg(test)]
+pub(crate) const OLD_FLAGS: &[&str] = &["--prefill-ms"];
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
 /// blank, or not UTF-8, is an error, not a server without auth.
@@ -3941,8 +3988,31 @@ fn api_key_of(
     }
 }
 
+/// One of `SWITCHES`, into `o` (`--datacenter` into `datacenter`). Each
+/// switch has its own arm: one in `SWITCHES` without an arm panics here
+/// instead of acting as another switch, as it did when the last arm was
+/// `--quiet`'s fallback (#280 review). `switches_each_set_their_own`
+/// runs every entry through it.
+fn switch(f: &str, o: &mut Opts, datacenter: &mut bool) {
+    match f {
+        "--no-think" => o.no_think = true,
+        "--think-inline" => o.think_inline = true,
+        "--quiet" => o.log = false,
+        "--datacenter" => *datacenter = true,
+        "--no-constrain" => o.constrain = Some(false),
+        _ => unreachable!("{f} is in SWITCHES with no arm"),
+    }
+}
+
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
+    // `-h` / `--help` anywhere among serve's arguments (#252): the help on
+    // stdout and exit 0, before the model is resolved (a name not pulled
+    // yet is a usage error) or any other argument is read.
+    if args.iter().skip(2).any(|a| a == "-h" || a == "--help") {
+        println!("{}", crate::cli::help());
+        return Ok(());
+    }
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         crate::fail(SERVE_USAGE);
     };
@@ -3998,14 +4068,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
     while i < args.len() {
         let f = args[i].as_str();
         match f {
-            "--no-think" | "--think-inline" | "--quiet" | "--datacenter" | "--no-constrain" => {
-                match f {
-                    "--no-think" => o.no_think = true,
-                    "--think-inline" => o.think_inline = true,
-                    "--datacenter" => datacenter = true,
-                    "--no-constrain" => o.constrain = Some(false),
-                    _ => o.log = false,
-                }
+            _ if SWITCHES.contains(&f) => {
+                switch(f, &mut o, &mut datacenter);
                 i += 1;
                 continue;
             }
@@ -4037,31 +4101,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 i += 2;
                 continue;
             }
-            "--host"
-            | "--port"
-            | "--ctx"
-            | "--draft"
-            | "--draft-model"
-            | "--device"
-            | "--gpu-layers"
-            | "--kv"
-            | "--alias"
-            | "--max-tokens"
-            | "--max-conns"
-            | "--max-queue"
-            | "--parallel"
-            | "--prefill-chunk"
-            | "--prefill-ms"
-            | "--step-ms"
-            | "--step-tokens"
-            | "--admit-order"
-            | "--admit-age-ms"
-            | "--prefill-lanes"
-            | "--api-key"
-            | "--max-prompt-tokens"
-            | "--cache-ram"
-            | "--slot-idle-ms"
-            | "--numerics" => {}
+            _ if VALUE_FLAGS.contains(&f) => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -4126,7 +4166,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 o.parallel = whole(true);
                 o.parallel_set = true;
             }
-            _ => k = Some(whole(false)),
+            "--draft" => k = Some(whole(false)),
+            // The guard above let only VALUE_FLAGS through: a flag added
+            // there needs its arm here (it is not --draft by default).
+            _ => unreachable!("{f} is in VALUE_FLAGS with no value arm"),
         }
         i += 2;
     }

@@ -2,7 +2,8 @@
 //! model, driven over real sockets.
 
 use super::{
-    MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, Server, Template, api::Message, api::Role, start,
+    MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, SWITCHES, Server, Template, api::Message, api::Role,
+    start, switch,
 };
 use crate::lm::{Device, Lm};
 use crate::numerics::Numerics;
@@ -25,6 +26,41 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
     let mut o = test_opts(path, device);
     f(&mut o);
     start(o).expect("start the server")
+}
+
+/// Every `SWITCHES` entry has an arm of its own in `switch` (#280 review):
+/// each one changes what the parser leaves, and no two change it the same
+/// way. An entry without an arm panics (`unreachable!`); before, it was
+/// `--quiet`'s fallback and silently turned the request lines off.
+#[test]
+fn switches_each_set_their_own() {
+    // What a switch can set: (no_think, think_inline, log, datacenter, constrain).
+    let after = |f: Option<&str>| {
+        let mut o = test_opts("m.gguf", Device::Cpu);
+        o.log = true; // run's default (test_opts has it off)
+        let mut datacenter = false;
+        if let Some(f) = f {
+            switch(f, &mut o, &mut datacenter);
+        }
+        (o.no_think, o.think_inline, o.log, datacenter, o.constrain)
+    };
+    let none = after(None);
+    assert_eq!(none, (false, false, true, false, None));
+    let mut seen = Vec::new();
+    for &f in SWITCHES {
+        let s = after(Some(f));
+        assert_ne!(s, none, "{f} changes nothing");
+        assert!(
+            !seen.contains(&s),
+            "{f} does what another switch does: {s:?}"
+        );
+        seen.push(s);
+    }
+    assert_eq!(after(Some("--quiet")), (false, false, false, false, None));
+    assert_eq!(
+        after(Some("--no-constrain")),
+        (false, false, true, false, Some(false))
+    );
 }
 
 /// The tests' server settings (`server_with` before its changes).

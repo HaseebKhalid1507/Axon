@@ -68,7 +68,7 @@ default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for
 budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COST=legacy`.
 `--no-constrain` (tool calls not held to the tools offered and to JSON:
 [Tool calling](#tool-calling)), `--quiet`
-(no per-request line on stderr). `GET /health` is 503 until the model is loaded.
+(no startup banner, notes or per-request lines on stderr; warnings still print). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
   Qwen2.5, 40960 for Qwen3, 131072 for Llama 3.1), so agent harnesses' 10k-40k-token prompts

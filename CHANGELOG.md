@@ -6,6 +6,16 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
+### `axon serve --help` exits 0, and serve's help states every flag it takes (#280, closes #252)
+- **`axon serve -h` / `--help` prints the help and exits 0** wherever it is among serve's arguments, before the model
+  is resolved, so a name that isn't pulled yet doesn't stop it. It was a usage error (exit 2).
+- **serve's usage line and `--help` are current.** The usage line drops `--prefill-ms` (still taken, as `--step-ms`'s
+  old name) and names the scheduling and rope flags. `--help` gains entries for nine serve flags it didn't list
+  (`--host`, `--port`, `--alias`, `--max-tokens`, `--cors`, `--max-conns`, `--max-queue`, `--think-inline`,
+  `--quiet`) and for `AXON_SHARE_KV` and `AXON_KV_RAM_ALLOC`. `--ctx` says what it means for chat, serve and gen,
+  and the model list says deepseek2 needs MLA GGUFs and native FP8 is experimental and parked. A test fails when a
+  flag in serve's parser lists has no entry, or the help names one serve doesn't take.
+
 ### Constrained tool calls on by default (PR B of #259; #272's guards)
 - **A Hermes tool call names an offered tool and is a JSON object**, by default, in `axon serve` on Qwen2.5 and
   Qwen3 models (PR A's `AXON_CONSTRAIN=1`, now on, and on Qwen3 too). From the reply's `<tool_call>` (its token or
