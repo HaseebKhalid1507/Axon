@@ -1,6 +1,6 @@
 # serve /v1/responses: codex's goal item is a tool message, not a 400  (PR #278)
 
-- Date: 2026-11-17. Branch: fix/responses-no-call-id. Base: main 1a1d751, main 29fd8f8 merged in at 23337f4. Status: open
+- Date: 2026-11-17. Branch: fix/responses-no-call-id. Base: main 1a1d751; main 29fd8f8 merged in at 23337f4, main 87be6fb at f8b69e3. Status: open
 - Pick / design: issue #273 (eval track, from #235's acceptance runs); the foreman's 11-17 ruling: take the issue's first
   suggestion, bug fix only.
 
@@ -44,25 +44,54 @@ template does with `last_tool_call`), and refuses one with no call before it. Th
 `functions.<the last call>`, which is the same rule chat completions follows.
 
 ## How it was verified
-**At the merged head 23337f4** (43efbb3 with main 29fd8f8 merged in, #274's constrained tool calls among it). Only
-CHANGELOG conflicted, and the merge leaves `responses.rs` exactly as 43efbb3 has it.
+**At the merged head f8b69e3** (23337f4 with main 87be6fb merged in, i.e. #280: serve's flag parsing and help). Only
+CHANGELOG conflicted. Against main 87be6fb this PR still changes `src/serve/responses.rs` alone among the sources. The
+merge brings #280's `serve.rs`, `serve/tests.rs`, `cli.rs` and `sample.rs`, and leaves `responses.rs` as 23337f4 has it.
+
+**A targeted regate, not the full suites** (the lead's ruling, 11-18). mergeready asks for the full gates again,
+because main moved by 7 files. #280 and this PR share no code: #280 is serve's argument parser and `--help`, and this
+PR is `/v1/responses`' input items. So the merged head runs the suites' `serve::` and `cli::` tests (231 of 1007,
+`serve::responses::` among them) in both builds. 23337f4's full suites (below) already cover the rest of this PR's
+code, and the merge didn't change it.
 
 | gate | result | job ID / log |
 |---|---|---|
-| build: release bin, release and debug-assertion test bins (rustc, lib layout) | OK | bella `~/.cache/axon-eval/logs/buildall-23337f4.log` |
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) | OK | bella `~/.cache/axon-eval/logs/buildall-f8b69e3.log` |
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
-| release suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-192015-9da4, -0ac3, -ca3a (group 7974) |
-| debug-assertion suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-192016-e344, -2809, -6dc9 (group 7ba9) |
+| `serve::` + `cli::`, debug-assertion build (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1118-042944-671c |
+| `serve::` + `cli::`, release build (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1118-042945-4905 |
+| `serve::tests::serve_gauges_settle_back_to_back` alone, 5 runs, debug-assertion build (`repeat.sh`, jade, CPU) | PENDING | 1118-042940-a7c5 |
 | codex over the wire, codex pinned to 0.169.0 (bella, CPU, no model); its capture is what W1 replays | PENDING (bella held) | 1117-104504-ed9d |
-| `/v1/responses` e2e differential, main 29fd8f8 vs 23337f4, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-23337f4-e2e`) |
-| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | 1117-192847-a771 |
+| `/v1/responses` e2e differential, main 87be6fb vs f8b69e3, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-f8b69e3-e2e`) |
+| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PASS at 23337f4; stands, since `responses.rs` and its tests are unchanged by the merge | 1117-192847-a771 |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
 
-The wire check is the same job as before the merge: it runs codex against a stub, with no Axon binary in it. Before
-queueing, `mutants.sh` ran on bella (fixture-only, no model): the candidate passed `serve::responses::`, and each of
-M1–M5 failed its tests.
+Gatewatch `eval-f8b69e3-gates` covers the targeted runs and the 5 runs. The wire check is still the job from before
+both merges: it runs codex against a stub, with no Axon binary in it. Before queueing, on bella: the debug-assertion
+build passed `serve::responses::`, `serve::tests::switches_` and `cli::tests::serve_help` (12 passed, fixture-only).
 
-**Before the merge, at 43efbb3:**
+**Why `serve_gauges_settle_back_to_back` runs 5 more times.** At 23337f4, debug-assertion shard 1 (e344) failed this one
+test, 429 passed and 1 failed, with `EOF in head` (`read_resp`, tests.rs:132), after 3 h 08 min on a loaded jade.
+The release shard with the same filters (9da4) passed it, and so did #280's jade debug-assertion runs. The test keeps
+one `/metrics` keep-alive connection open while it sends 200 one-token requests on other connections, and serve
+closes a keep-alive connection that has been idle for `IDLE` (30 s, serve.rs:73). If one request took over 30 s on
+the loaded host, the next `/metrics` read would get exactly this panic. That's a hypothesis: the panic doesn't say
+which connection closed. The test sends `/v1/responses` requests too, but with a string `input`, which never reaches
+the `function_call_output` branch this PR changes. If any of the 5 runs on an idle jade fails, this is treated as a
+possible serve bug, not load.
+
+**At 23337f4** (43efbb3 with main 29fd8f8 merged in, #274's constrained tool calls among it; only CHANGELOG
+conflicted, `responses.rs` exactly 43efbb3's):
+
+| gate | result | job ID / log |
+|---|---|---|
+| build, clippy `-D warnings`, rustfmt | OK, clean | bella `~/.cache/axon-eval/logs/buildall-23337f4.log` |
+| release suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | **PASS**: 430, 288 and 220 passed, 0 failed | 1117-192015-9da4, -0ac3, -ca3a (group 7974) |
+| debug-assertion suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | 2809 and 6dc9 **PASS** (288 and 220 passed); e344 **FAILED**, 429 passed, 1 failed: `serve::tests::serve_gauges_settle_back_to_back` (above) | 1117-192016-e344, -2809, -6dc9 (group 7ba9) |
+| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | **PASS**: the candidate passed, each of M1–M5 failed its tests | 1117-192847-a771 |
+| codex over the wire, the e2e (main 29fd8f8 vs 23337f4) | carried over to f8b69e3 (above); the e2e was never submitted | |
+
+**Before the merges, at 43efbb3:**
 
 | gate | result | job ID / log |
 |---|---|---|
@@ -111,7 +140,7 @@ replies never hold one). That request is kept as it went over the wire (`goal-re
 (W1). No model, no GPU.
 
 **e2e differential** (`resp_e2e.py` / `resp_e2e.sh`, in the eval scratch dir; sha256 in the PR body). It starts
-`axon serve` from main (29fd8f8 since the merge; 1a1d751 before) and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
+`axon serve` from main (87be6fb since the second merge, 29fd8f8 after the first, 1a1d751 before) and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
 tools; context 32768, for W1), Qwen3-0.6B (Qwen3) and Llama-3.2-1B (Llama 3.1 tools). Each gets the same greedy
 requests, 40 tokens:
 - **A, requests main accepts.** Tools with no history; a call and its output; that output with codex's extra fields;
@@ -165,8 +194,9 @@ scripts and docs only, the code still 43efbb3 (its queued suites and mutants kep
   and its docstring says it scans every request. CHANGELOG entry.
 
 ## Results
-PENDING: the gates above at 23337f4 (gatewatch `eval-23337f4-gates`; the e2e's `eval-23337f4-e2e`). Not a
-performance change: no pp/tg numbers apply.
+PENDING: the targeted regate, the 5 runs, the wire check and the e2e at f8b69e3 (gatewatch `eval-f8b69e3-gates`; the
+e2e's `eval-f8b69e3-e2e`). At 23337f4 every gate that ran passed except one debug-assertion test, which the 5 runs
+are for. Not a performance change: no pp/tg numbers apply.
 
 ## What didn't work / not done
 - Harmony (gpt-oss) still refuses a tool message with no assistant call before it, from either API. llama.cpp's
