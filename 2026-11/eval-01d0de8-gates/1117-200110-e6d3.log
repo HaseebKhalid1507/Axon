@@ -1,0 +1,30 @@
+[axon-run 20:01:10] submitted 1117-200110-e6d3 by /home/haseeb/.cache/axon-wt-evalhelp: /usr/bin/bash mutants2.sh ./axon-test-01d0de8 ./axon-test-H1-no-help-check ./axon-test-H2-help-first-only ./axon-test-H3-help-on-stderr ./axon-test-H4-stale-prefill-ms ./axon-test-H5-no-host-entry ./axon-test-H6-new-flag-no-help ./axon-test-H7-cors-mislabelled ./axon-test-H8-switch-no-arm ./axon-test-H9-switch-wrong-arm
+[axon-run 23:44:22] job 1117-200110-e6d3 -> jade: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-podjob/mutants2-e17aaeeeef6e --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /usr/bin/bash mutants2.sh ./axon-test-01d0de8 ./axon-test-H1-no-help-check ./axon-test-H2-help-first-only ./axon-test-H3-help-on-stderr ./axon-test-H4-stale-prefill-ms ./axon-test-H5-no-host-entry ./axon-test-H6-new-flag-no-help ./axon-test-H7-cors-mislabelled ./axon-test-H8-switch-no-arm ./axon-test-H9-switch-wrong-arm
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (46a308a07fdebd1ef72fe7af) + source of /home/haseeb/.cache/axon-podjob/mutants2-e17aaeeeef6e
+
+sent 86,069,754 bytes  received 305 bytes  305,755.09 bytes/sec
+total size is 285,479,743  speedup is 3.32
+
+sent 168 bytes  received 35 bytes  406.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261117-234907-bash-2061099 on jade (CPU-only)
+[axon-node 23:49:07] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 23:49:07] run bash (46a308a07fdebd1ef72fe7af) as /home/haseeb/.cache/axon-podjob/mutants2-e17aaeeeef6e on jade, AXON_THREADS=1 RUST_TEST_THREADS=1 AXON_READAHEAD=0
+[axon-node 23:49:07] memory cap (scope MemoryMax) 3127 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 23:49:07] MemAvailable 4663 MB, load ['0.45', '0.69', '1.08']; nice -n 19 ionice -c3 taskset -c 0-7
+candidate:01d0de8          OK   rc=0 failed: none | test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H1-no-help-check           OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.00s
+H2-help-first-only         OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.03s
+H3-help-on-stderr          OK   rc=101 want: serve_help_exits_0 | failed: serve_help_exits_0 | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.00s
+H4-stale-prefill-ms        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H5-no-host-entry           OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H6-new-flag-no-help        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H7-cors-mislabelled        OK   rc=101 want: serve_help_lists_every_flag | failed: serve_help_lists_every_flag | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H8-switch-no-arm           OK   rc=101 want: switches_each_set_their_own | failed: switches_each_set_their_own | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+H9-switch-wrong-arm        OK   rc=101 want: switches_each_set_their_own | failed: switches_each_set_their_own | test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 1001 filtered out; finished in 0.01s
+MUTANTS PASS
+[axon-node 23:49:10] exit 0 after 2.8s; lowest MemAvailable seen 4642 MB
+[axon-node 23:49:10] peak RSS 0 MB (job process tree PSS, 2 s samples x1)
+[axon-run 23:49:10] exit 0 after 288.9s (host jade)
+[axon-run 23:49:13] EXPECT ok: output matches /^MUTANTS PASS/
