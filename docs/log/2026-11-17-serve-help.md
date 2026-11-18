@@ -43,6 +43,13 @@
   with no arm is `unreachable!`. On main the last arm was `_ => --draft`, so a value flag added to the list without an
   arm would silently set the draft length. No test drives each value flag through `run` (it loads a model), so the
   panic is the guard; with the help test, a flag added to the list needs an entry and an arm.
+- **The switch match has no default arm either** (shady's SHOULD on c423426): `switch` gives each of `SWITCHES` its
+  own arm, `--quiet` included, and a switch with no arm is `unreachable!`. Until 01d0de8 the last arm was
+  `_ => o.log = false`, so a switch added to the list without an arm silently became `--quiet`. The merge of main is
+  where it could bite: had the resolution kept this branch's side of the match, #274's `--no-constrain` would have
+  been `--quiet`, and no test would have noticed.
+  `switches_each_set_their_own` (serve/tests.rs, no model) runs every entry through `switch`: each must change what
+  the parser leaves, and no two the same way.
 - `serve_help_lists_every_flag` checks each entry's label, the text before its first `:` ("gen, chat, serve"), for
   the word `serve`, where it checked the whole entry ("server" matched).
 - CHANGELOG entry.
@@ -54,20 +61,23 @@ entry at all. `--ctx`'s serve meaning was buried under a `chat:` label, and the 
 without the caveats docs/models.md has.
 
 ## How it was verified
-**At the merged head 761863e** (77ae344 with main 29fd8f8 merged in, #274's constrained tool calls among it):
+**At 01d0de8** (shady's SHOULD on c423426, on the merged head 761863e: 77ae344 with main 29fd8f8, #274's constrained
+tool calls among it):
 
 | gate | result | job ID / log |
 |---|---|---|
-| build: release bin, release and debug-assertion test bins (rustc, lib layout) | OK | bella `~/.cache/axon-eval/logs/buildall-761863e.log` |
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) | OK | bella `~/.cache/axon-eval/logs/buildall-01d0de8.log` |
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
-| release suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-190853-0efb, -44f0, -d833 (group 9523) |
-| debug-assertion suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-190853-5523, -33c1, -e08e (group 81b3) |
-| mutants H1–H7, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | 1117-191442-ef07 |
+| release suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-194653-98be, -82ae, -364d (group bfa4) |
+| debug-assertion suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-194653-3dda, -8974, -51aa (group e624) |
+| mutants H1–H9, the candidate as control (`mutants2.sh`, jade, CPU) | PENDING | 1117-200110-e6d3 |
 | md5 of `gen` | not run: no generation code changed (`sample::FLAGS` is the same 7 names `is_flag` matched) | |
 
 The targeted run isn't repeated: the debug-assertion suite runs `cli::tests::` and `sample::tests::` too. Before
-queueing, the three help tests and `mutants2.sh` ran on bella (fixture-only, no model): the candidate passed and each
-of H1–H7 failed its test.
+queueing, the help tests, `switches_each_set_their_own` and `mutants2.sh` ran on bella (fixture-only, no model): the
+candidate passed and each of H1–H9 failed its test. 761863e's gates (release 1117-190853-0efb/-44f0/-d833, debug
+-5523/-33c1/-e08e, mutants 1117-191442-ef07) were dropped for 01d0de8: all were still queued except 0efb, which was
+killed partway through its run (177 tests passed, none failed).
 
 **The merge.** Four files conflicted. `--no-constrain` (#274's switch) is now in `SWITCHES`, `SERVE_USAGE` and the
 synopsis; its `--help` entry, labelled serve, came from main. docs/serving.md keeps main's `--no-constrain` sentence
@@ -111,7 +121,7 @@ argument lists: `--help`, `-h`, `no-such-model-name --help` (a name not pulled),
 `/no/such/file.gguf --bogus --help`.
 
 **Mutants** (sources at bella `~/.cache/axon-eval/mut2/H*/src/...`, each a copy of 77ae344's file with one change; release
-test builds, `cli::tests::serve_help`):
+test builds, `cli::tests::serve_help` and `serve::tests::switches_`):
 
 | mutant | the one change | must fail |
 |---|---|---|
@@ -122,14 +132,17 @@ test builds, `cli::tests::serve_help`):
 | H5-no-host-entry | `--host`'s entry deleted | `serve_help_lists_every_flag` |
 | H6-new-flag-no-help | the parser takes a new `--new-flag` | `serve_help_lists_every_flag` |
 | H7-cors-mislabelled | `--cors`'s entry labelled `chat:`; its text still says "server", which the old `contains("serve")` passed | `serve_help_lists_every_flag` |
+| H8-switch-no-arm | `--no-constrain`'s arm deleted: a `SWITCHES` entry with no arm | `switches_each_set_their_own` |
+| H9-switch-wrong-arm | `--no-constrain`'s arm sets `log = false`, what the old fallback did | `switches_each_set_their_own` |
 
-H1–H6 are 0e95bda's, carried to 77ae344 by their diffs; H7 is new with the label check. At 761863e all seven are
-77ae344's one-line diffs applied to the merged tree (bella `~/.cache/axon-eval/mut2/patches/`). No mutant removes the
+H1–H6 are 0e95bda's, carried to 77ae344 by their diffs; H7 is new with the label check. H8 and H9 are new at 01d0de8.
+Since the merge, every mutant is a one-line diff applied to the tree under test (bella
+`~/.cache/axon-eval/mut2/patches/`). No mutant removes the
 `--draft` arm: no test drives a value flag through `run` (it loads a model and serves), so nothing would catch it but
 the panic at the first `--draft`, which is the point of the `unreachable!`.
 
 ## Results
-77ae344: every gate PASS. 761863e, the merged head: PENDING (gatewatch `eval-761863e-gates`). 0e95bda's (55f0,
+77ae344: every gate PASS. 01d0de8 (the merge and shady's SHOULD): PENDING (gatewatch `eval-01d0de8-gates`). 0e95bda's (55f0,
 770e/df4a/c812, a4cb/4560/2186, 13e1) were dropped while queued: shady's round changed `src/`. Help text and a parser refactor: no performance numbers apply.
 
 ## Not done
@@ -145,3 +158,8 @@ shady 9/10 SHIP on cd2c535 ([comment 6952843853](https://github.com/HaseebKhalid
 Fixed at 77ae344: the SHOULD (`--draft`'s own arm, `unreachable!` fallback), NIT 1 (the PR body's claim now says "the
 parser's lists", as this log did), NIT 2 (label check, H7), NIT 3 (`--quiet`), NIT 4 (the GPU's default), NIT 5
 (roadmap.md), NIT 6 (CHANGELOG). NIT 7: above.
+
+shady 9/10 SHIP on c423426 ([comment 6965258767](https://github.com/HaseebKhalid1507/Axon/pull/280#issuecomment-6965258767)),
+verifying 77ae344 and the merge. Its SHOULD, fixed at 01d0de8 on the foreman's call (the same bug class as `--draft`,
+and this merge came close to it): `--quiet`'s own arm, `unreachable!` for a switch without one, the test, and mutants
+H8 and H9.
