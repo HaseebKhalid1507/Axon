@@ -1,6 +1,6 @@
 # serve /v1/responses: codex's goal item is a tool message, not a 400  (PR #278)
 
-- Date: 2026-11-17. Branch: fix/responses-no-call-id. Base: main 1a1d751. Status: open
+- Date: 2026-11-17. Branch: fix/responses-no-call-id. Base: main 1a1d751, main 29fd8f8 merged in at 23337f4. Status: open
 - Pick / design: issue #273 (eval track, from #235's acceptance runs); the foreman's 11-17 ruling: take the issue's first
   suggestion, bug fix only.
 
@@ -44,21 +44,41 @@ template does with `last_tool_call`), and refuses one with no call before it. Th
 `functions.<the last call>`, which is the same rule chat completions follows.
 
 ## How it was verified
-Code at 43efbb3 (the review round). 7a6c175's suites, e2e and mutants were killed before they finished: the round
-changed `responses.rs`, and the e2e script had the bug the review found (below).
+**At the merged head 23337f4** (43efbb3 with main 29fd8f8 merged in, #274's constrained tool calls among it). Only
+CHANGELOG conflicted, and the merge leaves `responses.rs` exactly as 43efbb3 has it.
 
 | gate | result | job ID / log |
 |---|---|---|
-| build: release bin, release and debug-assertion test bins (rustc, lib layout) at 43efbb3 | OK | bella `~/.cache/axon-eval/logs/buildall-43efbb3.log` |
+| build: release bin, release and debug-assertion test bins (rustc, lib layout) | OK | bella `~/.cache/axon-eval/logs/buildall-23337f4.log` |
 | clippy `-D warnings` (lib, tests, bin), rustfmt | clean | same log |
-| targeted, debug-assertion build at c559c64: `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
-| release suite, 3 shards (jade, CPU: GPU tests skip themselves) | PENDING | 1117-100032-edd3, -14b5, -1565 (group 9c4a) |
-| debug-assertion suite, 3 shards (jade, CPU) | PENDING | 1117-100307-343e, -26e6, -d5bb (group 1ec3) |
-| codex over the wire: codex 0.169.0 against a stub, the goal item as sent (bella, CPU, no model) | PASS (before the version pin): request 2 carries `name` `goal_objective` and no `call_id` | 1117-100614-67b4 |
-| the same, with codex's version pinned to 0.169.0 (shady's 9/10 round); its capture is what W1 replays | PENDING | 1117-104504-ed9d |
-| `/v1/responses` e2e differential, main 1a1d751 vs 43efbb3, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-43efbb3-e2e`) |
-| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | 1117-101610-fcdd |
+| release suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-192015-9da4, -0ac3, -ca3a (group 7974) |
+| debug-assertion suite, 3 shards (jade, CPU; `AXON_SKIP_FP8_MODEL_TESTS=1`) | PENDING | 1117-192016-e344, -2809, -6dc9 (group 7ba9) |
+| codex over the wire, codex pinned to 0.169.0 (bella, CPU, no model); its capture is what W1 replays | PENDING (bella held) | 1117-104504-ed9d |
+| `/v1/responses` e2e differential, main 29fd8f8 vs 23337f4, **W1 required** (jade, CPU, 3 models) | PENDING | submitted by `after_wire.sh` only if ed9d passes, `--expect '^RESP-E2E PASS .0 failures, W1 OK.'` (gatewatch `eval-23337f4-e2e`) |
+| mutants M1–M5, the candidate as control (`mutants.sh`, jade, CPU) | PENDING | 1117-192847-a771 |
 | md5 of `gen` | not run: `gen` never reaches `responses.rs` | |
+
+The wire check is the same job as before the merge: it runs codex against a stub, with no Axon binary in it. Before
+queueing, `mutants.sh` ran on bella (fixture-only, no model): the candidate passed `serve::responses::`, and each of
+M1–M5 failed its tests.
+
+**Before the merge, at 43efbb3:**
+
+| gate | result | job ID / log |
+|---|---|---|
+| build, clippy `-D warnings`, rustfmt | OK, clean | bella `~/.cache/axon-eval/logs/buildall-43efbb3.log` |
+| targeted, debug-assertion build at c559c64: `serve::responses::`, `serve::tools::`, `serve::template_tests::`, `serve::api::` (jade, CPU) | 44 passed | 1117-093156-5057 |
+| codex over the wire, before the version pin | PASS: request 2 carries `name` `goal_objective` and no `call_id` | 1117-100614-67b4 |
+| mutants M1–M5 | M1–M5 all killed; the job FAILED on its harness (below) | 1117-101610-fcdd |
+| suites and the e2e | superseded by the merge, never finished (below) | |
+
+43efbb3's suites never finished:
+- 1117-100032-edd3 died when bella crashed.
+- 1117-100032-14b5 and -1565 failed on jade, which has no FP8 checkpoint. Their `AXON_SKIP_FP8_MODEL_TESTS=1` reruns
+  (`-r2`: 1117-135254-0612, -135255-8993, -135255-3c4f, -135256-c3d1, -135256-bf21, -135257-6768) were dropped when
+  main moved; 0612 was killed 3 minutes into its run.
+- Mutants fcdd killed every mutant but read the `--test-threads 1` that axon-run appends to a jade CPU job's argv as
+  two more binaries. `mutants.sh` now stops at the first `-` argument; its rerun (1117-135947-69b2) was dropped too.
 
 **Bit identity for requests main accepts.** These are exactly the requests where every `function_call_output` has a
 `call_id` string. They take the first match arm, `Some(J::Str(id))`, which is main's `.and_then(J::str)`. They build
@@ -91,7 +111,7 @@ replies never hold one). That request is kept as it went over the wire (`goal-re
 (W1). No model, no GPU.
 
 **e2e differential** (`resp_e2e.py` / `resp_e2e.sh`, in the eval scratch dir; sha256 in the PR body). It starts
-`axon serve` from main 1a1d751 and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
+`axon serve` from main (29fd8f8 since the merge; 1a1d751 before) and from the candidate on CPU, one after the other, on Qwen2.5-0.5B (Qwen2.5 Hermes
 tools; context 32768, for W1), Qwen3-0.6B (Qwen3) and Llama-3.2-1B (Llama 3.1 tools). Each gets the same greedy
 requests, 40 tokens:
 - **A, requests main accepts.** Tools with no history; a call and its output; that output with codex's extra fields;
@@ -116,7 +136,7 @@ requests, 40 tokens:
   wire check meant an e2e without W1 that could still read PASS.
 
 **Mutants** (sources at bella `~/.cache/axon-eval/mut/M*.rs`, each a copy of 43efbb3's `responses.rs` with one hunk
-changed; release test builds, `serve::responses::`):
+changed, overlaid on the merged tree, whose `responses.rs` is 43efbb3's; release test builds, `serve::responses::`):
 
 | mutant | the one change | must fail |
 |---|---|---|
@@ -145,7 +165,7 @@ scripts and docs only, the code still 43efbb3 (its queued suites and mutants kep
   and its docstring says it scans every request. CHANGELOG entry.
 
 ## Results
-PENDING: the gates above (gatewatch `eval-43efbb3-gates`). Not a
+PENDING: the gates above at 23337f4 (gatewatch `eval-23337f4-gates`; the e2e's `eval-23337f4-e2e`). Not a
 performance change: no pp/tg numbers apply.
 
 ## What didn't work / not done
